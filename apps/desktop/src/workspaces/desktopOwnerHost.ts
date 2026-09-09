@@ -1,6 +1,6 @@
 import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
-import {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineClient,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
 import {connectDeviceHost,parseDeviceHostCredential,type ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 
@@ -41,7 +41,10 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
   const fields = ["aggregateBytes","maxAdoptionBytes","maxAdoptionEvents","maxFrameBytes","maxQueuedBytes","maxRegistrations","maxUploads","requestDeadlineMs"];
   if (!transport || Object.keys(transport).filter(field => field !== "maxRestoreBytes").sort().join() !== fields.join() ||
     fields.some(field => !Number.isSafeInteger(transport[field]) || transport[field] < 1) || transport.requestDeadlineMs > 2_147_483_647 ||
-    (transport.maxRestoreBytes !== undefined && (!Number.isSafeInteger(transport.maxRestoreBytes) || transport.maxRestoreBytes < 5 || transport.maxRestoreBytes > 0xffff_ffff))) throw new Error("Invalid private owner host transport budget.");
+    transport.maxFrameBytes < 1_048_576 || transport.maxFrameBytes > 16_777_216 ||
+    transport.maxAdoptionBytes * 3 + transport.maxFrameBytes > transport.aggregateBytes ||
+    (transport.maxRestoreBytes !== undefined && (!Number.isSafeInteger(transport.maxRestoreBytes) || transport.maxRestoreBytes < 5 || transport.maxRestoreBytes > DEFAULT_MAX_BLOB_BYTES ||
+      transport.maxRestoreBytes * 5 + transport.maxFrameBytes > transport.aggregateBytes))) throw new Error("Invalid private owner host transport budget.");
   return {nativeConfigPath: input.nativeConfigPath,url: input.url,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
     transport,credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control: parseDeviceControlLimits(input.control)};
 }

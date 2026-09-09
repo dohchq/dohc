@@ -91,6 +91,37 @@ it("refuses an oversized native response and returns capacity for a later valid 
   }finally{await f.close();}
 });
 
+it("uses the caller's smaller output reservation without retiring the connection",async()=>{
+  const f=await fixture();
+  try{
+    const request={id:1,workspace:"handle",deadlineMs:30_000},bytes=f.encode(f.header("prepare"));
+    await expect(f.peer.sendLiveRestore(request,"prepare",bytes,600_000)).rejects.toThrow("owner-device-operation-refused");
+    expect(f.native.sendLiveRestore.mock.calls[0]![3]).toBe(600_000);
+    await expect(f.peer.sendLiveRestore({...request,id:2},"prepare",bytes,600_001)).resolves.toHaveProperty("bytes",f.output);
+    expect(f.stop).not.toHaveBeenCalled();
+  }finally{await f.close();}
+});
+
+it.each([0,1_000_000])("streams a native output of exactly %s bytes",async length=>{
+  const f=await fixture();
+  try{
+    const output=Buffer.alloc(length,13);f.native.sendLiveRestore.mockResolvedValueOnce({response:{result:{}},bytes:output});
+    const result=await f.peer.sendLiveRestore({id:1,workspace:"handle",deadlineMs:30_000},"prepare",f.encode(f.header("prepare")),1_000_000);
+    expect(result.bytes).toEqual(output);expect(f.stop).not.toHaveBeenCalled();
+  }finally{await f.close();}
+});
+
+it.each(["prepare","apply","settle","resume"] as const)("refuses invalid %s header fields before native forwarding",async operation=>{
+  const f=await fixture();
+  try{
+    const header:Record<string,unknown>=f.header(operation);
+    if(operation==="prepare")header.candidateDigest="b".repeat(64);
+    else delete header[operation==="resume" ? "settlementId" : "admitted"];
+    await expect(f.peer.sendLiveRestore({id:1,workspace:"handle",deadlineMs:30_000},operation,f.encode(header),1_000_000)).rejects.toThrow();
+    expect(f.native.sendLiveRestore).not.toHaveBeenCalled();expect(f.stop).not.toHaveBeenCalled();
+  }finally{await f.close();}
+});
+
 it.each([null,5])("refuses unconfigured or oversized restore uploads before native forwarding (%s)",async bound=>{
   const f=await fixture(bound);
   try{

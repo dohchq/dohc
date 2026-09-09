@@ -7,9 +7,9 @@ use dohc_engine_collab::live_update_application::{
     ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationBootstrap,
     LiveSettlementResult, LiveUpdateReceipt, NativeRestoreApplication,
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
-    NativeRestorePreparation, NativeRestoreProposal, OwnerAdoptionAck, OwnerAdoptionCut,
-    adopt_owner_committed, apply_committed, bootstrap_committed, validate_application_binding,
-    with_settlement,
+    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
+    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed,
+    apply_committed, bootstrap_committed, validate_application_binding, with_settlement,
 };
 use dohc_engine_collab::{CollabError, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
@@ -89,6 +89,47 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_restore(
+        &self,
+        input: NativeRestoreResume,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<NativeRestoreResumeReceipt, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        input.validate_budget(max_bytes, max_events)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::ResumeRestore {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                input: Box::new(input),
+                coordinate,
+                max_bytes,
+                max_events,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let receipt = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(receipt)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn settle_restore(
         &self,
@@ -583,6 +624,20 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    ResumeRestore {
+        workspace_id: String,
+        token: Token,
+        input: Box<NativeRestoreResume>,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<NativeRestoreResumeReceipt>,
+    },
     SettleRestore {
         workspace_id: String,
         token: Token,
@@ -705,6 +760,44 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::ResumeRestore {
+                workspace_id,
+                token,
+                input,
+                coordinate,
+                max_bytes,
+                max_events,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    if cancel.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                    owner.resume_restore(store, *input, coordinate, max_bytes, max_events,
+                        now_ms, faults.as_ref(), |conn, binding, moment, markdown| {
+                            if cancel.is_cancelled() { return Err(ApplicationError::Interrupted); }
+                            let job = dohc_engine_storage::materialize::load_job(conn, &format!("ydoc-mat_{moment}"))?
+                                .ok_or(ApplicationError::Conflict)?;
+                            if job.workspace_id != binding.workspace_id
+                                || job.target_path != binding.current_path
+                                || job.content_sha256 != markdown
+                                || job.operation != dohc_engine_storage::MaterializationOperation::Write
+                                || job.status != dohc_engine_storage::JobStatus::Complete {
+                                return Err(ApplicationError::Conflict);
+                            }
+                            if !matches!(
+                                dohc_engine_files::probe_projection_target(&root, &binding.current_path,
+                                    dohc_engine_files::ProjectionTargetKind::Plaintext),
+                                dohc_engine_files::ProjectionTargetState::Text { sha256 } if sha256 == markdown
+                            ) { return Err(ApplicationError::Conflict); }
+                            Ok(())
+                        }).map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
             Self::SettleRestore {
                 workspace_id,
                 token,

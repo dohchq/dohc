@@ -63,6 +63,7 @@ describe("private native restore transport", () => {
       wireId = envelope.id;
       expect(envelope.method).toBe("liveApplication.applyRestore");
       expect(envelope.params).not.toHaveProperty("registrationId");
+      expect(envelope.params).toHaveProperty("maxOutputBytes",128);
     };
     peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
     try {
@@ -70,6 +71,14 @@ describe("private native restore transport", () => {
       expect(result.response.id).toBe(call.id);
       expect(result.bytes.toString()).toBe("raw receipt");
     } finally { transport.close(); }
+  });
+  it("rejects an unsatisfiable restore bound before sending the request",async()=>{
+    const {peer,transport}=await connected();
+    const requests=vi.fn();peer.onEnvelope=requests;
+    try{
+      await expect(transport.sendLiveRestore(call,"prepare",input,64*1024*1024+1)).rejects.toThrow("Invalid native restore bounds");
+      expect(requests).not.toHaveBeenCalled();
+    }finally{transport.close();}
   });
   it.each(["too large", "unknown length", "duplicate", "missing blob", "wrong digest", "wrong status"])("refuses %s restore output", async mode => {
     const { peer, transport } = await connected();

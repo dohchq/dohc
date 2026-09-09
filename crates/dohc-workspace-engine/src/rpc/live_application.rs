@@ -549,6 +549,9 @@ impl EngineService {
         }
         let now_ms = super::request::now_ms()?;
         let object_id = params.operation.old_binding.object_id.clone();
+        let old_binding = params.operation.old_binding.clone();
+        let retired_binding = old_binding.clone();
+        let sessions = Arc::clone(&self.sessions);
         let guard = Arc::new(RestoreFenceOutputGuard {
             host: host.clone(),
             cancel: ctx.cancel.clone(),
@@ -558,7 +561,7 @@ impl EngineService {
         let worker_host = host.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            worker_host
+            let receipt = worker_host
                 .owner
                 .fence_restore_after_reconnect(
                     params.operation,
@@ -566,7 +569,30 @@ impl EngineService {
                     now_ms,
                     Arc::new(NoFaults),
                 )
-                .await
+                .await?;
+            // Retire sessions before releasing session_ops, including when the caller
+            // has stopped awaiting the committed fence. Historical retries spare new generations.
+            lock(&sessions).retain(|_, session| {
+                session.key.workspace_id != retired_binding.workspace_id
+                    || session.key.version_id != retired_binding.main_version_id
+                    || session.key.object_id != retired_binding.object_id
+                    || session.restore_generation.is_some_and(|generation| {
+                        generation > retired_binding.restore_fence_generation
+                    })
+            });
+            for registration in lock(&worker_host.output_fence)
+                .iter()
+                .filter_map(Weak::upgrade)
+            {
+                if registration.binding.main_version_id == retired_binding.main_version_id
+                    && registration.object_id == retired_binding.object_id
+                    && registration.binding.restore_fence_generation
+                        <= retired_binding.restore_fence_generation
+                {
+                    registration.retired.cancel();
+                }
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>(receipt)
         });
         let outcome = tokio::select! {
             biased;
@@ -583,7 +609,12 @@ impl EngineService {
             let mut registry = lock(&self.live_applications);
             let _fence = lock(&host.output_fence);
             registry.registrations.retain(|_, registration| {
-                if Arc::ptr_eq(&registration.host, &host) && registration.object_id == object_id {
+                if Arc::ptr_eq(&registration.host, &host)
+                    && registration.object_id == object_id
+                    && registration.binding.main_version_id == old_binding.main_version_id
+                    && registration.binding.restore_fence_generation
+                        <= old_binding.restore_fence_generation
+                {
                     registration.retired.cancel();
                     false
                 } else {

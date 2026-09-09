@@ -3,7 +3,7 @@ use crate::rpc::live_application::Host;
 use crate::rpc::live_application::restore::{RestoreInput, RestoreOperation};
 use dohc_engine_collab::live_update_application::{
     NativeRestoreApplication, NativeRestoreFenceReceipt, NativeRestorePoint,
-    NativeRestorePreparation,
+    NativeRestorePreparation, NativeRestoreResume,
 };
 
 #[derive(Clone, Deserialize)]
@@ -19,6 +19,7 @@ struct Params {
     stream_id: u64,
     byte_length: usize,
     digest: String,
+    max_output_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +30,7 @@ struct Header {
     candidate_digest: Option<String>,
     native_source_manifest_digest: Option<String>,
     admitted: Option<AdmittedLiveUpdateMetadata>,
+    settlement_id: Option<String>,
 }
 
 pub(super) struct Upload {
@@ -39,6 +41,7 @@ pub(super) struct Upload {
     bytes: Vec<u8>,
     deadline: Instant,
     permit: Arc<Reservation>,
+    max_output_bytes: usize,
 }
 
 impl Upload {
@@ -65,6 +68,7 @@ pub(super) fn is_method(method: &str) -> bool {
         "liveApplication.prepareRestore"
             | "liveApplication.applyRestore"
             | "liveApplication.settleRestore"
+            | "liveApplication.resumeRestore"
     )
 }
 
@@ -90,7 +94,6 @@ impl LiveApplicationIngress {
             .checked_add(MAX_CHUNK_BYTES * 2)
             .filter(|bytes| {
                 config.max_bytes >= 5
-                    && self.config.application_working_reserve_bytes > 0
                     && config.max_events > 0
                     && config.max_events < MAX_WIRE_INTEGER as usize
                     && *bytes <= self.config.aggregate_bytes
@@ -123,6 +126,7 @@ pub(super) fn begin(
         .map_err(|_| invalid("invalid-native-restore-upload"))?;
     if params.byte_length < 5
         || params.byte_length > config.max_bytes
+        || params.max_output_bytes < 5
         || ingress
             .last_stream_id
             .is_some_and(|last| params.stream_id <= last)
@@ -169,6 +173,7 @@ pub(super) fn begin(
             bytes,
             deadline,
             permit,
+            max_output_bytes: params.max_output_bytes,
         },
     );
     Ok(())
@@ -210,6 +215,7 @@ fn decode(
         if header.candidate_digest.is_some()
             || header.native_source_manifest_digest.is_some()
             || header.admitted.is_some()
+            || header.settlement_id.is_some()
         {
             return Err(invalid("unexpected-native-restore-admission"));
         }
@@ -230,6 +236,21 @@ fn decode(
     input
         .validate_budget(config.max_bytes, config.max_events)
         .map_err(|_| invalid("invalid-native-restore-admission"))?;
+    if method == "liveApplication.resumeRestore" {
+        let resume = NativeRestoreResume {
+            application: input,
+            settlement_id: header
+                .settlement_id
+                .ok_or_else(|| invalid("missing-native-restore-settlement"))?,
+        };
+        resume
+            .validate_budget(config.max_bytes, config.max_events)
+            .map_err(|_| invalid("invalid-native-restore-resume"))?;
+        return Ok(RestoreOperation::Resume(resume));
+    }
+    if header.settlement_id.is_some() {
+        return Err(invalid("unexpected-native-restore-settlement"));
+    }
     match method {
         "liveApplication.applyRestore" => Ok(RestoreOperation::Apply(input)),
         "liveApplication.settleRestore" => Ok(RestoreOperation::Settle(input)),
@@ -275,6 +296,7 @@ pub(super) fn chunk(
             host: upload.host,
             operation,
             config: upload.config,
+            max_output_bytes: upload.max_output_bytes,
             reservation: upload.permit,
         })),
     )))
@@ -428,9 +450,31 @@ mod tests {
             let stream = self.id + 10;
             let request = self.request(
                 method,
-                json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes)}),
+                json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000}),
             );
             self.upload(request, stream, &bytes).await
+        }
+        async fn try_restore(
+            &mut self,
+            method: &str,
+            header: &Value,
+            max_output_bytes: usize,
+        ) -> Result<dohc_engine_protocol::transport::ServiceResponse, WireError> {
+            let bytes = framed(header);
+            let stream = self.id + 10;
+            let request = self.request(method, json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":max_output_bytes}));
+            let id = request.id;
+            self.ingress.begin(request, &self.owner.handle())?;
+            self.ingress.start(BlobStart {
+                request_id: id,
+                stream_id: stream,
+                total_bytes: Some(bytes.len() as u64),
+                sha256: Some(hex_sha256(&bytes)),
+            })?;
+            let (request, input) = self.ingress.chunk(stream, true, &bytes)?.unwrap();
+            self.service
+                .call_with_input(self.context(), request, Some(input))
+                .await
         }
         async fn fence(&mut self) -> Value {
             let response = self.control("liveApplication.fenceRestore",json!({"operation":{
@@ -529,6 +573,79 @@ mod tests {
         let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
         bytes.extend(json);
         bytes
+    }
+
+    #[tokio::test]
+    async fn restore_output_obeys_the_callers_reserved_bound_and_releases_capacity() {
+        let mut f = Fixture::new().await;
+        let fence = f.fence().await;
+        let header = json!({"fence":fence,"point":f.point});
+        let capacity = f.ingress.budget.available_permits();
+        let error = f
+            .try_restore("liveApplication.prepareRestore", &header, 5)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::LimitExceeded);
+        assert_eq!(f.ingress.budget.available_permits(), capacity);
+        let output = f.restore("liveApplication.prepareRestore", &header).await;
+        assert_eq!(output.response.result["status"], "prepared");
+        drop(output);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn restore_resume_requires_durable_materialization_and_preserves_historical_retries() {
+        let mut f = Fixture::new().await;
+        let mut header = f.prepare_admitted().await;
+        drop(f.restore("liveApplication.applyRestore", &header).await);
+        header["settlementId"] = json!("missing");
+        assert!(
+            f.try_restore("liveApplication.resumeRestore", &header, 1_000_000)
+                .await
+                .is_err()
+        );
+        header.as_object_mut().unwrap().remove("settlementId");
+        let settled = f.restore("liveApplication.settleRestore", &header).await;
+        let settlement: Value =
+            serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
+        header["settlementId"] = settlement["settlementId"].clone();
+        drop(settled);
+        let path = f._scratch.path().join("notes/a.md");
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"external edit").unwrap();
+        assert!(
+            f.try_restore("liveApplication.resumeRestore", &header, 1_000_000)
+                .await
+                .is_err()
+        );
+        std::fs::write(&path, &saved).unwrap();
+        let resumed = f.restore("liveApplication.resumeRestore", &header).await;
+        assert_eq!(resumed.response.result["status"], "resumed");
+        let receipt = resumed.blob_egress.as_ref().unwrap().bytes.clone();
+        drop(resumed);
+        let binding = header["admitted"]["accepted"]["binding"].clone();
+        let registered = f
+            .control("liveApplication.register", json!({"binding":binding}))
+            .await;
+        let registration_id = registered.response.result["registrationId"]
+            .as_u64()
+            .unwrap();
+        drop(registered);
+        drop(f.fence().await);
+        assert!(
+            f.service
+                .live_application_registration(
+                    &f.owner.handle(),
+                    Some(&f.workspace),
+                    registration_id
+                )
+                .is_ok()
+        );
+        std::fs::write(&path, b"later edit").unwrap();
+        let retry = f.restore("liveApplication.resumeRestore", &header).await;
+        assert_eq!(retry.blob_egress.as_ref().unwrap().bytes, receipt);
+        drop(retry);
+        f.close().await;
     }
 
     #[tokio::test]
@@ -687,7 +804,7 @@ mod tests {
         let bytes = framed(&json!({"fence":fence,"point":f.point}));
         let request = f.request(
             "liveApplication.prepareRestore",
-            json!({"streamId":50,"byteLength":bytes.len(),"digest":hex_sha256(&bytes)}),
+            json!({"streamId":50,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000}),
         );
         let capacity = f.ingress.budget.available_permits();
         let foreign = ConnectionOwner::authenticated();

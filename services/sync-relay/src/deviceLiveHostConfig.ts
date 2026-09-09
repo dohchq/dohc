@@ -5,6 +5,7 @@ import type { DeviceControlLimits } from "@dohc/live-session-contract/device-con
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
 import {parseLiveRestoreConfig} from "./liveRestorePreparation.js";
+import {DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
 
 export function configRecord(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -39,7 +40,7 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(row.settlement);
   const restoreRow = row.restore === undefined ? undefined : configRecord(row.restore, ["maxBytes", "maxEvents"]);
-  const restore = restoreRow ? Object.freeze({maxBytes: integer(restoreRow.maxBytes, 5), maxEvents: integer(restoreRow.maxEvents)}) : undefined;
+  const restore = restoreRow ? Object.freeze({maxBytes: integer(restoreRow.maxBytes, 5, DEFAULT_MAX_BLOB_BYTES), maxEvents: integer(restoreRow.maxEvents)}) : undefined;
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),

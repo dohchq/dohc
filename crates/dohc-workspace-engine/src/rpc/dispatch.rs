@@ -73,6 +73,7 @@ impl EngineService {
                     | "liveApplication.prepareRestore"
                     | "liveApplication.applyRestore"
                     | "liveApplication.settleRestore"
+                    | "liveApplication.resumeRestore"
             )
         {
             return Err(WireError::new(

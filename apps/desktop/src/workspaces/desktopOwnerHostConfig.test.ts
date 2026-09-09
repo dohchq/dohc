@@ -51,10 +51,19 @@ it.each(["config","credential"] as const)("bounds %s reads before allocating the
 it("keeps restore forwarding disabled unless its explicit bound is valid",()=>{
   const f=fixture();
   expect(readDesktopOwnerHostConfig(f.path).transport.maxRestoreBytes).toBeUndefined();
-  for(const maxRestoreBytes of [0,4,-1,1.5,0x1_0000_0000]){
+  for(const maxRestoreBytes of [0,4,-1,1.5,64*1024*1024+1,0x1_0000_0000]){
     Object.assign(f.config.transport,{maxRestoreBytes});f.write();
     expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
   }
   Object.assign(f.config.transport,{maxRestoreBytes:1_000_000});f.write();
   expect(readDesktopOwnerHostConfig(f.path).transport.maxRestoreBytes).toBe(1_000_000);
+});
+
+it("refuses impossible aggregate budgets at config read",()=>{
+  const f=fixture();
+  Object.assign(f.config.transport,{maxRestoreBytes:1_000_000,aggregateBytes:6_048_575});f.write();
+  expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
+  f.config.transport.aggregateBytes++;f.write();expect(()=>readDesktopOwnerHostConfig(f.path)).not.toThrow();
+  f.config.transport.maxAdoptionBytes=2_000_000;f.write();
+  expect(()=>readDesktopOwnerHostConfig(f.path)).toThrow("transport budget");
 });

@@ -70,11 +70,22 @@ it("requires a positive application reserve before any live updates", () => {
 it("requires bounded native restore configuration and a working reserve", () => {
   const run = fixture(), restore = {maxBytes: 1_000_000, maxEvents: 10};
   expect(readDeviceLiveHostConfig(run.write({...run.value, restore}), limits).restore).toEqual(restore);
-  for (const bad of [{...restore, maxBytes: 4}, {...restore, maxEvents: 0}, {...restore, unexpected: true}]) {
+  for (const bad of [{...restore, maxBytes: 4}, {...restore, maxBytes: 64*1024*1024+1}, {...restore, maxEvents: 0}, {...restore, unexpected: true}]) {
     expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore: bad}), limits)).toThrow();
   }
   expect(() => readDeviceLiveHostConfig(run.write({...run.value, restore,
     ingress: {...run.value.ingress, applicationWorkingReserveBytes: 0}}), limits)).toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
+});
+
+it("rejects relay restore budgets above the client blob ceiling before delivery",()=>{
+  const run=fixture();
+  const restore={maxBytes:64*1024*1024,maxEvents:10,aggregateBytes:2_000_000_000,workingReserveBytes:1,maxOperations:1,
+    validation:{maxStructVisits:1,maxValueNodeVisits:1,maxDecodedPayloadByteVisits:1,maxStructClientGroupVisits:1,
+      maxDeleteClientGroupVisits:1,maxDeleteIntervalVisits:1,maxIndexOperations:1}};
+  const value={version:1,workspaceIds:["workspace"],maxQueuedBytes:4_000_000,maxActiveDrains:2,restore,
+    client:{aggregateBytes:200_000_000,maxUploads:2,connectTimeoutMs:1000,requestDeadlineMs:1000,maxFrameBytes:1_048_576}};
+  expect(readRelayDeviceDeliveryConfig(run.write(value),limits).restore?.maxBytes).toBe(64*1024*1024);
+  expect(()=>readRelayDeviceDeliveryConfig(run.write({...value,restore:{...restore,maxBytes:restore.maxBytes+1}}),limits)).toThrow("aggregate budget");
 });
 
 it("rejects relay queues smaller than an advertised payload before connecting", () => {

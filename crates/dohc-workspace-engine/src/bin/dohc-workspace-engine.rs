@@ -434,6 +434,7 @@ where
                                     | "liveApplication.prepareRestore"
                                     | "liveApplication.applyRestore"
                                     | "liveApplication.settleRestore"
+                                    | "liveApplication.resumeRestore"
                             ) =>
                         {
                             let id = request.id;

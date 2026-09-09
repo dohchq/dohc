@@ -1,4 +1,4 @@
-import {encodeNativeRestoreInput} from "@dohc/workspace-engine-client/daemon";
+import {encodeNativeRestoreInput,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
 import {resolveLiveRestorePoint, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
@@ -28,7 +28,7 @@ export function parseLiveRestoreConfig(value: unknown) {
   // Byte spans cover transport output, storage copies, both history captures and content validation.
   // The operator reserve covers parsed metadata and CRDT working allocations; this is not an RSS cap.
   const charge = reservationBytes(maxBytes, workingReserveBytes);
-  if (maxBytes > 0xffff_ffff || !Number.isSafeInteger(charge) || charge > aggregateBytes) {
+  if (maxBytes > DEFAULT_MAX_BLOB_BYTES || !Number.isSafeInteger(charge) || charge > aggregateBytes) {
     throw new TypeError("Restore preparation exceeds its configured aggregate budget.");
   }
   return Object.freeze({maxBytes, maxEvents, aggregateBytes, workingReserveBytes, maxOperations, validation: policy});

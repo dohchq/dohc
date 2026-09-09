@@ -16,7 +16,8 @@ const MAX_U32 = 0xffff_ffff;
 const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
-const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+export const NATIVE_RESTORE_STATUS = { prepare: "prepared", apply: "applied", settle: "settled", resume: "resumed" } as const;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
 // Global cap on chunks received by active streams. Unknown-length streams retain
 // those Buffers; known-length streams do not, but keep the same tiny-chunk flood
@@ -1138,8 +1139,8 @@ export class EngineClient implements EngineTransport {
     maxBytes: number,
     signal?: AbortSignal,
   ): Promise<{ response: Response; bytes: Buffer }> {
-    const status = ({ prepare: "prepared", apply: "applied", settle: "settled", resume: "resumed" } as const)[operation];
-    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 5 || maxBytes > MAX_U32 ||
+    const status = NATIVE_RESTORE_STATUS[operation];
+    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 5 || maxBytes > this.maxBlobBytes ||
       bytes.byteLength < 5 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
     const output: RestoreOutput = { maxBytes, status, started: false };
     const response = await this.sendLiveUpload(request, `liveApplication.${operation}Restore`,
@@ -1148,7 +1149,7 @@ export class EngineClient implements EngineTransport {
         const digest = createHash("sha256").update(captured).digest("hex");
         const streamId = this.nextLiveStreamId++;
         if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
-        return { params: { streamId, byteLength: captured.length, digest }, streams: [{ streamId, bytes: captured, digest }] };
+        return { params: { streamId, byteLength: captured.length, digest, maxOutputBytes: maxBytes }, streams: [{ streamId, bytes: captured, digest }] };
       }, signal, output);
     return { response, bytes: output.blob!.bytes };
   }

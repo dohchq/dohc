@@ -1,7 +1,7 @@
 use super::*;
 use crate::live_application_ingress::RestoreConfig;
 use dohc_engine_collab::live_update_application::{
-    NativeRestoreApplication, NativeRestorePreparation, NativeRestoreProposal,
+    NativeRestoreApplication, NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
 };
 use dohc_engine_protocol::transport::BlobEgress;
 use serde::Serialize;
@@ -13,6 +13,7 @@ pub struct RestoreInput {
     pub(crate) host: Arc<Host>,
     pub(crate) operation: RestoreOperation,
     pub(crate) config: RestoreConfig,
+    pub(crate) max_output_bytes: usize,
     pub(crate) reservation: Arc<dyn Send + Sync>,
 }
 
@@ -21,6 +22,7 @@ pub(crate) enum RestoreOperation {
     Prepare(NativeRestorePreparation),
     Apply(NativeRestoreApplication),
     Settle(NativeRestoreApplication),
+    Resume(NativeRestoreResume),
 }
 
 impl RestoreOperation {
@@ -28,6 +30,7 @@ impl RestoreOperation {
         match self {
             Self::Prepare(input) => input,
             Self::Apply(input) | Self::Settle(input) => &input.preparation,
+            Self::Resume(input) => &input.application.preparation,
         }
     }
     fn method(&self) -> &str {
@@ -35,6 +38,7 @@ impl RestoreOperation {
             Self::Prepare(_) => "liveApplication.prepareRestore",
             Self::Apply(_) => "liveApplication.applyRestore",
             Self::Settle(_) => "liveApplication.settleRestore",
+            Self::Resume(_) => "liveApplication.resumeRestore",
         }
     }
 }
@@ -227,8 +231,27 @@ impl EngineService {
             let _reservation = input.reservation.clone();
             let host = worker_host;
             let max = input.config.max_bytes;
+            let output_max = max.min(input.max_output_bytes);
             let count = input.config.max_events;
             match input.operation {
+                RestoreOperation::Resume(resume) => {
+                    let receipt = host
+                        .owner
+                        .resume_restore(
+                            resume,
+                            host.coordinate.clone(),
+                            max,
+                            count,
+                            host.open.root.clone(),
+                            now_ms,
+                            Arc::new(NoFaults),
+                            token,
+                            input.reservation,
+                        )
+                        .await
+                        .map_err(map_runtime)?;
+                    Ok(("resumed", bounded_json(&receipt, output_max)?))
+                }
                 RestoreOperation::Prepare(preparation) => {
                     let proposal = host
                         .owner
@@ -242,7 +265,7 @@ impl EngineService {
                         )
                         .await
                         .map_err(map_runtime)?;
-                    Ok(("prepared", proposal_bytes(&proposal, max)?))
+                    Ok(("prepared", proposal_bytes(&proposal, output_max)?))
                 }
                 RestoreOperation::Apply(application) => {
                     let workspace = host.open.workspace_id.clone();
@@ -265,7 +288,7 @@ impl EngineService {
                         )
                         .await
                         .map_err(map_runtime)?;
-                    Ok(("applied", bounded_json(&receipt, max)?))
+                    Ok(("applied", bounded_json(&receipt, output_max)?))
                 }
                 RestoreOperation::Settle(application) => {
                     let binding = application.preparation.fence.operation.old_binding.clone();
@@ -321,7 +344,7 @@ impl EngineService {
                         }
                     }
                     let receipt = outcome.map_err(map_runtime)?;
-                    Ok(("settled", bounded_json(&receipt, max)?))
+                    Ok(("settled", bounded_json(&receipt, output_max)?))
                 }
             }
         });

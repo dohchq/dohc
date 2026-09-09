@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket } from "ws";
-import { EngineClient, FrameDecoder, FrameType, encodeFrame, type Frame } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient, FrameDecoder, FrameType, encodeFrame, DEFAULT_MAX_BLOB_BYTES, NATIVE_RESTORE_STATUS, type Frame } from "@dohc/workspace-engine-client/daemon";
 import { DeviceCreditWindow } from "@dohc/service-http";
 import { deviceLiveHostReceive, type DeviceControlLimits, type DeviceLiveHostStart } from "@dohc/live-session-contract/device-control";
 import { parseAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
@@ -70,7 +70,7 @@ export function startExistingOwnerDeviceTransport(options: {
   for (const value of [config.maxQueuedBytes,config.maxUploads,config.maxRegistrations,config.aggregateBytes,config.maxAdoptionBytes,config.maxAdoptionEvents]) integer(value,1);
   integer(config.requestDeadlineMs,1,2_147_483_647);
   integer(config.maxFrameBytes,1_048_576,16_777_216);
-  const maxRestoreBytes = config.maxRestoreBytes === undefined ? undefined : integer(config.maxRestoreBytes,5,0xffff_ffff);
+  const maxRestoreBytes = config.maxRestoreBytes === undefined ? undefined : integer(config.maxRestoreBytes,5,DEFAULT_MAX_BLOB_BYTES);
   if (maxRestoreBytes !== undefined && maxRestoreBytes * 5 + config.maxFrameBytes > config.aggregateBytes) throw new Error("Invalid owner restore transport budget.");
   if (config.maxAdoptionBytes * 3 + config.maxFrameBytes > config.aggregateBytes || config.maxQueuedBytes < Math.max(limits.maxPayloadBytes + 16,config.maxFrameBytes + 36)) throw new Error("Invalid existing owner transport budget.");
   const workspaces = new Map(config.workspaces.map(row => [row.workspaceHandle, row.workspaceId]));
@@ -125,9 +125,10 @@ export function startExistingOwnerDeviceTransport(options: {
           ["fence","point",...(restoring === "prepare" ? [] : ["candidateDigest","nativeSourceManifestDigest","admitted"]),...(restoring === "resume" ? ["settlementId"] : [])]);
         const fence = parseNativeRestoreFenceReceipt(header.fence).operation;
         if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
-        const output = await config.client.sendLiveRestore(request,restoring,bytes,maxRestoreBytes,signal);
+        const outputBound = Math.min(maxRestoreBytes,integer(operation.params.maxOutputBytes,5,DEFAULT_MAX_BLOB_BYTES));
+        const output = await config.client.sendLiveRestore(request,restoring,bytes,outputBound,signal);
         check(); signal.throwIfAborted();
-        if (output.bytes.length > maxRestoreBytes) throw new Error("Owner restore response exceeds its bound.");
+        if (output.bytes.length > outputBound) throw new Error("Owner restore response exceeds its bound.");
         const digest = createHash("sha256").update(output.bytes).digest("hex"), streamId = operation.id;
         await send({type:"blobStart",requestId:operation.id,streamId,totalBytes:output.bytes.length,sha256:digest},signal);
         const chunkBytes = 256 * 1024;
@@ -135,7 +136,7 @@ export function startExistingOwnerDeviceTransport(options: {
           const end = Math.min(offset + chunkBytes,output.bytes.length);
           await write(encodeFrame(FrameType.BlobChunk,end === output.bytes.length ? 1 : 0,{streamId,bytes:output.bytes.subarray(offset,end)},chunkBytes),signal);
         }
-        result = {status:({prepare:"prepared",apply:"applied",settle:"settled",resume:"resumed"} as const)[restoring],streamId,byteLength:output.bytes.length,digest};
+        result = {status:NATIVE_RESTORE_STATUS[restoring],streamId,byteLength:output.bytes.length,digest};
       } else if (operation.method === "liveApplication.fenceRestore") {
         const params = configRecord(operation.params,["operation"]), fence = parseNativeRestoreFence(params.operation);
         if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
@@ -289,7 +290,10 @@ export function startExistingOwnerDeviceTransport(options: {
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;
     const rangeBytes = method === "liveApplication.apply" ? integer(params.rangeCount,0,Math.floor((updateBytes-2)/5))*16 : 0;
-    if (restoring) configRecord(params,["streamId","byteLength","digest"]);
+    if (restoring) {
+      configRecord(params,["streamId","byteLength","digest","maxOutputBytes"]);
+      integer(params.maxOutputBytes,5,DEFAULT_MAX_BLOB_BYTES);
+    }
     const bytes = restoring ? integer(params.byteLength,5,maxRestoreBytes!) : method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
     const charge = bytes * 3 + (restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
     if (!Number.isSafeInteger(charge) || charged + charge > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
