@@ -71,7 +71,7 @@ pub fn capture_in(
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum OwnerEnrollmentPreparation {
-    Observed { draft: OwnerDraftDescriptor },
+    Observed { draft: Box<OwnerDraftDescriptor> },
     Capture { captured: OwnerEnrollmentCapture },
 }
 
@@ -85,7 +85,9 @@ pub fn prepare_in(
         if draft.binding != *binding || draft.relay_database_namespace != namespace {
             return Err(OwnerOutboxError::ParentMismatch);
         }
-        return Ok(OwnerEnrollmentPreparation::Observed { draft });
+        return Ok(OwnerEnrollmentPreparation::Observed {
+            draft: Box::new(draft),
+        });
     }
     Ok(OwnerEnrollmentPreparation::Capture {
         captured: capture_in(conn, binding)?,

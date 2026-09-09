@@ -24,7 +24,9 @@ mod model;
 mod moment_apply;
 mod outbound;
 mod owner_publication;
-pub use owner_publication::{owner_publication_prefix,OwnerAdmissionPending,OwnerPublicationPrefix};
+pub use owner_publication::{
+    OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
+};
 mod path_policy;
 mod relay;
 mod router;

@@ -362,6 +362,7 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
     assert!(
         owner_outbox::read_pending(&f.store, "workspace", &outbox_id)
             .unwrap()
+            .entries
             .is_empty()
     );
     let resumed = resume_imported(&mut f, &captured.activation_id, 1_000_000).unwrap();
