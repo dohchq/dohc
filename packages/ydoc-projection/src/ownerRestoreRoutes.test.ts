@@ -22,7 +22,8 @@ function fixture() {
     `https://relay.test/sync/${workspace}/live-restores${suffix}`, {method: body === undefined ? "GET" : "POST",
       headers: {authorization: `Bearer user:${user}`, "content-type": "application/json"},
       ...(body === undefined ? {} : {body: JSON.stringify(body)})}));
-  const planInput = {document: f.input.evidence.document, shareId: "share", grantId: "grant", restorePointCursor: 0};
+  const planInput = {document: f.input.evidence.document, shareId: "share", grantId: "grant", restorePointCursor: 0,
+    restorePointReceiptDigest: f.input.evidence.checkpoint.updateDigest};
   const plan = async () => {const r = await request("/plan", planInput); expect(r.status).toBe(200); return r.json();};
   return {...f, host, request, planInput, plan};
 }

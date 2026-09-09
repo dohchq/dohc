@@ -111,6 +111,7 @@ describe("registered relay share handlers", () => {
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
+      CHANNELS.ownerRestore,
       CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
       CHANNELS.revokeRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
       CHANNELS.listRelayShareLinks, CHANNELS.retuneRelayShareLink, CHANNELS.rotateRelayShareLink,

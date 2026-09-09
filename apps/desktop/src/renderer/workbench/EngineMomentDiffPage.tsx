@@ -4,6 +4,7 @@ import type { EngineMomentDetailRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { momentDiffSides } from "./momentDiffSides";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import { SectionLabel } from "../ui/controls";
 import {
   UnifiedDiffLines,
@@ -77,6 +78,7 @@ export function EngineMomentDiffPage({
     | { status: "error"; message: string }
   >({ status: "idle" });
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
+  const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   const pageRef = useRef<HTMLElement | null>(null);
@@ -110,6 +112,7 @@ export function EngineMomentDiffPage({
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
+    setSharedRestoreOpen(false);
     setUndoMomentId(null);
   }, [tabPath]);
 
@@ -357,6 +360,11 @@ export function EngineMomentDiffPage({
           <Undo2 size={12} aria-hidden />
           {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
         </button>
+        {moment.contentKind === "text" && moment.path.toLowerCase().endsWith(".md") && <button
+          type="button" data-testid="engine-diff-shared-restore" disabled={restoreBusy}
+          onClick={() => setSharedRestoreOpen(true)}
+          className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"
+        >Restore shared file…</button>}
         {undoMomentId ? (
           <button
             type="button"
@@ -441,6 +449,8 @@ export function EngineMomentDiffPage({
           )}
         </section>
       </div>
+      {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
+        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
       {confirmRestoreOpen ? (
         <ConfirmDialog
           title="Restore this file?"

@@ -3,6 +3,7 @@ import {
   type DesktopWorkspaceCallbacksDependencies,
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
+import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
@@ -849,10 +850,17 @@ type RelayShareRetainedNotFoundResult<T> =
 
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
-  | { retainNotFound: true };
+  | { retainNotFound: true }
+  | { retainRestoreConflict: true };
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init: RequestInit | undefined,
+  options: {retainRestoreConflict: true},
+): Promise<T>;
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -908,7 +916,9 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (await response.json().catch(() => null)) as {
+  const data = (options && "retainRestoreConflict" in options
+    ? await readOwnerRestoreResponse(response)
+    : await response.json().catch(() => null)) as {
     ok?: boolean;
     error?: string;
     code?: string;
@@ -916,6 +926,9 @@ async function relayShareJsonWithCredentials<T>(
   }
     | null;
   if (!response.ok || data?.ok === false) {
+    if (options && "retainRestoreConflict" in options && response.status === 409 && data && "status" in data && "result" in data) {
+      return data as T;
+    }
     if (
       options &&
       "retainDependentSetConflict" in options &&
@@ -936,7 +949,7 @@ async function relayShareJsonWithCredentials<T>(
     }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
-  if (options) {
+  if (options && !("retainRestoreConflict" in options)) {
     return { kind: "success", body: data as T };
   }
   return data as T;

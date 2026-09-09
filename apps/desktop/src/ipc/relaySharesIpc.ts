@@ -56,6 +56,7 @@ import {
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
@@ -69,6 +70,7 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 
 interface RelayShareRequest {
+  <Result>(credentials: CloudCredentials, path: string, init: RequestInit | undefined, options: {retainRestoreConflict: true}): Promise<Result>;
   <Result>(
     credentials: CloudCredentials,
     path: string,
@@ -156,6 +158,50 @@ export function registerRelaySharesIpcHandlers<
       );
     }
   };
+
+  registerHandler(CHANNELS.ownerRestore, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OwnerRestoreRequest.parse(payload);
+    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+      const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
+      let path: string, body: unknown;
+      if (input.action === "options") {
+        path = `${prefix}/options`; body = {path: input.path, ...(input.beforeCursor === undefined ? {} : {beforeCursor: input.beforeCursor})};
+      } else if (input.action === "plan") {
+        if (input.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
+        path = `${prefix}/plan`; body = {document: input.document, shareId: input.shareId, grantId: input.grantId,
+          restorePointCursor: input.restorePointCursor, restorePointReceiptDigest: input.restorePointReceiptDigest};
+      } else if (input.action === "begin") {
+        if (input.intent.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
+        path = prefix; body = {intent: input.intent};
+      } else {
+        path = `${prefix}/${encodeURIComponent(input.operationId)}${input.action === "status" ? "" : `/${input.action}`}`;
+        body = input.action === "status" ? undefined : input.action === "confirm" ? {proposalDigest: input.proposalDigest} : {};
+      }
+      const raw = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials, path,
+        body === undefined ? undefined : {method: "POST", body: JSON.stringify(body)}, {retainRestoreConflict: true}));
+      const result = OwnerRestoreActionResponse[input.action].parse(raw);
+      const coordinate = "status" in result ? result.status : "intent" in result ? result.intent : result;
+      if ("document" in coordinate && coordinate.document.workspaceId !== input.workspaceId) throw new Error("The restore response belongs to another workspace.");
+      if ("operationId" in input && "operationId" in coordinate && coordinate.operationId !== input.operationId) throw new Error("The restore response belongs to another operation.");
+      const documentKey = (value: {workspaceId: string; mainVersionId: string; objectId: string; lineageClaimId: string}) =>
+        JSON.stringify([value.workspaceId, value.mainVersionId, value.objectId, value.lineageClaimId]);
+      if (input.action === "options" && "path" in result && result.path !== input.path) throw new Error("The restore response belongs to another file.");
+      if (input.action === "plan" && "intent" in result && (
+        documentKey(result.intent.document) !== documentKey(input.document) || result.intent.shareId !== input.shareId || result.intent.grantId !== input.grantId ||
+        result.intent.restorePointCursor !== input.restorePointCursor || result.intent.restorePointReceiptDigest !== input.restorePointReceiptDigest)) {
+        throw new Error("The selected restore point or access changed. Review it again.");
+      }
+      if (input.action === "begin" && "intent" in result && JSON.stringify(result.intent) !== JSON.stringify(input.intent)) {
+        throw new Error("The restore response belongs to another operation.");
+      }
+      if ("status" in result && result.status.operationId !== result.status.intent.operationId) throw new Error("The restore status changed. Review it again.");
+      if (input.action === "review" && "result" in result && result.result && "binding" in result.result &&
+        (result.result.operationId !== input.operationId || result.result.workspaceId !== input.workspaceId ||
+          documentKey(result.result.binding) !== documentKey(result.status.document))) throw new Error("The restore review belongs to another file.");
+      return result;
+    }, assertOriginalWorkspace);
+  });
 
   // ---- Relay shares ----
 
