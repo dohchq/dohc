@@ -3634,6 +3634,7 @@ fn validate_retryable_ydoc_identity(
 
 fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
+        CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",
         },

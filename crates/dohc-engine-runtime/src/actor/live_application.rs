@@ -1391,7 +1391,12 @@ impl ActorHandle {
             }
             let result = if let Some(activation_id) = activation_id {
                 dohc_engine_collab::live_update_application::resume_imported_owner_activation(
-                    store, &namespace, &key, &path, &activation_id, max_bytes,
+                    store,
+                    &namespace,
+                    &key,
+                    &path,
+                    &activation_id,
+                    max_bytes,
                 )?
             } else {
                 dohc_engine_collab::live_update_application::capture_imported_owner_activation(

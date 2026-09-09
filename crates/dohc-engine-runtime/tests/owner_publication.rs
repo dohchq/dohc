@@ -91,6 +91,52 @@ impl Fixture {
         }
     }
 
+    async fn adopt(
+        &self,
+        owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+    ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
+        let handle = owner
+            .register(
+                "relay".into(),
+                ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                self.binding.clone(),
+            )
+            .await
+            .unwrap();
+        handle
+            .adopt_owner(
+                OwnerAdoptionCut {
+                    relay_database_namespace: "relay".into(),
+                    adoption_id: "adoption".into(),
+                    source_moment_id: "original".into(),
+                    source_digest: hex_sha256(self.text.as_bytes()),
+                    source_byte_length: self.text.len() as i64,
+                    baseline_moment_relay_sequence: 1,
+                    baseline_registered_at_ms: 3,
+                    baseline_bytes: self.bytes.clone(),
+                    expected_local_sequence: 0,
+                    events: vec![],
+                    terminal_receipt: None,
+                    outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1_000_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                },
+                1_000_000,
+                100,
+                Arc::new(NoFaults),
+                Arc::new(()),
+            )
+            .await
+            .unwrap();
+        handle
+    }
+
     fn counts(&self) -> Vec<i64> {
         [
             "moments",
@@ -128,6 +174,101 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged() {
+    use dohc_engine_sync::{ApplyDisposition, NoLiveLeases, ReplicationEnvelope};
+    let mut f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let _handle = f.adopt(&owner).await;
+    let peer_text = format!("{}\n\nordinary peer edit\n", f.text);
+    let peer_digest = hex_sha256(peer_text.as_bytes());
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                rusqlite::params![peer_digest, peer_text.len() as i64, peer_text],
+            )
+        })
+        .unwrap();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let before_native = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap()
+        .doc
+        .encode_full_state();
+    let before_moments = f.store.table_row_count("moments").unwrap();
+    let op = ReplicationEnvelope {
+        workspace_id: "workspace".into(),
+        origin_id: "ordinary-peer".into(),
+        origin_seq: 0,
+        op_kind: "moment.append".into(),
+        recorded_at_ms: 40,
+        relay_seq: Some(1),
+        payload: serde_json::json!({
+            "momentId":"ordinary-peer-edit", "versionId":"main", "objectId":"object",
+            "objectCreatedAtMs":1, "path":f.binding.current_path, "recordedAtMs":40,
+            "operation":"write", "payloadBeforeBlobSha256":hex_sha256(f.text.as_bytes()),
+            "payloadBeforePath":f.binding.current_path, "payloadAfterBlobSha256":peer_digest,
+            "payloadAfterPath":f.binding.current_path, "metadata":{"origin":"sync"},
+            "beforePresent":"present", "beforeObjectId":"object", "beforeVersionId":"main",
+            "beforePath":f.binding.current_path, "beforeBlobSha256":hex_sha256(f.text.as_bytes()),
+            "beforeUpdatedAtMs":1, "beforeLatestMomentId":"original", "beforeMetadata":{"origin":"test"}
+        }),
+    };
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        &mut f.store,
+        &mut cache,
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("an ordinary peer edit must not wedge the adopted owner's cursor");
+    let ApplyDisposition::Refused(refusal) = applied.primary else {
+        panic!("expected retained binding refusal")
+    };
+    assert_eq!(
+        refusal.reason.message(),
+        "live document binding is still active"
+    );
+    assert_eq!(
+        dohc_engine_sync::read_replication_acked_seq(&f.store, "workspace", "ordinary-peer")
+            .unwrap(),
+        0
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), before_moments);
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&f.store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state(),
+        before_native
+    );
+    let retained: String = f.store.read_with(|conn| conn.query_row(
+        "SELECT text_sha256 FROM replication_refused_moment_blobs WHERE workspace_id='workspace' AND origin_id='ordinary-peer' AND origin_seq=0 AND role='payload-after'",
+        [], |row| row.get(0),
+    )).unwrap();
+    assert_eq!(retained, peer_digest);
+    assert_eq!(
+        dohc_engine_sync::apply_replication_envelope(
+            &mut f.store,
+            &mut cache,
+            &op,
+            &NoFaults,
+            &NoLiveLeases
+        )
+        .unwrap()
+        .primary,
+        ApplyDisposition::Skipped
+    );
+}
+
+#[tokio::test]
 async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_or_settlement() {
     let f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
@@ -136,45 +277,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         .live_application_owner("workspace".into())
         .await
         .unwrap();
-    let handle = owner
-        .register(
-            "relay".into(),
-            ApplicationHostCoordinate {
-                host_id: "host".into(),
-                host_epoch: 1,
-                instance_id: "instance".into(),
-                connection_id: "connection".into(),
-            },
-            f.binding.clone(),
-        )
-        .await
-        .unwrap();
-    handle
-        .adopt_owner(
-            OwnerAdoptionCut {
-                relay_database_namespace: "relay".into(),
-                adoption_id: "adoption".into(),
-                source_moment_id: "original".into(),
-                source_digest: hex_sha256(f.text.as_bytes()),
-                source_byte_length: f.text.len() as i64,
-                baseline_moment_relay_sequence: 1,
-                baseline_registered_at_ms: 3,
-                baseline_bytes: f.bytes.clone(),
-                expected_local_sequence: 0,
-                events: vec![],
-                terminal_receipt: None,
-                outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
-                    max_pending_bytes: 1_000_000,
-                    max_pending_age_ms: 100_000,
-                },
-            },
-            1_000_000,
-            100,
-            Arc::new(NoFaults),
-            Arc::new(()),
-        )
-        .await
-        .unwrap();
+    let handle = f.adopt(&owner).await;
     let before = f.counts();
     let update = f.doc.frontmatter_set("status", "pending-only");
     let appended = actor

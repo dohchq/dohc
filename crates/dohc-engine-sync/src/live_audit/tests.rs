@@ -364,11 +364,21 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
 }
 
 #[test]
-fn retained_base_export_does_not_reclaim_a_replaced_lineage() {
+fn retained_base_export_preserves_a_different_current_marker() {
     let mut f = fixture(false);
     bootstrap(&mut f, false).unwrap();
-    let replacement = "f".repeat(64);
+    let replacement_doc = dohc_engine_collab::Ydoc::wire();
+    replacement_doc.apply(&f.bytes).unwrap();
+    replacement_doc
+        .rewrite_content_to_markdown_preserving_source(
+            dohc_engine_collab::ContentKind::Richdoc,
+            "A different current marker",
+        )
+        .unwrap();
+    let replacement_bytes = replacement_doc.encode_full_state();
+    let replacement = hex_sha256(&replacement_bytes);
     f.store.write_with(&NoFaults,|tx| {
+        put_binary_blob(tx, &replacement_bytes)?;
         tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",[&replacement]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     }).unwrap();
