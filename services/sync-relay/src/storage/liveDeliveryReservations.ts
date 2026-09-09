@@ -51,7 +51,8 @@ function reserveLiveDeliveryBaseline(storage: StorageContext, document: LiveDocu
     row.baseline_projected_sha256, row.baseline_projected_byte_length]) + acknowledgementBytes;
   const terminalReceipt = {deliveryId: identifier,updateDigest: "a".repeat(64),journalCursor: maximum,acceptingHostEpoch: maximum};
   const origin = {relayDatabaseNamespace: identifier,adoptionId: identifier,sourceMomentId: identifier,sourceDigest: "a".repeat(64),sourceByteLength: maximum,
-    baselineMomentRelaySequence: maximum,baselineRegisteredAtMs: maximum,expectedLocalSequence: maximum,terminalReceipt,bindingDigest: "a".repeat(64)};
+    baselineMomentRelaySequence: maximum,baselineRegisteredAtMs: maximum,expectedLocalSequence: maximum,terminalReceipt,bindingDigest: "a".repeat(64),
+    originEvidenceDigest: "a".repeat(64),originEventCount: maximum,originHistoryEvidenceDigest: "a".repeat(64)};
   const owner = bytes([identifier,...parameters(document),hostId,JSON.stringify(origin),JSON.stringify(terminalReceipt),maximum,maximum,maximum]);
   const amount = Math.max(bootstrap,owner);
   reserve(storage, document, hostId, 0, amount);

@@ -14,6 +14,13 @@ import { initializeRelayDeployment, openRelayDeployment } from '../../../service
 import { openSyncRelayStorage, type LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
 import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
 import type { SqliteDb } from '../../../services/sync-relay/src/storage/types.js'
+import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
+
+function openJournalStorage(...args: Parameters<typeof openSyncRelayStorage>) {
+  const storage = openSyncRelayStorage(...args)
+  attachLiveJournalHistory(storage as StorageContext, createLiveJournalHistoryAuthority({namespace: 'journal-test', reconciled: true}))
+  return storage
+}
 
 const policy = {
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
@@ -48,7 +55,7 @@ function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean }
   const path = options.deployment ? join(root, 'volume', 'relay.sqlite') : join(root, 'relay.sqlite')
   const configPath = join(root, 'deployment.json')
   if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, 'continuity') })
-  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openSyncRelayStorage(path, options)
+  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openJournalStorage(path, options)
   const raw = new DatabaseSync(path, { readOnly: options.deployment === true })
   const write = (run: (db: SqliteDb | InstanceType<typeof DatabaseSync>) => void) => {
     if (options.deployment) {
@@ -122,7 +129,7 @@ function registered(options: { workspaceQuotaBytes?: number; deployment?: boolea
 function probeJournalCharge(f: ReturnType<typeof registered>, input: LiveUpdateJournalCommitInput): number {
   const path = `${f.path}.quota-probe`;
   f.raw.prepare('VACUUM INTO ?').run(path);
-  const probe = openSyncRelayStorage(path), raw = new DatabaseSync(path);
+  const probe = openJournalStorage(path), raw = new DatabaseSync(path);
   try {
     const before = Number(f.journalRows().usage);
     expect(probe.commitLiveUpdateJournal(input).result.kind).toBe('accepted');
@@ -148,7 +155,7 @@ it('charges wide actor selectors and provenance before committing within workspa
     expect(Buffer.byteLength(JSON.stringify(input.metadata.binding.selectorPaths))).toBeGreaterThan(20_000);
     const payloadOnlyQuota = initial + input.updateBytes.byteLength + liveDeliveryEventReservationBytes(input.cutToken.document, host.hostId,
       { journalCursor: 1, deliveryId: input.metadata.deliveryId, updateDigest: input.metadata.updateDigest, acceptingHostEpoch: host.hostEpoch });
-    const limited = openSyncRelayStorage(f.path, { workspaceQuotaBytes: payloadOnlyQuota });
+    const limited = openJournalStorage(f.path, { workspaceQuotaBytes: payloadOnlyQuota });
     const before = f.journalRows();
     try { expect(() => limited.commitLiveUpdateJournal(input)).toThrow(/quota/); }
     finally { limited.close(); }
@@ -179,7 +186,7 @@ it.each(['owner', 'named'] as const)('commits real %s journal evidence, original
     expect(before.journal[0]!.validation_checkpoint_bytes).toBeNull()
     expect(before.usage).toBe(liveBaselineStoredBytes(f.raw) + input.updateBytes.byteLength + journalMetadataBytes(f.raw) + liveDeliveryBookkeepingBytes(f.raw))
     for (const reopen of [false, true]) {
-      const storage = reopen ? openSyncRelayStorage(f.path) : f.storage
+      const storage = reopen ? openJournalStorage(f.path) : f.storage
       try {
         const replay = storage.commitLiveUpdateJournal({ ...input, receivedAtMs: 99,
           validation: { kind: 'refused', source: 'candidate', reason: 'capacity-refused' } })
@@ -224,7 +231,7 @@ it('charges exact payload, metadata and delivery quota once and replays at full 
   const f = registered()
   try {
     const input = f.capture(f.update()), quota = Number(f.journalRows().usage) + probeJournalCharge(f, input)
-    const limited = openSyncRelayStorage(f.path, { workspaceQuotaBytes: quota })
+    const limited = openJournalStorage(f.path, { workspaceQuotaBytes: quota })
     try {
       expect(limited.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
       expect(f.journalRows().usage).toBe(quota)
@@ -289,6 +296,25 @@ it('refuses a changed immutable cut at the same high water', () => {
     f.raw.exec('UPDATE sync_relay_live_documents SET registered_at_ms=99')
     expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(/damaged/)
     expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
+it('retains document event ordinals across journal cursor gaps and delivery replay', () => {
+  const f = registered()
+  try {
+    const first = f.capture(f.update(), 'ordinal-first')
+    expect(f.storage.commitLiveUpdateJournal(first).result).toMatchObject({kind: 'accepted', receipt: {journalCursor: 1}})
+    f.raw.prepare("UPDATE sqlite_sequence SET seq=5 WHERE name='sync_relay_live_update_journal'").run()
+    const second = f.capture(f.update('another', 'value'), 'ordinal-second')
+    expect(f.storage.commitLiveUpdateJournal(second).result).toMatchObject({kind: 'accepted', receipt: {journalCursor: 6}})
+    const rows = () => f.raw.prepare('SELECT journal_cursor,accepted_event_count,accepted_evidence_digest,relay_database_namespace FROM sync_relay_live_update_journal ORDER BY journal_cursor').all()
+    expect(rows()).toMatchObject([{journal_cursor: 1, accepted_event_count: 1, relay_database_namespace: 'journal-test'},
+      {journal_cursor: 6, accepted_event_count: 2, relay_database_namespace: 'journal-test'}])
+    const before = f.journalRows()
+    expect(f.storage.commitLiveUpdateJournal(second).result).toMatchObject({kind: 'accepted', replayed: true})
+    expect(f.journalRows()).toEqual(before)
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET accepted_evidence_digest=? WHERE journal_cursor=6").run('f'.repeat(64))
+    expect(() => f.storage.commitLiveUpdateJournal(second)).toThrow(/damaged/)
   } finally { f.close() }
 })
 
@@ -405,7 +431,7 @@ it('copies caller bytes and committed result bytes independently of retained SQL
 })
 
 it('two connections resolve identical delivery races and retry stale refused cuts before their refusal', () => {
-  const f = registered(), second = openSyncRelayStorage(f.path)
+  const f = registered(), second = openJournalStorage(f.path)
   try {
     const bytes = f.update(), left = f.capture(bytes, 'same'), right = f.capture(bytes, 'same')
     const stale = f.capture(bytes, 'different')
@@ -437,7 +463,7 @@ it('does not reinterpret post-write COMMIT busy as a retry or expose an accepted
     expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow('unavailable')
     f.close()
     fixtureClosed = true
-    reopened = openSyncRelayStorage(f.path)
+    reopened = openJournalStorage(f.path)
     expect(reopened.commitLiveUpdateJournal(input).result).toMatchObject({ kind: 'accepted', receipt: { journalCursor: 1 } })
   } finally {
     reopened?.close()
@@ -463,7 +489,7 @@ it('retains committed recovery after authority, share and object removal, then c
     const input = f.capture(f.update()), committed = f.storage.commitLiveUpdateJournal(input)
     if (!committed.admitted) throw new Error('commit refused')
     f.raw.exec('DELETE FROM sync_relay_live_documents; DELETE FROM sync_relay_share_grants; DELETE FROM sync_relay_shares; DELETE FROM sync_relay_object_moments')
-    const reopened = openSyncRelayStorage(f.path)
+    const reopened = openJournalStorage(f.path)
     try {
       expect(reopened.readCommittedLiveUpdate({ host, document: f.input.evidence.document, journalCursor: 1 }))
         .toEqual({ kind: 'committed', admitted: committed.admitted })
@@ -622,10 +648,10 @@ it.each(['exact', 'over'] as const)('commits a real %s byte-trigger checkpoint i
         [key, value instanceof Uint8Array ? { byteLength: value.byteLength, sha256: hash(value) } : value]))) }
     }
     const before = snapshot(), quota = Number(before.usage) + probeJournalCharge(f, due)
-    const short = openSyncRelayStorage(f.path, { workspaceQuotaBytes: quota - 1 })
+    const short = openJournalStorage(f.path, { workspaceQuotaBytes: quota - 1 })
     try { expect(() => short.commitLiveUpdateJournal(due)).toThrow(/quota/) } finally { short.close() }
     expect(snapshot()).toEqual(before)
-    const exact = openSyncRelayStorage(f.path, { workspaceQuotaBytes: quota })
+    const exact = openJournalStorage(f.path, { workspaceQuotaBytes: quota })
     try {
       const accepted = exact.commitLiveUpdateJournal(due)
       expect(accepted.result.kind).toBe('accepted')
@@ -882,7 +908,7 @@ it('hashes no copied state while holding the SQLite writer transaction', () => {
     const hashPrototype = Object.getPrototypeOf(createHash('sha256'))
     const originalUpdate = hashPrototype.update
     const originalExec = DatabaseSync.prototype.exec
-    let writer = false, hashCalls = 0
+    let writer = false, hashCalls = 0, metadataHashes = 0
     vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function(this: InstanceType<typeof DatabaseSync>, sql: string) {
       const result = originalExec.call(this, sql)
       if (sql === 'BEGIN IMMEDIATE') writer = true
@@ -890,12 +916,17 @@ it('hashes no copied state while holding the SQLite writer transaction', () => {
       return result
     })
     vi.spyOn(hashPrototype, 'update').mockImplementation(function(this: unknown, ...args: unknown[]) {
-      expect(writer).toBe(false); hashCalls++
+      if (writer) {
+        expect(args[0]).toEqual(expect.stringMatching(/^\["accepted-(history|event)-v1",/))
+        metadataHashes++
+      }
+      hashCalls++
       return originalUpdate.apply(this, args)
     })
     expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
     expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
     expect(hashCalls).toBeGreaterThan(0)
+    expect(metadataHashes).toBeGreaterThan(0)
     expect(writer).toBe(false)
     vi.restoreAllMocks()
   } finally { f.close() }

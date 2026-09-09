@@ -7,31 +7,32 @@ import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
-import type { StopRestoreCutCapture, CommittedBootstrap } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
+import type { StopRestoreCutCapture, CommittedBootstrap, OwnerCutCapture } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
-import {decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
+import {canonicalAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
+const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
+  c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
+  c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalAcceptedMetadata(event.metadata))]);
 function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device") {
   const f = readyNativeFence(kind, mode, true);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
   const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
-  const acceptedSources = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()
-    .map(row => decodeJournalRow(f.context.db, row).admitted.metadata);
+  const selectedHistory = f.store.captureStopRestorePoint(input).proof;
+  const acceptedHistory = f.store.captureStopRestoreAcceptedCut(input).proof;
   let origin: unknown;
   if (kind === "owner") {
-    const {binding, cut: c} = f.store.captureStopRestoreOwnerOrigin(input);
-    origin = [binding, c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength,
-      c.baselineMomentRelaySequence, c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => event.metadata)];
+    origin = f.store.captureStopRestoreOwnerOrigin(input).evidenceDigest;
   } else {
     const b = f.raw.prepare("SELECT * FROM sync_relay_live_delivery_bootstraps").get()!;
     origin = {bootstrapId: b.bootstrap_id, bootstrapMomentId: b.bootstrap_moment_id,
@@ -43,8 +44,8 @@ function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "
   const receipt = {fence: f.receipt, point: resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy),
     candidateDigest: "a".repeat(64), frozenStateDigest: "b".repeat(64), pointStateDigest: "c".repeat(64),
     finalContentDigest: "d".repeat(64), beforeStateVector: [0], afterStateVector: [0],
-    replacementRanges: [{clientId: 999, startClock: 0, endClock: 1}], originEvidenceDigest: jsonHash(origin),
-    acceptedSources, nativeSources: [], nativeSourceManifestDigest: jsonHash([f.receipt, []])};
+    replacementRanges: [{clientId: 999, startClock: 0, endClock: 1}], originEvidenceDigest: kind === "owner" ? String(origin) : jsonHash(origin),
+    selectedHistory, acceptedHistory, nativeSources: [], nativeSourceManifestDigest: jsonHash([f.receipt, []])};
   return {...f, input, proposal: receipt};
 }
 
@@ -53,13 +54,13 @@ it.each([["bootstrap", "service"], ["bootstrap", "device"], ["owner", "service"]
     const f = proposalSourcesFixture(kind, mode);
     try {
       const before = f.journalRows(), captured = f.store.captureStopRestoreProposal(f.input, JSON.stringify(f.proposal));
-      expect(captured.receipt.acceptedSources).toEqual(f.proposal.acceptedSources);
+      expect(captured.receipt.acceptedHistory).toEqual(f.proposal.acceptedHistory);
       expect(captured.selected.target).toBe("selected"); expect(captured.accepted.target).toBe("accepted");
       expect(() => captured.assertCurrent()).not.toThrow();
       expect(f.journalRows()).toEqual(before);
       expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
       expect(f.storage.getShareGrant("grant")?.status).toBe("revoked");
-      Object.assign(captured.receipt.acceptedSources[0]!.accepted.receipt, {updateDigest: "f".repeat(64)});
+      Object.assign(captured.receipt.acceptedHistory.suffix[0]!.accepted.receipt, {updateDigest: "f".repeat(64)});
       expect(() => captured.assertCurrent()).toThrow();
     } finally {f.close();}
   });
@@ -68,9 +69,9 @@ it("refuses restore proposal source substitution, omission, order and operation 
   const f = proposalSourcesFixture("owner", "device");
   try {
     const mutations = [
-      (r: typeof f.proposal) => {r.acceptedSources.pop();},
-      (r: typeof f.proposal) => {r.acceptedSources.reverse();},
-      (r: typeof f.proposal) => {Object.assign(r.acceptedSources[0]!.accepted.authority, {principalId: "other"});},
+      (r: typeof f.proposal) => {r.acceptedHistory.suffix.pop();},
+      (r: typeof f.proposal) => {r.acceptedHistory.suffix.reverse();},
+      (r: typeof f.proposal) => {Object.assign(r.acceptedHistory.suffix[0]!.accepted.authority, {principalId: "other"});},
       (r: typeof f.proposal) => {r.originEvidenceDigest = "f".repeat(64);},
       (r: typeof f.proposal) => {Object.assign(r.point, {journalCursor: 1});},
       (r: typeof f.proposal) => {r.fence.operation.hostId = "other";r.nativeSourceManifestDigest = jsonHash([r.fence, []]);},
@@ -259,7 +260,7 @@ it("refuses stale authority after native preparation without recording a proposa
     const preparing = preparation.prepare({store: f.store, lookup: f.lookup, deliveryKind: "owner",
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.coordinate,
         deadlineMs: 1000, nextRequestId: () => 1}});
-    const refused = expect(preparing).rejects.toThrow();
+    const refused = expect(preparing).rejects.toThrow("Accepted journal history is damaged.");
     await started.promise;
     f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=1").run();
     release.resolve({response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)});
@@ -1131,7 +1132,7 @@ it.each(["bytes", "authority", "receipt", "bound"])("refuses selected restore po
   } finally {f.close();}
 });
 
-it.each(["service", "device"] as const)("recovers the original owner prefix after %s fencing and relay restart", mode => {
+it.each(["service", "device"] as const)("recovers compact owner origin evidence after %s fencing and relay restart", mode => {
   const f = ownerOriginProofFixture(mode);
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
   try {
@@ -1139,38 +1140,43 @@ it.each(["service", "device"] as const)("recovers the original owner prefix afte
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
     const before = f.journalRows();
     const captured = f.store.captureStopRestoreOwnerOrigin(f.input);
-    expect({binding: captured.binding, cut: captured.cut}).toEqual(f.original);
-    expect(captured.cut.events).toHaveLength(2);
-    expect(captured.cut.expectedLocalSequence).toBe(7);
+    expect(captured).toMatchObject({binding: f.original.binding, eventCount: 2, expectedLocalSequence: 7,
+      terminalReceipt: f.original.cut.terminalReceipt, evidenceDigest: ownerOriginDigest(f.original)});
     expect(captured.point).toEqual({journalCursor: f.intent.restorePointCursor, receiptDigest: f.intent.restorePointReceiptDigest});
     expect(captured.nativeReceipt).toEqual(f.nativeReceipt);
-    expect(() => f.store.acknowledgeOwnerAdoption(captured, {})).toThrow();
+    expect(() => f.store.acknowledgeOwnerAdoption(captured as never, {})).toThrow();
+    const reads = vi.spyOn(f.context.db, "prepare");
+    try {
+      const bounded = f.store.captureStopRestoreOwnerOrigin({...f.input, maxEvents: 1});
+      expect(bounded.evidenceDigest).toBe(captured.evidenceDigest);bounded.assertCurrent();bounded.assertCurrent();
+      const journal = reads.mock.calls.map(([sql]) => sql).filter(sql => /FROM sync_relay_live_update_journal/.test(sql));
+      expect(journal.length).toBeGreaterThan(0);
+      expect(journal.every(sql => /journal_cursor=\?|ORDER BY journal_cursor DESC LIMIT 1/.test(sql))).toBe(true);
+    } finally {reads.mockRestore();}
     expect(f.journalRows()).toEqual(before);
     captured.assertCurrent();
     f.close(); closed = true;
     reopened = openSyncRelayStorage(f.path);
     const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
     const replay = store.captureStopRestoreOwnerOrigin(f.input);
-    expect({binding: replay.binding, cut: replay.cut}).toEqual(f.original);
+    expect(replay).toMatchObject({binding: f.original.binding, eventCount: captured.eventCount, expectedLocalSequence: captured.expectedLocalSequence,
+      evidenceDigest: captured.evidenceDigest, historyEvidenceDigest: captured.historyEvidenceDigest});
     expect(replay.nativeReceipt).toEqual(f.nativeReceipt);
   } finally {if (!closed) f.close(); reopened?.close();}
 });
 
-it.each(["bytes", "events", "owner", "workspace", "host", "origin", "checkpoint", "reopened"])("refuses an owner restore origin with %s drift without writes", damage => {
+it.each(["bytes", "owner", "workspace", "host", "origin", "endpoint", "reopened"])("refuses an owner restore origin with %s drift without writes", damage => {
   const f = ownerOriginProofFixture();
   try {
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
     const input: Parameters<typeof f.store.captureStopRestoreOwnerOrigin>[0] = structuredClone(f.input);
     if (damage === "bytes") input.maxBytes = 1;
-    if (damage === "events") input.maxEvents = 1;
     if (damage === "owner") input.ownerUserId = "foreign";
     if (damage === "workspace") input.workspaceId = "foreign";
     if (damage === "host") input.host = {...input.host, connectionId: "foreign"};
     if (damage === "origin") f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.expectedLocalSequence',8)");
-    if (damage === "checkpoint") {
-      const checkpoint = Y.encodeStateAsUpdate(f.doc);
-      f.raw.prepare("UPDATE sync_relay_live_update_journal SET validation_checkpoint_bytes=?,validation_checkpoint_sha256=? WHERE journal_cursor=1").run(checkpoint, hash(checkpoint));
-    }
+    if (damage === "endpoint") f.raw.prepare("UPDATE sync_relay_live_update_journal SET accepted_evidence_digest=? WHERE journal_cursor=?")
+      .run("f".repeat(64), f.original.cut.terminalReceipt!.journalCursor);
     if (damage === "reopened") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
     const before = f.journalRows();
     expect(() => f.store.captureStopRestoreOwnerOrigin(input)).toThrow();
@@ -1178,12 +1184,12 @@ it.each(["bytes", "events", "owner", "workspace", "host", "origin", "checkpoint"
   } finally {f.close();}
 });
 
-it.each(["bytes", "receipt", "point", "authority"])("invalidates a captured owner origin after %s changes", damage => {
+it.each(["binding", "receipt", "point", "authority"])("invalidates a captured owner origin after %s changes", damage => {
   const f = ownerOriginProofFixture();
   try {
     f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
     const capture = f.store.captureStopRestoreOwnerOrigin(f.input);
-    if (damage === "bytes") capture.cut.events[0]!.updateBytes[0] ^= 1;
+    if (damage === "binding") capture.binding.selectorPaths.push("other");
     if (damage === "receipt") capture.nativeReceipt.localHeadSequence++;
     if (damage === "point") capture.point.journalCursor++;
     if (damage === "authority") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");

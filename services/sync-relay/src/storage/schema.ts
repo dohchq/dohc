@@ -680,6 +680,13 @@ CREATE TABLE sync_relay_live_update_journal (
       validation_checkpoint_bytes IS NULL OR
       length(validation_checkpoint_bytes) BETWEEN 1 AND 20971520
     ),
+  relay_database_namespace TEXT NOT NULL
+    CHECK (length(CAST(relay_database_namespace AS BLOB)) BETWEEN 1 AND 512),
+  accepted_event_count INTEGER NOT NULL
+    CHECK (accepted_event_count BETWEEN 1 AND 9007199254740991),
+  accepted_evidence_digest TEXT NOT NULL
+    CHECK (length(accepted_evidence_digest) = 64 AND accepted_evidence_digest NOT GLOB '*[^0-9a-f]*'),
+  accepted_metadata_bytes INTEGER NOT NULL CHECK (accepted_metadata_bytes > 0),
   UNIQUE (
     journal_cursor,
     workspace_id, main_version_id, object_id, lineage_claim_id
@@ -773,6 +780,10 @@ const LIVE_JOURNAL_SHAPE = {
       [16,"update_bytes","BLOB",1,null,0],
       [17,"validation_checkpoint_sha256","TEXT",0,null,0],
       [18,"validation_checkpoint_bytes","BLOB",0,null,0],
+      [19,"relay_database_namespace","TEXT",1,null,0],
+      [20,"accepted_event_count","INTEGER",1,null,0],
+      [21,"accepted_evidence_digest","TEXT",1,null,0],
+      [22,"accepted_metadata_bytes","INTEGER",1,null,0],
     ],
     foreignKeys: [
       [0,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],

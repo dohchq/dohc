@@ -123,6 +123,9 @@ function parseBasis(value: StopRestoreBasis): StopRestoreBasis {
 export function requireStopRestoreOwnerOrigin(storage: StorageContext, basis: StopRestoreBasis): void {
   if (basis.ownerOrigin === null) return;
   const origin = JSON.parse(basis.ownerOrigin);
+  parseLiveUpdateDigest(origin?.originEvidenceDigest);
+  parseLiveUpdateDigest(origin?.originHistoryEvidenceDigest);
+  integer(origin?.originEventCount);
   const source = storage.db.prepare("SELECT moment_id FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
     .get(basis.binding.workspaceId,basis.binding.objectId,basis.baselineSequence);
   if (!origin || origin.relayDatabaseNamespace !== basis.namespace || origin.sourceMomentId !== source?.moment_id ||
