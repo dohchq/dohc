@@ -347,6 +347,81 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
   return {...f, capture, receipt};
 }
 
+function ownerOriginProofFixture(mode: "service" | "device" = "device") {
+  const f = fixture("owner", mode);
+  const point = f.add("point"), adoptedTip = f.add("adopted-tip");
+  const original = f.store.captureOwnerCut({host: f.coordinate, document: f.document, actor: f.actor,
+    adoptionId: "adoption", expectedLocalSequence: 7, maxBytes: 1_000_000, maxEvents: 10});
+  f.store.acknowledgeOwnerAdoption(original, {adoptionId: "adoption", localYDocSequence: 7,
+    terminalCursor: adoptedTip.journalCursor, adoptionReplayed: false});
+  const later = f.add("after-adoption");
+  f.intent.restorePointCursor = point.journalCursor;
+  f.intent.restorePointReceiptDigest = point.updateDigest;
+  f.fence();
+  const drain = f.open();
+  f.store.acknowledgeStopRestoreApplication(drain, adoptedTip, applicationAck(later, 8));
+  f.store.completeStopRestoreCut(drain);
+  const nativeReceipt = {operation: f.store.pendingStopRestoreFence(f.lookup).operation, localHeadSequence: 11, recordedAtMs: 100};
+  const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
+  return {...f, original: structuredClone({binding: original.binding, cut: original.cut}), nativeReceipt, input};
+}
+
+it.each(["service", "device"] as const)("recovers the original owner prefix after %s fencing and relay restart", mode => {
+  const f = ownerOriginProofFixture(mode);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    expect(() => f.store.captureStopRestoreOwnerOrigin(f.input)).toThrow();
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const before = f.journalRows();
+    const captured = f.store.captureStopRestoreOwnerOrigin(f.input);
+    expect({binding: captured.binding, cut: captured.cut}).toEqual(f.original);
+    expect(captured.cut.events).toHaveLength(2);
+    expect(captured.cut.expectedLocalSequence).toBe(7);
+    expect(captured.point).toEqual({journalCursor: f.intent.restorePointCursor, receiptDigest: f.intent.restorePointReceiptDigest});
+    expect(captured.nativeReceipt).toEqual(f.nativeReceipt);
+    expect(() => f.store.acknowledgeOwnerAdoption(captured, {})).toThrow();
+    expect(f.journalRows()).toEqual(before);
+    captured.assertCurrent();
+    f.close(); closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const store = reopened.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true}));
+    const replay = store.captureStopRestoreOwnerOrigin(f.input);
+    expect({binding: replay.binding, cut: replay.cut}).toEqual(f.original);
+    expect(replay.nativeReceipt).toEqual(f.nativeReceipt);
+  } finally {if (!closed) f.close(); reopened?.close();}
+});
+
+it.each(["bytes", "events", "owner", "workspace", "host", "origin", "reopened"])("refuses an owner restore origin with %s drift without writes", damage => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const input: Parameters<typeof f.store.captureStopRestoreOwnerOrigin>[0] = structuredClone(f.input);
+    if (damage === "bytes") input.maxBytes = 1;
+    if (damage === "events") input.maxEvents = 1;
+    if (damage === "owner") input.ownerUserId = "foreign";
+    if (damage === "workspace") input.workspaceId = "foreign";
+    if (damage === "host") input.host = {...input.host, connectionId: "foreign"};
+    if (damage === "origin") f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.expectedLocalSequence',8)");
+    if (damage === "reopened") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
+    const before = f.journalRows();
+    expect(() => f.store.captureStopRestoreOwnerOrigin(input)).toThrow();
+    expect(f.journalRows()).toEqual(before);
+  } finally {f.close();}
+});
+
+it.each(["bytes", "receipt", "point", "authority"])("invalidates a captured owner origin after %s changes", damage => {
+  const f = ownerOriginProofFixture();
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const capture = f.store.captureStopRestoreOwnerOrigin(f.input);
+    if (damage === "bytes") capture.cut.events[0]!.updateBytes[0] ^= 1;
+    if (damage === "receipt") capture.nativeReceipt.localHeadSequence++;
+    if (damage === "point") capture.point.journalCursor++;
+    if (damage === "authority") f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open'");
+    expect(() => capture.assertCurrent()).toThrow();
+  } finally {f.close();}
+});
+
 it.each(["bootstrap", "owner"] as const)("records a funded native fence for %s and replays it after relay reopen", kind => {
   const f = readyNativeFence(kind, "device", true);
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;

@@ -82,6 +82,10 @@ export interface OwnerCutCapture {
   cut: LiveOwnerAdoptionCut;
   assertCurrent(): void;
 }
+export interface RestoreOwnerOriginCapture extends OwnerCutCapture {
+  readonly nativeReceipt: NativeRestoreFenceReceipt;
+  readonly point: { journalCursor: number; receiptDigest: string };
+}
 export interface OwnerDeliveryCapture {
   binding: LiveObjectBinding;
   assertCurrent(): void;
@@ -867,6 +871,63 @@ export class LiveCommittedDeliveryStore {
       integrity(changed.changes === 1);
       return structuredClone(applied);
     });
+  }
+  captureStopRestoreOwnerOrigin(input: StopRestoreLookup & {
+    host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
+  }): RestoreOwnerOriginCapture {
+    const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
+      ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+    const host = snapshotHostCoordinate(input.host), maxBytes = authorityInteger(input.maxBytes, 1), maxEvents = authorityInteger(input.maxEvents, 1);
+    const saved = this.#storage.readTx(() => {
+      const {operation, authority} = this.#restore(lookup, host);
+      integrity(operation.phase === "native-fenced" && operation.nativeReceipt && operation.intent.deliveryKind === "owner");
+      const document = operation.intent.document, row = this.#ownerRow(host, document);
+      integrity(row && operation.basis.ownerOrigin !== null && row.origin_json === operation.basis.ownerOrigin);
+      requireStopRestoreOwnerOrigin(this.#storage, operation.basis);
+      const raw = baselineRecord(JSON.parse(operation.basis.ownerOrigin), ["relayDatabaseNamespace", "adoptionId", "sourceMomentId",
+        "sourceDigest", "sourceByteLength", "baselineMomentRelaySequence", "baselineRegisteredAtMs", "expectedLocalSequence", "terminalReceipt", "bindingDigest"]);
+      const terminal = raw.terminalReceipt === null ? null : parseLiveUpdateReceipt(raw.terminalReceipt);
+      const through = terminal?.journalCursor ?? 0;
+      integrity(through <= operation.cutoverCursor! && raw.adoptionId === operation.applied?.sourceId);
+      const header = {relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace), adoptionId: parseLiveUpdateIdentifier(raw.adoptionId),
+        sourceMomentId: parseLiveUpdateIdentifier(raw.sourceMomentId), sourceDigest: parseLiveUpdateDigest(raw.sourceDigest),
+        sourceByteLength: authorityInteger(raw.sourceByteLength), baselineMomentRelaySequence: authorityInteger(raw.baselineMomentRelaySequence, 1),
+        baselineRegisteredAtMs: authorityInteger(raw.baselineRegisteredAtMs), expectedLocalSequence: authorityInteger(raw.expectedLocalSequence), terminalReceipt: terminal};
+      const counts = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`)
+        .get(...documentParams(document), through)!;
+      const count = authorityInteger(counts.count), payloadBytes = authorityInteger(counts.bytes);
+      let bytes = authority.baselineBytes.byteLength + Buffer.byteLength(JSON.stringify({...header, eventCount: count})) + 8;
+      if (count > maxEvents || bytes > maxBytes || payloadBytes > maxBytes - bytes) throw new Error("Restore owner origin exceeds configured bounds.");
+      const events: AdmittedLiveUpdate[] = [];
+      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`)
+        .iterate(...documentParams(document), through)) {
+        const event = decodeJournalRow(this.#storage.db, raw);
+        assertJournalCheckpointPosition(this.#storage.db, event);
+        verifyJournalRow(event);
+        bytes += event.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(event.admitted.metadata)) + 8;
+        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Restore owner origin exceeds configured bounds.");
+        events.push(event.admitted);
+      }
+      integrity(events.length === count && sameReceipt(events.at(-1)?.metadata.accepted.receipt ?? null, terminal));
+      return {operation, baselineBytes: authority.baselineBytes, cut: {...header, baselineBytes: new Uint8Array(authority.baselineBytes), events}};
+    });
+    let fingerprint: string;
+    const capture: RestoreOwnerOriginCapture = Object.freeze({binding: structuredClone(saved.operation.basis.ownerBinding), cut: saved.cut,
+      nativeReceipt: structuredClone(saved.operation.nativeReceipt!),
+      point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
+      assertCurrent: () => {
+        integrity(fingerprint === digest());
+        this.#storage.readTx(() => {
+          const current = this.#restore(lookup, host, undefined, saved.baselineBytes);
+          integrity(isDeepStrictEqual(current.operation, saved.operation));
+          integrity(this.#ownerRow(host, saved.operation.intent.document)?.origin_json === saved.operation.basis.ownerOrigin);
+        });
+      }});
+    const digest = () => createHash("sha256").update(JSON.stringify({origin: ownerCutDigest(capture), nativeReceipt: capture.nativeReceipt, point: capture.point})).digest("hex");
+    fingerprint = digest();
+    capture.assertCurrent();
+    // This proof is not registered in #ownerCuts and grants no adoption or delivery authority.
+    return capture;
   }
   stopRestoreDocument(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): LiveDocumentKey {
     return this.#storage.readTx(() => structuredClone(this.#restore(input, input.host).operation.intent.document));
