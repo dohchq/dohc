@@ -631,7 +631,11 @@ mod tests {
             .as_u64()
             .unwrap();
         drop(registered);
-        drop(f.fence().await);
+        let request = f.request(
+            "liveApplication.fenceRestore",
+            json!({"operation":header["fence"]["operation"]}),
+        );
+        assert!(f.service.call(f.context(), request).await.is_err());
         assert!(
             f.service
                 .live_application_registration(

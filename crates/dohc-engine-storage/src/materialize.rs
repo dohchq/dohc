@@ -373,7 +373,7 @@ pub(crate) fn list_pending_jobs(
 }
 
 /// Load a single job by id.
-pub(crate) fn load_job(
+pub fn load_job(
     conn: &Connection,
     job_id: &str,
 ) -> Result<Option<MaterializationJob>, StorageError> {

@@ -849,7 +849,6 @@ pub fn acknowledge(
         if parent.state == OwnerOutboxState::Quarantined {
             return Err(OwnerOutboxError::Frozen);
         }
-        if parent.state==OwnerOutboxState::Quarantined {return Err(OwnerOutboxError::Frozen)};
         let mut statement = tx
             .prepare(
                 "SELECT sequence,delivery_id,update_digest,byte_length \
