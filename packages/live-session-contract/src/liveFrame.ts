@@ -19,6 +19,15 @@ import {
 } from "./liveUpdateAdmission.js";
 
 export const LIVE_FRAME_HEADER_BYTES = 12;
+export const LIVE_MEMBERSHIP_BASE_BYTES = LIVE_FRAME_HEADER_BYTES + 8 + 1 + 4;
+export const LIVE_MEMBERSHIP_MEMBER_BYTES = 16;
+export interface LiveMembershipFrame {
+  readonly kind: "membership";
+  readonly revision: number;
+  readonly members: readonly string[];
+  /** When true, omission does not establish that a peer left. */
+  readonly overflow: boolean;
+}
 // RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
 export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
 
@@ -40,6 +49,7 @@ export type LiveFrameBegin = {
   | { readonly purpose: "applied-update"; readonly journalCursor: number }
 );
 export type LiveFrame =
+  | LiveMembershipFrame
   | { readonly kind: "welcome"; readonly hostEpoch: HostEpoch; readonly receivePolicy: LiveFrameReceivePolicy }
   | { readonly kind: "hello"; readonly receivePolicy: LiveFrameReceivePolicy }
   | LiveFrameBegin
@@ -114,20 +124,35 @@ const retryCodes: Record<LiveUpdateRetry, number> = {
 };
 const closeCodes = { normal: 0, "protocol-invalid": 1, "route-fenced": 2, "resource-unavailable": 3, idle: 4, shutdown: 5 } as const;
 const purposeCodes = { "client-vector": 1, "initial-sync": 2, "submit-update": 3, "applied-update": 4 } as const;
-const kindCodes = { welcome: 1, hello: 2, begin: 3, chunk: 4, credit: 5, "sync-applied": 6, result: 7, close: 8 } as const;
+const kindCodes = { welcome: 1, hello: 2, begin: 3, chunk: 4, credit: 5, "sync-applied": 6, result: 7, close: 8, membership: 9 } as const;
 function fromCode<T extends string>(codes: Record<T, number>, code: number): T {
   const found = (Object.keys(codes) as T[]).find(key => codes[key] === code);
   requireFrame(found !== undefined);
   return found;
 }
 
-function snapshotFrame(value: unknown): LiveFrame {
+function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
   requireFrame(typeof value === "object" && value !== null && !Array.isArray(value));
   const keys = Reflect.ownKeys(value);
   requireFrame(keys.length <= 8 && keys.every(key => typeof key === "string"));
   value = record(value, keys as string[]);
   const kind = discriminant(value, "kind");
   switch (kind) {
+    case "membership": {
+      const r = record(value, ["kind", "revision", "members", "overflow"]);
+      requireFrame(typeof r.overflow === "boolean");
+      requireFrame(Array.isArray(r.members) && Object.getPrototypeOf(r.members) === Array.prototype);
+      const count = integer(Object.getOwnPropertyDescriptor(r.members, "length")?.value);
+      requireFrame(count <= Math.floor((maxFrameBytes - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES), "limit");
+      requireFrame(Reflect.ownKeys(r.members).length === count + 1);
+      const members = Array.from({ length: count }, (_, index) => {
+        const descriptor = Object.getOwnPropertyDescriptor(r.members, String(index));
+        requireFrame(descriptor && "value" in descriptor && typeof descriptor.value === "string" && /^[0-9a-f]{32}$/.test(descriptor.value));
+        return descriptor.value as string;
+      });
+      requireFrame(new Set(members).size === members.length);
+      return { kind, revision: integer(r.revision, true), members, overflow: r.overflow };
+    }
     case "welcome": {
       const r = record(value, ["kind", "hostEpoch", "receivePolicy"]);
       return { kind, hostEpoch: parseHostEpoch(r.hostEpoch), receivePolicy: policy(r.receivePolicy) };
@@ -237,6 +262,10 @@ function writePolicy(w: Writer, p: LiveFrameReceivePolicy) { for (const field of
 function readPolicy(r: Reader) { return policy(Object.fromEntries(policyFields.map(field => [field, r.number(8)]))); }
 function payload(w: Writer, frame: LiveFrame) {
   switch (frame.kind) {
+    case "membership":
+      w.number(frame.revision, 8); w.number(frame.overflow ? 1 : 0, 1); w.number(frame.members.length, 4);
+      for (const member of frame.members) for (let n = 0; n < 32; n += 2) w.number(Number.parseInt(member.slice(n, n + 2), 16), 1);
+      break;
     case "welcome": w.number(frame.hostEpoch, 8); writePolicy(w, frame.receivePolicy); break;
     case "hello": writePolicy(w, frame.receivePolicy); break;
     case "begin":
@@ -274,7 +303,7 @@ function encodeOwned(frame: LiveFrame, payloadBytes: number) {
 }
 export function encodeLiveFrame(value: LiveFrame, maxFrameBytes: number): Uint8Array {
   integer(maxFrameBytes, true);
-  const frame = snapshotFrame(value);
+  const frame = snapshotFrame(value, maxFrameBytes);
   return encodeOwned(frame, measureFrame(frame, maxFrameBytes));
 }
 function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolean): LiveFrame {
@@ -287,6 +316,13 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
   requireFrame(r.number(2) === 0 && r.number(4) === bytes.length - LIVE_FRAME_HEADER_BYTES);
   let frame: LiveFrame;
   switch (kind) {
+    case "membership": {
+      const revision = integer(r.number(8), true), overflow = r.number(1), count = r.number(4);
+      requireFrame(overflow <= 1 && count === (bytes.length - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES);
+      const members = Array.from({ length: count }, () => Array.from(r.raw(LIVE_MEMBERSHIP_MEMBER_BYTES), byte => byte.toString(16).padStart(2, "0")).join(""));
+      requireFrame(new Set(members).size === members.length);
+      frame = { kind, revision, overflow: overflow === 1, members }; break;
+    }
     case "welcome": frame = { kind, hostEpoch: parseHostEpoch(r.number(8)), receivePolicy: readPolicy(r) }; break;
     case "hello": frame = { kind, receivePolicy: readPolicy(r) }; break;
     case "begin": {
@@ -427,7 +463,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
   requireFrame(limits.maxAssemblyBytes >= Math.max(limits.receive.maxUpdateBytes,
     role === "client" ? limits.receive.maxSyncBytes : limits.receive.maxStateVectorBytes));
   const sides = { client: direction(), server: direction() };
-  let terminal = false, vectorDone = false, syncDone = false, live = false, syncCursor = 0, assemblyBytes = 0;
+  let terminal = false, vectorDone = false, syncDone = false, live = false, syncCursor = 0, assemblyBytes = 0, membershipRevision = 0;
   let pending: { deliveryId: string; updateDigest: string; complete: boolean } | undefined;
   function lease<T>(value: T, relinquish: () => void): LiveFrameLease<T> {
     let held = true;
@@ -461,6 +497,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     Object.freeze(frame);
     if (frame.kind === "welcome" || frame.kind === "hello") Object.freeze(frame.receivePolicy);
     if (frame.kind === "result" && frame.result === "success") Object.freeze(frame.ack);
+    if (frame.kind === "membership") Object.freeze(frame.members);
     if (frame.kind === "welcome" || frame.kind === "hello") {
       requireFrame(!state.greeted && (frame.kind === "welcome" ? sender === "server" : sender === "client"), "state");
       if (sender === role) requireFrame(policyFields.every(field => frame.receivePolicy[field] === limits.receive[field]), "state");
@@ -479,6 +516,10 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       peer.grantedBytes = frame.grantedBytes; peer.grantedFrames = frame.grantedFrames; return;
     }
     requireFrame(peer.greeted, "state");
+    if (frame.kind === "membership") {
+      requireFrame(sender === "server" && live && frame.revision > membershipRevision, "state");
+      membershipRevision = frame.revision; return;
+    }
     if (frame.kind === "sync-applied") {
       requireFrame(sender === "client" && syncDone && !live && frame.appliedThroughJournalCursor === syncCursor, "state");
       live = true; return;
@@ -537,8 +578,8 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       checkOpen();
       // Local shape/encoding and pressure errors consume no protocol position. The
       // caller can repair or wait. An illegal protocol transition retires the route.
-      const frame = snapshotFrame(value);
       const max = Math.min(limits.receive.maxFrameBytes, sides[opposite(role)].receivePolicy?.maxFrameBytes ?? limits.receive.maxFrameBytes);
+      const frame = snapshotFrame(value, max);
       const payloadBytes = measureFrame(frame, max), size = payloadBytes + LIVE_FRAME_HEADER_BYTES;
       const release = holdFrame(role, frame.kind === "begin" || frame.kind === "chunk", size);
       try {
