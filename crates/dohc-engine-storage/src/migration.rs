@@ -1496,7 +1496,7 @@ CREATE TABLE ydoc_owner_bindings (
     workspace_id TEXT NOT NULL,
     main_version_id TEXT NOT NULL,
     object_id TEXT NOT NULL,
-    lineage_claim_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
     relay_database_namespace TEXT NOT NULL,
     binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),

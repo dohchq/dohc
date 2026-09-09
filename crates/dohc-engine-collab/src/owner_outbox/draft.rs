@@ -206,7 +206,9 @@ pub fn open_draft_in(
     let marker = crate::read_marker_in(conn, &key(binding)?)
         .map_err(collab)?
         .ok_or(OwnerOutboxError::NotFound)?;
-    if marker.head_update_seq != observed.native_head_sequence
+    if marker.content_kind != crate::ContentKind::Richdoc
+        || marker.regime != crate::Regime::Replicated
+        || marker.head_update_seq != observed.native_head_sequence
         || marker.lineage_claim_id.as_deref() != Some(&binding.lineage_claim_id)
         || marker.path.as_deref() != Some(&binding.current_path)
     {
@@ -498,5 +500,58 @@ mod tests {
             store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
             0
         );
+    }
+    #[test]
+    fn observation_retains_original_base_without_an_outbox_or_native_snapshot() {
+        let (_dir, mut store, mut observed, checkpoint) = fixture();
+        let doc = Ydoc::wire();
+        doc.apply(&checkpoint).unwrap();
+        let delta = doc.richdoc_append_paragraph("accepted change");
+        let key = key(&observed.binding).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::record_update_in_tx(tx, &key, &delta, None, None, 3)
+            })
+            .unwrap();
+        let checkpoint = bounded(&doc).unwrap();
+        observed.checkpoint_digest = hex_sha256(&checkpoint);
+        observed.native_head_sequence = store
+            .read_with(|conn| crate::read_marker_in(conn, &key))
+            .unwrap()
+            .unwrap()
+            .head_update_seq;
+        assert_ne!(
+            observed.binding.lineage_claim_id,
+            observed.checkpoint_digest
+        );
+        install(&mut store, &observed, &checkpoint);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM ydoc_snapshots", []).unwrap();
+                assert!(tx
+                    .execute(
+                        "DELETE FROM binary_blobs WHERE sha256=?1",
+                        [&observed.binding.lineage_claim_id]
+                    )
+                    .is_err());
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+        assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
+    }
+    #[test]
+    fn draft_open_refuses_marker_kind_or_regime_drift_without_a_head_change() {
+        for assignment in ["content_kind='plaintext'", "regime='local-only'"] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(&format!("UPDATE ydoc_docs SET {assignment}"), [])
+                        .unwrap();
+                    assert!(open_draft_in(tx, &observed.binding, 1).is_err());
+                    Ok::<_, OwnerOutboxError>(())
+                })
+                .unwrap();
+        }
     }
 }
