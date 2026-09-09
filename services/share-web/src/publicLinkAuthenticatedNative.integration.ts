@@ -213,7 +213,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       for (const cookie of [sessionCookie, profileCookie]) expect(cookie).toMatchObject({secure: true, httpOnly: true, sameSite: "Strict", path: "/", domain: "127.0.0.1"});
       expect(sessionCookie!.value).not.toBe(profileCookie!.value);
       protectedSecrets.add(sessionCookie!.value); protectedSecrets.add(profileCookie!.value); protectedSecrets.add(new URL(url).hash.slice(1));
-      expect(await page.evaluate(() => ({cookies: document.cookie, fragment: location.hash}))).toEqual({cookies: "", fragment: ""});
+      expect(await page.evaluate(() => ({cookies: globalThis.document.cookie, fragment: location.hash}))).toEqual({cookies: "", fragment: ""});
       await page.getByRole("button", {name: "Edit file", exact: true}).click();
       const editor = page.getByRole("textbox", {name: "Shared file editor"});
       await browserExpect(editor).toHaveAttribute("contenteditable", "true");
@@ -406,7 +406,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click(); wireIdentities.push(peer);
     }
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
-    const workloadWires = [];
+    const workloadWires: Awaited<ReturnType<typeof wire.connect>>[] = [];
     for (const [index, peer] of wireIdentities.entries()) {
       const socket = await wire.connect(peer.context, await wire.ticket(peer.context, peer.discriminator, workloadDocument.objectId), `workload-${index}`);
       await socket.sync(); expect(hash(Buffer.from(yDocToMarkdown(socket.doc)))).toBe(hash(workload.markdown)); workloadWires.push(socket);
@@ -435,7 +435,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const exposedBodies = await Promise.all(publicBodies);
     for (const secret of protectedSecrets) for (const body of exposedBodies) expect(body).not.toContain(secret);
     for (const context of contexts) for (const page of context.pages()) {
-      const exposed = await page.evaluate(() => JSON.stringify({html: document.documentElement.outerHTML, local: {...localStorage}, session: {...sessionStorage}, hash: location.hash, cookie: document.cookie}));
+      const exposed = await page.evaluate(() => JSON.stringify({html: globalThis.document.documentElement.outerHTML, local: {...localStorage}, session: {...sessionStorage}, hash: location.hash, cookie: globalThis.document.cookie}));
       for (const secret of protectedSecrets) expect(exposed).not.toContain(secret);
     }
     results.credentials = {protectedCookieProfiles: capacity.admittedConcurrency, protectedSecretsChecked: protectedSecrets.size, javascriptResponseBodiesChecked: exposedBodies.length, privateCredentialsExcluded: true};
