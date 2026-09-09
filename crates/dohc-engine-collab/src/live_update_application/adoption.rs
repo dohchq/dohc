@@ -804,18 +804,28 @@ mod tests {
             f.doc
                 .rewrite_content_to_markdown(ContentKind::Richdoc, "later edit")
                 .unwrap();
-            f.store
-                .write_with(&NoFaults, |tx| {
-                    durable::record_update_in_tx(
+            let key = f.key.clone();
+            let update = f.doc.encode_full_state();
+            crate::record_local_update(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                crate::LocalAppend::default(),
+                &NoFaults,
+                5,
+                |tx, outcome, _| {
+                    owner_outbox::append_adopted_local_update_in_tx(
                         tx,
-                        &f.key,
-                        &f.doc.encode_full_state(),
-                        None,
-                        None,
+                        &key,
+                        "owner.md",
+                        outcome.seq,
+                        &update,
                         5,
                     )
-                })
-                .unwrap();
+                },
+            )
+            .unwrap();
             assert_eq!(
                 f.adopt().unwrap().local_ydoc_sequence,
                 ack.local_ydoc_sequence
@@ -1222,6 +1232,7 @@ fn read_adoption_source(
 /// update sequence, or projection. First adoption can seed a pending local cut.
 /// The captured registration
 /// mutex and actor writer lane remain held through the audit transaction.
+#[allow(clippy::too_many_arguments)]
 pub fn adopt_owner_committed(
     store: &mut EngineStore,
     handle: &ApplicationHandle,

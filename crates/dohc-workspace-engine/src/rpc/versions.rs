@@ -146,6 +146,7 @@ fn version_fence_session_view(
         .filter(|session| session.workspace == *handle)
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
     Ok(YdocSessionView {
+        owner_draft: session.owner_draft.clone(),
         key: session.key.clone(),
         path: session.path.clone(),
         content_kind: session.content_kind,
