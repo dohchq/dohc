@@ -105,55 +105,6 @@ impl OutputGuard for OwnerOutputGuard {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upload_metadata_keeps_frame_and_sync_shapes_separate() {
-        let binding = LiveObjectBinding {
-            workspace_id: "workspace".into(),
-            main_version_id: "main".into(),
-            object_id: "object".into(),
-            lineage_claim_id: "ab".repeat(32),
-            current_path: "a.md".into(),
-            selector_paths: vec!["a.md".into()],
-            restore_fence_generation: 0,
-        };
-        let mut p = OwnerUploadParams {
-            binding,
-            relay_database_namespace: "relay".into(),
-            expected_revision: 1,
-            expected_native_head_sequence: 0,
-            previous_accepted_cursor: 0,
-            journal_cursor: 1,
-            stream_id: 1,
-            byte_length: MAX,
-            digest: "cd".repeat(32),
-            host_vector_byte_length: None,
-        };
-        assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_ok());
-        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
-        p.host_vector_byte_length = Some(MAX);
-        p.byte_length = MAX * 2;
-        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_ok());
-        assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_err());
-        p.byte_length += 1;
-        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
-    }
-
-    #[test]
-    fn ordinary_daemon_does_not_enable_owner_transport_implicitly() {
-        let service = EngineService::new();
-        let owner = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
-        assert!(
-            service
-                .owner_delivery_connection(&owner.handle(), None)
-                .is_err()
-        );
-    }
-}
-
 fn invalid() -> WireError {
     WireError::new(ErrorCode::InvalidParams, "invalid owner delivery request")
 }
@@ -375,5 +326,54 @@ impl EngineService {
             blob_egress,
             output_guard: Some(guard),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_metadata_keeps_frame_and_sync_shapes_separate() {
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "ab".repeat(32),
+            current_path: "a.md".into(),
+            selector_paths: vec!["a.md".into()],
+            restore_fence_generation: 0,
+        };
+        let mut p = OwnerUploadParams {
+            binding,
+            relay_database_namespace: "relay".into(),
+            expected_revision: 1,
+            expected_native_head_sequence: 0,
+            previous_accepted_cursor: 0,
+            journal_cursor: 1,
+            stream_id: 1,
+            byte_length: MAX,
+            digest: "cd".repeat(32),
+            host_vector_byte_length: None,
+        };
+        assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_ok());
+        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
+        p.host_vector_byte_length = Some(MAX);
+        p.byte_length = MAX * 2;
+        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_ok());
+        assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_err());
+        p.byte_length += 1;
+        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
+    }
+
+    #[test]
+    fn ordinary_daemon_does_not_enable_owner_transport_implicitly() {
+        let service = EngineService::new();
+        let owner = dohc_engine_protocol::transport::ConnectionOwner::authenticated();
+        assert!(
+            service
+                .owner_delivery_connection(&owner.handle(), None)
+                .is_err()
+        );
     }
 }
