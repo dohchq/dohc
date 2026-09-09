@@ -128,6 +128,76 @@ it("resyncs a native invalidation into an open provider without losing its durab
   peer.destroy(); await session.close(); adapter.dispose();
 });
 
+it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as const)("handles a refused invalidation resync: %s", async (mode) => {
+  const engine = seedPlaintextEngine("seed"), scheduler = settleScheduler();
+  const transient = mode === "recover" || mode === "close" || mode === "close-during-retry";
+  const refusal = new DaemonRefusalError({code: transient ? "OVERLOADED" : "INVALID_PARAMS",
+    message: mode === "terminal" ? "owner-outbox-parent-mismatch" : "live-settlement-capacity",
+    retry: transient ? "afterBackoff" : "no"}, new Error("daemon response"));
+  let resyncs = 0;
+  let releaseRetry!: () => void;
+  const heldRetry = new Promise<void>(resolve => {releaseRetry = resolve;});
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) {
+        if (++resyncs === 1) throw refusal;
+        if (mode === "close-during-retry") await heldRetry;
+      }
+      return engine.sendRequest(request);
+    },
+  };
+  const errors: unknown[] = [];
+  const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, onSessionError: error => errors.push(error), scheduleSettle: scheduler.schedule});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(errors).toEqual([refusal]); expect(resyncs).toBe(1);
+  expect(provider.doc.getText("plainText").toString()).toBe("seed");
+  if (!transient) {
+    expect(scheduler.armed).toHaveLength(0);
+    await provider.evict();
+  } else {
+    expect(scheduler.armed).toHaveLength(1);
+    if (mode === "close") {
+      await provider.evict(); expect(scheduler.armed).toHaveLength(0); expect(resyncs).toBe(1);
+    } else if (mode === "close-during-retry") {
+      scheduler.fire(); await drain(); expect(resyncs).toBe(2);
+      const closing = provider.close({settle: false}); await drain();
+      expect(engine.activeSessionIds()).toHaveLength(1);
+      releaseRetry(); await closing; expect(engine.activeSessionIds()).toHaveLength(0);
+    } else {
+      scheduler.fire(); await drain();
+      expect(resyncs).toBe(2); expect(provider.doc.getText("plainText").toString()).toBe("remote seed");
+      await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(11, " local")));
+      expect(engine.sessionText(provider.nativeOwner!.sessionId)).toBe("remote seed local");
+      await provider.close();
+    }
+  }
+  peer.destroy();
+});
+
+it("shares one pending native resync between concurrent callers", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void, resyncs = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) {resyncs++; await held;}
+      return engine.sendRequest(request);
+    }});
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const first = session.resync(), second = session.resync();
+  await drain(); expect(resyncs).toBe(1);
+  release(); expect(await first).toEqual(await second);
+  await session.resync(); expect(resyncs).toBe(2);
+  await session.close(); adapter.dispose();
+});
+
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
   engine.seedFile({

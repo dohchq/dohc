@@ -610,6 +610,7 @@ export class YdocAdapterSession {
   private engineMissingLocalState = false;
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
+  private resyncPending: Promise<Uint8Array> | null = null;
   private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
   ownerDraft: YdocOwnerDraft | undefined;
@@ -1084,7 +1085,20 @@ export class YdocAdapterSession {
     void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
   }
 
-  async resync(): Promise<Uint8Array> {
+  async resyncIfNeeded(): Promise<void> {
+    if (this.staleError !== null) await this.resync();
+  }
+
+  resync(): Promise<Uint8Array> {
+    if (this.resyncPending) return this.resyncPending;
+    const pending = this.readResyncState();
+    this.resyncPending = pending;
+    const finished = () => {if (this.resyncPending === pending) this.resyncPending = null;};
+    void pending.then(finished, finished);
+    return pending;
+  }
+
+  private async readResyncState(): Promise<Uint8Array> {
     if (this.closed) {
       throw new YdocAdapterError(
         "session-closed",
@@ -1126,7 +1140,7 @@ export class YdocAdapterSession {
       // local edits journal against a baseline the second pass immediately
       // advances past.
       this.droppedWhileStale = false;
-      return await this.resync();
+      return await this.readResyncState();
     }
     this.staleError = null;
     if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);

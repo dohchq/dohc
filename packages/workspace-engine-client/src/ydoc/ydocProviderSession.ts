@@ -36,9 +36,7 @@ const LOCKED_SETTLE_RETRY_CAP_MS = 10_000;
 // condition it waits on lasts.
 const STORE_BUSY_SETTLE_RETRY_CAP_MS = 1_000;
 
-// How far this failure's retry ladder may walk out, or null when retrying
-// cannot help. One question decides it — is the condition transient? — and
-// both answers here are yes, for two different busy things.
+// How far this failure's retry ladder may walk out, or null for a terminal refusal.
 // Every other settle failure answers no: a preimage that no longer matches, a
 // target turned read-only, an ACL that denies the replace.
 //
@@ -90,10 +88,8 @@ export interface EngineYdocProviderSessionOptions {
   onSessionError?: (error: unknown) => void;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the same token, so a caller pairs start to outcome
-  // by identity — never by arrival order. Order is not a sound basis here: an
-  // aborting settle never reaches settleChain and so completes out of start
-  // order, and settleChain is per GENERATION while a caller's bookkeeping is
-  // per session. This is what lets a caller report a honest save state.
+  // by identity. The chain belongs to one provider generation; a caller can
+  // retain bookkeeping across several generations.
   onSettleStart?: (token: number) => void;
   // A settle FAILED. The debounced settle is the only path that writes the
   // user's edits to the file, so a dropped failure here is silent data loss:
@@ -231,43 +227,20 @@ export async function openEngineYdocProviderSession(
   }
 
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
-    // One identity per settle, echoed by whichever outcome this run produces.
-    // Callers pair on it instead of on arrival order, which does not hold:
-    // the two abort paths below throw before reaching settleChain, so an
-    // aborting settle completes ahead of settles that queued earlier.
-    //
-    // Announced before those aborts so every outcome has a matching start.
+    // Each outcome names its settle, including a failure before the native write.
     const token = ++settleTokens;
     try {
       options.onSettleStart?.(token);
     } catch {
       // Observer boundary, like notifyError.
     }
-    // A journal failure means the edit never reached the engine AT ALL —
-    // strictly worse than a failed settle, and it aborts this settle before
-    // the chain below. Report it on the same channel: otherwise it routes
-    // only to onSessionError, which the desktop wires to a reconnect handler
-    // that drops anything non-reconnect, and the document sits on "Saving…"
-    // forever with nothing logged.
-    try {
-      await journalChain;
-      // After the chain, so writes already in flight keep their order, and
-      // before the settle, which must never commit a projection the engine is
-      // still missing text for. A refusal here aborts this settle exactly as a
-      // journal failure does, and the ladder tries again.
-      await session.resendMissingState();
-    } catch (error) {
-      notifySettleError(error, token);
-      throw error;
-    }
-    // A SYNCHRONOUS applyLocalUpdate throw records the error without ever
-    // attaching it to journalChain, so the await above resolves clean.
-    if (localEditError !== null) {
-      notifySettleError(localEditError, token);
-      throw localEditError;
-    }
+    // Register recovery before awaiting it so teardown waits for the whole write.
     const operation = settleChain.then(async () => {
       try {
+        await journalChain;
+        await session.resyncIfNeeded();
+        await session.resendMissingState();
+        if (localEditError !== null) throw localEditError;
         const result = await session.settle(
           summary !== undefined ? { summary } : undefined,
         );
@@ -342,6 +315,7 @@ export async function openEngineYdocProviderSession(
   );
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
+    scheduleTransientSettleRetry(error);
   });
   const unsubscribeOwnerDraft = session.onOwnerDraftChanged(() => {
     if (!closed) requestSettle();

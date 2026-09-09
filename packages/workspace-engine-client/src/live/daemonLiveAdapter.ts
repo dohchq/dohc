@@ -191,13 +191,19 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "engine-store-busy";
 }
 
-// The two refusals that clear on their own: a program outside dohc holding
-// the artifact, and dohc's own writers meeting inside SQLite. MEMBERSHIP of
+// Native live operations reserve shared slots and bytes before reading state.
+// A competing operation can release this capacity without any user action.
+export function isLiveSettlementCapacityRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "live-settlement-capacity";
+}
+
+// Refusals that clear on their own: a program holding the artifact, busy
+// SQLite writers, or occupied native live capacity. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
 // be resent, and the session that must not be quarantined for one.
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
 export type EngineStoreRefusal = "unsupported-fingerprint" | "foreign-database";
