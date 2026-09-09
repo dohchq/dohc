@@ -85,6 +85,7 @@ fn native_tail_apply(
         event,
         &NoFaults,
         100_000_000,
+        |_, _, _, _| Ok(()),
     )
     .unwrap() else {
         panic!("application refused")

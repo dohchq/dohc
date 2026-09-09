@@ -682,7 +682,7 @@ impl From<CollabError> for TransactionError {
     }
 }
 
-/// Apply one owned committed event. No outbound origination signal escapes.
+/// Apply one owned committed event and publish its retained facts atomically.
 /// Pending dependencies roll back this attempt, including a fresh append.
 /// A post-commit fold error is safely redeliverable at the original sequence.
 pub fn apply_committed(
@@ -692,6 +692,12 @@ pub fn apply_committed(
     event: AdmittedLiveUpdate,
     faults: &dyn FaultInjector,
     working_reserve_bytes: usize,
+    follow_up: impl FnOnce(
+        &Transaction<'_>,
+        &str,
+        &LiveObjectBinding,
+        i64,
+    ) -> Result<(), ApplicationError>,
 ) -> Result<ApplicationResult, ApplicationError> {
     event.validate()?;
     let held = handle
@@ -794,6 +800,10 @@ pub fn apply_committed(
                 || readback.coordinate != held.coordinate
             {
                 return Err(ApplicationError::Corrupt.into());
+            }
+            let count:Option<i64>=tx.query_row("SELECT event_count FROM live_accepted_updates WHERE relay_database_namespace=?1 AND delivery_id=?2",params![held.namespace,event.metadata.accepted.receipt.delivery_id],|r|r.get(0)).optional().map_err(read_sql)?;
+            if let Some(count)=count {
+                follow_up(tx,&held.namespace,b,count)?;
             }
             Ok(ApplicationResult::Applied(
                 LiveUpdateHostApplicationAck::new(
@@ -1267,7 +1277,16 @@ mod tests {
         handle: &ApplicationHandle,
         event: AdmittedLiveUpdate,
     ) -> ApplicationResult {
-        apply_committed(store, cache, handle, event, &NoFaults, 100_000_000).unwrap()
+        apply_committed(
+            store,
+            cache,
+            handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap()
     }
     fn ack(result: ApplicationResult) -> LiveUpdateHostApplicationAck {
         match result {
@@ -1626,6 +1645,7 @@ mod tests {
                     update.clone(),
                     &NoFaults,
                     100_000_000,
+                    |_, _, _, _| Ok(()),
                 );
                 if cursor == 64 && fail_fold {
                     assert!(matches!(result, Err(ApplicationError::Collab(_))));
@@ -2013,7 +2033,8 @@ mod tests {
                             &handle,
                             update.clone(),
                             &Crash(dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck),
-                            100_000_000
+                            100_000_000,
+                            |_, _, _, _| Ok(())
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
@@ -2065,7 +2086,8 @@ mod tests {
                 &handle,
                 wrong,
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             ),
             Err(ApplicationError::WorkspaceMismatch)
         ));
@@ -2101,7 +2123,8 @@ mod tests {
                 &replacement,
                 update.clone(),
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             ),
             Err(ApplicationError::MainVersionMismatch)
         ));
@@ -2140,7 +2163,8 @@ mod tests {
                 &handle,
                 collision,
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             ),
             Err(ApplicationError::Conflict)
         ));
@@ -2205,7 +2229,7 @@ mod tests {
                     conflict,
                     &NoFaults,
                     100_000_000
-                ),
+                , |_,_,_,_| Ok(())),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -2225,7 +2249,7 @@ mod tests {
                         event("noop", 3, vec![0, 0]),
                         &NoFaults,
                         100_000_000
-                    ),
+                    , |_,_,_,_| Ok(())),
                     Err(ApplicationError::Corrupt)
                 ),
                 "{damage}"
@@ -2240,7 +2264,7 @@ mod tests {
                         first,
                         &NoFaults,
                         100_000_000
-                    ),
+                    , |_,_,_,_| Ok(())),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -2323,7 +2347,8 @@ mod tests {
                         &handle,
                         changed,
                         &NoFaults,
-                        100_000_000
+                        100_000_000,
+                        |_, _, _, _| Ok(())
                     ),
                     Ok(ApplicationResult::Applied(_))
                 ),
@@ -2341,7 +2366,8 @@ mod tests {
                 &handle,
                 changed_bytes,
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             ),
             Err(ApplicationError::Conflict)
         ));
@@ -2383,7 +2409,7 @@ mod tests {
                         update,
                         &NoFaults,
                         100_000_000
-                    ),
+                    , |_,_,_,_| Ok(())),
                     Ok(ApplicationResult::Applied(_))
                 ),
                 "{damage}"
@@ -2414,7 +2440,8 @@ mod tests {
                 &handle,
                 update,
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             )
             .is_err());
             store = reopen(store, &dir);
@@ -2449,7 +2476,7 @@ mod tests {
                     update,
                     &NoFaults,
                     100_000_000
-                )
+                , |_,_,_,_| Ok(()))
                 .is_err(),
                 "{damage}"
             );
@@ -2474,7 +2501,8 @@ mod tests {
                     &handle,
                     update.clone(),
                     &Crash(point),
-                    100_000_000
+                    100_000_000,
+                    |_, _, _, _| Ok(())
                 ),
                 Err(ApplicationError::Interrupted)
             ));

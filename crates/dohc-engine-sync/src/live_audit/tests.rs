@@ -333,6 +333,28 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
         },
         update_bytes: f.bytes.clone(),
     };
+    let before = operations(&f.store);
+    let failed = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event.clone(),
+        &NoFaults,
+        100_000_000,
+        |tx, namespace, binding, count| {
+            journal_live_event_in_tx(tx, namespace, binding, count, 200).map_err(|error| {
+                dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                    dohc_engine_storage::StorageError::persist_public(error),
+                )
+            })?;
+            Err(dohc_engine_collab::live_update_application::ApplicationError::Interrupted)
+        },
+    );
+    assert!(failed.is_err());
+    assert_eq!(operations(&f.store), before);
+    assert_eq!(count(&f.store, "live_device_update_applications"), 0);
+    assert_eq!(count(&f.store, "live_accepted_updates"), 0);
+    assert_eq!(count(&f.store, "live_audit_events"), 0);
     assert!(matches!(
         apply_committed(
             &mut f.store,
@@ -340,12 +362,20 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
             &f.handle,
             event,
             &NoFaults,
-            100_000_000
+            100_000_000,
+            |tx, namespace, binding, count| journal_live_event_in_tx(
+                tx, namespace, binding, count, 200
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                    dohc_engine_storage::StorageError::persist_public(error),
+                )
+            })
         )
         .unwrap(),
         ApplicationResult::Applied(_)
     ));
-    let before = operations(&f.store);
     let seq = f
         .store
         .write_with(&NoFaults, |tx| {

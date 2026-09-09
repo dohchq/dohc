@@ -472,6 +472,7 @@ mod tests {
                 sync_event(&handle, cursor, update.clone()),
                 &NoFaults,
                 10_000_000,
+                |_, _, _, _| Ok(()),
             )
             .unwrap();
         }
@@ -552,7 +553,8 @@ mod tests {
                         &handle,
                         sync_event(&handle, cursor, update),
                         &NoFaults,
-                        10_000_000
+                        10_000_000,
+                        |_, _, _, _| Ok(())
                     )
                     .unwrap(),
                     ApplicationResult::Applied(_)
@@ -615,6 +617,7 @@ mod tests {
             event.clone(),
             &NoFaults,
             10_000_000,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
         let first = read_next_applied(&store, &handle, &cut.position, policy, || true)
@@ -630,7 +633,13 @@ mod tests {
         duplicate.metadata.accepted.receipt.delivery_id = "sync-repeat-bytes".into();
         duplicate.metadata.accepted.receipt.journal_cursor = 30;
         apply_committed(
-            &mut store, &mut cache, &handle, duplicate, &NoFaults, 10_000_000,
+            &mut store,
+            &mut cache,
+            &handle,
+            duplicate,
+            &NoFaults,
+            10_000_000,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
         let second = read_next_applied(&store, &handle, &first.position, policy, || true)

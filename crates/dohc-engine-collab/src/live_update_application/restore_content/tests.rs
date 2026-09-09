@@ -403,7 +403,8 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
                     &f.handle,
                     event.clone(),
                     &NoFaults,
-                    reserve
+                    reserve,
+                    |_, _, _, _| Ok(())
                 ),
                 Err(ApplicationError::ConfiguredByteBudgetExceeded)
             ),
@@ -426,7 +427,8 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
             &f.handle,
             event,
             &NoFaults,
-            sufficient
+            sufficient,
+            |_, _, _, _| Ok(())
         )
         .unwrap(),
         ApplicationResult::Applied(_)
@@ -664,6 +666,7 @@ impl Fixture {
             event,
             &NoFaults,
             100_000_000,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
         let ApplicationResult::Applied(ack) = result else {

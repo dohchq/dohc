@@ -664,7 +664,8 @@ mod tests {
                 &f.handle,
                 event.clone(),
                 &NoFaults,
-                100_000_000
+                100_000_000,
+                |_, _, _, _| Ok(())
             ),
             Err(ApplicationError::Conflict)
         ));
@@ -682,6 +683,7 @@ mod tests {
             event.clone(),
             &NoFaults,
             100_000_000,
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
         assert!(matches!(applied, ApplicationResult::Applied(_)));

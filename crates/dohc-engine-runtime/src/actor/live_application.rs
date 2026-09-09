@@ -1249,6 +1249,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    let now_ms=event.metadata.accepted.received_at_ms;
                     apply_committed(
                         store,
                         cache,
@@ -1256,6 +1257,11 @@ impl Request {
                         event,
                         faults.as_ref(),
                         working_reserve_bytes,
+                        |tx,namespace,binding,count| {
+                            dohc_engine_sync::journal_live_event_in_tx(tx,namespace,binding,count,now_ms)
+                                .map(|_|())
+                                .map_err(|error|dohc_engine_collab::live_update_application::ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error)))
+                        },
                     )
                     .map_err(Into::into)
                 });
