@@ -236,6 +236,31 @@ impl ApplicationOwner {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<NativeRestoreApplicationReceipt, ApplicationError> {
+        self.apply_restore_with_facts(
+            store, cache, input, coordinate, max_bytes, max_events, now_ms, faults,
+        )
+        .map(|(receipt, _)| receipt)
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_restore_with_facts(
+        &mut self,
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        input: NativeRestoreApplication,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<
+        (
+            NativeRestoreApplicationReceipt,
+            Option<dohc_engine_domain::CollectionRecordApplyFacts>,
+        ),
+        ApplicationError,
+    > {
         input.validate_budget(max_bytes, max_events)?;
         coordinate.validate()?;
         integer(now_ms, 0, SAFE)?;
@@ -276,7 +301,7 @@ impl ApplicationOwner {
                 if saved.admitted != input.admitted {
                     return Err(ApplicationError::Conflict);
                 }
-                return Ok(saved);
+                return Ok((saved,None));
             }
             let event = AdmittedLiveUpdate {
                 metadata: input.admitted.clone(),
@@ -294,7 +319,7 @@ impl ApplicationOwner {
             check_provenance(tx, &held.namespace, &event)?;
             let frozen = Ydoc::wire();
             frozen.apply(&proposal.frozen_state_bytes)?;
-            let (projected, sequence, _) = durable::append_and_index_update(
+            let (projected, sequence, record_facts) = durable::append_and_index_update(
                 tx, &key, ContentKind::Richdoc, &frozen, &event.update_bytes,
                 &input.candidate_digest, true, None, None, None, now_ms,
             )?;
@@ -324,7 +349,7 @@ impl ApplicationOwner {
             if changed != 1 {
                 return Err(ApplicationError::Conflict);
             }
-            Ok(receipt)
+            Ok((receipt,record_facts))
         });
         cache.remove(&key);
         match outcome? {

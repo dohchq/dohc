@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
 import type { Envelope, Request } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
+import { decodeNativeRestoreProposal, encodeNativeRestoreInput } from "./nativeRestore";
 import {
   EngineClient,
   EngineClientError,
@@ -29,6 +30,99 @@ const LIMITS = {
   maxBatchLen: 64,
   maxJsonDepth: 32,
 };
+
+describe("private native restore transport", () => {
+  const input = encodeNativeRestoreInput(Buffer.from('{"fence":{}}'), new Uint8Array(), 128);
+  const call = { id: 903, workspace: "ws-0000000000000001", deadlineMs: 30_000 };
+  async function connected() {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    return { peer, transport };
+  }
+  function reply(peer: FakePeerConnection, wireId: number, bytes = Buffer.from("raw receipt"), status = "applied") {
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    peer.send({ type: "blobStart", requestId: wireId, streamId: wireId, totalBytes: bytes.length, sha256: digest });
+    peer.sendRaw(blobChunkFrame(wireId, bytes, true));
+    peer.send({ type: "response", id: wireId, result: { status, streamId: wireId, byteLength: bytes.length, digest } });
+  }
+  it("sends host-scoped binary input and retains raw output through its final descriptor", async () => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      wireId = envelope.id;
+      expect(envelope.method).toBe("liveApplication.applyRestore");
+      expect(envelope.params).not.toHaveProperty("registrationId");
+    };
+    peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
+    try {
+      const result = await transport.sendLiveRestore(call, "apply", input, 128);
+      expect(result.response.id).toBe(call.id);
+      expect(result.bytes.toString()).toBe("raw receipt");
+    } finally { transport.close(); }
+  });
+  it.each(["too large", "unknown length", "duplicate", "missing blob", "wrong digest", "wrong status"])("refuses %s restore output", async mode => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    peer.onEnvelope = envelope => { if (envelope.type === "request") wireId = envelope.id; };
+    peer.onBlobChunk = frame => {
+      if (!frame.fin) return;
+      if (mode === "missing blob") {
+        peer.send({ type: "response", id: wireId, result: { status: "applied" } });
+      } else if (mode === "wrong status") reply(peer, wireId, Buffer.from("raw"), "settled");
+      else {
+        peer.send({ type: "blobStart", requestId: wireId, streamId: wireId,
+          totalBytes: mode === "unknown length" ? null : mode === "too large" ? 129 : 3, sha256: "a".repeat(64) });
+        if (mode === "duplicate") peer.send({ type: "blobStart", requestId: wireId, streamId: wireId + 1, totalBytes: 3, sha256: "a".repeat(64) });
+        if (mode === "wrong digest") peer.sendRaw(blobChunkFrame(wireId, Buffer.from("raw"), true));
+      }
+    };
+    try { await expect(transport.sendLiveRestore(call, "apply", input, 128)).rejects.toThrow(); }
+    finally { transport.close(); }
+  });
+  it("releases a cancelled partial response before accepting the next reserved request", async () => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    let uploadDone!: () => void;
+    const drained = new Promise<void>(resolve => { uploadDone = resolve; });
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "barrier") peer.send({ type: "response", id: envelope.id, result: {} });
+      else wireId = envelope.id;
+    };
+    peer.onBlobChunk = frame => { if (frame.fin) uploadDone(); };
+    const controller = new AbortController();
+    const pending = transport.sendLiveRestore(call, "apply", input, 128, controller.signal);
+    const rejected = expect(pending).rejects.toThrow();
+    try {
+      await drained;
+      // Yield through the actual write completion before cancelling.
+      await transport.sendRequest({ ...request(999, "barrier"), deadlineMs: 30_000 });
+      const oldId = wireId;
+      const bytes = Buffer.from("raw");
+      peer.send({ type: "blobStart", requestId: oldId, streamId: oldId, totalBytes: 3, sha256: createHash("sha256").update(bytes).digest("hex") });
+      peer.sendRaw(blobChunkFrame(oldId, bytes.subarray(0, 1), false));
+      controller.abort();
+      await rejected;
+      peer.sendRaw(blobChunkFrame(oldId, bytes.subarray(1), true));
+      peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
+      await expect(transport.sendLiveRestore({ ...call, id: 904 }, "apply", input, 128)).resolves.toHaveProperty("bytes");
+    } finally { controller.abort(); transport.close(); }
+  });
+  it("decodes bounded field views without parsing receipt JSON", () => {
+    const fields = [Buffer.from("not JSON"), Buffer.from([1]), Buffer.from([2]), Buffer.from([3]), Buffer.from([4])];
+    const framed = Buffer.concat(fields.flatMap(value => { const size = Buffer.alloc(4); size.writeUInt32LE(value.length); return [size, value]; }));
+    const result = decodeNativeRestoreProposal(framed, 128, 1);
+    expect(Buffer.from(result.receiptJson).toString()).toBe("not JSON");
+    expect(result.nativeSourceBytes).toHaveLength(1);
+    expect(result.candidateBytes.buffer).toBe(framed.buffer);
+    expect(() => decodeNativeRestoreProposal(framed.subarray(0, -1), 128, 1)).toThrow("Truncated");
+    expect(() => decodeNativeRestoreProposal(Buffer.concat([framed, Buffer.alloc(4)]), 128, 1)).toThrow("source count");
+    expect(() => decodeNativeRestoreProposal(framed, 8, 1)).toThrow("bounds");
+  });
+});
 
 function helloAck(
   limits: typeof LIMITS = LIMITS,

@@ -55,6 +55,11 @@ enum OutputItem {
         response: Response,
         egress: BlobEgress,
     },
+    GuardedBlob {
+        response: Response,
+        egress: BlobEgress,
+        guard: Arc<dyn OutputGuard>,
+    },
 }
 
 impl From<Envelope> for OutputItem {
@@ -426,6 +431,9 @@ where
                                 "liveApplication.apply"
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
+                                    | "liveApplication.prepareRestore"
+                                    | "liveApplication.applyRestore"
+                                    | "liveApplication.settleRestore"
                             ) =>
                         {
                             let id = request.id;
@@ -670,6 +678,37 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 lock(&active_egress).remove(&request_id);
                 outcome?;
             }
+            OutputItem::GuardedBlob {
+                response,
+                egress,
+                guard,
+            } => {
+                let request_id = response.id;
+                if !guard.is_current() {
+                    lock(&active_egress).remove(&request_id);
+                    continue 'items;
+                }
+                let cancel = guard.cancel_signal();
+                let retired = guard.retirement_signal();
+                let deadline = guard.deadline();
+                let mut fenced = GuardedBlobWriter {
+                    output: &mut output,
+                    guard: &guard,
+                    wrote: false,
+                };
+                let result = tokio::select! {
+                    biased;
+                    ()=cancel.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output cancelled")),
+                    ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
+                    ()=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline.into()).await,None=>std::future::pending().await}}=>Err(io::Error::new(io::ErrorKind::TimedOut,"native restore output expired")),
+                    result=write_blob_egress(&mut fenced,response,egress,limits)=>result,
+                };
+                lock(&active_egress).remove(&request_id);
+                if result.is_err() && !fenced.wrote && !guard.is_current() {
+                    continue 'items;
+                }
+                result?;
+            }
         }
     }
     Ok(())
@@ -684,6 +723,56 @@ async fn write_envelope<W: AsyncWrite + Unpin>(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))?;
     output.write_all(&bytes).await?;
     output.flush().await
+}
+
+struct GuardedBlobWriter<'a, W> {
+    output: &'a mut W,
+    guard: &'a Arc<dyn OutputGuard>,
+    wrote: bool,
+}
+impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        let this = self.get_mut();
+        let mut result = std::task::Poll::Pending;
+        if !this.guard.with_current(&mut || {
+            result = std::pin::Pin::new(&mut *this.output).poll_write(cx, bytes);
+        }) {
+            return std::task::Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "native restore output retired",
+            )));
+        }
+        if matches!(&result,std::task::Poll::Ready(Ok(count)) if *count>0) {
+            this.wrote = true;
+        }
+        result
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        let this = self.get_mut();
+        let mut result = std::task::Poll::Pending;
+        if !this.guard.with_current(&mut || {
+            result = std::pin::Pin::new(&mut *this.output).poll_flush(cx);
+        }) {
+            return std::task::Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "native restore output retired",
+            )));
+        }
+        result
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        self.poll_flush(cx)
+    }
 }
 
 async fn write_blob_egress<W: AsyncWrite + Unpin>(
@@ -856,7 +945,6 @@ async fn dispatch_authenticated<
                     if let Ok(service_response) = outcome
                         && let Some(guard) = &service_response.output_guard
                     {
-                        debug_assert!(service_response.blob_egress.is_none());
                         lock(&completion_egress).insert(id, guard.cancel_signal());
                     }
                     // The handoff runs before the supervisor drops its cancel
@@ -880,9 +968,27 @@ async fn dispatch_authenticated<
                         let item = match receiver.await {
                             Ok(Ok(mut service_response)) => {
                                 if let Some(guard) = service_response.output_guard.take() {
-                                    OutputItem::Guarded {
-                                        response: service_response.response,
-                                        guard,
+                                    match service_response.blob_egress.take() {
+                                        Some(egress) if blobs_negotiated => {
+                                            OutputItem::GuardedBlob {
+                                                response: service_response.response,
+                                                egress,
+                                                guard,
+                                            }
+                                        }
+                                        Some(_) => {
+                                            OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
+                                                id: Some(service_response.response.id),
+                                                error: WireError::new(
+                                                    ErrorCode::InvalidParams,
+                                                    "blob-capability-required",
+                                                ),
+                                            }))
+                                        }
+                                        None => OutputItem::Guarded {
+                                            response: service_response.response,
+                                            guard,
+                                        },
                                     }
                                 } else {
                                     match service_response.blob_egress.take() {
@@ -1335,7 +1441,11 @@ mod tests {
 
     impl OutputGuard for TestOutputGuard {
         fn is_current(&self) -> bool {
-            !self.cancel.is_cancelled() && !self.retired.is_cancelled()
+            !self.cancel.is_cancelled()
+                && !self.retired.is_cancelled()
+                && self
+                    .deadline
+                    .is_none_or(|deadline| std::time::Instant::now() < deadline)
         }
         fn cancel_signal(&self) -> CancelSignal {
             self.cancel.clone()
@@ -1352,6 +1462,158 @@ mod tests {
         polled: Arc<Notify>,
         flush_only: bool,
         bytes: Arc<AtomicUsize>,
+    }
+
+    fn guarded_blob(guard: Arc<dyn OutputGuard>) -> OutputItem {
+        let bytes = vec![42; 512 * 1024];
+        OutputItem::GuardedBlob {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"status":"prepared"}),
+            },
+            egress: BlobEgress {
+                stream_id: 9,
+                sha256: dohc_engine_storage::hex_sha256(&bytes),
+                bytes,
+                cancel: guard.cancel_signal(),
+                deadline: guard.deadline(),
+                byte_permit: None,
+            },
+            guard,
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_blob_releases_reservation_on_cancelled_write_and_flush() {
+        for flush_only in [false, true] {
+            for retire in [false, true] {
+                let cancel = CancelSignal::new();
+                let retired = CancelSignal::new();
+                let dropped = Arc::new(AtomicBool::new(false));
+                let polled = Arc::new(Notify::new());
+                let bytes = Arc::new(AtomicUsize::new(0));
+                let guard = Arc::new(TestOutputGuard {
+                    cancel: cancel.clone(),
+                    retired: retired.clone(),
+                    deadline: None,
+                    dropped: dropped.clone(),
+                });
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                tx.send(guarded_blob(guard)).await.unwrap();
+                drop(tx);
+                let writer = BlockedWriter {
+                    polled: polled.clone(),
+                    flush_only,
+                    bytes: bytes.clone(),
+                };
+                let task = tokio::spawn(async move {
+                    write_output(
+                        writer,
+                        &mut rx,
+                        &WireLimits::default(),
+                        Arc::new(Mutex::new(HashMap::new())),
+                    )
+                    .await
+                });
+                polled.notified().await;
+                assert!(!dropped.load(Ordering::SeqCst));
+                if retire {
+                    retired.cancel();
+                } else {
+                    cancel.cancel();
+                }
+                let result = tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if flush_only {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                } else {
+                    result.unwrap();
+                    assert_eq!(bytes.load(Ordering::SeqCst), 0);
+                }
+                assert!(dropped.load(Ordering::SeqCst));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_blob_retired_before_first_frame_preserves_following_response() {
+        for expired in [false, true] {
+            let retired = CancelSignal::new();
+            if !expired {
+                retired.cancel();
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired,
+                deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            })))
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::Value::Null,
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let mut output = Vec::new();
+            let limits = WireLimits::default();
+            write_output(
+                &mut output,
+                &mut rx,
+                &limits,
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+            .unwrap();
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&output);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing")
+            };
+            assert!(
+                matches!(decode_control(&payload,&limits).unwrap(),Envelope::Response(response) if response.id==10)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_blob_partial_frame_deadline_closes_output() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let dropped = Arc::new(AtomicBool::new(false));
+        tx.send(guarded_blob(Arc::new(TestOutputGuard {
+            cancel: CancelSignal::new(),
+            retired: CancelSignal::new(),
+            deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
+            dropped: dropped.clone(),
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let (writer, mut reader) = tokio::io::duplex(8);
+        let task = tokio::spawn(async move {
+            write_output(
+                writer,
+                &mut rx,
+                &WireLimits::default(),
+                Arc::new(Mutex::new(HashMap::new())),
+            )
+            .await
+        });
+        let mut prefix = [0; 8];
+        reader.read_exact(&mut prefix).await.unwrap();
+        assert!(!dropped.load(Ordering::SeqCst));
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     impl AsyncWrite for BlockedWriter {

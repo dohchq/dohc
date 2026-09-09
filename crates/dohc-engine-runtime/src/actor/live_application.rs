@@ -22,6 +22,9 @@ use tokio::sync::oneshot;
 
 type Reply<T> = oneshot::Sender<Result<T, RuntimeError>>;
 type Token = Arc<AtomicBool>;
+pub type RestoreApplyObserver =
+    Arc<dyn Fn(&dohc_engine_domain::CollectionRecordApplyFacts) + Send + Sync>;
+pub type RestoreSettlementObserver = Arc<dyn Fn(&LiveSettlementResult) + Send + Sync>;
 
 /// The caller authenticates the connection, workspace, and relay namespace.
 /// Dropping this owner retires every captured document handle immediately.
@@ -99,6 +102,36 @@ impl ActorLiveApplicationOwner {
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<LiveSettlementResult, RuntimeError> {
+        self.settle_restore_observed(
+            input,
+            coordinate,
+            max_bytes,
+            max_events,
+            root,
+            now_ms,
+            faults,
+            cancel,
+            reservation,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn settle_restore_observed(
+        &self,
+        input: NativeRestoreApplication,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        observer: Option<RestoreSettlementObserver>,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
         let (reply, receive) = oneshot::channel();
@@ -116,6 +149,7 @@ impl ActorLiveApplicationOwner {
                 faults,
                 cancel,
                 reservation,
+                observer,
                 reply,
             })))
             .await
@@ -139,6 +173,32 @@ impl ActorLiveApplicationOwner {
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<NativeRestoreApplicationReceipt, RuntimeError> {
+        self.apply_restore_observed(
+            input,
+            coordinate,
+            max_bytes,
+            max_events,
+            now_ms,
+            faults,
+            reservation,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_restore_observed(
+        &self,
+        input: NativeRestoreApplication,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        reservation: Arc<dyn Send + Sync>,
+        observer: Option<RestoreApplyObserver>,
+    ) -> Result<NativeRestoreApplicationReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
         let (reply, receive) = oneshot::channel();
@@ -154,6 +214,7 @@ impl ActorLiveApplicationOwner {
                 now_ms,
                 faults,
                 reservation,
+                observer,
                 reply,
             })))
             .await
@@ -530,6 +591,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
+        observer: Option<RestoreSettlementObserver>,
         reply: Reply<LiveSettlementResult>,
     },
     ApplyRestore {
@@ -542,6 +604,7 @@ pub(super) enum Request {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
+        observer: Option<RestoreApplyObserver>,
         reply: Reply<NativeRestoreApplicationReceipt>,
     },
     PrepareRestore {
@@ -649,6 +712,7 @@ impl Request {
                 faults,
                 cancel,
                 reservation: _reservation,
+                observer,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
@@ -662,6 +726,9 @@ impl Request {
                         Ok(result)
                     })
                 });
+                if let (Some(observer), Ok(result)) = (&observer, &result) {
+                    observer(result);
+                }
                 let _ = reply.send(result);
             }
             Self::ApplyRestore {
@@ -674,11 +741,12 @@ impl Request {
                 now_ms,
                 faults,
                 reservation: _reservation,
+                observer,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
                     owner
-                        .apply_restore(
+                        .apply_restore_with_facts(
                             store,
                             cache,
                             *input,
@@ -688,6 +756,12 @@ impl Request {
                             now_ms,
                             faults.as_ref(),
                         )
+                        .map(|(receipt, facts)| {
+                            if let (Some(observer), Some(facts)) = (&observer, &facts) {
+                                observer(facts);
+                            }
+                            receipt
+                        })
                         .map_err(Into::into)
                 });
                 let _ = reply.send(result);

@@ -19,6 +19,7 @@ pub struct OrdinaryLiveHostConfig {
     max_adoption_events: usize,
     max_applications_per_settlement: usize,
     owner_outbox: dohc_engine_collab::OwnerOutboxLimits,
+    restore: Option<crate::live_application_ingress::RestoreConfig>,
 }
 
 impl OrdinaryLiveHostConfig {
@@ -51,6 +52,7 @@ pub(crate) struct OrdinaryHost {
     pub owner_outbox: dohc_engine_collab::OwnerOutboxLimits,
     pub connection: dohc_engine_protocol::transport::ConnectionHandle,
     pub settlement: (usize, crate::live_application_ingress::SettlementAdmission),
+    pub restore: Option<crate::live_application_ingress::RestoreConfig>,
 }
 
 impl EngineService {
@@ -80,6 +82,9 @@ impl EngineService {
         }
         let service = Arc::new(Self::new());
         let ingress = LiveApplicationIngress::new(service.clone(), config.ingress.validate()?)?;
+        if let Some(config) = &config.restore {
+            ingress.validate_restore_budget(config)?;
+        }
         ingress.validate_adoption_budget(config.max_adoption_bytes, config.max_adoption_events)?;
         let settlement = (
             config.max_applications_per_settlement,
@@ -93,6 +98,7 @@ impl EngineService {
             connection: owner.handle(),
             settlement,
             owner_outbox: config.owner_outbox,
+            restore: config.restore,
         });
         Ok((service, owner, ingress))
     }

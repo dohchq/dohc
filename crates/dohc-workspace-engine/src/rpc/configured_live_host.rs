@@ -27,6 +27,7 @@ pub struct ConfiguredLiveHostConfig {
     workspaces: Vec<WorkspaceConfig>,
     ingress: IngressConfig,
     settlement: Option<SettlementConfig>,
+    restore: Option<crate::live_application_ingress::RestoreConfig>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +176,7 @@ pub(crate) struct Discovery {
     connection: ConnectionHandle,
     result: Value,
     settlement: Option<(usize, SettlementAdmission)>,
+    restore: Option<crate::live_application_ingress::RestoreConfig>,
 }
 
 impl EngineService {
@@ -185,6 +187,9 @@ impl EngineService {
         let ingress_config = config.canonicalize_and_validate()?;
         let service = Arc::new(Self::new());
         let ingress = LiveApplicationIngress::new(service.clone(), ingress_config)?;
+        if let Some(config) = &config.restore {
+            ingress.validate_restore_budget(config)?;
+        }
         let settlement = config
             .settlement
             .map(|config| {
@@ -221,6 +226,7 @@ impl EngineService {
                     connection: owner.handle(),
                     result,
                     settlement,
+                    restore: config.restore,
                 });
                 Ok((service, owner, ingress))
             }
@@ -308,6 +314,27 @@ impl EngineService {
             WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
         })?;
         Ok((*max, admission.reserve()?))
+    }
+
+    pub(crate) fn restore_config(
+        &self,
+        connection: &ConnectionHandle,
+    ) -> Result<crate::live_application_ingress::RestoreConfig, WireError> {
+        let (expected, config) = if let Some(host) = self.ordinary_live_host.get() {
+            (&host.connection, &host.restore)
+        } else {
+            let host = self
+                .configured_live_host
+                .get()
+                .ok_or_else(|| invalid("restore host not configured"))?;
+            (&host.connection, &host.restore)
+        };
+        if !expected.is_current() || !expected.same_connection(connection) {
+            return Err(invalid("restore connection retired"));
+        }
+        config
+            .clone()
+            .ok_or_else(|| invalid("restore not configured"))
     }
 }
 

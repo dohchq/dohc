@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
+pub(crate) mod restore;
 
 /// Explicit host provisioning for the private admitted-update path.
 #[doc(hidden)]
@@ -102,7 +103,15 @@ impl Registry {
 
 /// Owned input; only the provisioned ingress can construct one.
 #[doc(hidden)]
-pub struct LiveApplicationInput {
+#[derive(Clone)]
+pub enum LiveApplicationInput {
+    Admitted(Box<AdmittedApplicationInput>),
+    Restore(Box<restore::RestoreInput>),
+}
+
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct AdmittedApplicationInput {
     pub(crate) registration: Arc<Registration>,
     pub(crate) operation: LiveApplicationOperation,
     pub(crate) reservation: Arc<dyn Send + Sync>,
@@ -785,7 +794,7 @@ impl EngineService {
         &self,
         ctx: RequestContext,
         request: Request,
-        input: LiveApplicationInput,
+        input: AdmittedApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
         if let LiveApplicationOperation::AdoptOwner {
             registration_id,
@@ -1582,11 +1591,7 @@ mod tests {
         }
         ingress.chunk(1, true, &bytes).unwrap();
         let (request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
-        let retry = LiveApplicationInput {
-            registration: input.registration.clone(),
-            operation: input.operation.clone(),
-            reservation: input.reservation.clone(),
-        };
+        let retry = input.clone();
         let handle = dohc_engine_protocol::wire::WorkspaceHandle(workspace);
         let open = service.open(Some(&handle)).unwrap();
         let serial = open.session_ops.lock().await;

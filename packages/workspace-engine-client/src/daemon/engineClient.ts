@@ -62,6 +62,14 @@ interface LiveApplicationRequest {
   deadlineMs: number;
 }
 
+interface RestoreOutput {
+  readonly maxBytes: number;
+  readonly status: "prepared" | "applied" | "settled";
+  wireId?: number;
+  started: boolean;
+  blob?: CompletedBlob;
+}
+
 export interface LiveApplicationBootstrap {
   readonly bootstrapId: string;
   readonly bootstrapMomentId: string;
@@ -637,6 +645,7 @@ interface PendingRequest {
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
+  readonly restoreOutput?: RestoreOutput;
 }
 
 interface PendingBlob {
@@ -799,6 +808,7 @@ export class EngineClient implements EngineTransport {
     request: Request,
     writeInput?: (wireId: number) => Promise<void>,
     signal?: AbortSignal,
+    restoreOutput?: RestoreOutput,
   ): Promise<Response> {
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
@@ -817,6 +827,7 @@ export class EngineClient implements EngineTransport {
     }
 
     const wireId = this.nextRequestId++;
+    if (restoreOutput) restoreOutput.wireId = wireId;
     const envelope = requestEnvelope(request, wireId);
     // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
@@ -869,6 +880,7 @@ export class EngineClient implements EngineTransport {
         callerId: request.id,
         resolve,
         reject,
+        ...(restoreOutput ? { restoreOutput } : {}),
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
@@ -1118,12 +1130,36 @@ export class EngineClient implements EngineTransport {
     }, signal);
   }
 
+  /** Private provisioned-host transport. Evidence is already serialized by its budgeted owner. */
+  async sendLiveRestore(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    operation: "prepare" | "apply" | "settle",
+    bytes: Uint8Array,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<{ response: Response; bytes: Buffer }> {
+    const status = ({ prepare: "prepared", apply: "applied", settle: "settled" } as const)[operation];
+    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 8 || maxBytes > MAX_U32 ||
+      bytes.byteLength < 8 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
+    const output: RestoreOutput = { maxBytes, status, started: false };
+    const response = await this.sendLiveUpload(request, `liveApplication.${operation}Restore`,
+      bytes.byteLength + maxBytes + 3 * 1024 * 1024, () => {
+        const captured = Buffer.from(bytes);
+        const digest = createHash("sha256").update(captured).digest("hex");
+        const streamId = this.nextLiveStreamId++;
+        if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+        return { params: { streamId, byteLength: captured.length, digest }, streams: [{ streamId, bytes: captured, digest }] };
+      }, signal, output);
+    return { response, bytes: output.blob!.bytes };
+  }
+
   private async sendLiveUpload(
-    request: LiveApplicationRequest,
+    request: Omit<LiveApplicationRequest, "registrationId"> & { registrationId?: number },
     method: string,
     charge: number,
     prepare: () => LiveUpload,
     signal?: AbortSignal,
+    restoreOutput?: RestoreOutput,
   ): Promise<Response> {
     if (
       !this.liveConfig ||
@@ -1138,8 +1174,8 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      !Number.isSafeInteger(request.registrationId) ||
-      request.registrationId < 1 ||
+      (!restoreOutput && (!Number.isSafeInteger(request.registrationId) ||
+      request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||
       request.deadlineMs > MAX_U32
@@ -1244,10 +1280,19 @@ export class EngineClient implements EngineTransport {
           params: upload.params,
         },
         writeInput,
+        undefined,
+        restoreOutput,
       );
     } finally {
       clearTimeout(uploadDeadline);
       signal?.removeEventListener("abort", abort);
+      if (restoreOutput?.wireId !== undefined) {
+        for (const [streamId, stream] of this.blobStreams) {
+          if (stream.start.requestId !== restoreOutput.wireId) continue;
+          this.releaseBlobStream(streamId, stream);
+          this.abandonedBlobStreamIds.add(streamId);
+        }
+      }
       this.liveUploadBytes -= charge;
       this.liveUploads -= 1;
     }
@@ -1623,6 +1668,14 @@ export class EngineClient implements EngineTransport {
       );
     }
     const announcedBytes = start.totalBytes ?? null;
+    const restoreOutput = pendingEntry.restoreOutput;
+    if (restoreOutput) {
+      if (restoreOutput.started || start.streamId !== start.requestId || announcedBytes === null ||
+        announcedBytes > restoreOutput.maxBytes || typeof start.sha256 !== "string") {
+        throw new BlobStreamError("invalid-blob-start", "Native restore output violates its reserved bounds.");
+      }
+      restoreOutput.started = true;
+    }
     if (
       announcedBytes !== null &&
       this.bufferedBlobBytes + announcedBytes > this.maxBlobBytes
@@ -1754,6 +1807,11 @@ export class EngineClient implements EngineTransport {
       sha256: stream.start.sha256,
       bytes,
     };
+    const restoreOutput = this.pending.get(stream.start.requestId)?.restoreOutput;
+    if (restoreOutput) {
+      restoreOutput.blob = blob;
+      return;
+    }
     for (const handler of this.blobHandlers) {
       try {
         handler(blob);
@@ -1771,6 +1829,14 @@ export class EngineClient implements EngineTransport {
         "protocol-error",
         `Received response for unknown request ${response.id}.`,
       );
+    }
+    if (pending.restoreOutput) {
+      const { blob, status } = pending.restoreOutput;
+      const result = response.result as Record<string, unknown> | null;
+      if (!blob || !result || result.status !== status || result.streamId !== blob.streamId ||
+        result.byteLength !== blob.bytes.length || result.digest !== blob.sha256) {
+        throw new EngineClientError("protocol-error", "Native restore response does not match its completed output.");
+      }
     }
     this.pending.delete(response.id);
     if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);

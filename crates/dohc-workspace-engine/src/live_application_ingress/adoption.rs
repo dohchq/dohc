@@ -33,9 +33,34 @@ fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], WireError> {
 
 /// Length-delimited metadata, original baseline, and ordered metadata/update pairs.
 pub(super) fn decode(
+    bytes: &[u8],
+    max_events: usize,
+    outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+) -> Result<OwnerAdoptionCut, WireError> {
+    decode_with(bytes, max_events, outbox_limits, |bytes| {
+        parse_admitted_metadata(
+            serde_json::from_slice(bytes).map_err(|_| invalid("invalid-owner-adoption-event"))?,
+        )
+        .map_err(|_| invalid("invalid-owner-adoption-event"))
+    })
+}
+
+/// Restore carries the retained canonical cut. Decode it without an intermediate JSON tree.
+pub(super) fn decode_restore(
+    bytes: &[u8],
+    max_events: usize,
+    outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+) -> Result<OwnerAdoptionCut, WireError> {
+    decode_with(bytes, max_events, outbox_limits, |bytes| {
+        serde_json::from_slice(bytes).map_err(|_| invalid("invalid-owner-adoption-event"))
+    })
+}
+
+fn decode_with(
     mut bytes: &[u8],
     max_events: usize,
     outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+    metadata: impl Fn(&[u8]) -> Result<AdmittedLiveUpdateMetadata, WireError>,
 ) -> Result<OwnerAdoptionCut, WireError> {
     let header = field(&mut bytes)?;
     if header.len() > MAX_HEADER_BYTES {
@@ -65,12 +90,7 @@ pub(super) fn decode(
         outbox_limits,
     };
     for _ in 0..header.event_count {
-        let metadata = field(&mut bytes)?;
-        let metadata = parse_admitted_metadata(
-            serde_json::from_slice(metadata)
-                .map_err(|_| invalid("invalid-owner-adoption-event"))?,
-        )
-        .map_err(|_| invalid("invalid-owner-adoption-event"))?;
+        let metadata = metadata(field(&mut bytes)?)?;
         let update = field(&mut bytes)?;
         if update.len() > MAX_YDOC_UPDATE_BYTES {
             return Err(invalid("owner-adoption-update-limit"));

@@ -70,6 +70,9 @@ impl EngineService {
                     | "liveApplication.apply"
                     | "liveApplication.settle"
                     | "liveApplication.fenceRestore"
+                    | "liveApplication.prepareRestore"
+                    | "liveApplication.applyRestore"
+                    | "liveApplication.settleRestore"
             )
         {
             return Err(WireError::new(
@@ -89,7 +92,14 @@ impl EngineService {
         self.ensure_configured_host_method(&request.method)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
-        self.live_application_apply(ctx, request, input).await
+        match input {
+            crate::LiveApplicationInput::Admitted(input) => {
+                self.live_application_apply(ctx, request, *input).await
+            }
+            crate::LiveApplicationInput::Restore(input) => {
+                self.live_application_restore(ctx, request, *input).await
+            }
+        }
     }
 
     pub(crate) async fn dispatch(
