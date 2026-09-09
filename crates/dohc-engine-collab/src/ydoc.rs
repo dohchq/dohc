@@ -498,6 +498,7 @@ impl Ydoc {
         }
         let source = self.markdown_source(&reference)?;
         let staged = Ydoc::wire();
+        self.copy_tagged_frontmatter_to(&staged);
         staged
             .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
             .ok()?;
@@ -1006,8 +1007,14 @@ impl Ydoc {
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
-                    meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
-                    meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
+                    let retains_prefix = matches!(
+                        meta.get(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
+                        Some(Out::Any(Any::String(prefix))) if markdown.starts_with(prefix.as_ref())
+                    );
+                    if !retains_prefix {
+                        meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
+                        meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
+                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1079,12 +1086,34 @@ impl Ydoc {
     pub(crate) fn rewrite_richdoc_preserving_source_bounded(
         &self,
         markdown: &str,
+        point: &Ydoc,
         max_bytes: usize,
     ) -> Result<Vec<u8>, CollabError> {
         self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
+            point.copy_tagged_frontmatter_to(staged);
             let _ = staged.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
             Ok(())
         })
+    }
+
+    fn copy_tagged_frontmatter_to(&self, target: &Ydoc) {
+        let source = self.doc.get_or_insert_map(ROOT_META);
+        let source_txn = self.doc.transact();
+        let meta = target.doc.get_or_insert_map(ROOT_META);
+        let mut txn = target.doc.transact_mut();
+        for key in [
+            TAGGED_FRONTMATTER_PREFIX_META_KEY,
+            TAGGED_FRONTMATTER_BASELINE_META_KEY,
+        ] {
+            match source.get(&source_txn, key) {
+                Some(Out::Any(Any::String(value))) => {
+                    meta.insert(&mut txn, key, value.as_ref());
+                }
+                _ => {
+                    meta.remove(&mut txn, key);
+                }
+            }
+        }
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -5694,6 +5723,31 @@ fn main() {}
             loaded.frontmatter_json()["debt"],
             json!(-9_007_199_254_740_993_i64)
         );
+    }
+
+    #[test]
+    fn conflict_fold_preserves_selected_tagged_prefix() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        for row in fixtures.as_array().unwrap().iter().filter(|row| {
+            row["name"].as_str().unwrap().starts_with("tagged")
+                && row["registrationAccepted"] == true
+        }) {
+            let doc = Ydoc::wire();
+            doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
+                .unwrap();
+            let selected = format!("{} edited", row["markdown"].as_str().unwrap());
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &selected)
+                .unwrap();
+            assert_eq!(
+                doc.project(ContentKind::Richdoc).unwrap().content,
+                selected,
+                "{}",
+                row["name"]
+            );
+        }
     }
 
     #[test]

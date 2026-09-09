@@ -27,6 +27,7 @@ mod tests {
     use crate::owner_outbox;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
+    include!("adoption_restore_tail_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1228,7 +1229,7 @@ pub fn adopt_owner_committed(
             let seed = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
                 .ok_or(invalid("owner adoption local seed exceeds configured budget"))?;
             let append_key = format!("owner-adoption:{}",hex_sha256(&serde_json::to_vec(&(&cut.adoption_id,marker.head_update_seq,hex_sha256(&seed))).map_err(|_|ApplicationError::Corrupt)?));
-            crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
+            let entry = crate::owner_outbox::append_in_tx(tx,&b.workspace_id,crate::OwnerOutboxAppendInput {
                 binding:b.clone(),base_update:cut.baseline_bytes.clone(),append_key,update:seed,
                 limits:cut.outbox_limits.clone(),created_at_ms:now_ms,
             }).map_err(|error| match error {
@@ -1236,6 +1237,10 @@ pub fn adopt_owner_committed(
                 crate::OwnerOutboxError::Corrupt => ApplicationError::Corrupt,
                 _ => invalid("owner adoption local seed could not be retained"),
             })?;
+            crate::owner_outbox::retain_native_source(tx,&entry,&crate::owner_outbox::OwnerOutboxNativeSource {
+                binding:b.clone(),adoption_id:cut.adoption_id.clone(),native_sequence:marker.head_update_seq,
+                update_digest:entry.update_digest.clone(),origin:crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed,
+            }).map_err(|_|ApplicationError::Corrupt)?;
         }
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)

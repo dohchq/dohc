@@ -14,6 +14,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod native_source;
+pub(crate) use native_source::retain_native_source;
+pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
+
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
     #[error("owner Y.Doc outbox input is invalid: {0}")]
@@ -472,17 +476,17 @@ pub fn append_adopted_local_update_in_tx(
     let Some(lineage) = marker.lineage_claim_id else {
         return Ok(());
     };
-    let saved: Option<(String, i64, i64)> = tx
+    let saved: Option<(String, i64, i64, String)> = tx
         .query_row(
-            "SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions
+            "SELECT binding_json,max_pending_bytes,max_pending_age_ms,adoption_id FROM live_owner_adoptions
          WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
             params![key.workspace_id, key.version_id, key.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(read_sql)
         .map_err(map)?;
-    let Some((binding_json, max_pending_bytes, max_pending_age_ms)) = saved else {
+    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
         return Ok(());
     };
     let binding: LiveObjectBinding =
@@ -524,7 +528,12 @@ pub fn append_adopted_local_update_in_tx(
             .map_err(|_| map(OwnerOutboxError::Corrupt))?
         )
     );
-    append_with_retained_base(
+    let source = native_source::read_native_update_source(tx, &binding, &adoption_id, sequence)
+        .map_err(map)?;
+    if source.update_digest != hex_sha256(update) {
+        return Err(map(OwnerOutboxError::Corrupt));
+    }
+    let result = append_with_retained_base(
         tx,
         &key.workspace_id,
         OwnerOutboxAppendInput {
@@ -541,6 +550,7 @@ pub fn append_adopted_local_update_in_tx(
         Some((lineage, base_byte_length)),
     )
     .map_err(map)?;
+    retain_native_source(tx, &result, &source).map_err(map)?;
     Ok(())
 }
 
@@ -1060,7 +1070,11 @@ fn binding_json(binding: &LiveObjectBinding) -> Result<String, OwnerOutboxError>
         .map_err(|_| OwnerOutboxError::InvalidInput("binding is not serializable"))
 }
 
-fn outbox_id(binding: &LiveObjectBinding, base_digest: &str, binding_json: &str) -> String {
+pub(crate) fn outbox_id(
+    binding: &LiveObjectBinding,
+    base_digest: &str,
+    binding_json: &str,
+) -> String {
     let identity = format!(
         "{}\0{}\0{}",
         binding.workspace_id, binding_json, base_digest
@@ -1068,7 +1082,7 @@ fn outbox_id(binding: &LiveObjectBinding, base_digest: &str, binding_json: &str)
     format!("owner-outbox-{}", hex_sha256(identity.as_bytes()))
 }
 
-fn delivery_id(outbox_id: &str, sequence: i64, update_digest: &str) -> String {
+pub(crate) fn delivery_id(outbox_id: &str, sequence: i64, update_digest: &str) -> String {
     let identity = format!("{outbox_id}\0{sequence}\0{update_digest}");
     format!("owner-delivery-{}", hex_sha256(identity.as_bytes()))
 }

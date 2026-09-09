@@ -3,8 +3,10 @@ use crate::{ContentKind, Ydoc};
 use dohc_engine_storage::put_binary_blob;
 use std::io::Write;
 
+mod native_sources;
 #[cfg(test)]
 mod tests;
+pub use native_sources::NativeRestoreSource;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,6 +42,8 @@ pub struct NativeRestoreProposalReceipt {
     pub origin_evidence_digest: String,
     /// Exact ordered admission evidence. This is not a per-span ancestry map.
     pub accepted_sources: Vec<AdmittedLiveUpdateMetadata>,
+    pub native_sources: Vec<NativeRestoreSource>,
+    pub native_source_manifest_digest: String,
 }
 
 /// Constructed only after native verification or verified durable replay.
@@ -50,6 +54,7 @@ pub struct NativeRestoreProposal {
     candidate_bytes: Vec<u8>,
     frozen_state_bytes: Vec<u8>,
     point_state_bytes: Vec<u8>,
+    native_source_bytes: Vec<Vec<u8>>,
 }
 
 impl NativeRestoreProposal {
@@ -65,6 +70,9 @@ impl NativeRestoreProposal {
     pub fn point_state_bytes(&self) -> &[u8] {
         &self.point_state_bytes
     }
+    pub fn native_source_bytes(&self) -> &[Vec<u8>] {
+        &self.native_source_bytes
+    }
 }
 
 struct Budget {
@@ -78,13 +86,19 @@ impl Budget {
         Ok(())
     }
     fn blob(&mut self, conn: &Connection, digest: &str) -> Result<Vec<u8>, ApplicationError> {
-        let length: i64 = conn
+        let (length, actual): (i64, i64) = conn
             .query_row(
-                "SELECT byte_length FROM binary_blobs WHERE sha256=?1",
+                "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
                 [digest],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(read_sql)?;
+        if length != actual
+            || length < 0
+            || length as u64 > crate::limits::MAX_YDOC_UPDATE_BYTES as u64
+        {
+            return Err(ApplicationError::Corrupt);
+        }
         self.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
         get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)
     }
@@ -317,7 +331,14 @@ fn prepare_in(
     if !selected || point.has_missing_updates() || accepted.has_missing_updates() {
         return Err(invalid("restore point is outside the authenticated prefix"));
     }
-    if !crate::replay_parity::structurally_equal_v2(&accepted, &frozen)? {
+    let native_sources::ClassifiedNativeSources {
+        sources: native_sources,
+        bytes: native_source_bytes,
+        digest: native_source_manifest_digest,
+    } = native_sources::classify(tx, input, &events, &accepted, &mut budget, max_events)?;
+    if accepted.has_missing_updates()
+        || !crate::replay_parity::structurally_equal_v2(&accepted, &frozen)?
+    {
         return Err(invalid(
             "restore preparation requires classified native pending context",
         ));
@@ -345,6 +366,8 @@ fn prepare_in(
             return Err(ApplicationError::Conflict);
         }
         if receipt.origin_evidence_digest != origin_digest
+            || receipt.native_sources != native_sources
+            || receipt.native_source_manifest_digest != native_source_manifest_digest
             || receipt
                 .accepted_sources
                 .iter()
@@ -380,6 +403,7 @@ fn prepare_in(
             candidate_bytes,
             frozen_state_bytes,
             point_state_bytes,
+            native_source_bytes,
         });
     }
     let frozen_state_bytes = budget.state(&frozen)?;
@@ -387,7 +411,7 @@ fn prepare_in(
     let before = frozen.state_vector();
     let before_state_vector = frozen.encode_state_vector();
     let candidate_bytes =
-        frozen.rewrite_richdoc_preserving_source_bounded(&markdown, budget.remaining)?;
+        frozen.rewrite_richdoc_preserving_source_bounded(&markdown, &point, budget.remaining)?;
     budget.charge(candidate_bytes.len())?;
     let after = frozen.state_vector();
     let mut replacement_ranges = Vec::new();
@@ -424,6 +448,8 @@ fn prepare_in(
         replacement_ranges,
         origin_evidence_digest: origin_digest,
         accepted_sources: events.into_iter().map(|event| event.metadata).collect(),
+        native_sources,
+        native_source_manifest_digest,
     };
     let check = Ydoc::wire();
     check.apply(&frozen_state_bytes)?;
@@ -448,6 +474,7 @@ fn prepare_in(
         candidate_bytes,
         frozen_state_bytes,
         point_state_bytes,
+        native_source_bytes,
     })
 }
 

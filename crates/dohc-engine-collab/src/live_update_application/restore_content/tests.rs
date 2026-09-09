@@ -30,6 +30,9 @@ fn point(doc: &Ydoc, cursor: i64, receipt_digest: String) -> NativeRestorePoint 
 
 impl Fixture {
     fn new(source: &str) -> Self {
+        Self::with_seed(source, "rich-unicode")
+    }
+    fn with_seed(source: &str, seed_name: &str) -> Self {
         let dir = ScratchDir::new_named("native-restore-proposal").unwrap();
         let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
@@ -44,7 +47,7 @@ impl Fixture {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["name"] == "rich-unicode")
+            .find(|row| row["name"] == seed_name)
             .unwrap();
         let seed_bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
         doc.apply(&seed_bytes).unwrap();
@@ -472,4 +475,40 @@ fn verified_backup_retains_prepared_candidate_and_all_replay_evidence() {
         serde_json::to_vec(&proposal).unwrap(),
         serde_json::to_vec(&replay).unwrap()
     );
+}
+
+#[test]
+fn tagged_restore_preserves_the_selected_projection_after_later_tags_are_cleared() {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../../tests/live-bootstrap-fixtures/live-bootstrap.json"
+    ))
+    .unwrap();
+    for row in fixtures.as_array().unwrap().iter().filter(|row| {
+        row["name"].as_str().unwrap().starts_with("tagged") && row["registrationAccepted"] == true
+    }) {
+        for clear in [false, true] {
+            let source = row["markdown"].as_str().unwrap();
+            let mut f = Fixture::with_seed(source, row["name"].as_str().unwrap());
+            if clear {
+                f.edit("# Later untagged content\n", 7);
+            }
+            let before = f.canonical();
+            let input = f.freeze(f.baseline_point.clone());
+            let proposal = f.prepare(input.clone()).unwrap();
+            let restored = Ydoc::wire();
+            restored.apply(proposal.frozen_state_bytes()).unwrap();
+            restored.apply(proposal.candidate_bytes()).unwrap();
+            let projection = restored.project(ContentKind::Richdoc).unwrap().content;
+            assert_eq!(projection, source, "{} clear={clear}", row["name"]);
+            assert_eq!(
+                restored.preserved_markdown_source(&projection).as_deref(),
+                Some(source)
+            );
+            assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+            assert_eq!(
+                serde_json::to_vec(&proposal).unwrap(),
+                serde_json::to_vec(&f.prepare(input).unwrap()).unwrap()
+            );
+        }
+    }
 }

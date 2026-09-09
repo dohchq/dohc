@@ -1713,6 +1713,7 @@ CREATE TABLE owner_ydoc_outbox_entries (
     append_key               TEXT NOT NULL UNIQUE,
     delivery_id              TEXT NOT NULL UNIQUE,
     update_digest            TEXT NOT NULL,
+    native_source_json       TEXT CHECK (native_source_json IS NULL OR json_valid(native_source_json)),
     update_blob_digest       TEXT,
     byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
     created_at_ms            INTEGER NOT NULL CHECK (created_at_ms >= 0),
