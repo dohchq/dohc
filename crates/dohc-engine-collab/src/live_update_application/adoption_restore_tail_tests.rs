@@ -684,10 +684,15 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
     let original = f.doc.encode_full_state();
     f.adopt().unwrap();
     let key = f.key.clone();
-    let appended = f
-        .store
-        .write_with(&NoFaults, |tx| {
-            let outcome = durable::record_update_in_tx(tx, &key, &original, None, None, 11)?;
+    let appended = crate::record_local_update(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &key,
+        &original,
+        crate::LocalAppend::default(),
+        &NoFaults,
+        11,
+        |tx, outcome, _| {
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,
@@ -695,10 +700,10 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
                 outcome.seq,
                 &original,
                 11,
-            )?;
-            Ok::<_, crate::CollabError>(outcome)
-        })
-        .unwrap();
+            )
+        },
+    )
+    .unwrap();
     let TxnOutcome::Committed(appended) = appended else {
         panic!("append interrupted")
     };
