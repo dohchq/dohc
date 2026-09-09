@@ -360,7 +360,7 @@ export function EngineMomentDiffPage({
           <Undo2 size={12} aria-hidden />
           {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
         </button>
-        {moment.contentKind === "text" && moment.path.toLowerCase().endsWith(".md") && <button
+        {!isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md") && <button
           type="button" data-testid="engine-diff-shared-restore" disabled={restoreBusy}
           onClick={() => setSharedRestoreOpen(true)}
           className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50"

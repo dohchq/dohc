@@ -1,0 +1,51 @@
+// @vitest-environment jsdom
+import {cleanup, fireEvent, render, screen} from "@testing-library/react";
+import {afterEach, expect, it, vi} from "vitest";
+import {engineMomentDetailForIpc} from "../../ipc/engineHistoryIpc";
+import type {WorkspaceEngineMomentDetail} from "../../workspaces/workspaceEngineCapture";
+import {EngineMomentDiffPage} from "./EngineMomentDiffPage";
+import {momentDiffTabPath} from "./workbenchState";
+
+afterEach(() => {cleanup(); vi.unstubAllGlobals();});
+const noop = () => {};
+const base = {id: "baseline", workspaceId: "workspace", versionId: "main", objectId: "object", path: "docs/a.md",
+  recordedAtMs: 2, operation: "write" as const, metadata: {origin: "local-file" as const}};
+const text = {path: base.path, contentKind: "text" as const, sha256: "a".repeat(64), byteLength: 5, text: "Hello"};
+const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...base, payload: {before: null, after: text}}};
+
+async function open(detail: WorkspaceEngineMomentDetail) {
+  const moment = engineMomentDetailForIpc(detail, () => "Owner");
+  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], pendingOperation: null,
+    nextGrantCursor: null, nextBeforeCursor: null});
+  vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
+  render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
+    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} />);
+  await screen.findByTestId("engine-diff-restore-file");
+  return {moment, ownerRestore};
+}
+
+it("opens shared restore for the text detail produced by the real IPC mapper", async () => {
+  const {moment, ownerRestore} = await open(textDetail);
+  expect(moment.contentKind).toBeUndefined();
+  fireEvent.click(screen.getByTestId("engine-diff-shared-restore"));
+  await screen.findByTestId("owner-restore-dialog");
+  expect(ownerRestore).toHaveBeenCalledWith({workspaceId: "workspace", action: "options", path: "docs/a.md"});
+});
+
+it("does not offer shared restore for a binary Markdown path", async () => {
+  const {moment} = await open({protected: false, moment: {...base, payload: {before: null, after: {...text, contentKind: "binary", text: ""}}}});
+  expect(moment.contentKind).toBe("binary");
+  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
+});
+
+it("does not offer shared restore for protected Markdown history", async () => {
+  const {moment} = await open({protected: true, moment: {...base, momentOrder: 0, protected: true}});
+  expect(moment.protected).toBe(true);
+  expect(moment.contentKind).toBeUndefined();
+  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
+});
+
+it("does not offer shared restore for other text formats", async () => {
+  await open({protected: false, moment: {...base, path: "docs/a.txt", payload: {before: null, after: {...text, path: "docs/a.txt"}}}});
+  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
+});
