@@ -76,7 +76,9 @@ const REMOTE = Symbol("named-live-remote");
  * The editor must honor status before mutating doc. A refused edit keeps doc as
  * an in-memory draft; reconnecting a quarantined provider is deliberately forbidden.
  */
-export function createNamedLiveProvider(input: NamedLiveProviderLimits) {
+export function createNamedLiveProvider(input: NamedLiveProviderLimits,
+  expectedDocument?: Pick<LiveObjectBinding, "workspaceId" | "objectId">) {
+  const expected = expectedDocument && { ...expectedDocument };
   const limits: NamedLiveProviderLimits = {
     frames: { ...input.frames, receive: { ...input.frames.receive } },
     maxPendingUpdateBytes: input.maxPendingUpdateBytes,
@@ -238,6 +240,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits) {
           if (begin.purpose === "initial-sync") {
             const sync = decodeLiveFrameSync(content, limits.frames.receive);
             if (sync.binding.mainVersionId !== "main" ||
+                (expected && (sync.binding.workspaceId !== expected.workspaceId || sync.binding.objectId !== expected.objectId)) ||
                 (binding && !sameBinding(binding, sync.binding))) { quarantine("binding-changed"); return; }
             if (begin.appliedThroughJournalCursor < highestObservedCursor) { quarantine("stale-sync-cut"); return; }
             const hostVector = Y.decodeStateVector(sync.hostVector);
