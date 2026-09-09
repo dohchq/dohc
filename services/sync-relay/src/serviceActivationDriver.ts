@@ -124,7 +124,8 @@ export class ServiceActivationDriver {
       if(!saved){
         try{
           this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,
-            validateBaseline:c.validateBaseline,validateJournal:c.validateJournal});
+            validateBaseline:c.validateBaseline,validateJournal:c.validateJournal,bounds:{maxCaptureBytes:c.maxCaptureBytes,
+              maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
           if(!(error instanceof ServiceActivationStaleCut))throw error;
           this.#staleLeases.set(targetKey,{activationId:capture.activationId,sessionId:capture.sessionId});

@@ -10,7 +10,9 @@ import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournal
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import { currentLiveDocumentMoment, currentLiveDocumentBinding, registerLiveDocumentBaselineInTransaction } from "./liveDocumentAuthority";
+import { currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
+import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
+export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -19,10 +21,6 @@ import { LIVE_JOURNAL_TABLE } from "./schema";
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const key = (source: NativeOwnerActivationSource): LiveDocumentKey => parseLiveDocumentKey({workspaceId: source.workspaceId,
   mainVersionId: source.mainVersionId, objectId: source.objectId, lineageClaimId: source.lineageClaimId});
-
-export class ServiceActivationStaleCut extends Error {
-  constructor() { super("Ordinary replication advanced before service activation."); }
-}
 
 export class ServiceActivationStore {
   constructor(private readonly storage: StorageContext, private readonly history: LiveJournalHistoryAuthority) {
@@ -133,8 +131,14 @@ export class ServiceActivationStore {
     capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate; shareId: string; registeredAtMs: number; guard(): void;
     validateBaseline: ReturnType<typeof createLiveMarkdownRegistrationValidator>;
     validateJournal: ReturnType<typeof createLiveMarkdownJournalValidator>;
+    bounds: OrdinaryActivationBounds;
   }) {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
+    for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
+    const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
+    if(capturedBytes>input.bounds.maxCaptureBytes||input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
+      throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    }
     const source = parseNativeOwnerActivationSource(input.capture.source, input.capture.source.currentPath, 20_971_520), document = key(source), baselineBytes = new Uint8Array(input.capture.baselineBytes),
       fullState = new Uint8Array(input.capture.fullState), activationId = input.capture.activationId;
     if (!/^ordinary-activation-[0-9a-f]{64}$/.test(activationId) || source.version !== 1 ||
@@ -143,9 +147,7 @@ export class ServiceActivationStore {
       throw new Error("Native activation identity differs.");
     }
     const base = input.validateBaseline({document,currentPath:source.currentPath,checkpoint:baselineBytes});
-    const state = input.validateJournal({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:[],candidate:fullState});
-    if (base.kind !== "accepted" || state.kind !== "accepted" ||
-        state.evidence.projectedMarkdownSha256 !== source.sourceDigest || state.evidence.projectedMarkdownByteLength !== source.sourceByteLength) {
+    if (base.kind !== "accepted") {
       throw new Error("Native activation does not match the ordinary source.");
     }
     const sourceJson = JSON.stringify(source);
@@ -162,32 +164,12 @@ export class ServiceActivationStore {
             prior.owner_user_id !== share.granterUserId || prior.share_id !== share.shareId) throw new Error("Service activation already has another retained source.");
         return {document, replayed: true, completed: prior.completion_json !== null};
       }
-      const current = this.storage.db.prepare("SELECT replication_epoch,stream_identity FROM sync_relay_workspaces WHERE workspace_id=?").get(document.workspaceId);
-      const highWater = this.storage.db.prepare("SELECT COALESCE(MAX(relay_seq),0) AS cursor FROM sync_relay_log WHERE workspace_id=?").get(document.workspaceId);
-      if (current?.replication_epoch !== source.replicationEpoch || current.stream_identity !== source.streamIdentity ||
-          highWater?.cursor !== source.committedCursor || source.baseRelaySeq > source.committedCursor ||
-          source.baseRelaySeq <= this.storage.getEpochLogFloor(document.workspaceId)) throw new ServiceActivationStaleCut();
-      const baseRow = this.storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND origin_id=? AND origin_seq=?
-        AND relay_seq=? AND op_kind='ydoc.update'`).get(document.workspaceId, source.baseOriginId, source.baseOriginSeq, source.baseRelaySeq);
-      const payload = baseRow && JSON.parse(String(baseRow.payload_json)) as Record<string,unknown> | undefined;
-      if (!payload || payload.versionId !== document.mainVersionId || payload.objectId !== document.objectId || payload.contentKind !== "richdoc" ||
-          payload.isBaseState !== true || payload.lineageClaimId !== document.lineageClaimId || payload.updateBlobSha256 !== document.lineageClaimId) {
-        throw new Error("Native activation base coordinate differs from ordinary history.");
-      }
-      const storedLength = this.storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,source.lineageClaimId);
-      if (storedLength?.byte_length !== baselineBytes.length) throw new Error("Ordinary activation base bytes are unavailable.");
-      const ordinaryBase = this.storage.getBlob(document.workspaceId,source.lineageClaimId);
-      if (!ordinaryBase || Buffer.compare(Buffer.from(ordinaryBase),Buffer.from(baselineBytes)) !== 0) throw new Error("Ordinary activation base bytes differ.");
-      const latest = currentLiveDocumentMoment(this.storage,document,source.currentPath);
-      const moment = latest && this.storage.db.prepare("SELECT moment_id FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
-        .get(document.workspaceId,document.objectId,latest.relay_seq);
-      if (!latest || moment?.moment_id !== source.sourceMomentId || latest.blob_sha256 !== source.sourceDigest || latest.byte_length !== source.sourceByteLength) {
-        throw new ServiceActivationStaleCut();
-      }
+      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base.evidence,
+        validateJournal:input.validateJournal,bounds:input.bounds});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
-      const registration = registerLiveDocumentBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
+      const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
         evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.evidence.checkpoint.ranges},
-          projectedMarkdownSha256:source.sourceDigest,projectedMarkdownByteLength:source.sourceByteLength}});
+          projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength}},ordinaryCut);
       if (registration.kind !== "registered" || registration.replayed) throw new Error("Service activation requires a new live baseline.");
       const binding = currentLiveDocumentBinding(this.storage,{document,actor:{kind:"owner",userId:share.granterUserId,shareId:share.shareId}});
       if (binding.kind !== "current" || !isDeepStrictEqual(binding.host,input.host)) throw new Error("Service activation selector is unavailable.");

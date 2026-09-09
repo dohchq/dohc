@@ -22,6 +22,7 @@ const policy={maxStructVisits:1_000_000,maxValueNodeVisits:5_000_000,maxDecodedP
 const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJournal=createLiveMarkdownJournalValidator(policy)
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
+const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 function fixture(){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
@@ -32,21 +33,30 @@ function fixture(){
   const document={workspaceId:'workspace',mainVersionId:'main' as const,objectId:'object',lineageClaimId:hash(baselineBytes)}
   const validated=validateJournal({document,currentPath:'docs/a.md',checkpoint:baselineBytes,suffix:[],candidate:fullState})
   if(validated.kind!=='accepted')throw new Error(JSON.stringify(validated))
+  const base=validateBaseline({document,currentPath:'docs/a.md',checkpoint:baselineBytes})
+  if(base.kind!=='accepted')throw new Error(JSON.stringify(base))
   const capture:NativeOwnerActivation={activationId:`ordinary-activation-${'a'.repeat(64)}`,sessionId:'real-session',baselineBytes,fullState,
     source:{version:1,relayDatabaseNamespace:'history',...document,currentPath:'docs/a.md',replicationEpoch:'epoch',streamIdentity:'stream',
-      committedCursor:2,baseOriginId:'origin',baseOriginSeq:1,baseRelaySeq:1,sourceMomentId:'moment',
+      committedCursor:3,baseOriginId:'origin',baseOriginSeq:1,baseRelaySeq:2,
+      sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin','2'].join('\0')))}`,
       sourceDigest:validated.evidence.projectedMarkdownSha256,sourceByteLength:validated.evidence.projectedMarkdownByteLength,
       nativeHeadSequence:2,fullStateDigest:hash(fullState),fullStateByteLength:fullState.length}}
   raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')")
+  raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',0,'moment.append',?,0)")
+    .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'original-moment',path:'docs/a.md',operation:'write',
+      payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:base.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength:base.evidence.projectedMarkdownByteLength}))
   raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',1,'ydoc.update',?,1)")
-    .run(JSON.stringify({versionId:'main',objectId:'object',contentKind:'richdoc',isBaseState:true,lineageClaimId:document.lineageClaimId,updateBlobSha256:document.lineageClaimId}))
-  raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',2,'object.snapshot','{}',2)")
+    .run(JSON.stringify({versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:true,lineageClaimId:document.lineageClaimId,updateBlobSha256:document.lineageClaimId}))
+  raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',2,'ydoc.update',?,2)")
+    .run(JSON.stringify({versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:false,lineageClaimId:document.lineageClaimId,updateBlobSha256:hash(fullState)}))
   raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(document.lineageClaimId,baselineBytes.length,baselineBytes)
-  raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',2,'moment','main','docs/a.md',?,'text',?,2)")
-    .run(capture.source.sourceDigest,capture.source.sourceByteLength)
+  raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(fullState),fullState.length,fullState)
+  raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
+    .run(base.evidence.projectedMarkdownSha256,base.evidence.projectedMarkdownByteLength)
   raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)").run(JSON.stringify({paths:['docs'],versionId:null}))
   storage.provisionLiveHostControl({...host,updatedAtMs:1,guard(){}})
-  const prepare=()=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validateBaseline,validateJournal})
+  const prepare=(readBounds=bounds)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validateBaseline,validateJournal,bounds:readBounds})
   return {storage,raw,store,history,capture,document,prepare,path,close(){raw.close();storage.close();rmSync(root,{recursive:true,force:true})}}
 }
 it('retains the original lineage and edited ordinary cut, closing ordinary authority until activation completes',()=>{
@@ -65,29 +75,51 @@ it('retains the original lineage and edited ordinary cut, closing ordinary autho
 })
 it('activates a receiver projection derived from the ordinary Ydoc base and suffix without a matching file moment',()=>{
   const f=fixture();try{
-    const baseline=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes})
-    if(baseline.kind!=='accepted')throw new Error(JSON.stringify(baseline))
-    f.raw.exec('DELETE FROM sync_relay_log; DELETE FROM sync_relay_object_moments')
-    const moment={versionId:'main',objectId:'object',momentId:'original-moment',path:'docs/a.md',operation:'write',
-      payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:baseline.evidence.projectedMarkdownSha256,
-      payloadAfterByteLength:baseline.evidence.projectedMarkdownByteLength}
-    const append=(relaySeq:number,originSeq:number,kind:string,payload:unknown)=>f.raw.prepare(
-      "INSERT INTO sync_relay_log(relay_seq,workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES (?,'workspace','origin',?,?,?,?)")
-      .run(relaySeq,originSeq,kind,JSON.stringify(payload),relaySeq)
-    append(1,0,'moment.append',moment)
-    append(2,1,'ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:true,
-      lineageClaimId:f.document.lineageClaimId,updateBlobSha256:f.document.lineageClaimId})
-    append(3,2,'ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:false,
-      lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(f.capture.fullState)})
-    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)")
-      .run(hash(f.capture.fullState),f.capture.fullState.length,f.capture.fullState)
-    f.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,1)")
-      .run(baseline.evidence.projectedMarkdownSha256,baseline.evidence.projectedMarkdownByteLength)
-    Object.assign(f.capture.source,{committedCursor:3,baseRelaySeq:2,nativeHeadSequence:1,
-      sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin','2'].join('\0')))}`})
     expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments').all()).toEqual([{moment_id:'original-moment'}])
+  }finally{f.close()}
+})
+it('rejects different CRDT history even when its rendered Markdown matches the ordinary cut',()=>{
+  const f=fixture(),changed=new Y.Doc();try{
+    Y.applyUpdate(changed,f.capture.fullState)
+    changed.getMap('frontmatter').set('temporary','removed');changed.getMap('frontmatter').delete('temporary')
+    const bytes=Y.encodeStateAsUpdate(changed)
+    const validated=validateJournal({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes,suffix:[],candidate:bytes})
+    expect(validated.kind).toBe('accepted')
+    if(validated.kind!=='accepted')throw new Error('Invalid test update')
+    expect(validated.evidence.projectedMarkdownSha256).toBe(f.capture.source.sourceDigest)
+    Object.assign(f.capture,{fullState:bytes});Object.assign(f.capture.source,{fullStateDigest:hash(bytes),fullStateByteLength:bytes.length})
+    expect(f.prepare).toThrow('complete ordinary CRDT history')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{changed.destroy();f.close()}
+})
+it('keeps an earlier projecting moment when a later ordinary suffix only adds deleted CRDT history',()=>{
+  const f=fixture(),changed=new Y.Doc();try{
+    Y.applyUpdate(changed,f.capture.fullState);const before=Y.encodeStateVector(changed)
+    changed.getMap('frontmatter').set('temporary','removed');changed.getMap('frontmatter').delete('temporary')
+    const suffix=Y.encodeStateAsUpdate(changed,before),fullState=Y.encodeStateAsUpdate(changed)
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
+      .run(JSON.stringify({versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}))
+    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(suffix),suffix.length,suffix)
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{committedCursor:4,fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(f.prepare()).toMatchObject({completed:false})
+  }finally{changed.destroy();f.close()}
+})
+it('checks configured history entry and byte budgets before loading relay blobs',()=>{
+  const f=fixture();try{
+    const read=vi.spyOn(f.storage,'getBlob')
+    expect(()=>f.prepare({...bounds,maxEntriesPerDrain:1})).toThrow('entry budget')
+    expect(read).not.toHaveBeenCalled()
+    expect(()=>f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length})).toThrow('metadata')
+    expect(read).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+  }finally{f.close()}
+})
+it('rejects a different replication epoch even at the same relay cursor',()=>{
+  const f=fixture();try{
+    f.capture.source.replicationEpoch='foreign-epoch'
+    expect(f.prepare).toThrow(ServiceActivationStaleCut)
   }finally{f.close()}
 })
 it('rolls back host registration and baseline when the ordinary cursor advanced',()=>{

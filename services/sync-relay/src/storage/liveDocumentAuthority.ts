@@ -1,4 +1,5 @@
 import type { StoredLiveDocumentAuthority } from "./types";
+import {ordinaryActivationBaseline,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
 import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
 import type {
   CurrentLiveBindingRequest,
@@ -493,7 +494,11 @@ export function registerLiveDocumentBaselineInTransaction(storage: StorageContex
     return registerBaseline(storage, input, operation => operation());
   }
 
-function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult): RelayBaselineRegistrationResult {
+export function registerOrdinaryActivationBaselineInTransaction(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut):RelayBaselineRegistrationResult {
+    return registerBaseline(storage,input,operation=>operation(),cut);
+  }
+
+function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult, ordinaryCut?:VerifiedOrdinaryActivationCut): RelayBaselineRegistrationResult {
     let outer: Record<string, unknown>;
     try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
@@ -514,7 +519,7 @@ function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRe
       if (host.configuredMode !== coordinate.mode || host.configuredHostId !== coordinate.hostId ||
         host.hostEpoch !== coordinate.hostEpoch || host.registeredInstanceId !== coordinate.instanceId ||
         host.registeredConnectionId !== coordinate.connectionId) return { kind: "refused", reason: "stale-host" };
-      const latest = currentLiveDocumentMoment(storage, document, currentPath);
+      const latest = ordinaryCut ? ordinaryActivationBaseline(storage,owned,ordinaryCut) : currentLiveDocumentMoment(storage, document, currentPath);
       if (!latest || latest.blob_sha256 !== evidence.projectedMarkdownSha256 ||
         latest.byte_length !== evidence.projectedMarkdownByteLength) return { kind: "refused", reason: "stale-document" };
       const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents
