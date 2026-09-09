@@ -11,7 +11,7 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
-import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
+import { createEngineClient, EngineRequestError } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver } from "@dohc/workspace-auth/session";
@@ -33,6 +33,8 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnect
 const exchangeKey = "native-network-exchange-".repeat(2);
 import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession.js";
 import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
+import {startDesktopOwnerDelivery} from "../../../apps/desktop/src/workspaces/desktopOwnerDelivery.js";
+import type {OwnerYDocDrainResult} from "../../../apps/desktop/src/workspaces/ownerYDocOutbox.js";
 import {OwnerYDocOutbox} from "../../../packages/workspace-engine-client/src/ydoc/ownerYDocOutbox.js";
 // Selected explicitly by the sealed proof runner. Never skipped for missing prerequisites.
 it("preserves and delivers owner drafts across two real native replicas and authenticated WS", async () => {
@@ -193,11 +195,32 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         return result.draft;
       }
       const outbox = new OwnerYDocOutbox(client, workspaceHandle);
+      async function pass(): Promise<OwnerYDocDrainResult> {
+        const lifetime = AbortSignal.timeout(deliveryConfig.attemptTimeoutMs);
+        let completed!: (result: OwnerYDocDrainResult) => void, failed!: (error: unknown) => void;
+        const completion = new Promise<OwnerYDocDrainResult>((resolve, reject) => {completed = resolve; failed = reject;});
+        const aborted = () => failed(lifetime.reason);
+        lifetime.addEventListener("abort", aborted, {once: true});
+        const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
+          async runPass(document, signal) {
+            const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig,
+              signal: AbortSignal.any([lifetime, signal]), bearer, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
+            if (result !== "retry") completed(result);
+            return result;
+          },
+          onError(error) {
+            const refusals = (results.deliveryRefusals ??= []) as unknown[];
+            refusals.push(error instanceof EngineRequestError ? error.wireError : String(error));
+            if (!(error instanceof EngineRequestError && error.wireError?.code === "OVERLOADED" && error.wireError.retry === "afterBackoff")) failed(error);
+          },
+        });
+        try {return await completion;}
+        finally {lifetime.removeEventListener("abort", aborted); await delivery.stop();}
+      }
       return {client, workspaceHandle, request, rpc, pull, outbox, dir, descriptor,
         openDraft: async () => client.ownerYDocOpenDraft(request(), {binding, expectedRevision: (await descriptor()).revision}),
         appendDraft: async (appendKey: string, updateBytes: Uint8Array) => client.ownerYDocAppendDraft(request(), {binding, expectedRevision: (await descriptor()).revision, appendKey, updateBytes}),
-        pass: () => runNativeOwnerDeliveryPass({client, workspaceHandle, document: selected, config: deliveryConfig,
-          signal: AbortSignal.timeout(30000), bearer, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}}),
+        pass,
         async close() {outbox.dispose(); client.close(); await client.waitForExit(); ownerClients.delete(client);}};
     }
     const first = await startOwner("owner-a");
