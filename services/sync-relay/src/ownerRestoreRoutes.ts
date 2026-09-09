@@ -7,6 +7,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StopRestoreIntent, StopRestoreLookup } from "./storage/liveRestoreOperation";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 import { ownerRestoreReviewResponse } from "./ownerRestoreResponse";
+import {parseOwnerRestoreGrantCursor} from "./storage/ownerRestoreOptions";
 
 export type OwnerRestoreHost = {
   readonly restoreConfigured: boolean;
@@ -48,13 +49,14 @@ export function createOwnerRestoreRoutes(options: {
     // Body parsing can yield. Ownership must still hold before reading or mutating the operation.
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (route.action === "options") {
-      const input = ticketRecord(raw, typeof raw === "object" && raw !== null && Object.hasOwn(raw, "beforeCursor")
-        ? ["path", "beforeCursor"] : ["path"]);
+      const fields = ["path", ...["beforeCursor", "grantCursor"].filter(key => typeof raw === "object" && raw !== null && Object.hasOwn(raw, key))];
+      const input = ticketRecord(raw, fields);
       if (typeof input.path !== "string") throw badRequest("Invalid restore path.");
       if (Object.hasOwn(input, "beforeCursor") && (!Number.isSafeInteger(input.beforeCursor) || Number(input.beforeCursor) < 1)) {
         throw badRequest("Invalid restore cursor.");
       }
       return response(storage.readOwnerRestoreOptions({workspaceId: route.workspaceId, ownerUserId, path: input.path,
+        ...(Object.hasOwn(input, "grantCursor") ? {grantCursor: parseOwnerRestoreGrantCursor(input.grantCursor)} : {}),
         ...(Object.hasOwn(input, "beforeCursor") ? {beforeCursor: input.beforeCursor as number} : {})}));
     }
     if (route.action === "plan") {

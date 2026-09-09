@@ -58,6 +58,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_share
     ON sync_relay_share_grants(share_id, created_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_restore_page
+    ON sync_relay_share_grants(share_id, created_at_ms, grant_id);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_user
     ON sync_relay_share_grants(principal_user_id, created_at_ms);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email

@@ -7,6 +7,7 @@ import {createOwnerRestoreRoutes} from "../ownerRestoreRoutes";
 import {createSyncRelayHandler} from "../server";
 import {advanceStopRestoreFence} from "./liveRestoreOperation";
 import {restoreDigest} from "./liveRestoreCheckpoint";
+import {parseOwnerRestoreGrantCursor, type OwnerRestoreGrantCursor} from "./ownerRestoreOptions";
 
 const ownerUserId = "owner-1", namespace = "restore-options-history";
 const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
@@ -94,7 +95,7 @@ describe("owner restore options", () => {
     expect(f.read()).toEqual({document, path: binding.currentPath, grants: [{shareId: scope.shareId,
       grantId: scope.grantId, generation: 4, principalKind: "user", userId: scope.userId, email: null}],
       points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: binding.lineageClaimId}],
-      nextBeforeCursor: null, pendingOperation: null});
+      nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null});
   });
 
   it("checks the trusted workspace owner before document or grant reads", async () => {
@@ -165,7 +166,7 @@ describe("owner restore options", () => {
       .run("a".repeat(MAX_PAYLOAD_JSON_BYTES + 1), scope.grantId);
     const query = vi.spyOn(f.context.db, "prepare");
     expect(() => f.read()).toThrow("metadata limit");
-    expect(query.mock.calls.some(([sql]) => sql.includes("WHERE g.rowid=?"))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => sql.includes("SELECT generation,principal_kind,principal_user_id,principal_email"))).toBe(false);
   });
 
   it("does not load baseline, update, or proposal blobs for options", async () => {
@@ -253,5 +254,84 @@ describe("owner restore options", () => {
     f.raw.prepare("UPDATE sync_relay_live_update_journal SET update_digest=? WHERE journal_cursor=1").run("e".repeat(64));
     await expect(plan(selected.receiptDigest)).rejects.toThrow("conflicts with current authority");
     expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_restore_operations").get()!.count).toBe(0);
+  });
+
+  it("continues past more than a page of unrelated shares instead of hiding the target", async () => {
+    const f = await fixture();
+    const insert = f.raw.prepare(`INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+      VALUES (?,?,?, ?,0)`);
+    f.raw.exec("BEGIN");
+    try {
+      for (let i = 0; i < MAX_LOG_PAGE_SIZE + 1; i++) insert.run(`a-${String(i).padStart(4, "0")}`, scope.workspaceId,
+        ownerUserId, JSON.stringify({paths: ["elsewhere"], versionId: null}));
+      f.raw.exec("COMMIT");
+    } catch (error) {f.raw.exec("ROLLBACK"); throw error;}
+    const query = vi.spyOn(f.context.db, "prepare"), first = f.read();
+    expect(first.grants).toEqual([]); expect(first.nextGrantCursor).not.toBeNull();
+    expect(query.mock.calls.filter(([sql]) => sql.includes("SELECT selector_json")).length).toBeLessThanOrEqual(MAX_LOG_PAGE_SIZE);
+    expect(query.mock.calls.some(([sql]) => sql.includes("idx_sync_relay_share_grants_restore_page"))).toBe(false);
+    const next = f.storage.readOwnerRestoreOptions({...f.input, grantCursor: first.nextGrantCursor!});
+    expect(next.grants.map(g => g.grantId)).toEqual([scope.grantId]); expect(next.nextGrantCursor).toBeNull();
+  });
+
+  it("resumes inside a large tied grant group and survives deletion of the previous cursor row", async () => {
+    const f = await fixture();
+    const insert = f.raw.prepare(`INSERT INTO sync_relay_share_grants
+      (grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms)
+      VALUES (?,?,'user','other','read',1,'active',0)`);
+    f.raw.exec("BEGIN");
+    try {for (let i = 0; i < 2 * MAX_LOG_PAGE_SIZE + 1; i++) insert.run(`a-${String(i).padStart(4, "0")}`, scope.shareId); f.raw.exec("COMMIT");}
+    catch (error) {f.raw.exec("ROLLBACK"); throw error;}
+    const first = f.read(); expect(first.grants).toEqual([]);
+    expect(first.nextGrantCursor).toMatchObject({shareId: scope.shareId, grantCreatedAtMs: 0, grantId: "a-0498"});
+    f.raw.prepare("DELETE FROM sync_relay_share_grants WHERE grant_id=?").run(first.nextGrantCursor!.grantId);
+    const second = f.storage.readOwnerRestoreOptions({...f.input, grantCursor: first.nextGrantCursor!});
+    expect(second.grants).toEqual([]); expect(second.nextGrantCursor!.grantId).toBe("a-0997");
+    const last = f.storage.readOwnerRestoreOptions({...f.input, grantCursor: second.nextGrantCursor!});
+    expect(last.grants.map(g => g.grantId)).toEqual([scope.grantId]); expect(last.nextGrantCursor).toBeNull();
+    const plan = f.raw.prepare(`EXPLAIN QUERY PLAN SELECT grant_id,created_at_ms,status,access FROM sync_relay_share_grants
+      INDEXED BY idx_sync_relay_share_grants_restore_page WHERE share_id=? AND (created_at_ms,grant_id)>(?,?)
+      ORDER BY created_at_ms,grant_id LIMIT ?`).all(scope.shareId, 0, "a-0498", MAX_LOG_PAGE_SIZE);
+    expect(plan.some(row => String(row.detail).includes("SEARCH") && String(row.detail).includes("idx_sync_relay_share_grants_restore_page"))).toBe(true);
+    expect(plan.some(row => /SCAN|TEMP B-TREE/.test(String(row.detail)))).toBe(false);
+  });
+
+  it("limits aggregate selector bytes before parsing unrelated sources and still advances", async () => {
+    const f = await fixture(), selectorJson = JSON.stringify({paths: ["elsewhere/" + "x".repeat(140_000)], versionId: null});
+    for (const id of ["a-large", "b-large"]) f.raw.prepare(`INSERT INTO sync_relay_shares
+      (share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,?,?,0)`)
+      .run(id, scope.workspaceId, ownerUserId, selectorJson);
+    const query = vi.spyOn(f.context.db, "prepare"), first = f.read();
+    expect(first.grants).toEqual([]); expect(first.nextGrantCursor!.shareId).toBe("a-large");
+    expect(query.mock.calls.filter(([sql]) => sql.includes("SELECT selector_json"))).toHaveLength(1);
+    const last = f.storage.readOwnerRestoreOptions({...f.input, grantCursor: first.nextGrantCursor!});
+    expect(last.grants.map(g => g.grantId)).toEqual([scope.grantId]); expect(last.nextGrantCursor).toBeNull();
+  });
+
+  it("refuses an individually oversized skipped selector before copying it", async () => {
+    const f = await fixture();
+    f.raw.prepare(`INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+      VALUES ('a-huge',?,?,?,0)`).run(scope.workspaceId, ownerUserId, JSON.stringify({paths: ["x".repeat(MAX_PAYLOAD_JSON_BYTES)]}));
+    const query = vi.spyOn(f.context.db, "prepare");
+    expect(() => f.read()).toThrow("metadata limit");
+    expect(query.mock.calls.some(([sql]) => sql.includes("SELECT selector_json"))).toBe(false);
+  });
+
+  it("keeps grant continuation independent of accepted-point pagination", async () => {
+    const f = await fixture(); f.point(2); f.point(5);
+    const grantCursor: OwnerRestoreGrantCursor = {shareId: scope.shareId, shareCreatedAtMs: 0, grantCreatedAtMs: null, grantId: null};
+    const page = f.storage.readOwnerRestoreOptions({...f.input, beforeCursor: 5, grantCursor});
+    expect(page.grants).toEqual([]); expect(page.nextGrantCursor).toBeNull();
+    expect(page.points.map(p => p.cursor)).toEqual([2, 0]);
+  });
+
+  it.each([
+    null, {}, {shareId: "share"},
+    {shareId: "share", shareCreatedAtMs: -1, grantId: null, grantCreatedAtMs: null},
+    {shareId: "share", shareCreatedAtMs: 0, grantId: "grant", grantCreatedAtMs: null},
+    {shareId: "share", shareCreatedAtMs: 0, grantId: null, grantCreatedAtMs: 1},
+    {shareId: "share", shareCreatedAtMs: 0, grantId: "grant", grantCreatedAtMs: 0, ownerUserId},
+  ])("rejects malformed grant cursor %j", value => {
+    expect(() => parseOwnerRestoreGrantCursor(value)).toThrow("Invalid restore grant cursor");
   });
 });

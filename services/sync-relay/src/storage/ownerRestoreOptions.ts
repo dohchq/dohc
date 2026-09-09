@@ -12,8 +12,14 @@ import type {StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRes
 import {readStopRestoreInTransaction} from "./liveRestoreOperation";
 import type {StorageContext} from "./context";
 import type {SyncRelayShareRow} from "./types";
+import {ticketRecord} from "../liveTicketInputs";
 
-export type OwnerRestoreOptionsInput = {workspaceId: string; ownerUserId: string; path: string; beforeCursor?: number};
+export type OwnerRestoreGrantCursor = {
+  shareCreatedAtMs: number; shareId: string; grantCreatedAtMs: number | null; grantId: string | null;
+};
+export type OwnerRestoreOptionsInput = {
+  workspaceId: string; ownerUserId: string; path: string; beforeCursor?: number; grantCursor?: OwnerRestoreGrantCursor;
+};
 export type OwnerRestoreStatus = {
   operationId: string; document: LiveDocumentKey; path: string; phase: StopRestoreOperation["phase"];
   intent: Omit<StopRestoreIntent, "ownerUserId">; proposalDigest: string | null;
@@ -23,6 +29,7 @@ export type OwnerRestoreOptions = {
   grants: Array<StopRestoreRecipient & {shareId: string; generation: number}>;
   points: Array<{cursor: number; receivedAtMs: number | null; kind: "baseline" | "accepted"; receiptDigest: string}>;
   nextBeforeCursor: number | null;
+  nextGrantCursor: OwnerRestoreGrantCursor | null;
   pendingOperation: Pick<OwnerRestoreStatus, "operationId" | "phase" | "proposalDigest"> | null;
 };
 
@@ -37,6 +44,74 @@ function owned(storage: StorageContext, workspaceId: string, ownerUserId: string
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw notFound();
 }
 function retired(): never {throw relayError("conflict", "The restore point is no longer retained for this document.");}
+
+export function parseOwnerRestoreGrantCursor(value: unknown): OwnerRestoreGrantCursor {
+  try {
+    const row = ticketRecord(value, ["shareCreatedAtMs", "shareId", "grantCreatedAtMs", "grantId"]);
+    if ((row.grantCreatedAtMs === null) !== (row.grantId === null)) throw new Error();
+    return {shareCreatedAtMs: authorityInteger(row.shareCreatedAtMs), shareId: parseLiveUpdateIdentifier(row.shareId),
+      grantCreatedAtMs: row.grantCreatedAtMs === null ? null : authorityInteger(row.grantCreatedAtMs),
+      grantId: row.grantId === null ? null : parseLiveUpdateIdentifier(row.grantId)};
+  } catch {throw badRequest("Invalid restore grant cursor.");}
+}
+
+function grantPage(storage: StorageContext, input: OwnerRestoreOptionsInput, charge: (value: unknown) => void) {
+  let cursor = input.grantCursor === undefined ? null : parseOwnerRestoreGrantCursor(input.grantCursor);
+  let resumeShare = cursor?.grantId != null, inspected = 0, selectorBytes = 0;
+  const grants: OwnerRestoreOptions["grants"] = [];
+  // Leave one source-row slot for a grant after opening a matching share.
+  while (inspected < MAX_LOG_PAGE_SIZE - 1) {
+    const columns = "share_id,granter_user_id,created_at_ms,length(CAST(selector_json AS BLOB)) AS bytes";
+    const header = resumeShare
+      ? storage.db.prepare(`SELECT ${columns} FROM sync_relay_shares WHERE workspace_id=? AND share_id=? AND created_at_ms=?`)
+        .get(input.workspaceId, cursor!.shareId, cursor!.shareCreatedAtMs)
+      : storage.db.prepare(`SELECT ${columns} FROM sync_relay_shares INDEXED BY idx_sync_relay_shares_workspace
+        WHERE workspace_id=? AND (created_at_ms,share_id)>(?,?) ORDER BY created_at_ms,share_id LIMIT 1`)
+        .get(input.workspaceId, cursor?.shareCreatedAtMs ?? -1, cursor?.shareId ?? "");
+    inspected++;
+    if (!header) {
+      if (resumeShare) {resumeShare = false; continue;}
+      return {grants, nextGrantCursor: null};
+    }
+    const shareId = parseLiveUpdateIdentifier(header.share_id), shareCreatedAtMs = authorityInteger(header.created_at_ms);
+    const afterShare: OwnerRestoreGrantCursor = {shareId, shareCreatedAtMs, grantCreatedAtMs: null, grantId: null};
+    if (header.granter_user_id !== input.ownerUserId) {cursor = afterShare; resumeShare = false; continue;}
+    const bytes = authorityInteger(header.bytes) + Buffer.byteLength(shareId) + Buffer.byteLength(input.ownerUserId);
+    bounded(bytes);
+    if (bytes > MAX_PAYLOAD_JSON_BYTES - selectorBytes) return {grants, nextGrantCursor: cursor};
+    selectorBytes += bytes;
+    const selectorJson = storage.db.prepare("SELECT selector_json FROM sync_relay_shares WHERE share_id=?").get(shareId)!.selector_json;
+    const share: SyncRelayShareRow = {shareId, workspaceId: input.workspaceId, granterUserId: input.ownerUserId,
+      selectorJson: String(selectorJson), createdAtMs: shareCreatedAtMs};
+    const stored = parseStoredAnyShareSelectorJson(share.selectorJson), selector = stored && effectiveShareSelector(stored, "edit");
+    if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
+      visibleSharePath(selector, input.path) !== input.path) {cursor = afterShare; resumeShare = false; continue;}
+    const grantTime = resumeShare ? cursor!.grantCreatedAtMs! : -1, grantId = resumeShare ? cursor!.grantId! : "";
+    for (const row of storage.db.prepare(`SELECT grant_id,created_at_ms,status,access,
+      COALESCE(length(CAST(principal_user_id AS BLOB)),0)+COALESCE(length(CAST(principal_email AS BLOB)),0) AS bytes
+      FROM sync_relay_share_grants INDEXED BY idx_sync_relay_share_grants_restore_page
+      WHERE share_id=? AND (created_at_ms,grant_id)>(?,?) ORDER BY created_at_ms,grant_id LIMIT ?`)
+      .iterate(shareId, grantTime, grantId, MAX_LOG_PAGE_SIZE - inspected)) {
+      inspected++;
+      cursor = {shareId, shareCreatedAtMs, grantCreatedAtMs: authorityInteger(row.created_at_ms), grantId: parseLiveUpdateIdentifier(row.grant_id)};
+      if (row.status === "active" && row.access === "edit") {
+        bounded(authorityInteger(row.bytes) + Buffer.byteLength(cursor.grantId!));
+        const grant = storage.db.prepare(`SELECT generation,principal_kind,principal_user_id,principal_email
+          FROM sync_relay_share_grants WHERE share_id=? AND grant_id=?`).get(shareId, cursor.grantId)!;
+        const principalKind = grant.principal_kind;
+        if (principalKind !== "user" && principalKind !== "email" && principalKind !== "link") throw new Error("Invalid grant recipient.");
+        const recipient: OwnerRestoreOptions["grants"][number] = {shareId, grantId: cursor.grantId!,
+          generation: authorityInteger(grant.generation, 1), principalKind,
+          userId: grant.principal_user_id === null ? null : parseLiveUpdateIdentifier(grant.principal_user_id),
+          email: grant.principal_email === null ? null : String(grant.principal_email)};
+        charge(recipient); grants.push(recipient);
+      }
+      if (inspected === MAX_LOG_PAGE_SIZE) return {grants, nextGrantCursor: cursor};
+    }
+    cursor = afterShare; resumeShare = false;
+  }
+  return {grants, nextGrantCursor: cursor};
+}
 
 /** Read authenticated receipt metadata without loading proposal or document blobs. */
 export function readOwnerRestoreStatus(storage: StorageContext, input: StopRestoreLookup): OwnerRestoreStatus {
@@ -92,7 +167,8 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
       objectId: current.object_id, lineageClaimId: current.lineage_claim_id});
     if (Number(current.baseline_moment_relay_seq) <= storage.getEpochLogFloor(workspaceId) ||
       !currentLiveDocumentMoment(storage, document, input.path)) retired();
-    const result: OwnerRestoreOptions = {document, path: input.path, grants: [], points: [], nextBeforeCursor: null, pendingOperation: null};
+    const result: OwnerRestoreOptions = {document, path: input.path, grants: [], points: [], nextBeforeCursor: null,
+      nextGrantCursor: null, pendingOperation: null};
     const pending = storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS}
       WHERE relay_database_namespace=? AND ${whereDocument} AND phase<>'resumed' ORDER BY invalidated_at_ms DESC LIMIT 2`)
       .all(namespace, ...key(document));
@@ -104,29 +180,7 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
     }
     let bytes = Buffer.byteLength(JSON.stringify(result));
     const charge = (value: unknown) => {bytes += Buffer.byteLength(JSON.stringify(value)) + 1; bounded(bytes);};
-    for (const header of storage.db.prepare(`SELECT g.rowid AS grant_rowid,
-      length(CAST(s.selector_json AS BLOB))+length(CAST(s.share_id AS BLOB))+length(CAST(g.grant_id AS BLOB))+
-      COALESCE(length(CAST(g.principal_user_id AS BLOB)),0)+COALESCE(length(CAST(g.principal_email AS BLOB)),0) AS bytes
-      FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id)
-      WHERE s.workspace_id=? AND s.granter_user_id=? AND g.status='active' AND g.access='edit' ORDER BY g.grant_id`)
-      .iterate(workspaceId, input.ownerUserId)) {
-      bounded(Number(header.bytes));
-      const grant = storage.db.prepare(`SELECT s.share_id,s.selector_json,s.created_at_ms,g.grant_id,g.generation,
-        g.principal_kind,g.principal_user_id,g.principal_email FROM sync_relay_share_grants g
-        JOIN sync_relay_shares s USING(share_id) WHERE g.rowid=?`).get(header.grant_rowid)!;
-      const share: SyncRelayShareRow = {shareId: String(grant.share_id), workspaceId, granterUserId: input.ownerUserId,
-        selectorJson: String(grant.selector_json), createdAtMs: Number(grant.created_at_ms)};
-      const stored = parseStoredAnyShareSelectorJson(share.selectorJson), selector = stored && effectiveShareSelector(stored, "edit");
-      if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
-        visibleSharePath(selector, input.path) !== input.path) continue;
-      const principalKind = grant.principal_kind;
-      if (principalKind !== "user" && principalKind !== "email" && principalKind !== "link") throw new Error("Invalid grant recipient.");
-      const recipient: OwnerRestoreOptions["grants"][number] = {shareId: parseLiveUpdateIdentifier(grant.share_id), grantId: parseLiveUpdateIdentifier(grant.grant_id),
-        generation: authorityInteger(grant.generation, 1), principalKind,
-        userId: grant.principal_user_id === null ? null : parseLiveUpdateIdentifier(grant.principal_user_id),
-        email: grant.principal_email === null ? null : String(grant.principal_email)};
-      charge(recipient); result.grants.push(recipient);
-    }
+    Object.assign(result, grantPage(storage, input, charge));
     if (beforeCursor !== undefined && !storage.db.prepare(`SELECT 1 FROM sync_relay_live_update_journal
       WHERE relay_database_namespace=? AND ${whereDocument} AND journal_cursor=?`).get(namespace, ...key(document), beforeCursor)) retired();
     for (const point of storage.db.prepare(`SELECT journal_cursor,received_at_ms,update_digest FROM sync_relay_live_update_journal
