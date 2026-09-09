@@ -42,7 +42,7 @@ describe("named live browser authentication", () => {
     });
     const { resolve, storage } = fixture(resolveActor);
     const incoming = request();
-    expect(await resolve(incoming, scope)).toEqual({ userId: "alice", ...scope });
+    expect(await resolve(incoming, scope)).toEqual({ kind: "named", userId: "alice", ...scope });
     expect(incoming.bodyUsed).toBe(false);
     expect(storage.getShareGrant).toHaveBeenCalledWith(scope.grantId);
   });
@@ -80,7 +80,7 @@ describe("named live browser authentication", () => {
       mutableScope.grantId = "other";
       return { userId: "alice", workspaceId };
     });
-    expect(await state.resolve(request(), mutableScope)).toEqual({ userId: "alice", ...scope });
+    expect(await state.resolve(request(), mutableScope)).toEqual({ kind: "named", userId: "alice", ...scope });
   });
 
   it.each(["view", "comment"])("refuses %s grants", async (access) => {

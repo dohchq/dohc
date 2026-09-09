@@ -31,7 +31,7 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
   return {
     create(context: NamedLiveBrowserContext): { discriminator: string; expiresAtMs: number } | null {
       const { userId, workspaceId, shareId, grantId } = context;
-      if ([userId, workspaceId, shareId, grantId].some(value => typeof value !== "string" || value.length === 0)) {
+      if (context.kind !== "named" || [userId, workspaceId, shareId, grantId].some(value => typeof value !== "string" || value.length === 0)) {
         throw new TypeError("Invalid named session context.");
       }
       const current = authorizeNamedLiveEditShareGrant({ storage, actorUserId: userId, grantId });
@@ -53,7 +53,7 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
       const discriminator = randomBytes(9).toString("base64url");
       if (sessions.has(discriminator)) throw new Error("Named session discriminator collision.");
       sessions.set(discriminator, {
-        context: Object.freeze({ userId, workspaceId, shareId, grantId }), expiresAtMs,
+        context: Object.freeze({ kind: "named", userId, workspaceId, shareId, grantId }), expiresAtMs,
         grantGeneration, grantAccess,
       });
       return { discriminator, expiresAtMs };

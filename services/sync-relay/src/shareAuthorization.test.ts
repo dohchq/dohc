@@ -179,7 +179,7 @@ describe("share authorization", () => {
       .toEqual({ ok: false, reason: "denied" });
     expect(authorizeLinkShareAction({
       storage: storageFixture({ grant: parent }), grantId: parent.grantId, action: "live-edit",
-    })).toEqual({ ok: false, reason: "gauntlet" });
+    })).toMatchObject({ ok: true, effectiveSelector: { access: "edit" } });
   });
 
   it("derives received-share read selection and generic appendability from one grant pass", () => {

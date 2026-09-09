@@ -7,8 +7,8 @@ import { createLiveFrameSession, type LiveFrameSessionPolicy } from "@dohc/live-
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { SyncRelayStorage } from "./storage.js";
-import type { createNamedLiveTickets } from "./liveTickets.js";
-import type { createNamedLiveBrowserSessions } from "./namedLiveBrowserSessions.js";
+import type { createLiveTickets } from "./liveTickets.js";
+import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import { captureNamedLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
@@ -41,6 +41,7 @@ export function parseNamedLiveRouteLimits(value: unknown): NamedLiveRouteLimits 
 
 /** The relay authenticates and redeems once; only framed document bytes reach the socket. */
 export function createNamedLiveRoutes(options: {
+  kind: "named" | "link";
   storage: SyncRelayStorage;
   hosts: ReadonlySet<string>;
   publicOrigin: string;
@@ -48,12 +49,14 @@ export function createNamedLiveRoutes(options: {
   limits: NamedLiveRouteLimits;
   frames: LiveFrameSessionPolicy;
   bounds: NamedFrameHostBounds;
-  sessions: Pick<ReturnType<typeof createNamedLiveBrowserSessions>, "resolve">;
-  tickets: ReturnType<typeof createNamedLiveTickets>;
+  sessions: { resolve(request: Request, discriminator: string): Promise<LiveBrowserContext | null> };
+  tickets: ReturnType<typeof createLiveTickets>;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
   validate: OwnerOutboxAdmission["validate"];
 }) {
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
+  const kind = options.kind;
+  if (kind !== "named" && kind !== "link") throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin), keyHash = hashRelayExchangeKey(options.exchangeKey);
   if (!origin.startsWith("https:") || options.exchangeKey.length < 32 || hosts.size === 0 || [...hosts].some(host => !host || new URL(`http://${host}`).host !== host)) {
     throw new TypeError("Named routes require explicit relay hosts, HTTPS audience, and exchange key.");
@@ -73,12 +76,14 @@ export function createNamedLiveRoutes(options: {
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers: { "cache-control": "private, no-store" } });
   const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && headers.get("origin") === origin &&
     verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash);
+  const credentials = (headers: Headers): Record<string, string> => kind === "named" ? { cookie: headers.get("cookie") ?? "" } :
+    { authorization: headers.get("authorization") ?? "", "x-dohc-link-profile-secret": headers.get("x-dohc-link-profile-secret") ?? "" };
   const sessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{12}$/.test(value);
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.drainTimeoutMs));
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (closed || storage.unavailable.aborted || url.pathname !== "/sync/live/named-tickets" || url.search || request.method !== "POST" || !trusted(request.headers) ||
+    if (closed || storage.unavailable.aborted || url.pathname !== `/sync/live/${kind}-tickets` || url.search || request.method !== "POST" || !trusted(request.headers) ||
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" || pendingRequests >= limits.maxPendingRequests || request.signal.aborted) return refusal();
     pendingRequests++;
     const controller = new AbortController(), signal = AbortSignal.any([request.signal, storage.unavailable, shutdown.signal, controller.signal]);
@@ -93,9 +98,9 @@ export function createNamedLiveRoutes(options: {
         const { discriminator, objectId } = input as Record<string, unknown>;
         if (!sessionId(discriminator)) return refusal();
         parseLiveUpdateIdentifier(objectId);
-        const authenticated = new Request(request.url, { headers: { cookie: request.headers.get("cookie") ?? "" }, signal });
+        const authenticated = new Request(request.url, { headers: credentials(request.headers), signal });
         const context = await resolve(authenticated, discriminator); signal.throwIfAborted(); check();
-        if (!context) return refusal();
+        if (!context || context.kind !== kind) return refusal();
         const minted = await tickets.mint({ objectId }, context, signal); signal.throwIfAborted(); check();
         if (!minted) return refusal();
         const body = JSON.stringify(minted);
@@ -112,14 +117,14 @@ export function createNamedLiveRoutes(options: {
     let discriminator: string, token: string;
     try {
       headers = new Headers();
-      const selected = new Set(["host", "origin", "cookie", "sec-websocket-protocol", "x-dohc-relay-exchange-key"]);
+      const selected = new Set(["host", "origin", "cookie", "authorization", "x-dohc-link-profile-secret", "sec-websocket-protocol", "x-dohc-relay-exchange-key"]);
       for (let index = 0; index < request.rawHeaders.length; index += 2) {
         const name = request.rawHeaders[index]!.toLowerCase();
         if (!selected.has(name)) continue;
         if (headers.has(name)) throw new Error();
         headers.set(name, request.rawHeaders[index + 1]!);
       }
-      const path = /^\/sync\/live\/named\?session=([A-Za-z0-9_-]{12})$/.exec(request.url ?? "");
+      const path = new RegExp(`^/sync/live/${kind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
       const protocols = headers.get("sec-websocket-protocol")?.split(",").map(value => value.trim());
       if (!path || request.method !== "GET" || !trusted(headers) || protocols?.length !== 2 || protocols.filter(value => value === "dohc-live-v1").length !== 1) throw new Error();
       discriminator = path[1]!;
@@ -156,22 +161,25 @@ export function createNamedLiveRoutes(options: {
     connections.add(stop); socket.once("close", stop); socket.once("error", stop);
     try {
       const check = storage.captureStanding();
-      const authenticated = new Request(new URL(request.url!, `https://${headers.get("host")}`), { headers: { cookie: headers.get("cookie") ?? "" }, signal });
+      const authenticated = new Request(new URL(request.url!, `https://${headers.get("host")}`), { headers: credentials(headers), signal });
       const context = await resolve(authenticated, discriminator); signal.throwIfAborted(); check();
-      if (!context) { stop(); return; }
+      if (!context || context.kind !== kind) { stop(); return; }
+      const principalKey = context.kind === "named" ? context.userId : context.profileTokenHash;
       const reservations: [string, number][] = [
-        [JSON.stringify(["session", context.userId, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession],
-        [JSON.stringify(["principal", context.userId]), limits.maxConnectionsPerPrincipal],
+        [JSON.stringify(["session", context.kind, principalKey, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession],
+        [JSON.stringify(context.kind === "named" ? ["principal", "named", context.userId] :
+          ["principal", "link", context.workspaceId, context.grantId, principalKey]), limits.maxConnectionsPerPrincipal],
         [JSON.stringify(["grant", context.workspaceId, context.grantId]), limits.maxConnectionsPerGrant],
       ];
       if (reservations.some(([key, bound]) => (counts.get(key) ?? 0) >= bound)) { stop(); return; }
       keys = reservations.map(([key]) => key);
       for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
       const ticket = await tickets.redeem(token, context, signal); signal.throwIfAborted(); check();
-      if (!ticket || ticket.audience !== origin || ticket.authority.principalKind !== "named" || ticket.authority.principalId !== context.userId ||
+      if (!ticket || ticket.audience !== origin || ticket.authority.principalKind !== context.kind ||
+        (context.kind === "named" && ticket.authority.principalId !== context.userId) ||
         ticket.authority.grantId !== context.grantId || ticket.binding.workspaceId !== context.workspaceId) { stop(); return; }
       const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
-      host = captureNamedLiveFrameHost({ ticket, storage, native, bounds, validate });
+      host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), storage, native, bounds, validate });
       host.invalidated.addEventListener("abort", stop, { once: true });
       host.assertCurrent();
       if (done || host.invalidated.aborted || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }

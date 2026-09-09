@@ -9,7 +9,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { decodeLiveFrame, encodeLiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveGateway, type LiveGatewayHostReceiveOptions, type LiveGatewayHostRoute, type LiveGatewayLimits, type LiveGatewayOptions } from "./liveGateway.js";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth.js";
-import { createNamedLiveTickets } from "../../sync-relay/src/liveTickets.js";
+import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostBindingReports } from "../../sync-relay/src/liveHostBindingReports.js";
 import { fixture as ticketFixture, scope, binding, host, key, audience } from "../../sync-relay/src/liveTickets.test-helper.js";
 
@@ -21,7 +21,7 @@ const limits: LiveGatewayLimits = {
   maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100,
 };
-const session = { userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "edit" };
+const session = { kind: "named" as const, userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "edit" };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(accept => { resolve = accept; });
@@ -66,10 +66,10 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
     socket.pause();
     return { socket, invalidated: invalidated.signal };
   };
-  const resolve = vi.fn<LiveGatewayOptions["resolveNamedSession"]>(async () => session);
+  const resolve = vi.fn<LiveGatewayOptions["resolveSession"]>(async () => session);
   const open = vi.fn<LiveGatewayOptions["openHostRoute"]>((_input, _signal, receive) => makeRoute(receive));
   const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin,
-    limits, resolveNamedSession: resolve, openHostRoute: open, ...overrides });
+    limits, resolveSession: resolve, openHostRoute: open, ...overrides });
   const completions: Promise<void>[] = [];
   http.on("upgrade", (request, socket, head) => {
     onUpgrade?.(socket);
@@ -126,7 +126,7 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
 function stalledRefusal() {
   let flush!: () => void;
   const socket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { flush = () => callback(); } });
-  const ports = { resolveNamedSession: vi.fn(async () => null), openHostRoute: vi.fn(async () => null) };
+  const ports = { resolveSession: vi.fn(async () => null), openHostRoute: vi.fn(async () => null) };
   const gateway = createLiveGateway({ publicHosts: new Set(["share.example.test"]), publicOrigin: origin, limits, ...ports });
   const request = { method: "GET", url: `/api/live?session=${discriminator}`, rawHeaders: ["Host", "share.example.test"] } as IncomingMessage;
   cleanups.push(async () => { gateway.close(); socket.destroy(); });
@@ -331,7 +331,7 @@ describe("private named live gateway", () => {
   });
 
   it("returns after cancellation even when named authentication never resolves", async () => {
-    const state = await fixture({ limits: { ...limits, upgradeTimeoutMs: 20 }, resolveNamedSession: async () => new Promise(() => {}) });
+    const state = await fixture({ limits: { ...limits, upgradeTimeoutMs: 20 }, resolveSession: async () => new Promise(() => {}) });
     expect(await state.browser().status).toBe(404);
     await Promise.all(state.completions);
     expect(state.open).not.toHaveBeenCalled();
@@ -340,7 +340,7 @@ describe("private named live gateway", () => {
   it("pauses the raw socket throughout asynchronous named authentication", async () => {
     const entered = deferred<IncomingMessage>();
     const resolved = deferred<typeof session>();
-    const state = await fixture({ resolveNamedSession: async request => { entered.resolve(request); return resolved.promise; } });
+    const state = await fixture({ resolveSession: async request => { entered.resolve(request); return resolved.promise; } });
     const client = state.browser();
     const request = await entered.promise;
     expect(request.socket.isPaused()).toBe(true);
@@ -488,7 +488,7 @@ describe("private named live gateway", () => {
 
   it("requires every injected limit to be a positive finite integer", () => {
     const base = { publicHosts: new Set(["share.example.test"]), publicOrigin: origin,
-      resolveNamedSession: async () => null, openHostRoute: async () => null };
+      resolveSession: async () => null, openHostRoute: async () => null };
     for (const name of Object.keys(limits)) for (const bad of [undefined, 0, -1, 1.5, Infinity, NaN]) {
       expect(() => createLiveGateway({ ...base, limits: { ...limits, [name]: bad } as LiveGatewayLimits })).toThrow();
     }
@@ -502,7 +502,7 @@ describe("private named live gateway", () => {
     const stored = await ticketFixture();
     cleanups.push(() => stored.close());
     const held = { coordinate: host, invalidated: new AbortController().signal, requestBinding: async () => binding };
-    const tickets = createNamedLiveTickets({ storage: stored.storage, audience, key,
+    const tickets = createLiveTickets({ storage: stored.storage, audience, key,
       hostReports: createLiveHostBindingReports({ storage: stored.storage, connections: { current: () => held } }) });
     const minted = await tickets.mint({ objectId: binding.objectId }, scope);
     expect(minted).not.toBeNull();
@@ -513,7 +513,7 @@ describe("private named live gateway", () => {
     // Trusted fixture scope is explicit. This does not implement a public
     // discriminator-to-named-scope mapping or real account sign-in service.
     const state = await fixture({
-      resolveNamedSession: (request: IncomingMessage) => resolveNamed(new Request(`${origin}/api/live`, {
+      resolveSession: (request: IncomingMessage) => resolveNamed(new Request(`${origin}/api/live`, {
         headers: { cookie: request.headers.cookie ?? "" },
       }), scope),
     });

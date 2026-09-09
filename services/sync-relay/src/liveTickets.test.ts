@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { createNamedLiveTickets } from "./liveTickets.js";
+import { createLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, key, report, scope } from "./liveTickets.test-helper.js";
 import { hashLiveTicketToken } from "./liveTicketSecurity.js";
 import { openSyncRelayStorage } from "./storage.js";
@@ -8,7 +8,7 @@ it("mints one server-derived live ticket and redeems it exactly once", async () 
   const state = await fixture();
   try {
     const entropy = vi.fn(() => new Uint8Array(32).fill(1));
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, entropy,
+    const service = createLiveTickets({ storage: state.storage, audience, key, entropy,
       newTicketId: () => "ticket-1", hostReports: { currentBinding: async () => report } });
     const minted = await service.mint({ objectId: binding.objectId }, scope);
     expect(minted).toEqual({ token: "01".repeat(32), expiresAtMs: 31000 });
@@ -24,7 +24,7 @@ it("captures browser scope and request before awaiting the host report", async (
   try {
     let resolveReport!: (value: typeof report) => void;
     const pending = new Promise<typeof report>(resolve => { resolveReport = resolve; });
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key,
+    const service = createLiveTickets({ storage: state.storage, audience, key,
       hostReports: { currentBinding: async candidate => { (candidate as { userId: string }).userId = "host-mutated"; return pending; } } });
     const context = { ...scope };
     const input = { objectId: binding.objectId };
@@ -41,7 +41,7 @@ it("rejects extra browser authority and hostile descriptors without reading them
   try {
     const callback = vi.fn(async () => report);
     const getter = vi.fn(() => binding.objectId);
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: callback } });
+    const service = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: callback } });
     for (const value of [
       { objectId: binding.objectId, userId: scope.userId }, Object.create({ objectId: binding.objectId }),
       Object.defineProperty({}, "objectId", { get: getter }),
@@ -56,7 +56,7 @@ it("leaves the canonical credential redeemable after every malformed spelling", 
   const state = await fixture();
   try {
     const callback = vi.fn(async () => report);
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, entropy: () => new Uint8Array(32).fill(171),
+    const service = createLiveTickets({ storage: state.storage, audience, key, entropy: () => new Uint8Array(32).fill(171),
       hostReports: { currentBinding: callback } });
     const minted = await service.mint({ objectId: binding.objectId }, scope);
     for (const token of [minted!.token.toUpperCase(), ` ${minted!.token}`, `${minted!.token} `, `0x${minted!.token}`,
@@ -75,7 +75,7 @@ it("copies the configured key and draws entropy once on a collision", async () =
     const entropyBytes = new Uint8Array(32).fill(1);
     const entropy = vi.fn(() => entropyBytes);
     let id = 0;
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key: mutableKey, entropy,
+    const service = createLiveTickets({ storage: state.storage, audience, key: mutableKey, entropy,
       newTicketId: () => `id-${++id}`, hostReports: { currentBinding: async () => report } });
     mutableKey.fill(0);
     const minted = await service.mint({ objectId: binding.objectId }, scope);
@@ -92,7 +92,7 @@ it("rechecks authority after an asynchronous redemption report", async () => {
   const state = await fixture();
   try {
     let reportCount = 0;
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => {
+    const service = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => {
       if (++reportCount === 2) state.raw.exec("UPDATE sync_relay_share_grants SET generation=5");
       return report;
     } } });
@@ -108,9 +108,9 @@ it("keeps storage failures internal and strips credential-bearing errors", async
     const token = "01".repeat(32);
     const hash = hashLiveTicketToken(token, key);
     const failure = new Error(`private ${token} ${hash}`);
-    const service = createNamedLiveTickets({ storage: {
-      mintNamedLiveTicket: () => { throw failure; }, readNamedLiveTicketTarget: () => { throw failure; },
-      redeemNamedLiveTicket: () => { throw failure; },
+    const service = createLiveTickets({ storage: {
+      mintLiveTicket: () => { throw failure; }, readLiveTicketTarget: () => { throw failure; },
+      redeemLiveTicket: () => { throw failure; },
     }, audience, key, entropy: () => new Uint8Array(32).fill(1), hostReports: { currentBinding: async () => report } });
     for (const operation of [() => service.mint({ objectId: binding.objectId }, scope), () => service.redeem(token, scope)]) {
       const error = await operation().catch(value => value as Error);
@@ -134,7 +134,7 @@ it("owns returned selectors and rejects hostile report fields without invocation
     const paths = ["docs"];
     Object.defineProperty(paths, "0", { get: getter });
     let candidate = { ...report, binding: { ...binding, selectorPaths: paths } };
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => candidate } });
+    const service = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => candidate } });
     expect(await service.mint({ objectId: binding.objectId }, scope)).toBeNull();
     expect(getter).not.toHaveBeenCalled();
     candidate = { ...report, connection: Object.defineProperty({ ...report.connection }, "connectionId", { get: getter }) };
@@ -155,14 +155,14 @@ it("gives simultaneous redemptions through two real database handles one winner"
     let release!: () => void;
     const bothArrived = new Promise<void>(resolve => { release = resolve; });
     let arrivals = 0;
-    const first = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
+    const first = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
     const minted = await first.mint({ objectId: binding.objectId }, scope);
     const hostReports = { currentBinding: async () => {
       if (++arrivals === 2) release();
       await bothArrived;
       return report;
     } };
-    const competitors = [state.storage, second].map(storage => createNamedLiveTickets({ storage, audience, key, hostReports }));
+    const competitors = [state.storage, second].map(storage => createLiveTickets({ storage, audience, key, hostReports }));
     const results = await Promise.all(competitors.map(service => service.redeem(minted!.token, scope)));
     expect(arrivals).toBe(2);
     expect(results.filter(result => result !== null)).toHaveLength(1);

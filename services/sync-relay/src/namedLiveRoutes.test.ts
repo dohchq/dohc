@@ -9,8 +9,10 @@ import { createLiveFrameSession, decodeLiveFrame, type LiveFrame } from "@dohc/l
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
 import { createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
-import { createNamedLiveTickets } from "./liveTickets.js";
-import { createNamedLiveHostReports } from "./namedLiveHostReports.js";
+import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
+import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
+import { createLiveTickets } from "./liveTickets.js";
+import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { fixture as ticketFixture, audience, binding, host, key, scope } from "./liveTickets.test-helper.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
@@ -25,13 +27,24 @@ const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerSessi
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100 };
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-async function fixture(routeLimits = limits) {
+async function fixture(routeLimits = limits, link = false) {
   const state = await ticketFixture();
+  const routeKind = link ? "link" : "named";
+  const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
+  const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
+    sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
+  const linkHeaders: Record<string, string> = link ? { authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
+  if (link) {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    state.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
+    expect(state.storage.mintLinkSession({ session: { sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key),
+      grantId: scope.grantId, generation: 4, mintedAtMs: 999, expiresAtMs: 61_000 } })).toBe(true);
+  }
   const changes = createNamedFrameChanges(16), invalidated = new AbortController();
   const native: NamedFrameNativeHost = {
     workspace: "never-send-native-handle", registrationId: 73, binding: { ...binding, selectorPaths: [binding.currentPath] }, coordinate: host,
@@ -50,10 +63,10 @@ async function fixture(routeLimits = limits) {
   });
   const application = createSyncRelayHandler({ storage: state.storage, resolveActor: actor, shareWebOrigin: audience, relayExchangeKey: exchangeKey, nowMs: () => 1000,
     namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
-  const tickets = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: createNamedLiveHostReports({ storage: state.storage, captureNative }) });
-  const routes = createNamedLiveRoutes({ storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: createLiveMarkdownJournalValidator(policy), sessions: { resolve: application.resolveNamedBrowserSession }, tickets, captureNative });
-  const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/named-tickets" ? routes.handle(request) : application(request),
+  const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
+  const routes = createNamedLiveRoutes({ kind: routeKind, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
+    validate: createLiveMarkdownJournalValidator(policy), sessions: link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }, tickets, captureNative });
+  const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
   http.on("upgrade", (request, socket, head) => { upgrades.push(routes.handleUpgrade(request, socket, head)); });
@@ -62,7 +75,7 @@ async function fixture(routeLimits = limits) {
   async function post(path: string, body: unknown, cookie = "account=reader", extra: Record<string, string> = {}) {
     return new Promise<Response>((resolve, reject) => {
       const request = httpRequest(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: {
-        host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, "content-type": "application/json", cookie, ...extra } }, response => {
+        host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, "content-type": "application/json", cookie, ...linkHeaders, ...extra } }, response => {
         const bytes: Buffer[] = []; response.on("data", chunk => bytes.push(Buffer.from(chunk)));
         response.once("end", () => resolve(new Response(Buffer.concat(bytes), { status: response.statusCode })));
         response.once("error", reject);
@@ -71,18 +84,18 @@ async function fixture(routeLimits = limits) {
     });
   }
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
-  const bootstrap = await post("/sync/live/named-sessions", { grantId: scope.grantId });
+  const bootstrap = link ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
   const { discriminator } = await bootstrap.json() as { discriminator: string };
   async function mint() {
-    expect(await application.resolveNamedBrowserSession(new Request("https://relay.example.test", { headers: { cookie: "account=reader" } }), discriminator)).toEqual(scope);
-    expect(state.storage.resolveNamedLiveObjectBinding(scope, binding.objectId)).toMatchObject({ kind: "current", binding });
-    const response = await post("/sync/live/named-tickets", { discriminator, objectId: binding.objectId });
+    if (!link) expect(await application.resolveNamedBrowserSession(new Request("https://relay.example.test", { headers: { cookie: "account=reader" } }), discriminator)).toEqual(scope);
+    expect(state.storage.resolveLiveObjectHostBinding(currentScope, binding.objectId)).toMatchObject({ kind: "current", binding });
+    const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number };
   }
   function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}) {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/sync/live/named?session=${discriminator}`, ["dohc-live-v1", `dohc-live-ticket.${token}`], {
-      headers: { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...extra }, perMessageDeflate: false });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/sync/live/${routeKind}?session=${discriminator}`, ["dohc-live-v1", `dohc-live-ticket.${token}`], {
+      headers: { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
     const received: LiveFrame[] = [], watchers = new Set<() => void>();
     ws.on("message", bytes => { received.push(decodeLiveFrame(Buffer.from(bytes as Buffer), frames.receive.maxFrameBytes)); for (const notify of watchers) notify(); });
@@ -96,11 +109,11 @@ async function fixture(routeLimits = limits) {
     }
     return { ws, status, received, until };
   }
-  return { ...state, post, discriminator, mint, connect, captureNative, native, changes, invalidated, actor, application, routes };
+  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, captureNative, native, changes, invalidated, actor, application, routes };
 }
 
-it("mints through actual HTTP auth and redeems once before exposing only live frames", async () => {
-  const f = await fixture(), minted = await f.mint();
+it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
+  const f = await fixture(limits, link), minted = await f.mint();
   expect(Object.keys(minted).sort()).toEqual(["expiresAtMs", "token"]);
   const browser = f.connect(minted.token); expect(await browser.status).toBe(101);
   await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
@@ -206,8 +219,8 @@ it("aborts the HTTP response on route shutdown while retaining pending authentic
 it("never accepts browser identity fields or mismatched trusted share scope", async () => {
   const f = await fixture();
   expect((await f.post("/sync/live/named-tickets", { discriminator: f.discriminator, objectId: binding.objectId, userId: scope.userId })).status).toBe(404);
-  expect(f.storage.resolveNamedLiveObjectBinding({ ...scope, shareId: "other-share" }, binding.objectId)).toMatchObject({ kind: "refused", reason: "not-authorized" });
-  expect(f.storage.resolveNamedLiveObjectBinding(scope, "missing-object")).toMatchObject({ kind: "refused", reason: "stale-document" });
+  expect(f.storage.resolveLiveObjectHostBinding({ ...scope, shareId: "other-share" }, binding.objectId)).toMatchObject({ kind: "refused", reason: "not-authorized" });
+  expect(f.storage.resolveLiveObjectHostBinding(scope, "missing-object")).toMatchObject({ kind: "refused", reason: "stale-document" });
   expect(f.captureNative).not.toHaveBeenCalled();
 });
 
@@ -217,4 +230,33 @@ it("answers control ping within its explicit budget and rejects text application
   const pong = once(browser.ws, "pong"); browser.ws.ping("probe"); expect((await pong)[0].toString()).toBe("probe");
   const closed = once(browser.ws, "close"); browser.ws.send("not binary"); await closed;
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});
+
+
+it("binds a link socket to its exact session and closes it when that session is refreshed", async () => {
+  const f = await fixture(limits, true), minted = await f.mint(), browser = f.connect(minted.token);
+  expect(await browser.status).toBe(101);
+  await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
+  const principal = f.raw.prepare("SELECT principal_id,display_name FROM sync_relay_link_principals").get()!;
+  expect(principal.display_name).toBeNull();
+  const serialized = JSON.stringify({ frames: browser.received, ticket: f.raw.prepare("SELECT * FROM sync_relay_live_session_tickets").get() });
+  for (const secret of [f.bearer, f.profile, hashLinkBearer(f.bearer, key), hashLinkProfileSecret(f.profile, key)]) expect(serialized).not.toContain(secret);
+  const old = f.storage.findLinkSessionByCapabilityHash(hashLinkBearer(f.bearer, key))!;
+  const closed = once(browser.ws, "close");
+  expect(f.storage.replaceLinkSession({ currentSession: old, session: { sessionId: "new-link-session", capabilityHash: hashLinkBearer("fresh", key),
+    grantId: old.grantId, generation: old.generation, mintedAtMs: 1000, expiresAtMs: 70_000 }, guard() {} })).toBe(true);
+  f.changes.notify(); await closed;
+  expect(f.invalidated.signal.aborted).toBe(false);
+  expect(f.raw.prepare("SELECT link_session_id FROM sync_relay_live_session_tickets").get()).toEqual({ link_session_id: old.sessionId });
+});
+
+it.each<Record<string, string>>([
+  { authorization: "" }, { "x-dohc-link-profile-secret": "" }, { "x-dohc-link-profile-secret": Buffer.alloc(32, 9).toString("base64url") },
+  { origin: "https://other.example" }, { host: "other.example" }, { "x-dohc-relay-exchange-key": "forged" },
+])("refuses invalid private link credentials and origin without consuming a ticket: %j", async headers => {
+  const f = await fixture(limits, true), minted = await f.mint();
+  expect((await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId}, "anonymous", headers)).status).toBe(404);
+  expect(await f.connect(minted.token, "anonymous", headers).status).toBe(404);
+  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({redeemed_at_ms: null});
+  expect(await f.connect(minted.token, "anonymous").status).toBe(101);
 });

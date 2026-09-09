@@ -8,6 +8,7 @@ export interface NamedLiveBrowserScope {
 }
 
 export interface NamedLiveBrowserContext extends NamedLiveBrowserScope {
+  readonly kind: "named";
   readonly userId: string;
 }
 
@@ -34,6 +35,6 @@ export function createNamedLiveBrowserResolver(options: {
       storage: options.storage, actorUserId: actor.userId, grantId,
     });
     if (!current.ok || current.share.workspaceId !== workspaceId || current.share.shareId !== shareId) return null;
-    return { userId: actor.userId, workspaceId, shareId, grantId };
+    return { kind: "named", userId: actor.userId, workspaceId, shareId, grantId };
   };
 }

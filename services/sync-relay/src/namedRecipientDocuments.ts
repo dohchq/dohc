@@ -54,7 +54,8 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
         if (!current.ok || current.grant.access !== "edit" || current.share.shareId !== context.shareId || current.share.workspaceId !== context.workspaceId ||
           current.grant.generation !== authority.grant.generation) return refuse();
         controller.signal.throwIfAborted();
-        const body = JSON.stringify({...context, files});
+        const body = JSON.stringify({ userId: context.userId, workspaceId: context.workspaceId,
+          shareId: context.shareId, grantId: context.grantId, files });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
         return new Response(body, {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
       } catch {return refuse();}

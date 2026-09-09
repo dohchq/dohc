@@ -2,7 +2,7 @@ import { types } from "node:util";
 import { parseHostEpoch, parseHostMode, parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier, parseLiveUpdateDigest } from "@dohc/live-session-contract/live-update-admission";
-import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
+import type { LiveBrowserContext } from "./liveBrowserContext.js";
 import type { LiveHostConnectionCoordinate, TicketHostReport } from "./storage.js";
 
 export function ticketRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -24,14 +24,20 @@ export function ticketRecord(value: unknown, fields: readonly string[]): Record<
   return result;
 }
 
-export function snapshotNamedTicketScope(value: unknown): NamedLiveBrowserContext {
-  const scope = ticketRecord(value, ["workspaceId", "shareId", "grantId", "userId"]);
-  return {
+export function snapshotLiveTicketScope(value: unknown): LiveBrowserContext {
+  if (typeof value !== "object" || value === null || types.isProxy(value)) throw new TypeError("Invalid live-ticket scope.");
+  const kind = Object.getOwnPropertyDescriptor(value, "kind")?.value;
+  if (kind !== "named" && kind !== "link") throw new TypeError("Invalid live-ticket scope kind.");
+  const scope = ticketRecord(value, kind === "named" ? ["kind", "workspaceId", "shareId", "grantId", "userId"] :
+    ["kind", "workspaceId", "shareId", "grantId", "sessionId", "capabilityHash", "profileTokenHash"]);
+  const common = {
     workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
     shareId: parseLiveUpdateIdentifier(scope.shareId, "share ID"),
     grantId: parseLiveUpdateIdentifier(scope.grantId, "grant ID"),
-    userId: parseLiveUpdateIdentifier(scope.userId, "user ID"),
   };
+  return kind === "named" ? { ...common, kind, userId: parseLiveUpdateIdentifier(scope.userId, "user ID") } :
+    { ...common, kind, sessionId: parseLiveUpdateIdentifier(scope.sessionId, "link session ID"),
+      capabilityHash: parseTicketHash(scope.capabilityHash), profileTokenHash: parseTicketHash(scope.profileTokenHash) };
 }
 
 export function snapshotHostCoordinate(value: unknown): LiveHostConnectionCoordinate {

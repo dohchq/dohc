@@ -13,7 +13,7 @@ import type { LiveDocumentKey, LiveUpdateStructRange, ServerDerivedLiveUpdateAut
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "../deviceHostCredential";
-import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
+import type { LiveBrowserContext } from "../liveBrowserContext";
 
 export type LiveHostControlRefusalReason =
   | "not-provisioned"
@@ -48,7 +48,9 @@ export interface CurrentLiveBindingRequest {
   readonly document: LiveDocumentKey;
   readonly actor:
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
-    | { readonly kind: "named"; readonly userId: string; readonly grantId: string };
+    | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
+    | { readonly kind: "link"; readonly sessionId: string; readonly capabilityHash: string;
+        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -571,11 +573,11 @@ export interface SyncRelayStorage {
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
-  resolveNamedLiveObjectBinding(scope: NamedLiveBrowserContext, objectId: string): CurrentLiveBindingResult;
+  resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
-  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
-  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
-  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null;
+  readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   // Local deployment-operator operations. Account and device requests cannot call these.
   provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult;
@@ -1044,19 +1046,19 @@ export interface TicketHostReport {
   readonly binding: LiveObjectBinding;
 }
 
-export interface NamedLiveTicketLookup {
+export interface LiveTicketLookup {
   readonly tokenHash: string;
-  readonly scope: NamedLiveBrowserContext;
+  readonly scope: LiveBrowserContext;
   readonly audience: string;
 }
 
-export interface NamedLiveTicketMint extends NamedLiveTicketLookup {
+export interface LiveTicketMint extends LiveTicketLookup {
   readonly objectId: string;
   readonly ticketId: string;
   readonly report: TicketHostReport;
 }
 
-export interface NamedLiveTicketRedemption extends NamedLiveTicketLookup {
+export interface LiveTicketRedemption extends LiveTicketLookup {
   readonly report: TicketHostReport;
 }
 

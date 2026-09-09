@@ -1,10 +1,10 @@
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
-import type { NamedLiveTicketOptions } from "./liveTickets.js";
+import type { LiveBrowserContext } from "./liveBrowserContext.js";
+import type { LiveTicketOptions } from "./liveTickets.js";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage, TicketHostReport } from "./storage.js";
-import { snapshotHostCoordinate, snapshotNamedTicketScope, snapshotTicketHostReport } from "./liveTicketInputs.js";
+import { snapshotHostCoordinate, snapshotLiveTicketScope, snapshotTicketHostReport } from "./liveTicketInputs.js";
 
 export interface HeldLiveHostConnection {
   // The authenticated runtime assigns a fresh server-derived connectionId per incarnation.
@@ -12,7 +12,7 @@ export interface HeldLiveHostConnection {
   readonly coordinate: LiveHostConnectionCoordinate;
   // Runtime aborts permanently before replacement and cancels underlying requests.
   readonly invalidated: AbortSignal;
-  requestBinding(scope: NamedLiveBrowserContext, objectId: string): Promise<LiveObjectBinding | null>;
+  requestBinding(scope: LiveBrowserContext, objectId: string): Promise<LiveObjectBinding | null>;
 }
 
 export interface LiveHostConnections {
@@ -48,15 +48,15 @@ async function requestWhileLive(
   }
 }
 
-export function createLiveHostBindingReports(options: LiveHostBindingReportOptions): NamedLiveTicketOptions["hostReports"] {
+export function createLiveHostBindingReports(options: LiveHostBindingReportOptions): LiveTicketOptions["hostReports"] {
   const current = options.connections.current.bind(options.connections);
   const readControl = options.storage.getLiveHostControl.bind(options.storage);
   return {
     async currentBinding(context, requestedObjectId) {
-      let scope: NamedLiveBrowserContext;
+      let scope: LiveBrowserContext;
       let objectId: string;
       try {
-        scope = snapshotNamedTicketScope(context);
+        scope = snapshotLiveTicketScope(context);
         objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
       } catch { return null; }
       try {

@@ -2,7 +2,6 @@ import { normalizeShareDiscussionDisplayName, normalizeShareDiscussionBody } fro
 import {
   LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT,
   LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES,
-  LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES,
   LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
   DISCUSSION_MESSAGE_RATE_WINDOW_MS,
   LINK_DISCUSSION_PAGE_LIMIT,
@@ -21,7 +20,8 @@ import {
   type SyncRelayLinkPrincipalRow,
   type SyncRelayDeletedDiscussionMessage,
 } from "./types";
-import { rowToLinkPrincipalRow, nullableText, rowToShareDiscussionMessageRow } from "./rows";
+import { rowToLinkPrincipalRow, rowToShareDiscussionMessageRow } from "./rows";
+import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
 
 export function normalizeDiscussionDisplayName(value: unknown): string | null {
   const result = normalizeShareDiscussionDisplayName(value);
@@ -77,17 +77,6 @@ function discussionMessageStorageBytes(input: {
   );
 }
 
-function linkPrincipalStorageBytes(input: {
-  principalId: string;
-  grantId: string;
-  profileTokenHash: string;
-}): number {
-  return (
-    utf8Bytes(input.principalId, input.grantId, input.profileTokenHash) +
-    LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES
-  );
-}
-
 function validDiscussionDeletingUserId(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -138,66 +127,16 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
     // the final live-authority decision below.
     input.guard?.();
     return storage.tx(() => {
-      // This is the final authority read. The same BEGIN IMMEDIATE transaction
-      // holds the write lock through principal mint, binding, budget charge,
-      // and message insert.
-      const authority = storage.db
-        .prepare(
-          `SELECT session.session_id, session.principal_id AS session_principal_id,
-                  session.grant_id, session.generation AS session_generation,
-                  session.minted_at_ms, session.expires_at_ms,
-                  grant.share_id, grant.generation AS grant_generation,
-                  grant.access, grant.status, grant.revoked_at_ms,
-                  share.workspace_id, share.granter_user_id,
-                  share.link_writes_paused_at_ms,
-                  share.discussion_revision,
-                  workspace.owner_user_id
-           FROM sync_relay_link_sessions AS session
-           JOIN sync_relay_share_grants AS grant ON grant.grant_id = session.grant_id
-           JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-           JOIN sync_relay_workspaces AS workspace
-             ON workspace.workspace_id = share.workspace_id
-           WHERE session.capability_hash = ?
-           LIMIT 1`,
-        )
-        .get(input.capabilityHash);
-      if (
-        !authority ||
-        authority.status !== "active" ||
-        authority.revoked_at_ms !== null ||
-        Number(authority.session_generation) !== Number(authority.grant_generation) ||
-        Number(authority.minted_at_ms) > createdAtMs ||
-        Number(authority.expires_at_ms) <= createdAtMs ||
-        authority.owner_user_id !== authority.granter_user_id
-      ) {
-        return { ok: false, reason: "not-authorized" };
-      }
+      const enrollment = readLinkEnrollment(storage, input, createdAtMs);
+      if (!enrollment) return { ok: false, reason: "not-authorized" };
+      const { authority } = enrollment;
+      let { principal } = enrollment;
       const grantId = String(authority.grant_id);
       const shareId = String(authority.share_id);
       const workspaceId = String(authority.workspace_id);
       const activityRevision = Number(authority.discussion_revision);
       if (!Number.isSafeInteger(activityRevision) || activityRevision < 0) {
         throw new Error("share discussion revision is invalid");
-      }
-      const existingPrincipalRow = storage.db
-        .prepare(
-          `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                  display_name, created_at_ms, blocked_at_ms,
-                  discussion_revision, storage_bytes
-           FROM sync_relay_link_principals
-           WHERE grant_id = ? AND profile_token_hash = ?
-           LIMIT 1`,
-        )
-        .get(grantId, input.profileTokenHash);
-      let principal = existingPrincipalRow
-        ? rowToLinkPrincipalRow(existingPrincipalRow)
-        : null;
-      const sessionPrincipalId = nullableText(authority.session_principal_id);
-      if (
-        (principal && sessionPrincipalId !== null && sessionPrincipalId !== principal.principalId) ||
-        (!principal && sessionPrincipalId !== null)
-      ) {
-        return { ok: false, reason: "not-authorized" };
       }
       if (principal) {
         const replayRow = storage.db
@@ -229,12 +168,8 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
       if (authority.access !== "comment") {
         return { ok: false, reason: "not-authorized" };
       }
-      if (principal && principal.blockedAtMs !== null) {
-        return { ok: false, reason: "blocked", activityRevision };
-      }
-      if (authority.link_writes_paused_at_ms !== null) {
-        return { ok: false, reason: "paused", activityRevision };
-      }
+      const writeRefusal = linkWriteRefusal(enrollment);
+      if (writeRefusal) return { ok: false, reason: writeRefusal, activityRevision };
       if (
         principal &&
         claimedName !== null &&
@@ -244,20 +179,7 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
         return { ok: false, reason: "name-already-set" };
       }
 
-      if (!principal) {
-        const principalCount = Number(
-          storage.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_link_principals
-               WHERE grant_id = ? AND mint_generation = ?`,
-            )
-            .get(grantId, Number(authority.grant_generation))?.count ?? 0,
-        );
-        if (principalCount >= storage.options.linkDiscussionPrincipalLimit) {
-          return { ok: false, reason: "principal-limit" };
-        }
-      }
+      if (linkPrincipalLimitReached(storage, enrollment)) return { ok: false, reason: "principal-limit" };
 
       if (principal) {
         const rateCount = Number(
@@ -312,11 +234,7 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
       const displayNameSnapshot = committedName ?? "Anonymous";
       const principalAddedBytes = principal
         ? 0
-        : linkPrincipalStorageBytes({
-            principalId,
-            grantId,
-            profileTokenHash: input.profileTokenHash,
-          });
+        : linkPrincipalStorageBytes(principalId, grantId, input.profileTokenHash);
       const messageStorageBytes = discussionMessageStorageBytes({
         messageId,
         shareId,
@@ -337,49 +255,8 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
       }
       const discussionRevision = nextShareDiscussionRevision(storage, shareId);
 
-      if (!principal) {
-        storage.db
-          .prepare(
-            `INSERT INTO sync_relay_link_principals (
-               principal_id, grant_id, mint_generation, profile_token_hash,
-               display_name, created_at_ms, blocked_at_ms,
-               discussion_revision, storage_bytes
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-          )
-          .run(
-            principalId,
-            grantId,
-            Number(authority.grant_generation),
-            input.profileTokenHash,
-            committedName,
-            createdAtMs,
-            discussionRevision,
-            principalAddedBytes,
-          );
-        principal = storage.getLinkPrincipal(principalId)!;
-      } else if (principal.displayName === null && committedName !== null) {
-        storage.db
-          .prepare(
-            `UPDATE sync_relay_link_principals
-             SET display_name = ?, discussion_revision = ?
-             WHERE principal_id = ? AND display_name IS NULL`,
-          )
-          .run(committedName, discussionRevision, principal.principalId);
-        principal = storage.getLinkPrincipal(principal.principalId)!;
-      }
-
-      if (sessionPrincipalId === null) {
-        const bound = storage.db
-          .prepare(
-            `UPDATE sync_relay_link_sessions
-             SET principal_id = ?
-             WHERE session_id = ? AND capability_hash = ? AND principal_id IS NULL`,
-          )
-          .run(principal.principalId, authority.session_id, input.capabilityHash);
-        if (Number(bound.changes ?? 0) !== 1) {
-          throw new Error("link discussion session binding changed inside transaction");
-        }
-      }
+      principal = commitLinkEnrollment(storage, { ...input, enrollment, principalId,
+        displayName: committedName, createdAtMs, discussionRevision });
 
       storage.db
         .prepare(

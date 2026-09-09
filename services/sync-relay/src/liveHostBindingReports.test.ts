@@ -2,9 +2,9 @@ import { expect, it, vi } from "vitest";
 import { parseHostEpoch, type HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { createLiveHostBindingReports, type HeldLiveHostConnection } from "./liveHostBindingReports.js";
-import { createNamedLiveTickets } from "./liveTickets.js";
+import { createLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, host, key, scope } from "./liveTickets.test-helper.js";
-import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth.js";
+import type { LiveBrowserContext } from "./liveBrowserContext.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -15,7 +15,7 @@ function deferred<T>() {
 
 function setup() {
   const invalidation = new AbortController();
-  const request = vi.fn<(context: NamedLiveBrowserContext, objectId: string) => Promise<LiveObjectBinding | null>>(
+  const request = vi.fn<(context: LiveBrowserContext, objectId: string) => Promise<LiveObjectBinding | null>>(
     async () => structuredClone(binding),
   );
   const handle: HeldLiveHostConnection = { coordinate: { ...host }, invalidated: invalidation.signal, requestBinding: request };
@@ -218,7 +218,7 @@ it.each([false, true])("correlates simultaneous reverse-order responses; swapped
   const first = deferred<LiveObjectBinding | null>();
   const second = deferred<LiveObjectBinding | null>();
   state.request.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-  const otherScope = { workspaceId: "workspace-2", shareId: "share-2", grantId: "grant-2", userId: "user-2" };
+  const otherScope = { kind: "named" as const, workspaceId: "workspace-2", shareId: "share-2", grantId: "grant-2", userId: "user-2" };
   const other = { ...binding, workspaceId: otherScope.workspaceId, objectId: "object-2", currentPath: "docs/b.md" };
   const a = state.adapter.currentBinding(scope, binding.objectId);
   const b = state.adapter.currentBinding(otherScope, other.objectId);
@@ -262,10 +262,10 @@ it.each(["mint", "redeem"] as const)("ticket %s refuses replacement after report
     const invalidation = new AbortController();
     let current: HeldLiveHostConnection = { coordinate: host, invalidated: invalidation.signal, requestBinding: async () => binding };
     const adapter = createLiveHostBindingReports({ storage: state.storage, connections: { current: () => current } });
-    const direct = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: adapter });
+    const direct = createLiveTickets({ storage: state.storage, audience, key, hostReports: adapter });
     const existing = operation === "redeem" ? await direct.mint({ objectId: binding.objectId }, scope) : null;
     const connection = { ...host, connectionId: "connection-2" };
-    const racing = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async (context, objectId) => {
+    const racing = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async (context, objectId) => {
       const oldReport = await adapter.currentBinding(context, objectId);
       expect(oldReport).not.toBeNull();
       invalidation.abort();
@@ -286,7 +286,7 @@ it("ticket authority changes after report collection still refuse at commit", as
   try {
     const handle: HeldLiveHostConnection = { coordinate: host, invalidated: new AbortController().signal, requestBinding: async () => binding };
     const adapter = createLiveHostBindingReports({ storage: state.storage, connections: { current: () => handle } });
-    const service = createNamedLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async (context, objectId) => {
+    const service = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async (context, objectId) => {
       const report = await adapter.currentBinding(context, objectId);
       state.raw.exec("UPDATE sync_relay_share_grants SET access='view'");
       return report;

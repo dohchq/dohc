@@ -18,8 +18,8 @@ import { initializeRelayDeployment, openRelayDeployment } from "../../sync-relay
 import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
-import { createNamedLiveTickets } from "../../sync-relay/src/liveTickets.js";
-import { createNamedLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
+import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
+import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js";
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
@@ -147,8 +147,8 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
     const captureNative = active.captureNative.bind(active);
-    const tickets = createNamedLiveTickets({ storage, audience, key: ticketKey, hostReports: createNamedLiveHostReports({ storage, captureNative }) });
-    routes = createNamedLiveRoutes({ storage, hosts: new Set([new URL(relayUrl).host]), publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
+    const tickets = createLiveTickets({ storage, audience, key: ticketKey, hostReports: createLiveHostReports({ storage, captureNative }) });
+    routes = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set([new URL(relayUrl).host]), publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: { maxClientVectorBytes: 100000, maxSyncOutputBytes: 1000000, maxAppliedUpdateBytes: 1000000, maxSubmissionBytes: 1000000, maxAdmissionBytes: 4000000 },
       validate, sessions: { resolve: relayApp.resolveNamedBrowserSession }, tickets, captureNative });
     closes.push(async () => routes.close());
@@ -158,7 +158,7 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     const gateway = createLiveGateway({ publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
       limits: { maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxFrameBytes: 65536,
         maxPendingBytes: 2000000, maxPendingFrames: 64, maxFragments: 8, maxBufferedChunks: 64, upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 },
-      resolveNamedSession: async (request, discriminator, signal) => { const authenticated = namedLiveGatewayRequest(request, audience, signal);
+      resolveSession: async (request, discriminator, signal) => { const authenticated = namedLiveGatewayRequest(request, audience, signal);
         return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null; },
       openHostRoute: createNamedLiveRelayRoute({ relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000 }),
     });

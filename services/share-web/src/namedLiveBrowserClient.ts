@@ -15,6 +15,7 @@ export interface NamedLiveBrowserClientLimits {
 }
 
 export interface NamedLiveBrowserSessionContext {
+  kind: "named";
   userId: string;
   workspaceId: string;
   shareId: string;
@@ -101,6 +102,7 @@ export function createNamedLiveBrowserClient(options: {
         } else {
           if (Object.keys(record).sort().join(",") !== "grantId,shareId,userId,workspaceId") return null;
           return {
+            kind: "named",
             userId: parseLiveUpdateIdentifier(record.userId, "named session context"),
             workspaceId: parseLiveUpdateIdentifier(record.workspaceId, "named session context"),
             shareId: parseLiveUpdateIdentifier(record.shareId, "named session context"),

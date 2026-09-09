@@ -5,7 +5,8 @@ import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-ses
 import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
+import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
+import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
@@ -35,6 +36,7 @@ export interface NamedFrameHostBounds {
 /** Wraps an established authenticated native registration. It never owns host retirement. */
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
+  actor: CurrentLiveBindingRequest["actor"];
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
@@ -55,13 +57,14 @@ export function captureNamedLiveFrameHost(options: {
     bounds.maxSubmissionBytes, bounds.maxAdmissionBytes, native.registrationId, native.deadlineMs]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid named native frame bound.");
   }
-  if (native.deadlineMs > 0xffff_ffff || ticket.authority.principalKind !== "named") throw new TypeError("Invalid named host capture.");
+  if (native.deadlineMs > 0xffff_ffff || (ticket.authority.principalKind !== "named" && ticket.authority.principalKind !== "link")) throw new TypeError("Invalid live host capture.");
   for (const field of ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "restoreFenceGeneration"] as const) {
     if (native.binding[field] !== ticket.binding[field]) throw new Error("Native registration binding changed.");
   }
   const document: LiveDocumentKey = { workspaceId: ticket.binding.workspaceId, mainVersionId: ticket.binding.mainVersionId,
     objectId: ticket.binding.objectId, lineageClaimId: ticket.binding.lineageClaimId };
-  const actor = { kind: "named" as const, userId: ticket.authority.principalId, grantId: ticket.authority.grantId };
+  const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
+  if (actor.kind !== ticket.authority.principalKind) throw new TypeError("Live host actor kind changed.");
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;

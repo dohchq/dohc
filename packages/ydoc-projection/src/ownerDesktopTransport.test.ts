@@ -1,5 +1,5 @@
 import {captureNamedLiveFrameHost,createNamedFrameChanges} from "../../../services/sync-relay/src/namedLiveFrameHost.js";
-import {createNamedLiveTickets} from "../../../services/sync-relay/src/liveTickets.js";
+import {createLiveTickets} from "../../../services/sync-relay/src/liveTickets.js";
 import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/deviceLiveHostConfig.js";
 import {createHash} from "node:crypto";
 import {spawn,spawnSync,type ChildProcess} from "node:child_process";
@@ -232,14 +232,14 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([false,true])("keep
     const namedBinding = deployment.storage.resolveCurrentLiveDocumentBinding({document,actor: namedActor});
     if (namedBinding.kind !== "current") throw new Error("Named owner binding unavailable.");
     const nativePeer = await control.captureNative(namedBinding.binding);
-    const scope = {workspaceId: "workspace",shareId: "named-share",grantId: "named-grant",userId: "reader"};
-    const tickets = createNamedLiveTickets({storage: deployment.storage,audience: `https://localhost:${sharePort}`,key: Buffer.alloc(32,17),
+    const scope = {kind: "named" as const,workspaceId: "workspace",shareId: "named-share",grantId: "named-grant",userId: "reader"};
+    const tickets = createLiveTickets({storage: deployment.storage,audience: `https://localhost:${sharePort}`,key: Buffer.alloc(32,17),
       hostReports: {currentBinding: async () => ({connection: nativePeer.coordinate,binding: namedBinding.binding})}});
     const minted = await tickets.mint({objectId: document.objectId},scope);
     if (!minted) throw new Error("Named owner ticket was not minted.");
     const ticket = await tickets.redeem(minted.token,scope);
     if (!ticket) throw new Error("Named owner ticket was not redeemed.");
-    const namedPeer = captureNamedLiveFrameHost({ticket,storage: deployment.storage,native: nativePeer,
+    const namedPeer = captureNamedLiveFrameHost({ticket,actor: namedActor,storage: deployment.storage,native: nativePeer,
       bounds: {maxClientVectorBytes: 100_000,maxSyncOutputBytes: 2_000_000,maxAppliedUpdateBytes: 2_000_000,maxSubmissionBytes: 2_000_000,maxAdmissionBytes: 8_000_000},
       validate: createLiveMarkdownJournalValidator(policy)});
     namedPeerInvalidated = namedPeer.invalidated;

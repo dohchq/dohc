@@ -28,8 +28,8 @@ import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createNamedLiveRoutes } from "./namedLiveRoutes";
-import { createNamedLiveTickets } from "./liveTickets";
-import { createNamedLiveHostReports } from "./namedLiveHostReports";
+import { createLiveTickets } from "./liveTickets";
+import { createLiveHostReports } from "./namedLiveHostReports";
 import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
@@ -415,8 +415,8 @@ if (namedLiveConfig) {
     if (!host) throw new Error("Named live host is unavailable.");
     return host.captureNative(binding, signal);
   };
-  const tickets = createNamedLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createNamedLiveHostReports({ storage, captureNative }) });
-  namedLive = createNamedLiveRoutes({ storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  const tickets = createLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createLiveHostReports({ storage, captureNative }) });
+  namedLive = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative });
