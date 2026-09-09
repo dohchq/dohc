@@ -14,8 +14,10 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx
 mod application_record;
 mod chunks;
 pub(crate) mod enrollment;
+mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
 pub use enrollment::journal_live_event_or_defer_in_tx;
+pub use settlement_record::journal_live_settlement_in_tx;
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,
@@ -26,6 +28,9 @@ pub(crate) fn apply_audit_envelope(
         BASE_OP => apply_base_envelope(store, envelope, faults),
         application_record::EVENT_OP => {
             application_record::apply_event_envelope(store, envelope, faults)
+        }
+        settlement_record::SETTLEMENT_OP => {
+            settlement_record::apply_settlement_envelope(store, envelope, faults)
         }
         _ => Err(SyncError::UnsupportedOperation),
     }

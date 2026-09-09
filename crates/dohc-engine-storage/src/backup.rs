@@ -51,6 +51,9 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_base_conflicts",
     "live_audit_record_manifests",
     "live_audit_pending_exports",
+    "live_audit_settlements",
+    "live_audit_settlement_publications",
+    "live_audit_settlement_conflicts",
     "live_audit_record_chunks",
     "live_audit_events",
     "live_audit_event_publications",
@@ -522,7 +525,10 @@ mod tests {
             tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_record_manifests VALUES (?1,'{}',?1)",[&sha]).unwrap();
-            tx.execute("INSERT INTO live_audit_pending_exports VALUES ('relay','workspace','main','object',?1,0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_pending_exports VALUES ('relay','workspace','main','object',?1,0,-1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlements VALUES ('settlement','workspace',?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlement_publications VALUES ('settlement','workspace','relay','main','object',?1,0,?2,'peer',0)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
@@ -532,6 +538,9 @@ mod tests {
         for (index, table) in [
             "live_audit_record_manifests",
             "live_audit_pending_exports",
+            "live_audit_settlements",
+            "live_audit_settlement_publications",
+            "live_audit_settlement_conflicts",
             "live_audit_record_chunks",
             "live_audit_events",
             "live_audit_event_publications",

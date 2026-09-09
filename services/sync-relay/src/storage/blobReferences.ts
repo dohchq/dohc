@@ -88,6 +88,9 @@ export function referencedBlobShas(
       const chunk = asRecord(value);
       if (chunk) push(chunk.sha256);
     }
+  } else if (opKind === "live.audit.settlement") {
+    const audit = asRecord(record.record);
+    if (audit) push(audit.markdownDigest);
   } else if (opKind === "live.audit.base") {
     const audit = asRecord(record.record);
     const checkpoint = audit ? asRecord(audit.checkpoint) : null;

@@ -2503,6 +2503,15 @@ fn collect_blob_refs(
                     insert_optional_ref(&mut refs, chunk.get("sha256"), BlobKind::Binary)?;
                 }
             }
+            "live.audit.settlement" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("record")
+                        .and_then(|record| record.get("markdownDigest")),
+                    BlobKind::Text,
+                )?;
+            }
             "live.audit.base" => {
                 insert_optional_ref(
                     &mut refs,
@@ -4679,6 +4688,24 @@ mod conflict_resolve_blob_ref_tests {
         assert_eq!(
             collect_blob_refs(&[envelope]).unwrap(),
             BTreeMap::from([(sha, BTreeSet::from([BlobKind::Ydoc]))])
+        );
+    }
+
+    #[test]
+    fn native_settlement_keeps_projection_in_the_text_blob_lane() {
+        let sha = "a".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.settlement".into(),
+            payload: serde_json::json!({"record":{"markdownDigest":sha}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([(sha, BTreeSet::from([BlobKind::Text]))])
         );
     }
 

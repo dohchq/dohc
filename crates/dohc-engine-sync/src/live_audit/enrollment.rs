@@ -68,6 +68,12 @@ pub(crate) fn prepare_exports(
                 return Ok(Some((usize::try_from(length).map_err(SyncError::corrupt)?,Vec::new())));
             }
             journal_live_base_in_tx(tx,&namespace,&binding,now_ms)?.ok_or_else(||invalid("native audit export has no relay position"))?;
+            let next_settlement:Option<(String,i64)>=tx.query_row(&format!("SELECT s.settlement_id,s.terminal_cursor FROM live_device_settlements s WHERE {SCOPE} AND s.terminal_cursor>(SELECT after_settlement_cursor FROM live_audit_pending_exports WHERE {SCOPE}) ORDER BY s.terminal_cursor LIMIT 1"),p,|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(SyncError::corrupt)?;
+            if let Some((id,cursor))=next_settlement {
+                settlement_record::journal_ready_in_tx(tx,workspace,&id,now_ms)?.ok_or_else(||invalid("native settlement export has no relay position"))?;
+                tx.execute(&format!("UPDATE live_audit_pending_exports SET after_settlement_cursor=?6 WHERE {SCOPE}"),params![p[0],p[1],p[2],p[3],p[4],cursor]).map_err(SyncError::persist)?;
+                return Ok(Some((crate::MAX_PAYLOAD_JSON_BYTES,Vec::new())));
+            }
             tx.execute(&format!("DELETE FROM live_audit_pending_exports WHERE {SCOPE}"),p).map_err(SyncError::persist)?;
             let declined=if !pending_in_tx(tx,workspace)? {
                 crate::enrolment::finish_live_history_enrolment_in_tx(tx,workspace,now_ms)?

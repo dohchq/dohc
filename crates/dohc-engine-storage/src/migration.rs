@@ -1866,9 +1866,41 @@ CREATE TABLE live_audit_pending_exports (
     object_id TEXT NOT NULL,
     lineage_claim_id TEXT NOT NULL,
     after_event_count INTEGER NOT NULL CHECK(after_event_count BETWEEN 0 AND 9007199254740991),
+    after_settlement_cursor INTEGER NOT NULL DEFAULT -1 CHECK(after_settlement_cursor BETWEEN -1 AND 9007199254740991),
     PRIMARY KEY(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id)
 ) STRICT;
 CREATE INDEX live_accepted_enrollment_streams ON live_accepted_checkpoints(workspace_id,event_count,relay_database_namespace,main_version_id,object_id,lineage_claim_id);
+CREATE TABLE live_audit_settlements (
+    settlement_id TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE live_audit_settlement_publications (
+    settlement_id TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    terminal_cursor INTEGER NOT NULL CHECK(terminal_cursor BETWEEN 0 AND 9007199254740991),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX live_audit_settlement_export_stream ON live_audit_settlement_publications(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id,terminal_cursor);
+CREATE TABLE live_audit_settlement_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
 CREATE TABLE live_audit_record_chunks (
     record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 1024),
@@ -1891,6 +1923,7 @@ CREATE TABLE live_audit_events (
     UNIQUE(relay_database_namespace,journal_cursor),
     UNIQUE(relay_database_namespace,delivery_id)
 ) STRICT;
+CREATE INDEX live_audit_event_interval ON live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor);
 CREATE TABLE live_audit_event_publications (
     relay_database_namespace TEXT NOT NULL,
     workspace_id TEXT NOT NULL,

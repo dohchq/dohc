@@ -62,6 +62,7 @@ pub use journal::{
 };
 pub use live_audit::{
     journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
+    journal_live_settlement_in_tx,
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,

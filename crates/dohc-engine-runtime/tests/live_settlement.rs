@@ -543,12 +543,42 @@ fn vector(name: &str) -> Vec<u8> {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_relay(false).await
+    }
+    async fn with_relay(replicates: bool) -> Self {
         let root = ScratchDir::new().unwrap();
         let db = engine_db_path(&root).unwrap();
         let mut store = EngineStore::open(&db, 0).unwrap();
         dohc_engine_domain::VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &NoFaults)
             .unwrap();
+        if replicates {
+            dohc_engine_sync::journal_local_replication_op(
+                &mut store,
+                "workspace",
+                "owner-origin",
+                "epoch",
+                "stream",
+                "workspace.init",
+                &serde_json::json!({}),
+                0,
+                &NoFaults,
+            )
+            .unwrap();
+            dohc_engine_sync::commit_relay_cursor(
+                &mut store,
+                "workspace",
+                &dohc_engine_sync::RelayCursor {
+                    cursor: 0,
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    refusal_report_id: None,
+                },
+                &NoFaults,
+                0,
+            )
+            .unwrap();
+        }
         drop(store);
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).unwrap().actor;
@@ -747,6 +777,228 @@ impl Fixture {
             let hash:String=db.query_row("SELECT blob_sha256 FROM snapshots WHERE object_id='object'",[],|r|r.get(0)).unwrap();assert_eq!(hash,hex_sha256(markdown.as_bytes()));
         });
     }
+}
+
+#[tokio::test]
+async fn live_settlement_history_syncs_after_restore_without_granting_native_authority() {
+    use dohc_engine_sync::{
+        ApplyDisposition, BlobContent, BlobHydration, NoLiveLeases, SyncError,
+        apply_replication_envelope, hydrate_blob_content,
+    };
+    let f = Fixture::with_relay(true).await;
+    let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\n")
+        .unwrap();
+    let terminal = f.apply(7, update).await;
+    let second = f
+        .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let restore = applied_restore(&f, Some(terminal), 1).await;
+    let final_settlement = settle_restore(&f, restore.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(
+        settle_restore(&f, restore, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .settlement_id,
+        final_settlement.settlement_id
+    );
+    assert_eq!(
+        std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+        expected
+    );
+    f.supervisor.close(&f.db).unwrap();
+    let source = EngineStore::open(&f.db, 40).unwrap();
+    let ops = dohc_engine_sync::list_replication_ops(&source, "workspace", "owner-origin", -1, 500)
+        .unwrap();
+    let settlements: Vec<_> = ops
+        .iter()
+        .filter(|op| op.op_kind == "live.audit.settlement")
+        .cloned()
+        .collect();
+    assert_eq!(settlements.len(), 3);
+    assert_eq!(
+        settlements[0].payload["record"]["settlementId"],
+        first.settlement_id
+    );
+    assert_eq!(
+        settlements[1].payload["record"]["settlementId"],
+        second.settlement_id
+    );
+    assert_eq!(
+        settlements[2].payload["record"]["restoreOperationId"],
+        "restore-settlement"
+    );
+    let binary: Vec<(String, Vec<u8>)> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT sha256,bytes FROM binary_blobs")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()
+        })
+        .unwrap();
+    let texts: Vec<(String, String)> = source
+        .read_with(|conn| {
+            conn.prepare("SELECT sha256,text FROM blobs")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()
+        })
+        .unwrap();
+    let (_receiver_root, receiver_path, mut receiver) = dohc_engine_testkit::open_store();
+    for (sha256, bytes) in binary {
+        hydrate_blob_content(
+            &mut receiver,
+            &BlobHydration {
+                sha256,
+                content: BlobContent::Binary(bytes),
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    for (sha256, text) in texts {
+        hydrate_blob_content(
+            &mut receiver,
+            &BlobHydration {
+                sha256,
+                content: BlobContent::Text(text),
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        let result =
+            apply_replication_envelope(&mut receiver, &mut cache, &op, &NoFaults, &NoLiveLeases)
+                .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            result.primary
+        );
+        if op.op_kind == "live.audit.base" {
+            let mut missing = settlements[1].clone();
+            missing.origin_id = "early-settlement".into();
+            missing.origin_seq = 0;
+            missing.relay_seq = Some(100);
+            assert!(matches!(
+                apply_replication_envelope(
+                    &mut receiver,
+                    &mut cache,
+                    &missing,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
+                Err(SyncError::RetryableState { .. })
+            ));
+            assert_eq!(
+                dohc_engine_sync::read_replication_acked_seq(
+                    &receiver,
+                    "workspace",
+                    "early-settlement"
+                )
+                .unwrap(),
+                -1
+            );
+        }
+    }
+    drop(receiver);
+    let mut receiver = EngineStore::open(&receiver_path, 41).unwrap();
+    receiver
+        .read_with(|conn| -> Result<(), rusqlite::Error> {
+            let count: i64 =
+                conn.query_row("SELECT count(*) FROM live_audit_settlements", [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(count, 3);
+            for table in [
+                "live_device_settlements",
+                "live_device_application_bindings",
+                "live_device_update_applications",
+                "live_owner_adoptions",
+                "live_restore_fences",
+            ] {
+                let count: i64 =
+                    conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(count, 0, "{table}");
+            }
+            let projection: String = conn.query_row(
+                "SELECT markdown_digest FROM live_audit_settlements WHERE settlement_id=?1",
+                [&final_settlement.settlement_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(projection, hex_sha256(&expected));
+            assert!(
+                conn.execute("DELETE FROM blobs WHERE sha256=?1", [projection])
+                    .is_err()
+            );
+            Ok(())
+        })
+        .unwrap();
+    let retained: String = receiver
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_json FROM live_audit_settlements WHERE settlement_id=?1",
+                [&second.settlement_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let malformed = retained.replace("\"acceptedEventCount\":1", "\"acceptedEventCount\":2");
+    assert_ne!(malformed, retained);
+    let mut forged = settlements[1].clone();
+    forged.origin_id = "forged-interval".into();
+    forged.origin_seq = 0;
+    forged.relay_seq = Some(200);
+    forged.payload["record"] = serde_json::from_str(&malformed).unwrap();
+    forged.payload["recordDigest"] = serde_json::json!(hex_sha256(malformed.as_bytes()));
+    assert!(matches!(
+        apply_replication_envelope(&mut receiver, &mut cache, &forged, &NoFaults, &NoLiveLeases)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    let conflicting = retained.replace(
+        "\"connectionId\":\"connection\"",
+        "\"connectionId\":\"other-connection\"",
+    );
+    assert_ne!(conflicting, retained);
+    forged.origin_id = "conflicting-settlement".into();
+    forged.relay_seq = Some(201);
+    forged.payload["record"] = serde_json::from_str(&conflicting).unwrap();
+    forged.payload["recordDigest"] = serde_json::json!(hex_sha256(conflicting.as_bytes()));
+    assert!(matches!(
+        apply_replication_envelope(&mut receiver, &mut cache, &forged, &NoFaults, &NoLiveLeases)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    receiver
+        .read_with(|conn| -> Result<(), rusqlite::Error> {
+            let conflict_count: i64 = conn.query_row(
+                "SELECT count(*) FROM live_audit_settlement_conflicts",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(conflict_count, 1);
+            let still: String = conn.query_row(
+                "SELECT record_json FROM live_audit_settlements WHERE settlement_id=?1",
+                [&second.settlement_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(still, retained);
+            Ok(())
+        })
+        .unwrap();
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

@@ -2345,13 +2345,21 @@ pub(super) fn ydoc_settle_on_store(
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
-                audit.record_in_tx(
+                let id = audit.record_in_tx(
                     tx,
                     &current.latest_moment_id,
                     &current.blob_sha256,
                     &projection.source_state_vector_sha256,
                     now_ms,
+                )?;
+                dohc_engine_sync::journal_live_settlement_in_tx(
+                    tx,
+                    &audit.binding().workspace_id,
+                    &id,
+                    now_ms,
                 )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(id)
             })?;
             if matches!(recorded, TxnOutcome::Crashed { .. }) {
                 return Err(RuntimeError::OperationCrashed);
@@ -2541,13 +2549,20 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
-            audit.record_in_tx(
+            let id = audit.record_in_tx(
                 tx,
                 &result.moment.moment_id,
                 &result.snapshot.blob_sha256,
                 &source_state_vector_sha256,
                 now_ms,
             )?;
+            dohc_engine_sync::journal_live_settlement_in_tx(
+                tx,
+                &audit.binding().workspace_id,
+                &id,
+                now_ms,
+            )
+            .map_err(StorageError::persist_public)?;
         }
         Ok((result, prior_marker))
     })?;

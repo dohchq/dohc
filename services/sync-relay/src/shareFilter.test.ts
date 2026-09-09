@@ -52,7 +52,7 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
-it.each(["live.audit.base","live.audit.application"])("keeps %s out of every file-share level", (kind) => {
+it.each(["live.audit.base","live.audit.application","live.audit.settlement"])("keeps %s out of every file-share level", (kind) => {
   const payload = JSON.stringify({formatVersion: 1,record: {checkpoint: {binding: {currentPath: "docs/a.md"},stateDigest: "a".repeat(64)}}});
   for (const access of ["view","comment","edit"] as const) {
     expect(filterOpForShare({...pathShare,access},kind,payload).allowed).toBe(false);

@@ -77,6 +77,7 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("ydoc.update", OwnedRoute::Ydoc),
     ("live.audit.base", OwnedRoute::LiveAudit),
     ("live.audit.application", OwnedRoute::LiveAudit),
+    ("live.audit.settlement", OwnedRoute::LiveAudit),
     ("conflict.open", OwnedRoute::Conflict),
     ("conflict.resolve", OwnedRoute::Conflict),
     ("workspace.init", OwnedRoute::Workspace),
