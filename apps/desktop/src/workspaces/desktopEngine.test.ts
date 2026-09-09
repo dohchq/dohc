@@ -21,6 +21,10 @@ import { createTestScratch } from "./testTemp";
 const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
 vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock.read, startDesktopOwnerHost: ownerHostMock.start }));
 
+const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
+vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
+vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
+
 type State = { pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace> };
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
 
@@ -667,5 +671,58 @@ describe("desktop engine composed sessions and events", () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["notes.md"] });
     } finally { vi.useRealTimers(); await f.close(); }
+  });
+});
+
+
+describe("private owner peer lifecycle", () => {
+  it.each(["credentials", "daemon", "workspace"])("holds the workspace session until %s cancellation settles", async mode => {
+    const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-peer-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner"}, outboxId: "pending"};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      relayUrl: "https://relay.example.test", documents: [document]};
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
+    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", relayUrl: config.relayUrl, signal: credentials.signal});
+    ownerDeliveryMock.read.mockReturnValue(config);
+    let active: Promise<unknown> | undefined, lifetime!: AbortController;
+    ownerDeliveryMock.start.mockImplementation(options => {
+      lifetime = new AbortController();
+      return {stop: async () => {lifetime.abort(); await active?.catch(() => undefined);}};
+    });
+    let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
+    ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "retry";});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      expect(f.options().privateOwnerHost).toEqual({configPath: "native-config", client: config.nativeClient});
+      const run = ownerDeliveryMock.start.mock.calls.at(-1)![0].runPass;
+      active = run(document, lifetime.signal);
+      await entered.promise;
+      expect(passOptions.bearer).toBe("actual-token");
+      if (mode === "credentials") credentials.abort();
+      let closed = false;
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      expect(passOptions.signal.aborted).toBe(true);
+      expect(() => passOptions.assertCurrent()).toThrow();
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(f.client.requests.filter(request => request.method === "workspace.close" && request.workspace === "workspace-handle")).toHaveLength(0);
+      settled.resolve(); await active?.catch(() => undefined); await closing;
+      expect(closed).toBe(true);
+    } finally {settled.resolve(); await f.close(); ownerDeliveryMock.read.mockReset(); ownerDeliveryMock.start.mockReset(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  it("rejects conflicting native ingress budgets before launching the daemon", async () => {
+    const f = fixture();
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "host-config";
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
+    f.dependencies.existingOwnerFor = vi.fn();
+    f.dependencies.ownerDeliveryCredentials = () => null;
+    ownerHostMock.read.mockReturnValue({nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: {aggregateBytes: 100_000_000, maxUploads: 2}});
+    ownerDeliveryMock.read.mockReturnValue({nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 3}, documents: []});
+    try {expect(await f.engine.start()).toBe(false); expect(f.dependencies.createRustEngineDaemon).not.toHaveBeenCalled();}
+    finally {await f.close(); ownerHostMock.read.mockReset(); ownerDeliveryMock.read.mockReset();}
   });
 });

@@ -720,12 +720,15 @@ type CloudSessionCredentials = NonNullable<
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
 let credentialCacheGeneration = 0;
+let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
 // across physical workspaces in the same session, and clear it whenever that
 // credential session ends or changes.
 const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
+    ownerDeliveryCredentialLifetime.abort();
+    ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
     shareHandoffRedemption.credentialsChanged();
@@ -3146,6 +3149,8 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTra
 });
 
 const desktopEngine = createDesktopEngine({
+  ownerDeliveryCredentials: () => cachedCredentials?.relayUrl ? {bearer: cachedCredentials.token,
+    relayUrl: cachedCredentials.relayUrl, signal: ownerDeliveryCredentialLifetime.signal} : null,
   existingOwnerFor: binding => engineYDocSessionIpc.existingOwner(binding),
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,

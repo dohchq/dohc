@@ -17,7 +17,7 @@ import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
-import type { WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
+import type { WorkspaceAuthorityOperation, WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import type { PluginWorkspaceRuntimes } from "../plugins/pluginWorkspaceRuntimes";
 import type { launchMarks as launchMarksImplementation } from "../performance/launchMarks";
 import type { desktopMarks as desktopMarksImplementation } from "../performance/desktopMarks";
@@ -25,11 +25,15 @@ import {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
 import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOwnerHost";
 
+import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
+import {relayUrlsMatch} from "./syncCode";
+
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
 };
 
 interface DesktopEngineDependencies<State extends EngineAuthorityState> {
+  ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath" | "quit">;
@@ -40,6 +44,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   isQuitting(): boolean;
   workspaceAuthorities: {
     workspaceIds(): string[];
+    withOperation?<Result>(workspaceId: string, work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Result | Promise<Result>): Promise<Result>;
     withAuthority<Result>(
       workspaceId: string,
       work: (lease: WorkspaceAuthorityLease<RegistryEntry, State>) => Result | Promise<Result>,
@@ -71,6 +76,51 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
+  let ownerDelivery: ReturnType<typeof startDesktopOwnerDelivery> | undefined;
+  let ownerDeliveryConfig: DesktopOwnerDeliveryConfig | undefined;
+  let ownerDeliveryModule: typeof import("./desktopOwnerDelivery") | undefined;
+  let nativeOwnerDeliveryModule: typeof import("./nativeOwnerDelivery") | undefined;
+  let ownerDeliverySettled = Promise.resolve();
+  let ownerDeliveryGeneration = 0;
+  function stopOwnerDelivery(): Promise<void> {
+    ownerDeliveryGeneration += 1;
+    const previous = ownerDelivery;
+    ownerDelivery = undefined;
+    if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
+    return ownerDeliverySettled;
+  }
+  function startOwnerDelivery(): void {
+    const settled = stopOwnerDelivery(), generation = ownerDeliveryGeneration;
+    void settled.then(() => {
+      if (generation !== ownerDeliveryGeneration || isQuitting() || ownerWorkspaceCloses || !ownerDeliveryConfig || !ownerDeliveryModule || !nativeOwnerDeliveryModule || !rustEngineDaemon || !rustEngineWorkspaceSessions || !rustEngineSessionSource) return;
+      const config = ownerDeliveryConfig, daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions,
+        source = rustEngineSessionSource, native = nativeOwnerDeliveryModule;
+      ownerDelivery = ownerDeliveryModule.startDesktopOwnerDelivery({config,
+        onError: error => console.error("[desktop] owner delivery failed:", error),
+        runPass: async (document, lifetime) => {
+          const credentials = dependencies.ownerDeliveryCredentials?.();
+          if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !dependencies.findWorkspace(document.binding.workspaceId)) return "retry";
+          if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
+          return workspaceAuthorities.withOperation(document.binding.workspaceId, operation =>
+            sessions.run(operation.workspace, async binding => {
+              const client = daemon.currentClient();
+              if (!(client instanceof EngineClient)) throw new Error("Owner delivery requires the desktop daemon client.");
+              const signal = AbortSignal.any([lifetime, operation.signal, credentials.signal]);
+              const assertCurrent = () => {
+                signal.throwIfAborted(); operation.assertCurrent();
+                sessions.assertCurrentBinding(operation.workspace, binding);
+                if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
+              };
+              assertCurrent();
+              return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
+                document, config, signal, bearer: credentials.bearer, assertCurrent});
+            }));
+        },
+      });
+    }).catch(error => console.error("[desktop] owner delivery startup failed:", error));
+  }
+  const ownerUsesWorkspace = (workspaceId: string) => ownerHostConfig?.workspaceIds.includes(workspaceId) === true ||
+    ownerDeliveryConfig?.documents.some(document => document.binding.workspaceId === workspaceId) === true;
   const stopOwnerHost = () => {
     ownerHostGeneration += 1;
     const previous = ownerHost;
@@ -141,10 +191,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     ownerWorkspaceCloses += 1;
     try {
       stopOwnerHost();
+      await stopOwnerDelivery();
       return await work();
     } finally {
       ownerWorkspaceCloses -= 1;
-      if (!ownerWorkspaceCloses) startOwnerHost();
+      if (!ownerWorkspaceCloses) {startOwnerHost(); startOwnerDelivery();}
     }
   }
 
@@ -153,7 +204,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   ): Promise<void> {
     const workspaceId =
       typeof workspace === "string" ? workspace : workspace.workspaceId;
-    const reconnectOwner = ownerHostConfig?.workspaceIds.includes(workspaceId) === true;
+    const reconnectOwner = ownerUsesWorkspace(workspaceId);
     await withOwnerHostPaused(reconnectOwner, async () => {
       if (rustEngineRelayClient) {
         await rustEngineRelayClient.closeWorkspace(workspace);
@@ -203,9 +254,20 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         ownerHostModule = await import("./desktopOwnerHost");
         ownerHostConfig = ownerHostModule.readDesktopOwnerHostConfig(process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG);
       }
+      if (process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG) {
+        if (!dependencies.ownerDeliveryCredentials || !workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
+        ownerDeliveryModule = await import("./desktopOwnerDelivery");
+        nativeOwnerDeliveryModule = await import("./nativeOwnerDelivery");
+        ownerDeliveryConfig = ownerDeliveryModule.readDesktopOwnerDeliveryConfig(process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG);
+      }
+      const hostIngress = ownerHostConfig && {configPath: ownerHostConfig.nativeConfigPath,
+        client: {aggregateBytes: ownerHostConfig.transport.aggregateBytes, maxUploads: ownerHostConfig.transport.maxUploads}};
+      const peerIngress = ownerDeliveryConfig && {configPath: ownerDeliveryConfig.nativeConfigPath, client: ownerDeliveryConfig.nativeClient};
+      if (hostIngress && peerIngress && (hostIngress.configPath !== peerIngress.configPath ||
+        hostIngress.client.aggregateBytes !== peerIngress.client.aggregateBytes || hostIngress.client.maxUploads !== peerIngress.client.maxUploads)) throw new Error("Private owner modes require the same native ingress configuration and client budget.");
+      const ingress = hostIngress ?? peerIngress;
       rustEngineDaemon = createRustEngineDaemon({
-        ...(ownerHostConfig ? {privateOwnerHost: {configPath: ownerHostConfig.nativeConfigPath,
-          client: {aggregateBytes: ownerHostConfig.transport.aggregateBytes,maxUploads: ownerHostConfig.transport.maxUploads}}} : {}),
+        ...(ingress ? {privateOwnerHost: ingress} : {}),
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -242,6 +304,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
         beforePublish: async () => {
           stopOwnerHost();
+          await stopOwnerDelivery();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
             workspaceAuthorities.withAuthority(workspaceId, (lease) => {
               const runtimes = lease.state.pluginRuntimes;
@@ -257,6 +320,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         // any open workspace.
         onLaunch: () => {
           startOwnerHost();
+          startOwnerDelivery();
           for (const runtimes of restartingPluginRuntimes) {
             runtimes.resumeAfterEngineRestart();
           }
@@ -301,11 +365,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         sessions,
         routes: relayTransportRoutes,
         closeWorkspaceBinding: workspace => withOwnerHostPaused(
-          ownerHostConfig?.workspaceIds.includes(workspace.workspaceId) === true,
+          ownerUsesWorkspace(workspace.workspaceId),
           () => sessions.closeWorkspaceBinding(workspace).catch(() => undefined),
         ),
       });
       startOwnerHost();
+      startOwnerDelivery();
       console.info(
         "[desktop] Rust engine daemon handshake complete; startup smoke running.",
       );
@@ -317,6 +382,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       logLaunchMarksOnce();
       return true;
     } catch (error) {
+      stopOwnerHost();
+      await stopOwnerDelivery();
       for (const runtimes of restartingPluginRuntimes) {
         runtimes.failEngineRestart(error);
       }
