@@ -400,6 +400,39 @@ it("resolves a baseline restore point after native bootstrap fencing", () => {
   } finally {f.close();}
 });
 
+it.each(["service", "device"] as const)("captures the frozen accepted %s cut separately from the chosen restore point", mode => {
+  const f = ownerOriginProofFixture(mode);
+  try {
+    expect(() => f.store.captureStopRestoreAcceptedCut(f.input)).toThrow();
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.nativeReceipt);
+    const before = f.journalRows();
+    const selected = f.store.captureStopRestorePoint(f.input);
+    const accepted = f.store.captureStopRestoreAcceptedCut(f.input);
+    expect(selected.events).toHaveLength(1);
+    expect(accepted.events).toHaveLength(3);
+    expect(accepted.point).toEqual({journalCursor: f.nativeReceipt.operation.terminal!.journalCursor,
+      receiptDigest: f.nativeReceipt.operation.terminal!.updateDigest});
+    expect(resolveLiveRestorePoint(accepted, policy).markdownDigest).toBe(hash(Buffer.from(yDocToMarkdown(f.doc))));
+    expect(f.journalRows()).toEqual(before);
+    expect(() => f.store.captureStopRestoreAcceptedCut({...f.input, maxEvents: 2})).toThrow(/bounds/);
+    accepted.events[0]!.updateBytes[0] ^= 1;
+    expect(() => accepted.assertCurrent()).toThrow();
+  } finally {f.close();}
+});
+
+it("captures the baseline as an empty accepted cut and refuses retired storage standing", () => {
+  const f = readyNativeFence("bootstrap", "service");
+  try {
+    f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
+    const capture = f.store.captureStopRestoreAcceptedCut({...f.lookup, maxBytes: 1_000_000, maxEvents: 10});
+    expect(capture.events).toHaveLength(0);
+    expect(capture.point.journalCursor).toBe(0);
+    expect(capture.point.receiptDigest).toBe(f.intent.restorePointReceiptDigest);
+    expect(() => f.context.tx(() => f.context.db.exec("ROLLBACK"))).toThrow();
+    expect(() => capture.assertCurrent()).toThrow();
+  } finally {f.close();}
+});
+
 it("keeps exact source and canonical projection digests distinct for a restore point", () => {
   const source = "# Hello\n\n", doc = markdownToYDoc(source);
   const projection = yDocToMarkdown(doc), meta = doc.getMap("meta");

@@ -940,13 +940,27 @@ export class LiveCommittedDeliveryStore {
   captureStopRestorePoint(input: StopRestoreLookup & {
     host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
   }): RestorePointCapture {
+    return this.#captureRestoreHistory(input, "selected");
+  }
+  captureStopRestoreAcceptedCut(input: StopRestoreLookup & {
+    host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
+  }): RestorePointCapture {
+    return this.#captureRestoreHistory(input, "accepted");
+  }
+  #captureRestoreHistory(input: StopRestoreLookup & {
+    host: LiveHostConnectionCoordinate; maxBytes: number; maxEvents: number;
+  }, target: "selected" | "accepted"): RestorePointCapture {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
     const host = snapshotHostCoordinate(input.host), maxBytes = authorityInteger(input.maxBytes, 1), maxEvents = authorityInteger(input.maxEvents, 1);
     const saved = this.#storage.readTx(() => {
       const {operation, authority} = this.#restore(lookup, host);
       integrity(operation.phase === "native-fenced" && operation.nativeReceipt);
-      const document = operation.intent.document, through = operation.intent.restorePointCursor;
+      const document = operation.intent.document;
+      const point = target === "selected"
+        ? {journalCursor: operation.intent.restorePointCursor, receiptDigest: operation.intent.restorePointReceiptDigest}
+        : {journalCursor: operation.cutoverCursor!, receiptDigest: operation.terminal?.updateDigest ?? authority.baselineDigest};
+      const through = point.journalCursor;
       const checkpointHeader = this.#storage.db.prepare(`SELECT journal_cursor, length(validation_checkpoint_bytes) AS bytes, length(update_bytes) AS update_bytes FROM ${LIVE_JOURNAL_TABLE}
         WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
         .get(...documentParams(document), through);
@@ -981,12 +995,12 @@ export class LiveCommittedDeliveryStore {
         terminal = receipt.journalCursor; terminalDigest = receipt.updateDigest; events.push(row.admitted);
         if (terminal === through) assertJournalCheckpointPosition(this.#storage.db, row);
       }
-      integrity(events.length === count && terminal === through && terminalDigest === operation.intent.restorePointReceiptDigest);
-      return {operation, baselineBytes: authority.baselineBytes, checkpoint, events};
+      integrity(events.length === count && terminal === through && terminalDigest === point.receiptDigest);
+      return {operation, baselineBytes: authority.baselineBytes, checkpoint, events, point};
     });
     const binding = saved.operation.intent.deliveryKind === "owner" ? saved.operation.basis.ownerBinding : saved.operation.basis.binding;
     const capture: RestorePointCapture = Object.freeze({binding: structuredClone(binding), checkpoint: saved.checkpoint,
-      events: saved.events, point: {journalCursor: saved.operation.intent.restorePointCursor, receiptDigest: saved.operation.intent.restorePointReceiptDigest},
+      events: saved.events, point: saved.point,
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!), assertCurrent: () => {
         this.#storage.captureStanding();
         integrity(fingerprint === digest());
