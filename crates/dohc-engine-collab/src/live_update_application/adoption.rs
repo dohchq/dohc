@@ -154,12 +154,17 @@ mod tests {
                 .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
                 .unwrap();
             let bytes = self.doc.encode_full_state();
-            let sequence = self
-                .store
-                .write_with(&NoFaults, |tx| {
-                    durable::record_update_in_tx(tx, &self.key, &bytes, None, None, 4)
-                })
-                .unwrap();
+            let sequence = crate::record_local_update(
+                &mut self.store,
+                &mut WriterDocCache::new(),
+                &self.key,
+                &bytes,
+                crate::LocalAppend::default(),
+                &NoFaults,
+                4,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
             let TxnOutcome::Committed(sequence) = sequence else {
                 panic!("record crash")
             };

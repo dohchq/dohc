@@ -569,14 +569,16 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
         .unwrap()
         .clone();
     let (_scratch, path, mut receiver) = open_store();
-    let blobs: Vec<Vec<u8>> = f.store.read_with(|conn| {
-        conn.prepare("SELECT bytes FROM binary_blobs")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    });
+    let blobs: Vec<Vec<u8>> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
     receiver
         .write_with(&NoFaults, |tx| {
             for bytes in &blobs {
@@ -616,25 +618,28 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
     assert_eq!(count(&receiver, "live_audit_events"), 1);
     let manifest: chunks::Manifest =
         serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
-    receiver.read_with(|conn| {
-        for chunk in &manifest.chunks {
-            assert!(
-                conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
-                    .is_err()
+    receiver
+        .read_with(|conn| {
+            for chunk in &manifest.chunks {
+                assert!(
+                    conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
+                        .is_err()
+                );
+            }
+            let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+            let record: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
+            reader.finish().unwrap();
+            assert_eq!(
+                record["metadata"]["accepted"]["authority"]["principalKind"],
+                "link"
             );
-        }
-        let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
-        let record: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
-        reader.finish().unwrap();
-        assert_eq!(
-            record["metadata"]["accepted"]["authority"]["principalKind"],
-            "link"
-        );
-        assert_eq!(
-            record["metadata"]["accepted"]["authority"]["principalId"],
-            "link-principal"
-        );
-    });
+            assert_eq!(
+                record["metadata"]["accepted"]["authority"]["principalId"],
+                "link-principal"
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
     let mut missing = audit.clone();
     missing.origin_seq += 1;
     missing.relay_seq = Some(missing.origin_seq + 1);
@@ -647,21 +652,23 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
         crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
         audit.origin_seq
     );
-    let changed = receiver.read_with(|conn| {
-        use std::io::{Read, Write};
-        let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
-        let mut text = String::new();
-        reader.read_to_string(&mut text).unwrap();
-        reader.finish().unwrap();
-        assert!(text.contains("\"connectionId\":\"connection\""));
-        let text = text.replace(
-            "\"connectionId\":\"connection\"",
-            "\"connectionId\":\"conflicting-connection\"",
-        );
-        let mut writer = chunks::ChunkWriter::new(conn);
-        writer.write_all(text.as_bytes()).unwrap();
-        writer.finish().unwrap()
-    });
+    let changed = receiver
+        .read_with(|conn| {
+            use std::io::{Read, Write};
+            let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+            let mut text = String::new();
+            reader.read_to_string(&mut text).unwrap();
+            reader.finish().unwrap();
+            assert!(text.contains("\"connectionId\":\"connection\""));
+            let text = text.replace(
+                "\"connectionId\":\"connection\"",
+                "\"connectionId\":\"conflicting-connection\"",
+            );
+            let mut writer = chunks::ChunkWriter::new(conn);
+            writer.write_all(text.as_bytes()).unwrap();
+            writer.finish()
+        })
+        .unwrap();
     let mut conflict = missing;
     conflict.payload["manifest"] = serde_json::to_value(&changed).unwrap();
     assert!(matches!(
@@ -676,14 +683,17 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
         crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
         conflict.origin_seq
     );
-    receiver.read_with(|conn| {
-        for chunk in &changed.chunks {
-            assert!(
-                conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
-                    .is_err()
-            );
-        }
-    });
+    receiver
+        .read_with(|conn| {
+            for chunk in &changed.chunks {
+                assert!(
+                    conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
+                        .is_err()
+                );
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
 }
 
 #[test]

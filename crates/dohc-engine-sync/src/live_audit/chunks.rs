@@ -365,19 +365,22 @@ mod tests {
     #[test]
     fn untrusted_header_array_is_bounded_before_deserialization_finishes() {
         let (_scratch, _path, store) = dohc_engine_testkit::open_store();
-        store.read_with(|conn| {
-            let mut writer = ChunkWriter::new(conn);
-            writer
-                .write_all(b"{\"metadata\":{\"accepted\":{\"binding\":{\"selectorPaths\":[")
-                .unwrap();
-            for _ in 0..90_000 {
-                writer.write_all(b"\"a\",").unwrap();
-            }
-            writer.write_all(b"\"b\"]}}}}").unwrap();
-            let manifest = writer.finish().unwrap();
-            let reader = std::io::BufReader::new(ChunkReader::new(conn, &manifest).unwrap());
-            let error = serde_json::from_reader::<_, serde_json::Value>(reader).unwrap_err();
-            assert_eq!(error.io_error_kind(), Some(io::ErrorKind::InvalidData));
-        });
+        store
+            .read_with(|conn| {
+                let mut writer = ChunkWriter::new(conn);
+                writer
+                    .write_all(b"{\"metadata\":{\"accepted\":{\"binding\":{\"selectorPaths\":[")
+                    .unwrap();
+                for _ in 0..90_000 {
+                    writer.write_all(b"\"a\",").unwrap();
+                }
+                writer.write_all(b"\"b\"]}}}}").unwrap();
+                let manifest = writer.finish().unwrap();
+                let reader = std::io::BufReader::new(ChunkReader::new(conn, &manifest).unwrap());
+                let error = serde_json::from_reader::<_, serde_json::Value>(reader).unwrap_err();
+                assert_eq!(error.io_error_kind(), Some(io::ErrorKind::InvalidData));
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
     }
 }
