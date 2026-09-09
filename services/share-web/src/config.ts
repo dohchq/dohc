@@ -17,6 +17,7 @@ export interface ShareWebConfig {
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveGatewayLimits?: LiveGatewayLimits;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
+  linkLive?: {publicOrigin: string; gateway: LiveGatewayLimits; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -141,6 +142,17 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     }
   }
 
+  let linkLive: ShareWebConfig["linkLive"];
+  if (env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS !== undefined) {
+    const publicOrigin = required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), origin = new URL(publicOrigin);
+    if (origin.protocol !== "https:" || origin.origin !== publicOrigin || !hosts.includes(origin.host) || !relayExchangeKey) throw new Error("Link live editing requires an exact HTTPS public origin and relay exchange configuration.");
+    const value: unknown = JSON.parse(env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS);
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "editor,gateway,requests") throw new Error("Invalid link live limits.");
+    const fields = value as Record<string, unknown>;
+    linkLive = {publicOrigin, gateway: parseLiveGatewayLimits(fields.gateway), requests: parseNamedLiveBrowserClientLimits(fields.requests), editor: parseNamedLiveBrowserLimits(fields.editor)};
+    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes) throw new Error("Link browser frames exceed gateway capacity.");
+  }
+
   return {
     relayUrl: relayUrl.href,
     publicRelayUrl,
@@ -154,5 +166,6 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
     ...(namedLiveGatewayLimits ? {namedLiveGatewayLimits} : {}),
     ...(namedRecipientBrowserLimits ? {namedRecipientBrowserLimits} : {}),
+    ...(linkLive ? {linkLive} : {}),
   };
 }

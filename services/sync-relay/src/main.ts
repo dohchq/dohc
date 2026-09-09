@@ -30,6 +30,9 @@ import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
+import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {createLinkLiveHttp} from "./linkLiveHttp";
+import {createLiveMembershipRegistry} from "./liveMembership";
 import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
@@ -168,6 +171,9 @@ const namedLiveConfig = (() => {
   catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
 })();
 const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
+const linkLiveEnabled = process.env.DOHC_RELAY_LINK_LIVE === "1";
+if (process.env.DOHC_RELAY_LINK_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_RELAY_LINK_LIVE)) fatal("FATAL: DOHC_RELAY_LINK_LIVE must be 0 or 1.");
+if (linkLiveEnabled && !namedLiveConfig) fatal("FATAL: Link live routes require configured live admission limits.");
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
@@ -270,9 +276,15 @@ const relayApplication = createSyncRelayHandler({
   namedBrowserSessionLimits,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
-const relayHandler = guardRelayResponses(storage, request => new URL(request.url).pathname === "/sync/live/named-tickets"
-  ? namedLive?.handle(request) ?? Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
-  : relayApplication(request));
+let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
+const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]);
+const relayHandler = guardRelayResponses(storage, request => {
+  const path = new URL(request.url).pathname;
+  if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (linkLivePaths.has(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  return relayApplication(request);
+});
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
     // The presence hub footprint is exposed only under the dev/test seam so
@@ -338,13 +350,13 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
-    url.pathname === "/sync/live/named-tickets" && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES,
   oversized: (url) =>
-    url.pathname === "/sync/live/named-tickets" || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -386,7 +398,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
 }
 if (deviceControl) {
   server.on("upgrade", (request, socket, head) => {
-    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
+    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
     deviceControl!.handleUpgrade(request, socket, head);
   });
   process.once("SIGINT", deviceControl.close);
@@ -416,10 +428,20 @@ if (namedLiveConfig) {
     return host.captureNative(binding, signal);
   };
   const tickets = createLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createLiveHostReports({ storage, captureNative }) });
+  const membership = createLiveMembershipRegistry({maxSessions: namedLiveConfig.transport.maxConnections, maxMembers: namedLiveConfig.transport.maxConnections,
+    maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
   namedLive = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative });
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership });
+  if (linkLiveEnabled) {
+    const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
+    linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!});
+    server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
+  }
   const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative });
@@ -428,6 +450,7 @@ if (namedLiveConfig) {
   server.on("upgrade", (request, socket, head) => {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive.handleUpgrade(request, socket, head);
     else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
+    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive.handleUpgrade(request, socket, head); else socket.destroy();}
     else if (!deviceControl) socket.destroy();
   });
   server.once("close", namedLive.close);

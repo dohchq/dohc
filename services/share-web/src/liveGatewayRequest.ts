@@ -14,6 +14,7 @@ function validHost(value: string): boolean {
 export function createLiveGatewayRequestParser(config: {
   publicHosts: ReadonlySet<string>;
   publicOrigin: string;
+  path?: "/api/live" | "/api/live/link";
 }) {
   const publicOrigin = parseLiveTicketAudience(config.publicOrigin);
   const publicHosts = new Set([...config.publicHosts].map(host => {
@@ -42,7 +43,7 @@ export function createLiveGatewayRequestParser(config: {
     const host = selected.get("host");
     if (!host || !validHost(host) || !publicHosts.has(host.toLowerCase())) return null;
     if (selected.get("origin") !== publicOrigin) return null;
-    const targetPrefix = "/api/live?session=";
+    const targetPrefix = `${config.path ?? "/api/live"}?session=`;
     if (method !== "GET" || !url?.startsWith(targetPrefix)) return null;
     const session = url.slice(targetPrefix.length);
     if (!isSessionDiscriminator(session)) return null;

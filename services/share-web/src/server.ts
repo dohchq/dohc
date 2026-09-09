@@ -10,6 +10,7 @@ import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth"
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
+import {createLinkLiveClient} from "./linkLiveClient";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -80,6 +81,7 @@ export interface CreateShareWebApplicationOptions {
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveTickets?: boolean;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
+  linkLive?: {publicOrigin: string; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
 }
 
 export type LinkBrowserMaterial =
@@ -89,6 +91,7 @@ export type LinkBrowserMaterial =
 export interface ShareWebApplication {
   handle(request: Request): Promise<Response>;
   resolveNamedBrowserSession(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null>;
+  linkLive?: ReturnType<typeof createLinkLiveClient>;
   resolveLinkBrowserMaterial(
     discriminator: string,
     cookie: string | null,
@@ -769,6 +772,7 @@ export function createShareWebApplication({
   namedBrowserSessionLimits,
   namedLiveTickets,
   namedRecipientBrowserLimits,
+  linkLive: linkLiveConfig,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
     throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
@@ -807,6 +811,9 @@ export function createShareWebApplication({
     MAX_ACTIVITY_HOLDS_PER_GRANT,
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
+  if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
+  const linkLive = linkLiveConfig ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
+    limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
 
   function readBrowserSession(discriminator: string, cookies: Map<string, string>): {
     discriminator: string;
@@ -979,6 +986,12 @@ export function createShareWebApplication({
   const handle = async (request: Request): Promise<Response> => {
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+
+    if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
+      if (!linkLive) return refused();
+      const result = await linkLive.handle(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
 
     if (pathname === "/api/live/named-session") {
       if (!namedBrowser) return refused();
@@ -1378,7 +1391,7 @@ export function createShareWebApplication({
 
     return refused();
   };
-  return { handle, resolveLinkBrowserMaterial,
+  return { handle, resolveLinkBrowserMaterial, ...(linkLive ? {linkLive} : {}),
     resolveNamedBrowserSession: (request, discriminator) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null) };
 }
 

@@ -47,11 +47,12 @@ const application = createShareWebApplication({
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
   namedLiveTickets: config.namedLiveGatewayLimits !== undefined,
   namedRecipientBrowserLimits: config.namedRecipientBrowserLimits,
+  linkLive: config.linkLive,
 });
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,
@@ -94,7 +95,15 @@ if (config.namedLiveGatewayLimits) {
   process.once("SIGTERM", namedGateway.close);
   server.once("close", namedGateway.close);
 }
-if (deviceControl || namedGateway) server.on("upgrade", (request, socket, head) => {
+const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
+  path: "/api/live/link", limits: config.linkLive.gateway, resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute}) : undefined;
+if (linkGateway) {
+  process.once("SIGINT", linkGateway.close); process.once("SIGTERM", linkGateway.close); server.once("close", linkGateway.close);
+}
+if (deviceControl || namedGateway || linkGateway) server.on("upgrade", (request, socket, head) => {
+  if (request.url?.startsWith("/api/live/link?")) {
+    if (linkGateway) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
+  } else
   if (request.url?.startsWith("/api/live?")) {
     if (namedGateway) void namedGateway.handleUpgrade(request, socket, head); else socket.destroy();
   } else if (deviceControl) deviceControl.handleUpgrade(request, socket, head);
