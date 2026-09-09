@@ -1835,6 +1835,61 @@ CREATE TABLE live_audit_base_conflicts (
 ) STRICT;
 
 -- Owner update recovery stays independent of live document and version rows.
+CREATE TABLE live_audit_record_manifests (
+    record_digest TEXT PRIMARY KEY NOT NULL,
+    manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX live_audit_manifest_updates ON live_audit_record_manifests(update_sha256);
+CREATE TABLE live_audit_record_chunks (
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 1024),
+    chunk_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(record_digest,ordinal)
+) STRICT;
+CREATE INDEX live_audit_chunk_roots ON live_audit_record_chunks(chunk_sha256);
+CREATE TABLE live_audit_events (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK(event_count BETWEEN 1 AND 9007199254740991),
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    evidence_digest TEXT NOT NULL,
+    journal_cursor INTEGER NOT NULL CHECK(journal_cursor BETWEEN 1 AND 9007199254740991),
+    delivery_id TEXT NOT NULL,
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count),
+    UNIQUE(relay_database_namespace,journal_cursor),
+    UNIQUE(relay_database_namespace,delivery_id)
+) STRICT;
+CREATE TABLE live_audit_event_publications (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count),
+    FOREIGN KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count)
+      REFERENCES live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count) ON DELETE RESTRICT,
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE live_audit_event_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX replication_ydoc_content ON replication_log(workspace_id,
+    json_extract(payload_json,'$.versionId'),json_extract(payload_json,'$.objectId'),
+    json_extract(payload_json,'$.lineageClaimId'),json_extract(payload_json,'$.updateBlobSha256'),
+    json_extract(payload_json,'$.path'),origin_id,origin_seq) WHERE op_kind='ydoc.update';
+
 CREATE TABLE owner_ydoc_outboxes (
     outbox_id                 TEXT NOT NULL PRIMARY KEY,
     workspace_id              TEXT NOT NULL,

@@ -2457,6 +2457,23 @@ fn collect_blob_refs(
                     BlobKind::Ydoc,
                 )?;
             }
+            "live.audit.application" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload.get("updateBlobSha256"),
+                    BlobKind::Ydoc,
+                )?;
+                for chunk in op
+                    .payload
+                    .get("manifest")
+                    .and_then(|m| m.get("chunks"))
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    insert_optional_ref(&mut refs, chunk.get("sha256"), BlobKind::Binary)?;
+                }
+            }
             "live.audit.base" => {
                 insert_optional_ref(
                     &mut refs,
@@ -4633,6 +4650,28 @@ mod conflict_resolve_blob_ref_tests {
         assert_eq!(
             collect_blob_refs(&[envelope]).unwrap(),
             BTreeMap::from([(sha, BTreeSet::from([BlobKind::Ydoc]))])
+        );
+    }
+
+    #[test]
+    fn live_application_audit_keeps_update_and_metadata_in_their_existing_blob_lanes() {
+        let update = "a".repeat(64);
+        let chunk = "b".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.application".into(),
+            payload: serde_json::json!({"updateBlobSha256":update,"manifest":{"chunks":[{"sha256":chunk},{"sha256":chunk}]}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([
+                (update, BTreeSet::from([BlobKind::Ydoc])),
+                (chunk, BTreeSet::from([BlobKind::Binary]))
+            ])
         );
     }
 

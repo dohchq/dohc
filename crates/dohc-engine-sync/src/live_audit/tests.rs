@@ -303,6 +303,195 @@ fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
 }
 
 #[test]
+fn admitted_link_history_roundtrips_without_creating_native_authority() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveUpdateReceipt,
+        RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    // Reusing an accepted base has no newly attributed structs, but retains
+    // the distinct link delivery and its receipt as historical evidence.
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "link-delivery".into(),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "link-principal".into(),
+                    grant_id: "link-grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000
+        )
+        .unwrap(),
+        ApplicationResult::Applied(_)
+    ));
+    let before = operations(&f.store);
+    let seq = f
+        .store
+        .write_with(&NoFaults, |tx| {
+            journal_live_event_in_tx(tx, "relay", &f.binding, 1, 201)
+        })
+        .unwrap();
+    assert!(matches!(
+        seq,
+        dohc_engine_storage::TxnOutcome::Committed(Some(_))
+    ));
+    let after = operations(&f.store);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "existing content coordinate is reused"
+    );
+    f.store
+        .write_with(&NoFaults, |tx| {
+            journal_live_event_in_tx(tx, "relay", &f.binding, 1, 202)
+        })
+        .unwrap();
+    assert_eq!(operations(&f.store), after);
+    let audit = after
+        .iter()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap()
+        .clone();
+    let (_scratch, path, mut receiver) = open_store();
+    let blobs: Vec<Vec<u8>> = f.store.read_with(|conn| {
+        conn.prepare("SELECT bytes FROM binary_blobs")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    });
+    receiver
+        .write_with(&NoFaults, |tx| {
+            for bytes in &blobs {
+                put_binary_blob(tx, bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for mut op in after {
+        op.relay_seq = Some(op.origin_seq + 1);
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            result.primary
+        );
+    }
+    assert_eq!(count(&receiver, "live_audit_events"), 1);
+    for table in [
+        "live_device_update_applications",
+        "live_device_application_bindings",
+        "live_owner_adoptions",
+        "live_accepted_updates",
+    ] {
+        assert_eq!(count(&receiver, table), 0);
+    }
+    drop(receiver);
+    let mut receiver = EngineStore::open(&path, 300).unwrap();
+    assert_eq!(count(&receiver, "live_audit_events"), 1);
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    receiver.read_with(|conn| {
+        for chunk in &manifest.chunks {
+            assert!(
+                conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
+                    .is_err()
+            );
+        }
+        let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+        let record: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(
+            record["metadata"]["accepted"]["authority"]["principalKind"],
+            "link"
+        );
+        assert_eq!(
+            record["metadata"]["accepted"]["authority"]["principalId"],
+            "link-principal"
+        );
+    });
+    let mut missing = audit.clone();
+    missing.origin_seq += 1;
+    missing.relay_seq = Some(missing.origin_seq + 1);
+    missing.payload["manifest"]["chunks"][0]["sha256"] = json!("f".repeat(64));
+    assert!(matches!(
+        apply_audit_envelope(&mut receiver, &missing, &NoFaults),
+        Err(SyncError::BlobInvalid)
+    ));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        audit.origin_seq
+    );
+    let changed = receiver.read_with(|conn| {
+        use std::io::{Read, Write};
+        let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        reader.finish().unwrap();
+        assert!(text.contains("\"connectionId\":\"connection\""));
+        let text = text.replace(
+            "\"connectionId\":\"connection\"",
+            "\"connectionId\":\"conflicting-connection\"",
+        );
+        let mut writer = chunks::ChunkWriter::new(conn);
+        writer.write_all(text.as_bytes()).unwrap();
+        writer.finish().unwrap()
+    });
+    let mut conflict = missing;
+    conflict.payload["manifest"] = serde_json::to_value(&changed).unwrap();
+    assert!(matches!(
+        apply_audit_envelope(&mut receiver, &conflict, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    assert_eq!(count(&receiver, "live_audit_events"), 1);
+    assert_eq!(count(&receiver, "live_audit_event_conflicts"), 1);
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        conflict.origin_seq
+    );
+    receiver.read_with(|conn| {
+        for chunk in &changed.chunks {
+            assert!(
+                conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&chunk.sha256])
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
 fn imported_event_zero_is_durable_historical_evidence_without_native_authority_or_echo() {
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();

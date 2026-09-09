@@ -76,6 +76,7 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("secret.version.fork", OwnedRoute::Secret),
     ("ydoc.update", OwnedRoute::Ydoc),
     ("live.audit.base", OwnedRoute::LiveAudit),
+    ("live.audit.application", OwnedRoute::LiveAudit),
     ("conflict.open", OwnedRoute::Conflict),
     ("conflict.resolve", OwnedRoute::Conflict),
     ("workspace.init", OwnedRoute::Workspace),
@@ -127,7 +128,7 @@ pub fn apply_replication_envelope(
     }
     match route {
         OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
-        OwnedRoute::LiveAudit => plain(crate::live_audit::apply_base_envelope(
+        OwnedRoute::LiveAudit => plain(crate::live_audit::apply_audit_envelope(
             store, envelope, faults,
         )),
         OwnedRoute::Secret => map_applied(

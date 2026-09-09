@@ -49,6 +49,11 @@ const COMPARED_TABLES: &[&str] = &[
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
+    "live_audit_record_manifests",
+    "live_audit_record_chunks",
+    "live_audit_events",
+    "live_audit_event_publications",
+    "live_audit_event_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_restore_fences",
@@ -513,9 +518,19 @@ mod tests {
             tx.execute("INSERT INTO live_audit_base_publications VALUES ('relay','workspace','main','object',?1,'{}',?1,'peer',0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_record_manifests VALUES (?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery')",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "live_audit_record_manifests",
+            "live_audit_record_chunks",
+            "live_audit_events",
+            "live_audit_event_publications",
+            "live_audit_event_conflicts",
             "live_audit_base_publications",
             "live_audit_bases",
             "live_audit_base_conflicts",

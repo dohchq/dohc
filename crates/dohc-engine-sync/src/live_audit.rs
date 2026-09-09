@@ -11,6 +11,24 @@ use sha2::{Digest, Sha256};
 use crate::apply::{MutationOutcome, apply_envelope_with_mutation_outcome};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx};
 
+mod application_record;
+mod chunks;
+pub use application_record::journal_live_event_in_tx;
+
+pub(crate) fn apply_audit_envelope(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<ApplyOutcome<()>, SyncError> {
+    match envelope.op_kind.as_str() {
+        BASE_OP => apply_base_envelope(store, envelope, faults),
+        application_record::EVENT_OP => {
+            application_record::apply_event_envelope(store, envelope, faults)
+        }
+        _ => Err(SyncError::UnsupportedOperation),
+    }
+}
+
 pub(crate) const BASE_OP: &str = "live.audit.base";
 const SCOPE: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
 

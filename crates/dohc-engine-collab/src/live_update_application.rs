@@ -260,6 +260,15 @@ pub struct RelayAcceptedLiveUpdate {
     #[serde(deserialize_with = "wire_integer")]
     pub received_at_ms: i64,
 }
+impl RelayAcceptedLiveUpdate {
+    /// Validates historical facts; it does not confer current live authority.
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        self.receipt.validate()?;
+        self.binding.validate_canonical().map_err(invalid)?;
+        self.authority.validate()?;
+        integer(self.received_at_ms, 0, SAFE)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiveUpdateStructRange {
@@ -271,6 +280,18 @@ pub struct LiveUpdateStructRange {
     pub end_clock: i64,
 }
 impl LiveUpdateStructRange {
+    /// Shared validation for retained arrays and bounded historical readers.
+    pub fn validate_after(&self, previous: Option<&Self>) -> Result<(), ApplicationError> {
+        self.validate()?;
+        if previous.is_some_and(|prev| {
+            self.client_id < prev.client_id
+                || (self.client_id == prev.client_id && self.start_clock <= prev.end_clock)
+        }) {
+            return Err(invalid("noncanonical firstSeen"));
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), ApplicationError> {
         integer(self.client_id, 0, SAFE)?;
         integer(self.start_clock, 0, 4_294_967_294)?;
@@ -321,14 +342,7 @@ impl LiveUpdateHostApplicationAck {
 fn canonical_ranges(ranges: &[LiveUpdateStructRange]) -> Result<(), ApplicationError> {
     let mut previous: Option<&LiveUpdateStructRange> = None;
     for range in ranges {
-        range.validate()?;
-        if let Some(prev) = previous {
-            if range.client_id < prev.client_id
-                || (range.client_id == prev.client_id && range.start_clock <= prev.end_clock)
-            {
-                return Err(invalid("noncanonical firstSeen"));
-            }
-        }
+        range.validate_after(previous)?;
         previous = Some(range);
     }
     Ok(())
@@ -349,10 +363,7 @@ impl AdmittedLiveUpdate {
     /// Validate immutable committed facts before any normalization.
     pub fn validate(&self) -> Result<(), ApplicationError> {
         let accepted = &self.metadata.accepted;
-        accepted.receipt.validate()?;
-        accepted.binding.validate_canonical().map_err(invalid)?;
-        accepted.authority.validate()?;
-        integer(accepted.received_at_ms, 0, SAFE)?;
+        accepted.validate()?;
         canonical_ranges(&self.metadata.first_seen)?;
         if self.update_bytes.is_empty()
             || hex_sha256(&self.update_bytes) != accepted.receipt.update_digest

@@ -52,10 +52,10 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
-it("keeps native event-zero audit out of every file-share level", () => {
+it.each(["live.audit.base","live.audit.application"])("keeps %s out of every file-share level", (kind) => {
   const payload = JSON.stringify({formatVersion: 1,record: {checkpoint: {binding: {currentPath: "docs/a.md"},stateDigest: "a".repeat(64)}}});
   for (const access of ["view","comment","edit"] as const) {
-    expect(filterOpForShare({...pathShare,access},"live.audit.base",payload).allowed).toBe(false);
+    expect(filterOpForShare({...pathShare,access},kind,payload).allowed).toBe(false);
   }
 });
 
