@@ -466,6 +466,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: proofPassed ? "PASS" : "FAIL", executable, sha256: expectedHash, admissionSha256: admissionDigest,
       scope: "Owner HTTP Edit creation and anonymous protected-cookie exchange; tiny Chromium lifecycle at C; supplied baseline rendered and small real browser edits acknowledged and settled at C; separate client-distinct pinned wire workload acknowledged, converged and settled at C; tiny partial-transfer restore and restart stale-authority checks",
       omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Supplied workload updates through Chromium editor/provider; supplied updates use wire clients after Chromium baseline readiness"], results}, null, 2));
+    } catch (error) {
+      if (proofPassed) throw error;
+      console.error("Could not retain public proof results after failure:", error);
     } finally {
     for (const context of contexts) await context.close();
     await browser?.close();
