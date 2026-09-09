@@ -169,6 +169,28 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    pub async fn owner_ydoc_draft_for_key(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<
+        Result<
+            Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(conn, &key)
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_list_drafts(
         &self,
         workspace_id: String,

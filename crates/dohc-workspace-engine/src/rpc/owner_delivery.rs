@@ -154,7 +154,7 @@ fn invalid() -> WireError {
 }
 
 impl EngineService {
-    fn reserve_owner_delivery(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
+    pub(super) fn reserve_owner_delivery(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
         self.ordinary_live_host
             .get()
             .and_then(|host| host.owner_delivery_admission.as_ref())

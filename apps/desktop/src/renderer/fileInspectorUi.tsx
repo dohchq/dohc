@@ -69,6 +69,10 @@ export const ENGINE_CHIP: Record<
   { label: string; title?: string }
 > = {
   saved: { label: "Saved" },
+  "pending-share": {
+    label: "Saved locally · Pending share",
+    title: "Your edits are saved on this device. The shared file update is pending.",
+  },
   saving: { label: "Saving…" },
   error: {
     label: "Couldn't save",

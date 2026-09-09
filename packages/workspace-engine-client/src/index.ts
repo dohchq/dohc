@@ -22,6 +22,7 @@ export {
 export {
   YDOC_OPEN_DEADLINE_MS,
   YdocAdapterError,
+  YdocOwnerDraftPendingError,
   YdocLiveAdapter,
   YdocOpenTimedOutError,
   type EngineTransport,

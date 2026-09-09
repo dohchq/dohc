@@ -43,6 +43,7 @@ import {
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
+  YdocOwnerDraftPendingError,
   type EngineStoreRefusal,
   type CollectionPendingAdoptionCursor,
   type CollectionPendingAdoptionsPage,
@@ -313,6 +314,7 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // the handle releases — distinct from "error" so the surface can say
 // what blocks the disk and that no user action is needed.
 export type EngineYDocSaveState =
+  | "pending-share"
   | "settling"
   | "saved"
   | "error"
@@ -732,6 +734,7 @@ function isLineageChangedCause(error: unknown): boolean {
  * no longer depends on where the failure was raised.
  */
 function settleFailureSaveState(error: unknown): EngineYDocSaveState {
+  if (error instanceof YdocOwnerDraftPendingError) return "pending-share";
   if (isFileLockedRefusal(error)) return "file-locked";
   if (isEngineStoreBusyRefusal(error)) return "settling";
   return "error";
@@ -3405,7 +3408,9 @@ export function createWorkspaceEngineCapture(
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, token);
           }
-          onError(`ydoc settle of ${input.path}`, error);
+          if (!(error instanceof YdocOwnerDraftPendingError)) {
+            onError(`ydoc settle of ${input.path}`, error);
+          }
           reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;

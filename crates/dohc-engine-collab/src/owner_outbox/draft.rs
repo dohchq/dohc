@@ -83,7 +83,7 @@ pub struct OwnerDraftCursor {
     pub lineage_claim_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnerDraftDescriptor {
     pub binding: LiveObjectBinding,
@@ -94,6 +94,36 @@ pub struct OwnerDraftDescriptor {
     pub outbox_id: Option<String>,
     pub pending_bytes: i64,
     pub state: Option<String>,
+}
+
+/// Resolve the editor's object to its current observed binding. A stale binding
+/// freezes the object instead of falling back to ordinary document writes.
+pub fn descriptor_for_key_in(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<OwnerDraftDescriptor>, OwnerOutboxError> {
+    let mut stmt = conn.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
+    let bindings = stmt
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(read_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_sql)?;
+    if bindings.len() > 1 {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    let Some(json) = bindings.first() else {
+        return Ok(None);
+    };
+    let binding: LiveObjectBinding =
+        serde_json::from_str(json).map_err(|_| OwnerOutboxError::Corrupt)?;
+    binding
+        .validate_canonical()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    let observed = super::accepted::current(conn, &binding)?;
+    describe_draft(conn, observed).map(Some)
 }
 
 pub fn list_drafts_in(

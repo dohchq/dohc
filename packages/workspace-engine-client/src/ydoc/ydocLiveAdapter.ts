@@ -31,6 +31,7 @@ import {
   type YdocRecordUpdateResult,
   type YdocSettleParams,
   type YdocSettleResult,
+  type YdocOwnerDraft,
 } from "./ydocWireContract";
 
 const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
@@ -62,6 +63,13 @@ export class YdocAdapterError extends Error {
     super(message);
     this.name = "YdocAdapterError";
     this.code = code;
+  }
+}
+
+export class YdocOwnerDraftPendingError extends Error {
+  constructor(readonly draft: YdocOwnerDraft) {
+    super("Saved locally. The shared file update is pending.");
+    this.name = "YdocOwnerDraftPendingError";
   }
 }
 
@@ -603,6 +611,7 @@ export class YdocAdapterSession {
   private staleError: YdocResyncNeededError | null = null;
   private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
+  ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -628,6 +637,7 @@ export class YdocAdapterSession {
       initialUpdate: Uint8Array;
       artifactAssets?: readonly ArtifactAssetDescriptor[];
       lineageClaimId: string | null;
+      ownerDraft?: YdocOwnerDraft;
     },
   ) {
     this.adapter = adapter;
@@ -639,6 +649,7 @@ export class YdocAdapterSession {
     this.activeArtifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.lineageClaimId = input.lineageClaimId;
+    this.ownerDraft = input.ownerDraft;
     this.activeDoc = new Y.Doc();
     declareDohcRootSchema(this.activeDoc, this.contentKind);
     Y.applyUpdate(this.activeDoc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
@@ -909,6 +920,10 @@ export class YdocAdapterSession {
       ),
     );
     this.lineageClaimId = result.lineageClaimId;
+    if ("ownerDraft" in result && this.ownerDraft) {
+      this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
+        pendingBytes: result.ownerDraft.pendingBytes, state: result.ownerDraft.state };
+    }
     return result;
   }
 
@@ -952,6 +967,10 @@ export class YdocAdapterSession {
     this.assertOpen();
     await this.recordChain;
     this.assertOpen();
+    if (this.ownerDraft) {
+      await this.resendMissingState();
+      throw new YdocOwnerDraftPendingError(this.ownerDraft);
+    }
     const params: YdocSettleParams = {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
@@ -1117,6 +1136,7 @@ export class YdocAdapterSession {
       { sessionId: this.sessionId },
     );
     const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
+    this.ownerDraft = result.ownerDraft;
     return {
       update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
@@ -1325,6 +1345,7 @@ export class YdocLiveAdapter {
       path: result.path,
       contentKind: result.contentKind,
       initialUpdate: delivery.bytes,
+      ownerDraft: result.ownerDraft,
       artifactAssets: result.artifactAssets,
       lineageClaimId: result.lineageClaimId,
     });

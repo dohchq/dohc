@@ -6,6 +6,7 @@ import {
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
+  YdocOwnerDraftPendingError,
   type ApplyLocalUpdateOptions,
   type YdocResyncNeededError,
   type EngineTransport,
@@ -203,6 +204,7 @@ export async function openEngineYdocProviderSession(
     callback: ((error: unknown) => void) | undefined,
     error: unknown,
   ): void {
+    if (error instanceof YdocOwnerDraftPendingError) return;
     try {
       callback?.(error);
     } catch {
@@ -341,6 +343,7 @@ export async function openEngineYdocProviderSession(
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
   });
+  if (session.ownerDraft) requestSettle();
 
   async function beginTeardown(): Promise<boolean> {
     if (closeComplete) return true;
@@ -448,6 +451,7 @@ export async function openEngineYdocProviderSession(
       let preCloseError: unknown;
       if (
         closeOptions?.settle !== false &&
+        session.ownerDraft === undefined &&
         localEditError === null
       ) {
         try {
@@ -494,7 +498,7 @@ export async function openEngineYdocProviderSession(
           // hands the refusal back instead, and the daemon keeps the session
           // (ydoc_close_inner reinserts it), so the caller still has a live
           // session to decide about.
-          if (closeOptions?.settleOnRefusal === false) throw error;
+          if (closeOptions?.settleOnRefusal === false || session.ownerDraft) throw error;
           // Escalate to a settling close after a transient failure so
           // pending edits are preserved.
           await session.close({ settle: true });

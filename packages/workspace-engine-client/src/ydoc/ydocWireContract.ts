@@ -103,6 +103,18 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
 }
 
 const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext", "scene"]);
+const OwnerDraftSchema = mutableStruct({
+  binding: mutableStruct({
+    workspaceId: Schema.String, mainVersionId: Schema.String, objectId: Schema.String,
+    lineageClaimId: Schema.String, currentPath: Schema.String,
+    selectorPaths: Schema.mutable(Schema.Array(Schema.String)), restoreFenceGeneration: Schema.Int,
+  }),
+  relayDatabaseNamespace: Schema.String, revision: Schema.Int,
+  acceptedCursor: Schema.Int, nativeHeadSequence: Schema.Int,
+  outboxId: Schema.NullOr(Schema.String), pendingBytes: Schema.Int,
+  state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
+});
+export type YdocOwnerDraft = typeof OwnerDraftSchema.Type;
 const ArtifactAssetDescriptorSchema = mutableStruct({
   id: Schema.String,
   mimeType: Schema.String,
@@ -113,6 +125,7 @@ const ArtifactAssetDescriptorSchema = mutableStruct({
   version: Schema.optionalKey(Schema.Int),
 });
 const OpenResultSchema = mutableStruct({
+  ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   sessionId: Schema.String,
   objectId: Schema.String,
   path: Schema.String,
@@ -125,11 +138,19 @@ const OpenResultSchema = mutableStruct({
   seedContent: Schema.optionalKey(Schema.String),
   lineageClaimId: Schema.NullOr(Schema.String),
 });
-const RecordUpdateResultSchema = mutableStruct({
+const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   seq: Schema.Int,
   lineageClaimId: Schema.NullOr(Schema.String),
-});
+}), mutableStruct({
+  lineageClaimId: Schema.String,
+  ownerDraft: mutableStruct({
+    outboxId: Schema.String, sequence: Schema.Int, deliveryId: Schema.String,
+    updateDigest: Schema.String, pendingBytes: Schema.Int,
+    state: Schema.Literals(["active", "sealed", "quarantined"]),
+  }),
+})]);
 const ResyncResultSchema = mutableStruct({
+  ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   lineageClaimId: Schema.NullOr(Schema.String),
   recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
   artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),
@@ -230,6 +251,14 @@ export function decodeYdocResult<M extends YdocMethod>(
   if (method === YDOC_METHOD.open) {
     const decoded = decodeYdocSchema(OpenResultSchema, value, `${method} result`);
     validateOpenAssets(decoded.artifactAssets);
+    if (decoded.ownerDraft && (
+      decoded.contentKind !== "richdoc" || decoded.lineage !== "existing"
+      || decoded.ownerDraft.binding.objectId !== decoded.objectId
+      || decoded.ownerDraft.binding.currentPath !== decoded.path
+      || decoded.ownerDraft.binding.lineageClaimId !== decoded.lineageClaimId
+    )) {
+      throw new ProtocolShapeError("ydoc.open owner draft does not match the editor session.");
+    }
     return decoded as YdocMethodResultMap[M];
   }
   return decodeYdocSchema(

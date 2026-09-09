@@ -122,6 +122,7 @@ export type EngineDocSaveState =
   | "saving"
   | "error"
   | "file-locked"
+  | "pending-share"
   | "read-only"
   | "changed-on-disk"
   | "deleted";
@@ -937,7 +938,7 @@ function createEngineDocSession(
       return;
     }
     pendingSavedSeq = null;
-    if (event.state === "file-locked") {
+    if (event.state === "file-locked" || event.state === "pending-share") {
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }

@@ -11,7 +11,7 @@ import {
   DaemonRefusalError,
   isYdocUnsettledCloseRefusal,
 } from "../live/daemonLiveAdapter";
-import type { Request } from "../protocol";
+import type { JsonValue, Request } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
@@ -21,6 +21,7 @@ import {
   YdocResyncNeededError,
   YdocSessionQuarantinedError,
   YdocLiveAdapter,
+  YdocOwnerDraftPendingError,
   isWellFormedUtf16,
   type EngineTransport,
 } from "./ydocLiveAdapter";
@@ -38,6 +39,54 @@ import {
 const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
+
+it("keeps owner draft durability distinct from native settlement and preserves it on close", async () => {
+  const engine = new YdocLoopbackEngine();
+  const path = "notes/owner.md";
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path, content: "seed", contentKind: "richdoc"});
+  const seedAdapter = new YdocLiveAdapter(engine);
+  const seed = await seedAdapter.openSession({workspace: WORKSPACE,versionId:VERSION,path,contentKind:"richdoc"});
+  engine.markSessionReplicated(seed.sessionId);
+  const objectId = seed.objectId;
+  await seed.close({settle:false});
+  seedAdapter.dispose();
+  let revision = 1;
+  const descriptor = () => ({
+    binding: {workspaceId:"workspace",mainVersionId:VERSION,objectId,lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0},
+    relayDatabaseNamespace:"relay",revision,acceptedCursor:0,nativeHeadSequence:1,
+    outboxId:"outbox",pendingBytes:20,state:"active",
+  });
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      const response = await engine.sendRequest(request);
+      if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
+        return {...response,result:{...response.result as Record<string, JsonValue>,lineageClaimId:"a".repeat(64),ownerDraft:descriptor()}};
+      }
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        return {...response,result:{lineageClaimId:"a".repeat(64),ownerDraft:{outboxId:"outbox",sequence:2,deliveryId:"delivery",updateDigest:"b".repeat(64),pendingBytes:40,state:"active"}}};
+      }
+      return response;
+    },
+  };
+  const scheduler = settleScheduler();
+  const onSettled = vi.fn();
+  const onSettleError = vi.fn();
+  const provider = await openEngineYdocProviderSession({transport,workspace:WORKSPACE,versionId:VERSION,path,contentKind:"richdoc",onRemoteUpdate:()=>undefined,onSettled,onSettleError,scheduleSettle:scheduler.schedule});
+  const update = richdocUpdate(provider.initialUpdate,"pending edit");
+  await provider.applyLocalUpdate(update);
+  await expect(provider.settleNow()).rejects.toBeInstanceOf(YdocOwnerDraftPendingError);
+  expect(onSettled).not.toHaveBeenCalled();
+  expect(onSettleError.mock.calls.at(-1)?.[0]).toMatchObject({draft:{pendingBytes:40}});
+  expect(engine.requests.filter(request=>request.method===YDOC_METHOD.settle)).toHaveLength(0);
+  await provider.close();
+  expect(engine.activeSessionIds()).toHaveLength(0);
+  revision = 2;
+  const reopened = await openEngineYdocProviderSession({transport,workspace:WORKSPACE,versionId:VERSION,path,contentKind:"richdoc",onRemoteUpdate:()=>undefined,scheduleSettle:scheduler.schedule});
+  expect(ydocProjection.yDocToMarkdown(reopened.doc)).toContain("pending edit");
+  await expect(reopened.settleNow()).rejects.toMatchObject({draft:{revision:2}});
+  await reopened.close();
+});
 
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
@@ -670,7 +719,7 @@ describe("YdocLiveAdapter", () => {
       text.delete(0, 1);
       text.insert(0, "x");
     });
-    expect(result?.seq).toBe(1);
+    expect(result).toMatchObject({ seq: 1 });
     expect(session.doc.getText("plainText").toString()).toBe("xabc");
     expect(engine.recordedUpdates).toHaveLength(1);
 
@@ -3015,8 +3064,8 @@ describe("YdocLiveAdapter", () => {
     engine.emitRemoteUpdate(firstSession.sessionId, firstRemote);
     engine.emitRemoteUpdate(secondSession.sessionId, secondRemote);
 
-    expect(firstRecord?.seq).toBe(1);
-    expect(secondRecord?.seq).toBe(1);
+    expect(firstRecord).toMatchObject({ seq: 1 });
+    expect(secondRecord).toMatchObject({ seq: 1 });
     expect(engine.events.map((event) => event.seq)).toEqual([1, 1]);
 
     await firstSession.close({ settle: true });

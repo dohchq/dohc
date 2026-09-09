@@ -19,6 +19,7 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::Lease;
 use dohc_engine_collab::Regime;
+use dohc_engine_collab::owner_outbox::draft::{OwnerDraftDescriptor, OwnerDraftSnapshot};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::BlobEgress;
@@ -36,6 +37,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub(crate) struct YdocSession {
+    pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) workspace: WorkspaceHandle,
     pub(super) key: DocKey,
     pub(super) path: String,
@@ -80,6 +82,7 @@ impl YdocSession {
 
 #[derive(Clone)]
 pub(super) struct YdocSessionView {
+    pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) key: DocKey,
     pub(super) path: String,
     pub(super) content_kind: ContentKind,
@@ -193,6 +196,8 @@ struct YdocOpenParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocOpenResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_draft: Option<OwnerDraftDescriptor>,
     session_id: String,
     object_id: String,
     path: String,
@@ -327,6 +332,8 @@ struct YdocResyncParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_draft: Option<OwnerDraftDescriptor>,
     lineage_claim_id: Option<String>,
     recovered_paths: Vec<String>,
     artifact_assets: Vec<ArtifactAssetDescriptorResult>,
@@ -404,6 +411,36 @@ fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
 }
 
 impl EngineService {
+    async fn ydoc_editor_draft(
+        &self,
+        open: &Arc<OpenWorkspace>,
+        key: &DocKey,
+        cancellation: &OperationCancellation,
+    ) -> Result<(Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>), WireError> {
+        let descriptor = open
+            .actor
+            .owner_ydoc_draft_for_key(key.clone(), cancellation.token())
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        let Some(descriptor) = descriptor else {
+            return Ok((None, None));
+        };
+        let reservation = self.reserve_owner_delivery()?;
+        let draft = open
+            .actor
+            .owner_ydoc_open_draft(
+                descriptor.binding,
+                descriptor.revision,
+                cancellation.token(),
+                Arc::clone(&reservation),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        Ok((Some(draft), Some(reservation)))
+    }
+
     /// Keep scene-open exclusion owned by the detached completion. The
     /// protocol supervisor can stop waiting on cancellation or deadline, but
     /// a queued actor command still runs after its reply receiver is dropped.
@@ -775,7 +812,7 @@ impl EngineService {
                     }
                     other => map_runtime(RuntimeError::Collab(other)),
                 })?;
-        let state = open
+        let mut state = open
             .actor
             .ydoc_open_state_with_artifact_seed(
                 open.workspace_id.clone(),
@@ -841,6 +878,24 @@ impl EngineService {
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
+        let (draft, _draft_reservation) = self
+            .ydoc_editor_draft(&open, &state.key, &cancellation)
+            .await?;
+        if draft.as_ref().is_some_and(|draft| {
+            draft.descriptor.binding.current_path != params.path
+                || Some(&draft.descriptor.binding.lineage_claim_id)
+                    != state.lineage_claim_id.as_ref()
+                || state.content_kind != ContentKind::Richdoc
+                || state.restore_generation.is_some()
+        }) {
+            return Err(map_owner_outbox(
+                dohc_engine_collab::OwnerOutboxError::ParentMismatch,
+            ));
+        }
+        let owner_draft = draft.map(|draft| {
+            state.initial_update = draft.initial_update;
+            draft.descriptor
+        });
         let initial_update = state.initial_update;
         let byte_permit = self
             .blob_egress_budget
@@ -853,6 +908,7 @@ impl EngineService {
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = YdocOpenResult {
+            owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),
             path: params.path.clone(),
@@ -903,6 +959,7 @@ impl EngineService {
         lock(&self.sessions).insert(
             session_id,
             YdocSession {
+                owner_draft,
                 workspace: handle,
                 key: state.key,
                 path: params.path,
@@ -980,6 +1037,60 @@ impl EngineService {
             .seed
             .then(|| session.owner_seed_source.clone())
             .flatten();
+        if let Some(draft) = &session.owner_draft {
+            if draft.binding.current_path != session.path
+                || Some(&draft.binding.lineage_claim_id) != session.lineage_claim_id.as_ref()
+                || params.seed
+                || require_empty
+                || session.restore_generation.is_some()
+            {
+                return Err(map_owner_outbox(
+                    dohc_engine_collab::OwnerOutboxError::ParentMismatch,
+                ));
+            }
+            let append_key = idempotency_key.ok_or_else(|| {
+                WireError::new(
+                    ErrorCode::InvalidParams,
+                    "owner-draft-requires-idempotency-key",
+                )
+            })?;
+            let input = dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                binding: draft.binding.clone(),
+                expected_revision: draft.revision,
+                append_key,
+                update,
+                now_ms: now_ms()?,
+            };
+            let actor = open.actor.clone();
+            let workspace = open.workspace_id.clone();
+            let token = cancellation.token();
+            let reservation = self.reserve_owner_delivery()?;
+            let append = tokio::spawn(async move {
+                let _serial = serial;
+                actor
+                    .owner_ydoc_append_draft(workspace, input, token, reservation)
+                    .await
+            })
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc record task failed"))?
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+            self.events.emit(
+                "ydoc.ownerDraftChanged",
+                json!({"workspaceId":open.workspace_id,"outboxId":append.outbox_id}),
+            );
+            return Ok(json!({
+                "lineageClaimId": session.lineage_claim_id,
+                "ownerDraft": {
+                    "outboxId": append.outbox_id,
+                    "sequence": append.sequence,
+                    "deliveryId": append.delivery_id,
+                    "updateDigest": append.update_digest,
+                    "pendingBytes": append.pending_bytes,
+                    "state": append.state.as_str()
+                }
+            }));
+        }
         // The record and the first-seed flag transition run in a spawned
         // task: if the seed commits but a deadline/cancel drops this future
         // before the post-await assignment, the session would keep
@@ -1349,18 +1460,53 @@ impl EngineService {
             serial = open.session_ops.lock() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-        let state = open
-            .actor
-            .ydoc_resync(
-                session.key,
-                session.lineage_claim_id,
-                cancellation.token(),
-                session.restore_generation,
-            )
-            .await
-            .map_err(map_runtime)?;
+        let (draft, _draft_reservation) = self
+            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .await?;
+        if draft.as_ref().is_some_and(|draft| {
+            draft.descriptor.binding.current_path != session.path
+                || session.restore_generation.is_some()
+                || session.owner_draft.as_ref().is_some_and(|previous| {
+                    previous.binding != draft.descriptor.binding
+                        || previous.relay_database_namespace
+                            != draft.descriptor.relay_database_namespace
+                })
+        }) {
+            return Err(map_owner_outbox(
+                dohc_engine_collab::OwnerOutboxError::ParentMismatch,
+            ));
+        }
+        let (state, owner_draft) = match draft {
+            Some(draft) => (
+                dohc_engine_runtime::actor::YdocResyncState {
+                    initial_update: draft.initial_update,
+                    lineage_claim_id: Some(draft.descriptor.binding.lineage_claim_id.clone()),
+                    recovered_paths: Vec::new(),
+                    artifact_assets: Vec::new(),
+                },
+                Some(draft.descriptor),
+            ),
+            None if session.owner_draft.is_some() => {
+                return Err(map_owner_outbox(
+                    dohc_engine_collab::OwnerOutboxError::Frozen,
+                ));
+            }
+            None => (
+                open.actor
+                    .ydoc_resync(
+                        session.key,
+                        session.lineage_claim_id,
+                        cancellation.token(),
+                        session.restore_generation,
+                    )
+                    .await
+                    .map_err(map_runtime)?,
+                None,
+            ),
+        };
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session.lineage_claim_id = state.lineage_claim_id.clone();
+            session.owner_draft = owner_draft.clone();
         }
         let initial_update = state.initial_update;
         let byte_permit = self
@@ -1374,6 +1520,7 @@ impl EngineService {
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = serde_json::to_value(YdocResyncResult {
+            owner_draft,
             lineage_claim_id: state.lineage_claim_id,
             recovered_paths: state.recovered_paths,
             artifact_assets: state
@@ -1419,6 +1566,7 @@ impl EngineService {
         Ok((
             open,
             YdocSessionView {
+                owner_draft: session.owner_draft.clone(),
                 key: session.key.clone(),
                 path: session.path.clone(),
                 content_kind: session.content_kind,
@@ -1463,6 +1611,10 @@ impl EngineService {
         open.actor.ydoc_cache_clear_for_test().await
     }
 }
+
+#[cfg(test)]
+#[path = "owner_draft_editor_tests.rs"]
+mod owner_draft_editor_tests;
 
 #[cfg(test)]
 mod tests {

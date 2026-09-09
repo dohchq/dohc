@@ -246,6 +246,10 @@ export function CollectionRecordFieldWrite({
           }
         }
         return;
+      case "pending-share":
+        onDurabilityConfirmed?.("Saved on this device. The shared file update is pending.");
+        onHeldDurably("Saved on this device. The shared file update is pending.");
+        return;
       case "error":
       case "read-only":
       case "changed-on-disk":
