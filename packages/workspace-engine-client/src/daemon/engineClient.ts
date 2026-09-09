@@ -937,7 +937,7 @@ export class EngineClient implements EngineTransport {
       if (!pending && !writeInput) return;
       cancellationSent = true;
       this.pending.delete(wireId);
-      this.abandonedRequestIds.add(wireId);
+      if (pending) this.abandonedRequestIds.add(wireId);
       if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
       pending?.reject(cancellationError());
       void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);

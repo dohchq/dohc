@@ -81,6 +81,39 @@ describe("private applied sync transport",()=>{
       expect(closed).not.toHaveBeenCalled();
     } finally {peer.drain(); transport.close();}
   });
+  it.each(["answered", "unanswered"] as const)("rejects duplicate sync responses after cancelling %s final input", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024, maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close"), reached = Promise.withResolvers<void>();
+    let wireId = 0;
+    peer.onEnvelope = envelope => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    peer.onBlobChunk = frame => {
+      if (!frame.fin) return;
+      peer.backpressured = true;
+      if (mode === "answered") output(peer, wireId, {status: "sync", binding, position,
+        observedLocalYDocHeadSequence: 5, hostVectorByteLength: 1});
+      reached.resolve();
+    };
+    const signal = new AbortController();
+    try {
+      const sync = transport.openLiveAppliedSync(request, Uint8Array.of(0), {maxInputBytes: 8, maxOutputBytes: 32}, signal.signal);
+      const cancelled = expect(sync).rejects.toThrow("cancelled");
+      await reached.promise;
+      signal.abort(); peer.drain(); await cancelled;
+      expect(peer.received).toContainEqual({type: "cancel", id: wireId});
+      expect(closed).not.toHaveBeenCalled();
+      if (mode === "unanswered") {
+        peer.send({type: "response", id: wireId, result: {status: "cancelled"}});
+        expect(closed).not.toHaveBeenCalled();
+      }
+      peer.send({type: "response", id: wireId, result: {status: "duplicate"}});
+      expect(closed).toHaveBeenCalledOnce();
+      await expect(transport.sendRequest({id: 971, method: "after-duplicate", params: {}}))
+        .rejects.toMatchObject({code: "protocol-error"});
+    } finally {peer.drain(); transport.close();}
+  });
   it.each(["queued", "written"] as const)("cancels a %s applied read without retiring the shared client", async mode => {
     const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
     peer.acknowledge(); await transport.ready();
