@@ -227,16 +227,32 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
         },
         update_bytes: bytes,
     };
-    assert!(apply_committed(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &f.handle,
-        event.clone(),
-        &NoFaults,
-        4096
-    )
-    .is_err());
-    assert_eq!(snapshot(&f.store), before);
+    let (checkpoint_metadata, baseline_bytes, history_bytes, prior_metadata): (usize, usize, usize, usize) = f.store.read_with(|conn| conn.query_row(
+        "SELECT (SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB)) FROM live_accepted_checkpoints WHERE event_count=0),(SELECT byte_length FROM binary_blobs WHERE sha256=(SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0)),(SELECT sum(length(CAST(a.metadata_json AS BLOB))+b.byte_length) FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256),(SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1)",[],|r|Ok((r.get::<_,i64>(0)? as usize,r.get::<_,i64>(1)? as usize,r.get::<_,i64>(2)? as usize,r.get::<_,i64>(3)? as usize)))).unwrap();
+    let replay_bytes = checkpoint_metadata
+        + baseline_bytes
+        + history_bytes
+        + serde_json::to_vec(&event.metadata).unwrap().len()
+        + event.update_bytes.len()
+        + f.doc.encode_full_state().len();
+    let retained_metadata = checkpoint_metadata + prior_metadata;
+    let sufficient = replay_bytes + retained_metadata;
+    // Replay alone fits, but the checkpoint and prior binding remain live too.
+    for reserve in [4096, replay_bytes, sufficient - 1] {
+        assert!(
+            apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                event.clone(),
+                &NoFaults,
+                reserve
+            )
+            .is_err(),
+            "accepted under {reserve} bytes; requires {sufficient}"
+        );
+        assert_eq!(snapshot(&f.store), before);
+    }
     let key = DocKey::new("workspace", "main", "object").unwrap();
     assert!(f
         .store
@@ -252,7 +268,7 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
             &f.handle,
             event,
             &NoFaults,
-            100_000_000
+            sufficient
         )
         .unwrap(),
         ApplicationResult::Applied(_)

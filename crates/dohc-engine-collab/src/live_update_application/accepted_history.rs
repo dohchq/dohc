@@ -380,9 +380,6 @@ pub(super) fn append(
     )
     .map_err(write_sql)?;
     if events == CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
-        let mut budget = restore_content::Budget {
-            remaining: working_reserve_bytes,
-        };
         let history = read_inner(
             tx,
             held,
