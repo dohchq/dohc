@@ -1,9 +1,11 @@
+import {ServiceActivationDriver} from "../../../services/sync-relay/src/serviceActivationDriver.js"
+import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js"
 import {createHash} from 'node:crypto'
 import {mkdtempSync,rmSync} from 'node:fs'
 import {createRequire} from 'node:module'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {expect,it} from 'vitest'
+import {expect,it,vi} from 'vitest'
 import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
@@ -125,6 +127,10 @@ it('requires exact seed application ACK and supports lost completion responses',
     complete();complete()
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.completed).toBe(true)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
+    expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
+    f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
+    expect(activationDriver(f,vi.fn()).driver.restoreConsumer(f.document)).toBeInstanceOf(OwnerCommittedDelivery)
   }finally{f.close()}
 })
 
@@ -151,5 +157,60 @@ it('rolls back the full activation when its retained-state quota charge fails',(
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
     expect(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()).toEqual(before)
+  }finally{f.close()}
+})
+
+function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest=vi.fn(async()=>({result:{released:true}}))){
+  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
+  const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
+    client:{captureOwnerActivation,sendRequest} as never,
+    workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
+    config:{targets:[target],validateBaseline,validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
+      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
+    adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
+    runDocument:(_document,_signal,operation)=>operation(),
+  })
+  return {driver,target,pull}
+}
+it('releases a real captured session after a stale cut without retaining another source',async()=>{
+  const f=fixture();try{
+    f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
+    const send=vi.fn(async()=>({result:{released:true}}))
+    const d=activationDriver(f,vi.fn(async()=>f.capture),send)
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toMatchObject({kind:'pending'})
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace',method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+    expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
+  }finally{f.close()}
+})
+it('restarts a pending activation with its retained ID instead of pulling and selecting a new cut',async()=>{
+  const f=fixture(),drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
+  try{
+    const initial=activationDriver(f,vi.fn(async()=>f.capture))
+    await initial.driver.activate(initial.target,new AbortController().signal)
+    expect(()=>initial.driver.consumer(f.document)).toThrow('incomplete')
+    const capture=vi.fn(async()=>({...f.capture,sessionId:'reopened-native-session'}))
+    const resumed=activationDriver(f,capture)
+    await resumed.driver.activate(resumed.target,new AbortController().signal)
+    expect(resumed.pull).not.toHaveBeenCalled()
+    expect(capture).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('refused')
+  }finally{drain.mockRestore();f.close()}
+})
+
+it('retries the exact stale lease release before another ordinary pull after response loss',async()=>{
+  const f=fixture();try{
+    f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
+    const order:string[]=[],send=vi.fn(async()=>{order.push('release');return {result:{released:true}}})
+    send.mockImplementationOnce(async()=>{order.push('release-lost');throw new Error('response lost')})
+    const capture=vi.fn(async()=>{order.push('capture');return f.capture}),d=activationDriver(f,capture,send)
+    d.pull.mockImplementation(async()=>{order.push('pull');return {hasMore:false}})
+    await expect(d.driver.activate(d.target,new AbortController().signal)).rejects.toThrow('response lost')
+    expect(order).toEqual(['pull','capture','release-lost'])
+    await d.driver.activate(d.target,new AbortController().signal)
+    expect(order).toEqual(['pull','capture','release-lost','release','pull','capture','release'])
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
 })

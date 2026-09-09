@@ -92,7 +92,7 @@ export function queueLiveHostRequests(client: EngineClient, options: {
 
   // Bind every operation to the original client. Internal RPC calls cannot enter
   // this queue again while their outer operation owns its only active slot.
-  const signals = {sendRequest: 1, sendLiveBootstrap: 2, sendLiveApplication: 2, sendLiveOwnerAdoption: 3,
+  const signals = {sendRequest: 1, sendLiveBootstrap: 2, sendLiveApplication: 2, sendLiveOwnerAdoption: 3, captureOwnerActivation: 3,
     sendLiveRestore: 4, openLiveAppliedSync: 3, readNextLiveApplied: 3, readLiveApplicationAck: 2} as const satisfies Partial<Record<keyof EngineClient, number>>;
   const methods = new Map<PropertyKey, unknown>();
   return new Proxy(client, {get(target, property) {

@@ -1,3 +1,4 @@
+import {parseServiceActivationConfig,ServiceActivationDriver,type ServiceActivationConfig} from "./serviceActivationDriver";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
@@ -32,6 +33,7 @@ interface ServiceLiveHostConfig {
   readonly settlement?: LiveSettlementConfig;
   readonly restore?: LiveRestoreConfig;
   readonly sync?: ReturnType<typeof parseNativeLiveSyncConfig>;
+  readonly activation?: ServiceActivationConfig;
   readonly adoption?: { readonly maxBytes: number; readonly maxEvents: number;
     readonly ownerOutbox: { readonly maxPendingBytes: number; readonly maxPendingAgeMs: number } };
 }
@@ -56,7 +58,7 @@ function path(value: unknown, directory: boolean): string {
 /** Operator configuration only. Incoming document fields never supply these paths. */
 function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
     const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["ordinaryReplication"]);
@@ -76,12 +78,21 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
     return Object.freeze({maxBytes: integer(row.maxBytes), maxEvents: integer(row.maxEvents),
       ownerOutbox: Object.freeze({maxPendingBytes: integer(outbox.maxPendingBytes), maxPendingAgeMs: integer(outbox.maxPendingAgeMs)})});
   })();
+  const activation=parseServiceActivationConfig(value.activation);
+  const sync=parseNativeLiveSyncConfig(value.sync,integer(ingress.aggregateBytes));
+  if(activation){
+    if(!adoption || !sync || activation.maxCaptureBytes>Math.min(sync.policy.maxReadBytes,sync.policy.maxOutputBytes))throw new Error("Service activation requires bounded native adoption and sync.");
+    for(const target of activation.targets){
+      const workspace=workspaces.find(row=>row.workspaceId===target.workspaceId);
+      if(!workspace?.ordinaryReplication || activation.targets.filter(row=>row.workspaceId===target.workspaceId).length>workspace.maxRegistrations)throw new Error("Service activation workspace is not configured.");
+    }
+  }
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement, restore, adoption, sync: parseNativeLiveSyncConfig(value.sync, integer(ingress.aggregateBytes)),
+    settlement, restore, adoption, activation, sync,
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -107,7 +118,7 @@ export async function startServiceLiveHost(options: {
   const control = storage.getLiveHostControl();
   if (!control || control.configuredMode !== "service" || control.configuredHostId !== config.hostId || control.transition ||
     (control.registeredInstanceId !== null && control.registeredInstanceId !== config.instanceId)) throw new Error("Service host does not match provisioned control.");
-  if (preparingOrdinary && control.registeredConnectionId !== null) throw new Error("Ordinary service preparation requires an unregistered host.");
+  if (preparingOrdinary && !config.activation && control.registeredConnectionId !== null) throw new Error("Ordinary service preparation requires an unregistered host.");
   const coordinate: LiveHostConnectionCoordinate = Object.freeze({ mode: "service", hostId: config.hostId, hostEpoch: control.hostEpoch,
     instanceId: config.instanceId, connectionId: randomUUID() });
   const host = { hostId: coordinate.hostId, hostEpoch: coordinate.hostEpoch, instanceId: coordinate.instanceId, connectionId: coordinate.connectionId };
@@ -119,6 +130,8 @@ export async function startServiceLiveHost(options: {
   const consumers = new Map<string, LiveCommittedDelivery>();
   const ordinary = new Map<string, ServiceOrdinaryReplication>();
   const documents = new LiveDocumentWork();
+  const attachments=new Map<string,{handle:string;ordinary:ServiceOrdinaryReplication}>();
+  let activation:ServiceActivationDriver|undefined,activationTimer:ReturnType<typeof setTimeout>|undefined,activationPass:Promise<void>|undefined;
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
   let clientClosed = false;
@@ -139,6 +152,7 @@ export async function startServiceLiveHost(options: {
       current.registeredConnectionId !== coordinate.connectionId || current.admissionState !== "open") throw new Error("Service host registration was retired.");
   };
   const checkPreparing = () => {
+    if(registered){check();return;}
     standing(); signal.throwIfAborted();
     if (!history.reconciled || !isDeepStrictEqual(storage.getLiveHostControl(), control)) throw new Error("Ordinary service preparation was retired.");
   };
@@ -147,6 +161,7 @@ export async function startServiceLiveHost(options: {
     closing = Promise.resolve().then(async () => {
       await startupSettled;
       stopClient();
+      await activationPass;
       try {
         if (registered && !storage.unavailable.aborted) storage.disconnectLiveHost({ ...coordinate, updatedAtMs: Date.now(), guard: standing });
       } finally {
@@ -156,6 +171,7 @@ export async function startServiceLiveHost(options: {
       }
     });
     invalidated.abort();
+    clearTimeout(activationTimer);
     stopObserving();
     changes?.notify();
     lifetime.dispose();
@@ -174,9 +190,16 @@ export async function startServiceLiveHost(options: {
       }));
     } finally {changes?.notify(document);}
   };
+  const consumerFor=(document:LiveDocumentKey)=>ordinary.has(document.workspaceId)
+    ? activation?.consumer(document).consumer
+    : consumers.get(document.workspaceId);
+  const consumerForRestore=(lookup:StopRestoreLookup)=>{
+    const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
+    return document?(ordinary.has(document.workspaceId)?activation?.restoreConsumer(document):consumerFor(document)):undefined;
+  };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
-    const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+    const document = parseLiveDocumentKey(value), consumer = consumerFor(document);
     if (!consumer) throw new Error("Workspace is not configured on this service host.");
     return runDocument(document, callerSignal, joined => consumer.drain(document, joined));
   };
@@ -215,6 +238,7 @@ export async function startServiceLiveHost(options: {
       if (attachment) ordinary.set(row.workspaceId as string, new ServiceOrdinaryReplication({client, workspace: row.workspaceHandle,
         workspaceId: row.workspaceId as string, nextRequestId, deadlineMs: config.client.requestDeadlineMs,
         signal, assertCurrent: checkPreparing}, attachment));
+      if(attachment)attachments.set(row.workspaceId as string,{handle:row.workspaceHandle,ordinary:ordinary.get(row.workspaceId as string)!});
     }
     standing();
     if (signal.aborted || !history.reconciled) throw new Error("Service host startup cancelled.");
@@ -227,9 +251,41 @@ export async function startServiceLiveHost(options: {
       registered = true;
       check();
     }
+    if(config.activation){
+      activation=new ServiceActivationDriver({storage,history,client,host:coordinate,workspaces:attachments,config:config.activation,
+        adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
+        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
+      if(activation.hasRetained()){
+        if(!storage.registerLiveHost({...coordinate,updatedAtMs:Date.now(),guard:standing}).ok)throw new Error("Retained service host registration refused.");
+        registered=true;check();
+      }
+      let index=0,lastError:string|undefined;
+      const pass=async()=>{
+        const bounds=config.activation!;
+        const passSignal=AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]);
+        try{
+          for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,bounds.targets.length);visited++){
+            const target=bounds.targets[index]!;index=(index+1)%bounds.targets.length;
+            const result=await activation!.activate(target,passSignal);
+            if(result.kind==="done"){
+              if(config.settlement)await runDocument(result.document,passSignal,joined=>activation!.consumer(result.document).consumer.settle(result.document,joined));
+              await attachments.get(target.workspaceId)!.ordinary.push(passSignal);
+              if(activation!.workspaceReady(target.workspaceId))await attachments.get(target.workspaceId)!.ordinary.pull(passSignal);
+            }
+          }
+          lastError=undefined;
+        }catch(error){
+          const message=error instanceof Error?error.message:String(error);
+          if(!signal.aborted && message!==lastError){lastError=message;console.error("Service activation pass failed.",message);}
+        }
+        if(!signal.aborted){activationTimer=setTimeout(()=>{activationPass=pass();},bounds.pollIntervalMs);activationTimer.unref();}
+      };
+      activationPass=Promise.resolve().then(pass);
+    }
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
       async prepareOrdinary(workspaceId: string, callerSignal?: AbortSignal) {
+        if(config.activation)throw new Error("The activation driver owns ordinary replication on this host.");
         const driver = ordinary.get(workspaceId);
         if (!driver) throw new Error("Workspace has no ordinary replication attachment.");
         return driver.pull(callerSignal);
@@ -240,47 +296,47 @@ export async function startServiceLiveHost(options: {
         const document = parseLiveDocumentKey({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId});
         await drain(document, callerSignal);
         check();
-        const consumer = consumers.get(document.workspaceId)!;
+        const consumer = consumerFor(document)!;
         const registration = consumer.captureRegistration(binding);
-        return Object.freeze({client: client!, workspace: consumer.workspace,
+        return Object.freeze({client: ordinary.has(document.workspaceId)?activation!.consumer(document).transport.client:client!, workspace: consumer.workspace,
           registrationId: registration.id, binding: registration.binding, coordinate, invalidated: AbortSignal.any([signal, registration.invalidated]),
           changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.prepareRestore(lookup, joined));
       },
       async reviewRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.reviewRestore(lookup, joined));
       },
       async confirmRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
         check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.confirmRestore(lookup, proposalDigest, joined));
       },
       async completeRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
         check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.completeRestore(lookup, proposalDigest, joined));
       },
       async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumers.get(lookup.workspaceId);
+        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.stopRestore(lookup, joined));
       },
       async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
         check();
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
-        const document = parseLiveDocumentKey(value), consumer = consumers.get(document.workspaceId);
+        const document = parseLiveDocumentKey(value), consumer = consumerFor(document);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(document, callerSignal, joined => consumer.settle(document, joined));
       },

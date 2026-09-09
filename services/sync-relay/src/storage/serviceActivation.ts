@@ -1,3 +1,4 @@
+import { requireResumedBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
@@ -49,11 +50,13 @@ export class ServiceActivationStore {
       const access = row.completion_json === null ? this.pending(input.document, input.host) : undefined;
       const current = currentLiveDocumentBinding(this.storage, {document: input.document,
         actor: {kind: "owner", userId: String(row.owner_user_id), shareId: String(row.share_id)}}, access);
-      if (current.kind !== "current" || !isDeepStrictEqual(current.host, input.host) ||
-          !isDeepStrictEqual(current.binding, JSON.parse(String(row.binding_json)))) {
+      if (current.kind !== "current" || !isDeepStrictEqual(current.host, input.host)) {
         throw new Error("Retained service activation authority changed.");
       }
-      return {access, completed: row.completion_json !== null};
+      const original=parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
+      if(row.completion_json===null && !isDeepStrictEqual(current.binding,original))throw new Error("Pending service activation binding changed.");
+      requireResumedBinding(this.storage.db,this.history.namespace,original,current.binding);
+      return {access, binding:current.binding, completed: row.completion_json !== null};
     });
   }
 

@@ -59,22 +59,29 @@ impl EngineService {
             .workspace
             .as_ref()
             .ok_or_else(workspace_unavailable)?;
-        let (open, session) = self.ydoc_session(Some(workspace), &params.session_id)?;
+        let open = self.open(Some(workspace))?;
         let cancellation = OperationCancellation::new(&ctx);
         let serial = tokio::select! {biased;
             ()=cancellation.token.cancelled()=>return Err(cancellation.interruption("ordinary activation release")),
             serial=Arc::clone(&open.session_ops).lock_owned()=>serial,
         };
+        let session = if lock(&self.sessions).contains_key(&params.session_id) {
+            Some(self.ydoc_session(Some(workspace), &params.session_id)?.1)
+        } else { None };
+        let had_session = session.is_some();
+        let workspace_id = open.workspace_id.clone();
         let db_path = open.db_path.clone();
         let activation_id = params.activation_id;
         let (result, serial) = tokio::task::spawn_blocking(move || {
             let result = (|| {
                 let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
                 let permitted: bool = store.read_with(|conn|conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources WHERE activation_id=?1 AND relay_database_namespace=?2
-                     AND workspace_id=?3 AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6)
-                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?3 AND main_version_id=?4 AND object_id=?5)",
-                    rusqlite::params![activation_id,namespace,session.key.workspace_id,session.key.version_id,session.key.object_id,session.lineage_claim_id],
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources a WHERE a.activation_id=?1 AND a.relay_database_namespace=?2
+                     AND a.workspace_id=?3 AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
+                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted WHERE adopted.workspace_id=a.workspace_id
+                       AND adopted.main_version_id=a.version_id AND adopted.object_id=a.object_id))",
+                    rusqlite::params![activation_id,namespace,workspace_id,session.as_ref().map(|s|s.key.version_id.as_str()),
+                        session.as_ref().map(|s|s.key.object_id.as_str()),session.as_ref().and_then(|s|s.lineage_claim_id.as_deref())],
                     |row|row.get(0))).map_err(|_|workspace_unavailable())?;
                 if !permitted { return Err(workspace_unavailable()); }
                 Ok(())
@@ -82,14 +89,14 @@ impl EngineService {
             (result, serial)
         }).await.map_err(|_|workspace_unavailable())?;
         result?;
-        let (current, _) = self.ydoc_session(Some(workspace), &params.session_id)?;
+        let current = self.open(Some(workspace))?;
         if !Arc::ptr_eq(&open, &current) || cancellation.token.is_cancelled() {
             return Err(workspace_unavailable());
         }
-        let removed = lock(&self.sessions)
-            .remove(&params.session_id)
-            .ok_or_else(workspace_unavailable)?;
-        drop(removed);
+        if had_session {
+            let removed = lock(&self.sessions).remove(&params.session_id).ok_or_else(workspace_unavailable)?;
+            drop(removed);
+        }
         drop(serial);
         Ok(ServiceResponse {
             response: Response {
@@ -182,6 +189,7 @@ impl EngineService {
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
+        let resuming = params.activation_id.is_some();
         let actor = open.actor.clone();
         let token = cancellation.token();
         let capture_key = key.clone();
@@ -211,6 +219,14 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let session_id = if let Some(id) = existing {
+            if resuming {
+                let mut sessions = lock(&self.sessions);
+                let session = sessions.get_mut(&id).ok_or_else(workspace_unavailable)?;
+                if session.lineage_claim_id.as_deref() != Some(captured.source.lineage_claim_id.as_str()) {
+                    return Err(workspace_unavailable());
+                }
+                session.restore_generation = captured.restore_generation;
+            }
             id
         } else {
             let sequence = self

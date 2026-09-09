@@ -242,3 +242,35 @@ it("requires a restore working reserve and passes only native restore bounds to 
     await expect(host.prepareRestore({operationId: "restore", workspaceId: "other", ownerUserId: "owner"})).rejects.toThrow("not configured");
   } finally {await host.close();}
 });
+
+it("runs bounded ordinary preparation in the configured activation lifecycle and closes its pass",async()=>{
+  const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
+  Object.assign(f.config.workspaces[0]!,{ordinaryReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"owner-token"},
+    identity:{kind:"join",replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
+  Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
+    sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
+    activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
+      maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
+      validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
+        maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000}}});
+  await f.save();
+  spawn.mockImplementation(async options=>{
+    captured=clientFrom(options);const discovery=captured.client.sendRequest.getMockImplementation()!;
+    captured.client.sendRequest.mockImplementation(async(...args:unknown[])=>{
+      const request=args[0] as {method:string};
+      if(request.method==="liveApplication.hosts")return discovery();
+      if(request.method==="sync.adoptJoinIdentity")return {result:{adopted:true}} as never;
+      if(request.method==="sync.materializePendingCursor")return {result:{materialized:true}} as never;
+      if(request.method==="sync.commitCursor")return {result:{committed:true,sharingDeclined:[]}} as never;
+      return {result:{status:"complete",nextCursor:1,pendingCursor:{kind:"relay",token:"pending"},hasMore:true,
+        fetched:1,applied:1,refused:0,skipped:0,conflictsOpened:0,refusals:[],sharingDeclined:[]}} as never;
+    });return captured.client;
+  });
+  const host=await startServiceLiveHost(f);
+  await vi.waitFor(()=>expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method:"sync.commitCursor"}),expect.any(AbortSignal)));
+  await expect(host.prepareOrdinary("workspace")).rejects.toThrow("activation driver owns");
+  expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull();
+  await host.close();
+  expect(captured.client.close).toHaveBeenCalledTimes(1);
+  expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
+});
