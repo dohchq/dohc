@@ -41,15 +41,14 @@ struct ParsedRecord {
     canonical_digest: String,
 }
 
-struct AcceptedPrefix;
-impl<'de> Visitor<'de> for AcceptedPrefix {
-    type Value = RelayAcceptedLiveUpdate;
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the bounded accepted metadata header")
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        next_field(&mut map, "accepted")
-    }
+fn accepted_header(head: &[u8]) -> Result<RelayAcceptedLiveUpdate, SyncError> {
+    let bytes = head
+        .strip_prefix(b"{\"accepted\":")
+        .ok_or_else(|| invalid("noncanonical native metadata prefix"))?;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    // Decode the accepted object, not its enclosing metadata map. The bounded
+    // prefix may end inside firstSeen; the full record parser checks it later.
+    RelayAcceptedLiveUpdate::deserialize(&mut decoder).map_err(SyncError::corrupt)
 }
 
 fn prefix(header: &Header) -> Result<Vec<u8>, SyncError> {
@@ -525,9 +524,7 @@ pub fn journal_live_event_in_tx(
     // The canonical accepted header is at most214,820 bytes under the existing
     // binding and authority bounds. Do not ask SQLite to parse the range array.
     let head:Vec<u8>=tx.query_row(&format!("SELECT substr(CAST(metadata_json AS BLOB),1,262144) FROM live_accepted_updates WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],count],|r|r.get(0)).map_err(SyncError::corrupt)?;
-    let mut decoder = serde_json::Deserializer::from_slice(&head);
-    let accepted = serde::Deserializer::deserialize_map(&mut decoder, AcceptedPrefix)
-        .map_err(SyncError::corrupt)?;
+    let accepted = accepted_header(&head)?;
     accepted.validate().map_err(SyncError::corrupt)?;
     if scope(namespace, &accepted.binding) != p
         || accepted.receipt.delivery_id != delivery
@@ -633,4 +630,48 @@ pub fn journal_live_event_in_tx(
     let seq = journal_local_op_in_tx(tx, &binding.workspace_id, EVENT_OP, &payload, now_ms)?;
     tx.execute("INSERT INTO live_audit_event_publications(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,origin_id,origin_seq) VALUES (?1,?2,?3,?4,?5,?6,(SELECT origin_id FROM sync_identity WHERE workspace_id=?2),?7)",params![p[0],p[1],p[2],p[3],p[4],count,seq]).map_err(SyncError::persist)?;
     Ok(Some(seq))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_collab::live_update_application::{
+        LiveUpdateReceipt, ServerDerivedLiveUpdateAuthority,
+    };
+
+    #[test]
+    fn accepted_header_does_not_require_the_metadata_map_to_end() {
+        let accepted = RelayAcceptedLiveUpdate {
+            receipt: LiveUpdateReceipt {
+                delivery_id: "delivery".into(),
+                update_digest: "a".repeat(64),
+                journal_cursor: 1,
+                accepting_host_epoch: 1,
+            },
+            binding: LiveObjectBinding {
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: "object".into(),
+                lineage_claim_id: "b".repeat(64),
+                current_path: "note.md".into(),
+                selector_paths: vec!["note.md".into()],
+                restore_fence_generation: 0,
+            },
+            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                principal_id: "owner".into(),
+            },
+            received_at_ms: 1,
+        };
+        let json = serde_json::to_string(&accepted).unwrap();
+        for tail in [
+            ",\"firstSeen\":[]}",
+            ",\"firstSeen\":[{",
+            ",\"firstSeen\":[{\"clientId\":1",
+        ] {
+            let prefix = format!("{{\"accepted\":{json}{tail}");
+            assert_eq!(accepted_header(prefix.as_bytes()).unwrap(), accepted);
+        }
+        assert!(accepted_header(b"{\"accepted\":{\"receipt\":").is_err());
+        assert!(accepted_header(format!("{{\"unexpected\":{json}}}").as_bytes()).is_err());
+    }
 }
