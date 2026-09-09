@@ -78,6 +78,7 @@ async function browserRequest(port: number, path: string, init: RequestInit = {}
 
 const harness = vi.hoisted(() => ({
   relayUrl: "", holdAdoption: true, committed: undefined as undefined | (() => void),
+  failed: undefined as undefined | ((error: Error) => void),
   transforms: [] as {from: string; to: string; insecureLoopbackForTests: true}[],
   captures: [] as {activationId: string; requestedActivationId?: string; source: unknown}[],
   tracePath: "", calls: [] as {method: string; status: "started" | "complete" | "failed"; message?: string; code?: string}[],
@@ -109,7 +110,12 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
       };
       record("started");
       try {const result = await operation(); record("complete"); return result;}
-      catch (error) {record("failed", error); throw error;}
+      catch (error) {
+        record("failed", error);
+        const wire = (error as {wireError?: {code: string; retry: string}})?.wireError;
+        if (wire && wire.retry !== "afterBackoff") harness.failed?.(new Error(`Service activation RPC ${method} failed: ${wire.code}`, {cause: error}));
+        throw error;
+      }
     }
     return new Proxy(client, {get(target, property) {
       if (property === "sendRequest") return (...args: Parameters<typeof client.sendRequest>) => trace(args[0].method, () => client.sendRequest(...args));
@@ -224,8 +230,10 @@ it("resumes a real configured service activation after a lost native adoption re
       ingress: {aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 4, uploadDeadlineMs: 30000},
       client: {aggregateBytes: 200_000_000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000}}));
     let committed!: () => void; const adoptionCommitted = new Promise<void>(resolve => {committed = resolve;}); harness.committed = committed;
+    const activationFailed = new Promise<Error>(resolve => {harness.failed = resolve;});
     active = await startServiceLiveHost({configPath: serviceConfig, storage, history, frameChanges});
-    await adoptionCommitted;
+    const activationOutcome = await Promise.race([adoptionCommitted, activationFailed]);
+    if (activationOutcome instanceof Error) throw activationOutcome;
     const pending = storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!;
     expect(pending).not.toBeNull(); expect(pending.completed).toBe(false);
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(ownerDoc));
