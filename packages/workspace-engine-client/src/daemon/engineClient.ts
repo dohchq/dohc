@@ -63,6 +63,26 @@ interface LiveApplicationRequest {
   deadlineMs: number;
 }
 
+export type OwnerYDocDeliveryRequest = Omit<LiveApplicationRequest, "registrationId">;
+export interface OwnerYDocDeliveryTarget { readonly binding: LiveObjectBinding; readonly relayDatabaseNamespace: string }
+export interface OwnerYDocDeliveryPosition { readonly revision: number; readonly acceptedCursor: number; readonly nativeHeadSequence: number }
+export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
+  readonly expectedRevision: number; readonly expectedNativeHeadSequence: number;
+  readonly previousAcceptedCursor: number; readonly journalCursor: number; readonly updateBytes: Uint8Array;
+}
+export interface OwnerYDocDeliveryReceipt { readonly deliveryId: string; readonly updateDigest: string; readonly journalCursor: number; readonly acceptingHostEpoch: number }
+
+function ownerDeliveryTarget(target: OwnerYDocDeliveryTarget) {
+  const binding=parseLiveObjectBinding(target.binding);
+  return {binding: {...binding,selectorPaths:[...binding.selectorPaths]}, relayDatabaseNamespace: parseLiveUpdateIdentifier(target.relayDatabaseNamespace, "relay namespace")};
+}
+function ownerDeliveryPosition(value: unknown): OwnerYDocDeliveryPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Invalid owner delivery position.");
+  const row=value as OwnerYDocDeliveryPosition;
+  if (!Number.isSafeInteger(row.revision) || row.revision<1 || !Number.isSafeInteger(row.acceptedCursor) || row.acceptedCursor<0 || !Number.isSafeInteger(row.nativeHeadSequence) || row.nativeHeadSequence<0) throw new TypeError("Invalid owner delivery position.");
+  return {revision:row.revision,acceptedCursor:row.acceptedCursor,nativeHeadSequence:row.nativeHeadSequence};
+}
+
 export interface NativeAppliedPosition { readonly eventCount:number; readonly journalCursor:number; readonly evidenceDigest:string }
 function appliedPosition(value: unknown): NativeAppliedPosition {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "eventCount,evidenceDigest,journalCursor") throw new TypeError("Invalid applied position.");
@@ -73,7 +93,7 @@ function appliedPosition(value: unknown): NativeAppliedPosition {
 
 interface PrivateLiveOutput {
   readonly maxBytes: number;
-  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update";
+  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state";
   readonly allowEmpty?: boolean;
   wireId?: number;
   started: boolean;
@@ -676,6 +696,52 @@ interface PendingBlob {
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
+  async ownerYDocReadState(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition & {stateVector: Buffer}> {
+    const params=ownerDeliveryTarget(target);
+    const output:PrivateLiveOutput={status:"state",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.readState",MAX_LIVE_UPDATE_BYTES+3*1024*1024,()=>({params,streams:[]}),signal,output);
+    if (Object.keys(response.result as object).sort().join()!=="acceptedCursor,byteLength,digest,nativeHeadSequence,revision,status,streamId") throw new TypeError("Invalid owner state response.");
+    return {...ownerDeliveryPosition(response.result),stateVector:output.blob!.bytes};
+  }
+
+  async ownerYDocApplyAcceptedFrame(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    return this.ownerYDocApply(request,input,undefined,signal);
+  }
+
+  async ownerYDocApplyInitialSync(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput & {readonly hostVector: Uint8Array}, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    return this.ownerYDocApply(request,input,input.hostVector,signal);
+  }
+
+  private async ownerYDocApply(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput, vector: Uint8Array | undefined, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    const target=ownerDeliveryTarget(input);
+    ownerDeliveryPosition({revision:input.expectedRevision,acceptedCursor:input.previousAcceptedCursor,nativeHeadSequence:input.expectedNativeHeadSequence});
+    if (!Number.isSafeInteger(input.journalCursor) || input.journalCursor<input.previousAcceptedCursor || (!vector && input.journalCursor===input.previousAcceptedCursor)
+      || input.updateBytes.byteLength<2 || input.updateBytes.byteLength>MAX_LIVE_UPDATE_BYTES
+      || (vector && (vector.byteLength<1 || vector.byteLength>MAX_LIVE_UPDATE_BYTES))) throw new TypeError("Invalid owner accepted input.");
+    const byteLength=input.updateBytes.byteLength+(vector?.byteLength??0);
+    const params={...target,expectedRevision:input.expectedRevision,expectedNativeHeadSequence:input.expectedNativeHeadSequence,
+      previousAcceptedCursor:input.previousAcceptedCursor,journalCursor:input.journalCursor,hostVectorByteLength:vector?.byteLength??null};
+    const response=await this.sendLiveUpload(request,vector?"ydoc.ownerDelivery.applyInitialSync":"ydoc.ownerDelivery.applyAcceptedFrame",byteLength+3*1024*1024,()=>{
+      const bytes=vector?Buffer.concat([vector,input.updateBytes],byteLength):Buffer.from(input.updateBytes);
+      const digest=createHash("sha256").update(bytes).digest("hex"),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      return {params:{...params,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    if (Object.keys(response.result as object).sort().join()!=="acceptedCursor,nativeHeadSequence,revision") throw new TypeError("Invalid owner apply response.");
+    const position=ownerDeliveryPosition(response.result);
+    if (position.acceptedCursor!==input.journalCursor || position.revision!==(input.journalCursor===input.previousAcceptedCursor?input.expectedRevision:input.expectedRevision+1)) throw new TypeError("Owner apply position differs from request.");
+    return position;
+  }
+
+  async ownerYDocIsReceiptApplied(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryTarget & {readonly receipt:OwnerYDocDeliveryReceipt}, signal?: AbortSignal): Promise<boolean> {
+    const receipt={deliveryId:parseLiveUpdateIdentifier(input.receipt.deliveryId,"delivery ID"),updateDigest:parseLiveUpdateDigest(input.receipt.updateDigest),journalCursor:input.receipt.journalCursor,acceptingHostEpoch:input.receipt.acceptingHostEpoch};
+    if (!Number.isSafeInteger(receipt.journalCursor) || receipt.journalCursor<1 || !Number.isSafeInteger(receipt.acceptingHostEpoch) || receipt.acceptingHostEpoch<1) throw new TypeError("Invalid owner receipt.");
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.isReceiptApplied",3*1024*1024,()=>({params:{...ownerDeliveryTarget(input),receipt},streams:[]}),signal);
+    const row=response.result as {applied?:unknown};
+    if (!row || typeof row.applied!=="boolean" || Object.keys(row).join()!=="applied") throw new TypeError("Invalid owner receipt response.");
+    return row.applied;
+  }
+
   async openLiveAppliedSync(request:LiveApplicationRequest, clientVector:Uint8Array, bounds:{maxInputBytes:number;maxOutputBytes:number}, signal?:AbortSignal):Promise<{
     binding:LiveObjectBinding;position:NativeAppliedPosition;observedLocalYDocHeadSequence:number;hostVector:Buffer;missingStateUpdate:Buffer;
   }> {
@@ -1259,7 +1325,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||

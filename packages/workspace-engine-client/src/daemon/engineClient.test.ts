@@ -31,6 +31,47 @@ const LIMITS = {
   maxJsonDepth: 32,
 };
 
+describe("private owner delivery transport", () => {
+  const request={id:970,workspace:"workspace",deadlineMs:30_000};
+  const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it("reads a bounded accepted vector without a host registration", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;
+      expect(e.method).toBe("ydoc.ownerDelivery.readState");expect(e.params).toEqual(target);
+      const bytes=Buffer.from([0]),digest=createHash("sha256").update(bytes).digest("hex");
+      peer.send({type:"blobStart",requestId:e.id,streamId:e.id,totalBytes:1,sha256:digest});
+      peer.sendRaw(blobChunkFrame(e.id,bytes,true));
+      peer.send({type:"response",id:e.id,result:{status:"state",revision:2,acceptedCursor:19,nativeHeadSequence:3,streamId:e.id,byteLength:1,digest}});
+    };
+    try { expect(await transport.ownerYDocReadState(request,target)).toEqual({revision:2,acceptedCursor:19,nativeHeadSequence:3,stateVector:Buffer.from([0])}); }
+    finally {transport.close();}
+  });
+  it("streams a 20 MiB update with a separate host vector and retains its cut", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    let wireId=0;const chunks:Buffer[]=[];
+    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;expect(e.method).toBe("ydoc.ownerDelivery.applyInitialSync");expect(e.params).not.toHaveProperty("registrationId");expect(e.params).toHaveProperty("hostVectorByteLength",1);};
+    peer.onBlobChunk=frame=>{chunks.push(Buffer.from(frame.payload));if(frame.fin)peer.send({type:"response",id:wireId,result:{revision:2,acceptedCursor:19,nativeHeadSequence:3}});};
+    const updateBytes=Buffer.alloc(20*1024*1024,7);
+    try {
+      expect(await transport.ownerYDocApplyInitialSync(request,{...target,expectedRevision:1,expectedNativeHeadSequence:2,previousAcceptedCursor:0,journalCursor:19,updateBytes,hostVector:Uint8Array.of(0)})).toEqual({revision:2,acceptedCursor:19,nativeHeadSequence:3});
+      const bytes=Buffer.concat(chunks);expect(bytes.length).toBe(updateBytes.length+1);expect(bytes[0]).toBe(0);expect(bytes.subarray(1).equals(updateBytes)).toBe(true);
+    } finally {transport.close();}
+  });
+  it("checks receipt containment separately and rejects a mismatched applied cursor", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();let wireId=0;
+    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;if(e.method==="ydoc.ownerDelivery.isReceiptApplied")peer.send({type:"response",id:e.id,result:{applied:false}});};
+    peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{revision:2,acceptedCursor:18,nativeHeadSequence:3}});};
+    try {
+      expect(await transport.ownerYDocIsReceiptApplied(request,{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe(false);
+      await expect(transport.ownerYDocApplyAcceptedFrame({...request,id:971},{...target,expectedRevision:1,expectedNativeHeadSequence:2,previousAcceptedCursor:0,journalCursor:19,updateBytes:Uint8Array.of(0,0)})).rejects.toThrow("differs from request");
+    } finally {transport.close();}
+  });
+});
+
 describe("private applied sync transport",()=>{
   const request={id:970,workspace:"workspace",registrationId:7,deadlineMs:30_000};
   const position={eventCount:0,journalCursor:0,evidenceDigest:"ab".repeat(32)};
