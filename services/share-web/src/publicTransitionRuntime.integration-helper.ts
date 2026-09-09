@@ -152,7 +152,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         const settled = await h.host().settle(fixture.document); expect(settled.materialized).toBe(true);
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
       }
-      Object.assign(stage, {interruptedAt, staleAdmissionRefused: true, restored, verdict: "PASS"});
+      Object.assign(stage, {interruptedAt, restored, verdict: "PASS"});
     } finally {
       await socket.close(); await writer.context.close(); for (const peer of peers) await peer.context.close();
       for (const context of extraContexts) await context.close();

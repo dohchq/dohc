@@ -57,6 +57,7 @@ export async function runPublicAutomaticView(options: Options) {
   const views: Awaited<ReturnType<Options["newView"]>>[] = [], peers: Awaited<ReturnType<PublicTransitionHarness["openLink"]>>[] = [];
   let socket: Awaited<ReturnType<typeof h.wire.connect>> | undefined;
   let completed = false;
+  let stopObservingSettlements: (() => void) | undefined;
   const rounds: Record<string, unknown>[] = [];
   h.evidence.automaticView = {verdict: "INCOMPLETE", rounds, concurrency: h.concurrency, admittedReadContexts: admission.readContexts};
   let requestId = 1;
@@ -64,22 +65,29 @@ export async function runPublicAutomaticView(options: Options) {
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId, captureMode: "none",
       relay: {baseUrl: options.relayUrl, bearerToken: options.ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: h.timeoutMs});
     const handle = (opened.result as {workspace: string}).workspace;
-    const rpc = async (method: string, params: Parameters<typeof owner.sendRequest>[0]["params"]) => {
+    const rpc = async <T = unknown>(method: string, params: Parameters<typeof owner.sendRequest>[0]["params"]) => {
       const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs});
-      return response.result as Record<string, any>;
+      return response.result as T;
     };
     await rpc("sync.claim", {workspaceId});
-    const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
-    const written = await rpc("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api", requestId: randomUUID()});
+    const mainVersionId = (await rpc<{id: string}>("versions.ensureMain", {})).id as string;
+    async function pushAll() {
+      for (let page = 0; ; page++) {
+        if (page >= admission.maxPagesPerPull) throw new Error("Ordinary push exceeded admitted page budget.");
+        const pushed = await rpc<{status: string; hasMore: boolean; refusals: unknown[]; sharingDeclined: unknown[]; ownerAdmissionPending: unknown[]}>("sync.push", {workspaceId});
+        expect(pushed.status).toBe("complete"); expect(pushed.refusals).toEqual([]);
+        expect(pushed.sharingDeclined).toEqual([]); expect(pushed.ownerAdmissionPending).toEqual([]);
+        if (!pushed.hasMore) return;
+      }
+    }
+    // Establish ordinary enrollment before the owner creates a replicated live lineage.
+    await pushAll();
+    const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api", requestId: randomUUID()});
     const objectId = written.object.id as string;
-    const editor = await rpc("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
+    const editor = await rpc<{sessionId: string}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
     await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true});
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
-    for (let page = 0; ; page++) {
-      if (page >= admission.maxPagesPerPull) throw new Error("Initial ordinary push exceeded admitted page budget.");
-      const pushed = await rpc("sync.push", {workspaceId});
-      expect(pushed.refusals ?? []).toEqual([]); if (!pushed.hasMore) break;
-    }
+    await pushAll();
     const link = await h.ownerRequest(`/sync/${workspaceId}/shares/links`, {paths: [path], access: "edit"});
     const viewLink = await h.ownerRequest(`/sync/${workspaceId}/shares/${link.shareId}/links`, {access: "view"});
     const identity = h.storage.getWorkspaceBootstrap(workspaceId).identity;
@@ -99,11 +107,13 @@ export async function runPublicAutomaticView(options: Options) {
       await browserExpect(view.page.getByRole("button", {name: "Edit file", exact: true})).toHaveCount(0);
     }
     for (let index = 0; index < h.concurrency; index++) peers.push(await h.openLink(link.url, index));
-    const writer = peers.pop()!; peers.push(writer);
+    const writer = peers.at(-1)!;
     await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, objectId), "automatic-view-writer"); await socket.sync();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
+    const manualSettlements = vi.spyOn(h.host(), "settle");
+    stopObservingSettlements = () => manualSettlements.mockRestore();
     for (const step of selected.updates) {
       // The observer is armed before submission. No mocked clock or explicit settle participates.
       await Promise.all(views.map(view => view.page.evaluate(expected => {
@@ -128,10 +138,13 @@ export async function runPublicAutomaticView(options: Options) {
       rounds.push({deliveryId: step.deliveryId, ack, submittedAt, hostReceiptObservedAt, renderedAt,
         conservativeSubmitToViewMs: renderedAt.map(time => time - submittedAt), markdownSha256: hash(step.expected.markdown)});
     }
+    const manualSettlementsDuringMeasurement = manualSettlements.mock.calls.length;
+    expect(manualSettlementsDuringMeasurement).toBe(0);
     completed = true;
-    return {verdict: "PASS", concurrency: h.concurrency, readContexts: views.length, automaticSettlement: true, manualSettlementsDuringMeasurement: 0,
+    return {verdict: "PASS", concurrency: h.concurrency, readContexts: views.length, manualSettlementsDuringMeasurement,
       acceptedEnvelopeMs: 5000, rounds, internalRelayTransport: transport.transforms, publicBrowserTransport: "HTTPS/WSS"};
   } finally {
+    stopObservingSettlements?.();
     const cleanup = await Promise.allSettled([socket?.close(), ...peers.map(peer => peer.context.close()), ...views.map(async view => {
       try {await view.page.evaluate(() => (globalThis as typeof globalThis & {publicViewObservation?: {observer?: MutationObserver}}).publicViewObservation?.observer?.disconnect());}
       finally {await view.context.close();}

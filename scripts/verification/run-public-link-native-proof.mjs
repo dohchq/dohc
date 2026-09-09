@@ -118,7 +118,7 @@ try{
  assert.equal(proof.results.suppliedWireWorkload.rounds.length,workload.rounds.length);
  assert.deepEqual(proof.results.suppliedWireWorkload.manifest,release.workload);
  assert.deepEqual(proof.results.loadedTransitions.map(row=>row.name),transitionNames);
- for(const row of proof.results.loadedTransitions){assert.equal(row.verdict,'PASS');assert.equal(row.concurrency,release.admittedConcurrency);assert.equal(row.staleAdmissionRefused,true);}
+ for(const row of proof.results.loadedTransitions){assert.equal(row.verdict,'PASS');assert.equal(row.concurrency,release.admittedConcurrency);}
  assert.equal(proof.results.publicMixedPresence.verdict,'PASS');assert.equal(proof.results.publicMixedPresence.concurrency,release.admittedConcurrency);
  assert.equal(proof.results.automaticView.verdict,'PASS');assert.equal(proof.results.automaticView.readContexts,release.automaticView.readContexts);
  assert.equal(proof.results.automaticView.manualSettlementsDuringMeasurement,0);assert.equal(proof.results.automaticView.acceptedEnvelopeMs,5000);
