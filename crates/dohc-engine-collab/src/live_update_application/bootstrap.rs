@@ -81,7 +81,7 @@ pub fn bootstrap_committed<E>(
     input: LiveApplicationBootstrap,
     bytes: Vec<u8>,
     faults: &dyn FaultInjector,
-    follow_up: impl FnOnce(&Transaction<'_>, &WriteResult) -> Result<(), E>,
+    follow_up: impl FnOnce(&Transaction<'_>, &WriteResult, &str, &LiveObjectBinding) -> Result<(), E>,
 ) -> Result<BootstrapResult, E>
 where
     E: From<ApplicationError> + From<StorageError> + From<DomainError>,
@@ -187,7 +187,7 @@ where
         if marker.head_update_seq != 0 || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest) { return Err(E::from(ApplicationError::Corrupt)); }
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
         accepted_history::initialize(tx, &held, &bytes).map_err(E::from)?;
-        follow_up(tx, &written)?;
+        follow_up(tx, &written, &held.namespace, binding)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if readback != (input.clone(), binding.clone(), held.coordinate.clone(), marker.head_update_seq) { return Err(E::from(ApplicationError::Corrupt)); }
         Ok(BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(&input, marker.head_update_seq, false)))
@@ -324,7 +324,7 @@ mod tests {
             input(vector),
             vector.bytes.clone(),
             faults,
-            |_, _| Ok(()),
+            |_, _, _, _| Ok(()),
         )
     }
     fn counts(store: &EngineStore) -> (i64, i64, i64, i64) {
@@ -1131,7 +1131,7 @@ mod tests {
             bad,
             vector.bytes.clone(),
             &NoFaults,
-            |_, _| Ok(()),
+            |_, _, _, _| Ok(()),
         );
         assert!(result.is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));
@@ -1142,7 +1142,7 @@ mod tests {
             input(&vector),
             vector.bytes.clone(),
             &NoFaults,
-            |_, _| Err(ApplicationError::Interrupted.into()),
+            |_, _, _, _| Err(ApplicationError::Interrupted.into()),
         );
         assert!(result.is_err());
         assert_eq!(counts(&store), (0, 0, 0, 0));

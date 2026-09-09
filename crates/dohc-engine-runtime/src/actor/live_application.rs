@@ -1175,6 +1175,7 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    let now_ms = input.baseline_registered_at_ms;
                     bootstrap_committed(
                         store,
                         cache,
@@ -1182,7 +1183,10 @@ impl Request {
                         input,
                         bytes,
                         faults.as_ref(),
-                        |tx, written| {
+                        |tx, written, namespace, binding| {
+                            dohc_engine_sync::journal_live_base_in_tx(
+                                tx, namespace, binding, now_ms,
+                            )?;
                             crate::search::upsert_file_search_index(
                                 tx,
                                 &root,

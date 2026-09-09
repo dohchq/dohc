@@ -64,7 +64,7 @@ fn stopped_remote_update_retains_bytes_without_reporting_storage_corruption() {
         },
         bytes.clone(),
         &NoFaults,
-        |_, _| Ok(()),
+        |_, _, _, _| Ok(()),
     )
     .unwrap();
     let operation = NativeRestoreFence {

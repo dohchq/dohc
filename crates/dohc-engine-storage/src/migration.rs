@@ -1746,6 +1746,46 @@ CREATE TABLE live_device_application_first_seen (
 CREATE INDEX live_device_application_delivery_ranges
     ON live_device_application_first_seen(relay_database_namespace, delivery_id, ordinal);
 
+-- Portable historical evidence is separate from native live authority.
+CREATE TABLE live_audit_base_publications (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE live_audit_bases (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+
+CREATE TABLE live_audit_base_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id,origin_id,origin_seq),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+
 -- Owner update recovery stays independent of live document and version rows.
 CREATE TABLE owner_ydoc_outboxes (
     outbox_id                 TEXT NOT NULL PRIMARY KEY,
