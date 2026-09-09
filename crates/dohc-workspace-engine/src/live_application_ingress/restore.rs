@@ -540,6 +540,16 @@ mod tests {
             header["admitted"] = json!({"accepted":{"receipt":{"deliveryId":"restore-admission","updateDigest":receipt["candidateDigest"],"journalCursor":self.sequence+1,"acceptingHostEpoch":1},"binding":binding,"authority":{"principalKind":"owner","principalId":"owner","grantId":null,"grantGeneration":null},"receivedAtMs":3},"firstSeen":receipt["replacementRanges"]});
             header
         }
+        async fn settled_resume_header(&mut self) -> Value {
+            let mut header = self.prepare_admitted().await;
+            drop(self.restore("liveApplication.applyRestore", &header).await);
+            let settled = self.restore("liveApplication.settleRestore", &header).await;
+            let receipt: Value =
+                serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
+            assert_eq!(receipt["materialized"], true);
+            header["settlementId"] = receipt["settlementId"].clone();
+            header
+        }
         async fn close(self) {
             let Self {
                 mut service,
@@ -649,6 +659,228 @@ mod tests {
         let retry = f.restore("liveApplication.resumeRestore", &header).await;
         assert_eq!(retry.blob_egress.as_ref().unwrap().bytes, receipt);
         drop(retry);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn resumed_ydoc_open_captures_generation_and_queued_stale_writers_cannot_mutate() {
+        use dohc_engine_collab::{CollabError, DocKey};
+        use dohc_engine_runtime::{CancellationToken, RuntimeError};
+        let mut f = Fixture::new().await;
+        let attached = f
+            .service
+            .supervisor
+            .open(&f._scratch.path().join(".dohc/engine/engine.db"), 10)
+            .unwrap();
+        assert!(!attached.created_actor);
+        let actor = attached.actor;
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let before = actor
+            .ydoc_open_state(
+                "workspace".into(),
+                10,
+                false,
+                Some(key.clone()),
+                "main".into(),
+                "notes/a.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.restore_generation, None);
+        let header = f.settled_resume_header().await;
+        drop(f.restore("liveApplication.resumeRestore", &header).await);
+        let fresh = actor
+            .ydoc_open_state(
+                "workspace".into(),
+                20,
+                true,
+                Some(key.clone()),
+                "main".into(),
+                "notes/a.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fresh.restore_generation, Some(1));
+        let editor = Ydoc::wire();
+        editor.apply(&fresh.initial_update).unwrap();
+        let update = editor.richdoc_append_paragraph("Fresh resumed edit");
+        let db =
+            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        db.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','native-origin','epoch','stream',1)",[]).unwrap();
+        let inventory = || {
+            db.query_row("SELECT head_update_seq,(SELECT count(*) FROM moments),(SELECT count(*) FROM ydoc_updates) FROM ydoc_docs WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap()
+        };
+        let prior = inventory();
+        // The caller carries its open-time authority into each queued actor command.
+        for stale in [before.restore_generation, Some(0)] {
+            let record = actor.ydoc_record_update(
+                key.clone(),
+                "notes/a.md".into(),
+                fresh.content_kind,
+                fresh.regime,
+                update.clone(),
+                Some("queued-writer".into()),
+                None,
+                fresh.lineage_claim_id.clone(),
+                false,
+                None,
+                Some(format!("stale-{stale:?}")),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                stale,
+            );
+            let settle = actor.ydoc_settle(
+                f._scratch.path().to_owned(),
+                key.clone(),
+                "notes/a.md".into(),
+                fresh.content_kind,
+                fresh.lineage_claim_id.clone(),
+                fresh.head_blob_sha256.clone(),
+                format!("stale-{stale:?}"),
+                Arc::new(()),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                stale,
+            );
+            let (record, settle) = tokio::join!(record, settle);
+            assert!(matches!(
+                record,
+                Err(RuntimeError::Collab(CollabError::RestoreFenced))
+            ));
+            assert!(matches!(
+                settle,
+                Err(RuntimeError::Collab(CollabError::RestoreFenced))
+            ));
+            assert_eq!(inventory(), prior);
+        }
+        let recorded = actor
+            .ydoc_record_update(
+                key.clone(),
+                "notes/a.md".into(),
+                fresh.content_kind,
+                fresh.regime,
+                update,
+                Some("fresh-writer".into()),
+                None,
+                fresh.lineage_claim_id.clone(),
+                false,
+                None,
+                Some("fresh-generation".into()),
+                40,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                fresh.restore_generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded.outcome.seq, prior.0 + 1);
+        let resynced = actor
+            .ydoc_resync(
+                key,
+                fresh.lineage_claim_id,
+                CancellationToken::new(),
+                fresh.restore_generation,
+            )
+            .await
+            .unwrap();
+        let observed = Ydoc::wire();
+        observed.apply(&resynced.initial_update).unwrap();
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&editor, &observed)
+                .unwrap()
+        );
+        drop(db);
+        drop(actor);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn restore_resume_refuses_a_pending_materialization_job_even_when_disk_matches() {
+        let mut f = Fixture::new().await;
+        let header = f.settled_resume_header().await;
+        let db =
+            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let moment: String = db
+            .query_row(
+                "SELECT moment_id FROM live_device_settlements WHERE settlement_id=?1",
+                [header["settlementId"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let job = format!("ydoc-mat_{moment}");
+        let path = f._scratch.path().join("notes/a.md");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(db.execute("UPDATE materialization_jobs SET status='pending' WHERE job_id=?1 AND status='complete'",[&job]).unwrap(),1);
+        assert!(
+            f.try_restore("liveApplication.resumeRestore", &header, 1_000_000)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let resumed: bool = db
+            .query_row(
+                "SELECT resume_receipt_json IS NOT NULL FROM live_restore_fences",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!resumed);
+        assert_eq!(db.execute("UPDATE materialization_jobs SET status='complete' WHERE job_id=?1 AND status='pending'",[&job]).unwrap(),1);
+        drop(f.restore("liveApplication.resumeRestore", &header).await);
+        drop(db);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn restore_resume_output_refusal_keeps_one_receipt_and_releases_reserved_capacity() {
+        let mut f = Fixture::new().await;
+        let header = f.settled_resume_header().await;
+        let capacity = f.ingress.budget.available_permits();
+        let refusal = f
+            .try_restore("liveApplication.resumeRestore", &header, 5)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal.code, ErrorCode::LimitExceeded);
+        assert_eq!(f.ingress.budget.available_permits(), capacity);
+        let db =
+            rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT resume_receipt_json FROM live_restore_fences",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        std::fs::write(
+            f._scratch.path().join("notes/a.md"),
+            b"later independent work",
+        )
+        .unwrap();
+        let retry = f.restore("liveApplication.resumeRestore", &header).await;
+        assert_eq!(retry.response.result["status"], "resumed");
+        assert_eq!(retry.blob_egress.as_ref().unwrap().bytes, saved.as_bytes());
+        assert!(f.ingress.budget.available_permits() < capacity);
+        drop(retry);
+        assert_eq!(f.ingress.budget.available_permits(), capacity);
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM live_restore_fences WHERE resume_receipt_json IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(f._scratch.path().join("notes/a.md")).unwrap(),
+            b"later independent work"
+        );
+        drop(db);
         f.close().await;
     }
 
