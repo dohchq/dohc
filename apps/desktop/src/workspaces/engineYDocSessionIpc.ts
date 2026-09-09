@@ -63,10 +63,10 @@ export interface EngineYDocIpcSender {
   once(event: "destroyed", listener: () => void): this;
 }
 
-export type EngineYDocSessionCapture = Pick<
-  WorkspaceEngineCapture,
-  "openYDocSession"
->;
+export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & { liveWritable?(): boolean };
+export interface EngineYDocSessionCapture {
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number) => void}): Promise<EngineYDocSessionProvider>;
+}
 
 interface EngineYDocWorkspace {
   workspaceId: string;
@@ -94,6 +94,7 @@ interface EngineYDocSessionIpcOptions {
   ) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
+  sharedCaptureFor?: (workspace: EngineYDocWorkspace) => Promise<EngineYDocSessionCapture | null>;
   resolveDocumentPath: (
     workspace: EngineYDocWorkspace,
     path: string,
@@ -115,7 +116,7 @@ interface LineageReplacement {
 interface EngineYDocIpcOwnedSession {
   ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
-  provider: WorkspaceEngineYDocProviderSession;
+  provider: EngineYDocSessionProvider;
   saveSeq: EngineYDocSaveSeqState;
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
@@ -250,6 +251,7 @@ class EngineYDocSessionIpc {
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
+  readonly #sharedCaptureFor: EngineYDocSessionIpcOptions["sharedCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
     "resolveDocumentPath"
@@ -265,6 +267,7 @@ class EngineYDocSessionIpc {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#sharedCaptureFor = options.sharedCaptureFor;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#documentReservations = new DocumentMutationReservations();
@@ -332,7 +335,7 @@ class EngineYDocSessionIpc {
     const workspace = authority.workspace;
     authority.assertCurrent();
     if (!rendererSession.isCurrent()) return unavailableOpen();
-    if (this.#isSharedView(workspace)) return unavailableOpen();
+    if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) return unavailableOpen();
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
     const requestedSpellingKind = liveDocumentKindForPath(
@@ -356,7 +359,7 @@ class EngineYDocSessionIpc {
     }
     if (
       !rendererSession.isCurrent() ||
-      this.#isSharedView(workspace)
+      (this.#isSharedView(workspace) && !this.#sharedCaptureFor)
     ) {
       return unavailableOpen();
     }
@@ -370,6 +373,7 @@ class EngineYDocSessionIpc {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (canonicalKind === null) return unavailableOpen();
+    if (this.#isSharedView(workspace) && (canonicalKind !== "richdoc" || !/\.md$/i.test(canonicalPath))) return unavailableOpen();
     const releaseOpening = await this.#documentReservations.reserveOpen(
       workspace.attachmentId,
       canonicalPath,
@@ -403,7 +407,14 @@ class EngineYDocSessionIpc {
     rendererSession: EngineYDocRendererSession,
     generation: number,
   ): Promise<OpenResult> {
-    let capture = this.#captureFor(workspace);
+    const shared = this.#isSharedView(workspace);
+    let capture: EngineYDocSessionCapture | null;
+    if (shared && this.#sharedCaptureFor) {
+      try { capture = await this.#sharedCaptureFor?.(workspace) ?? null; }
+      catch { return unavailableOpen({ liveHostUnavailable: true }); }
+      authority.assertCurrent();
+      if (!capture || !rendererSession.isCurrent()) return unavailableOpen({ liveHostUnavailable: true });
+    } else capture = this.#captureFor(workspace);
     if (!capture) {
       try {
         await this.#ensureCaptureFor(workspace);
@@ -441,8 +452,8 @@ class EngineYDocSessionIpc {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (
-      !rendererSession.isCurrent() ||
-      this.#isSharedView(workspace)
+      !rendererSession.isCurrent() || this.#isSharedView(workspace) !== shared ||
+      (this.#isSharedView(workspace) && !this.#sharedCaptureFor)
     ) {
       return unavailableOpen();
     }
@@ -461,7 +472,7 @@ class EngineYDocSessionIpc {
           if (delivery === "active") send();
           else if (delivery === "pending") pending.push(send);
         };
-        let provider: WorkspaceEngineYDocProviderSession;
+        let provider: EngineYDocSessionProvider;
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
@@ -571,7 +582,7 @@ class EngineYDocSessionIpc {
       `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
       opened.error,
     );
-    return this.#openRefusal(opened.error);
+    return shared ? unavailableOpen({ liveHostUnavailable: true }) : this.#openRefusal(opened.error);
   }
 
   async readArtifactAsset(
@@ -621,7 +632,7 @@ class EngineYDocSessionIpc {
           owned.emit({ state: "deleted", seq: input.seq });
           return { accepted: false, reason: "deleted" };
         }
-        if (this.#isSharedView(owned.workspace)) {
+        if (this.#isSharedView(owned.workspace) && !owned.provider.liveWritable?.()) {
           owned.emit({ state: "read-only", seq: input.seq });
           return { accepted: false, reason: "read-only" };
         }

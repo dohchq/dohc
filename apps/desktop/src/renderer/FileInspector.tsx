@@ -590,6 +590,7 @@ export const FileInspector = memo(function FileInspector(
   writesRefusedRef.current =
     notInVersion ||
     engine.documentUnavailable ||
+    engine.liveHostUnavailable ||
     engine.opening ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||

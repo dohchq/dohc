@@ -166,6 +166,7 @@ type EngineDocOpenOutcome =
   // distinct user states and retry rules behind one flag.
   | { kind: "not-in-version" }
   | { kind: "document-unavailable" }
+  | { kind: "live-host-unavailable" }
   | { kind: "engine-may-hold-document" }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
@@ -212,6 +213,7 @@ function makeTransport(
           ? { lineageGeneration: result.lineageGeneration }
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
+        ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
@@ -1183,6 +1185,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.liveHostUnavailable) {
+              setOutcome({ kind: "live-host-unavailable" });
             } else if (bound.documentUnavailable) {
               setOutcome({ kind: "document-unavailable" });
             } else if (bound.artifactAssetsInvalid) {

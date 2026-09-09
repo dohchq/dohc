@@ -55,6 +55,7 @@ interface LiveRouteOptions {
 }
 type BrowserRouteOptions = LiveRouteOptions & {
   kind: "named" | "link";
+  desktopBearer?: boolean;
   sessions: { resolve(request: Request, discriminator: string): Promise<LiveBrowserContext | null> };
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
@@ -69,6 +70,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     {...input, sessions: {resolve: input.sessions.resolve.bind(input.sessions)}};
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
   const kind = options.kind;
+  const desktop = options.kind === "named" && options.desktopBearer === true;
+  const routeKind = desktop ? "desktop" : kind;
   if (kind !== "named" && kind !== "link" && kind !== "owner") throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin), keyHash = hashRelayExchangeKey(options.exchangeKey);
   if (!origin.startsWith("https:") || options.exchangeKey.length < 32 || hosts.size === 0 || [...hosts].some(host => !host || new URL(`http://${host}`).host !== host)) {
@@ -88,16 +91,17 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
 
   let closed = false, pendingRequests = 0;
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers: { "cache-control": "private, no-store" } });
-  const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && headers.get("origin") === origin &&
-    verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash);
-  const credentials = (headers: Headers): Record<string, string> => kind === "owner" ? { authorization: headers.get("authorization") ?? "" } : kind === "named" ? { cookie: headers.get("cookie") ?? "" } :
+  const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && (desktop
+    ? (!headers.has("origin") || headers.get("origin") === origin) && /^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") && !headers.has("cookie")
+    : headers.get("origin") === origin && verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
+  const credentials = (headers: Headers): Record<string, string> => (kind === "owner" || desktop) ? { authorization: headers.get("authorization") ?? "" } : kind === "named" ? { cookie: headers.get("cookie") ?? "" } :
     { authorization: headers.get("authorization") ?? "", "x-dohc-link-profile-secret": headers.get("x-dohc-link-profile-secret") ?? "" };
   const sessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{12}$/.test(value);
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.drainTimeoutMs));
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (options.kind === "owner" || closed || storage.unavailable.aborted || url.pathname !== `/sync/live/${kind}-tickets` || url.search || request.method !== "POST" || !trusted(request.headers) ||
+    if (options.kind === "owner" || closed || storage.unavailable.aborted || url.pathname !== `/sync/live/${routeKind}-tickets` || url.search || request.method !== "POST" || !trusted(request.headers) ||
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" || pendingRequests >= limits.maxPendingRequests || request.signal.aborted) return refusal();
     pendingRequests++;
     const controller = new AbortController(), signal = AbortSignal.any([request.signal, storage.unavailable, shutdown.signal, controller.signal]);
@@ -152,7 +156,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           lineageClaimId: parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))},
           shareId: parseLiveUpdateIdentifier(url.searchParams.get("shareId"))};
       } else {
-        const path = new RegExp(`^/sync/live/${kind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
+        const path = new RegExp(`^/sync/live/${routeKind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
         const protocols = headers.get("sec-websocket-protocol")?.split(",").map(value => value.trim());
         if (!path || request.method !== "GET" || !trusted(headers) || protocols?.length !== 2 || protocols.filter(value => value === "dohc-live-v1").length !== 1) throw new Error();
         discriminator = path[1]!;

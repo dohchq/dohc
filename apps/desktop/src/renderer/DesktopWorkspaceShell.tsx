@@ -4327,11 +4327,7 @@ export function DesktopWorkspaceShell(props: {
               : shareViewDamaged
                 ? "dohc can't read what this share grants. Open the share again to restore it."
                 : shareViewDocumentsWritable
-                  ? // Edit gets its own sentence from #646 PR3a. It states
-                    // the whole right, including the half that is not a
-                    // right: the granter's files change only when the
-                    // granter accepts.
-                    `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
+                  ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
                   : shareViewHasIndependentChat
                     ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
                     : shareView.access === "comment"

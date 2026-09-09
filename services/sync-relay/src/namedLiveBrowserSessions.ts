@@ -19,7 +19,7 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
   for (const [name, value] of Object.entries({ maxSessions, retentionMs })) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`Invalid named session ${name}.`);
   }
-  const resolveBrowser = createNamedLiveBrowserResolver({ storage, resolveActor });
+  const resolveBrowser = createNamedLiveBrowserResolver({ storage, resolveActor, authentication: options.authentication });
   const sessions = new Map<string, NamedLiveBrowserSession>();
 
   function currentTime(): number {

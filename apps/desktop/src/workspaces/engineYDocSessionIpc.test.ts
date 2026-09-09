@@ -103,6 +103,7 @@ interface TestHarnessOptions {
     path: string,
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
+  sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
 }
 
 function rendererSession(
@@ -150,6 +151,7 @@ function harness(
     captureFor: () => capture,
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
+    sharedCaptureFor: options.sharedCaptureFor,
     resolveDocumentPath,
     onError,
   });
@@ -178,6 +180,47 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("routes shared Markdown through the named provider and pauses when that host stops", async () => {
+    let live = true;
+    const shared = Object.assign(providerSession(), {liveWritable: () => live});
+    const open = vi.fn(async () => shared);
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: open})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    const opened = await h.ipc.open(sender, openPayload);
+    expect(opened.available).toBe(true);
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    const update = {sessionId: openPayload.sessionId, update: new Uint8Array([0, 0]), seq: 1, lineageGeneration: 1};
+    expect(h.ipc.applyUpdate(sender, update)).toEqual({accepted: true});
+    expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
+    live = false;
+    expect(h.ipc.applyUpdate(sender, {...update, seq: 2})).toEqual({accepted: false, reason: "read-only"});
+    expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
+    await h.ipc.shutdown();
+  });
+
+  it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("retires shared admission when the renderer switches workspaces", async () => {
+    const pending = deferred<EngineYDocSessionCapture | null>();
+    const entered = deferred<void>();
+    const shared = {openYDocSession: vi.fn(async () => providerSession())};
+    const h = harness(providerSession(), {sharedCaptureFor: () => {entered.resolve(); return pending.promise;}});
+    h.setReadOnly(true);
+    const opening = h.ipc.open(new FakeSender(7), openPayload);
+    await entered.promise;
+    h.retireSession();
+    pending.resolve(shared);
+    expect((await opening).available).toBe(false);
+    expect(shared.openYDocSession).not.toHaveBeenCalled();
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
     const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},

@@ -1,3 +1,5 @@
+import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
+import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
   type DesktopWorkspaceCallbacksDependencies,
@@ -3084,6 +3086,30 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
   },
   isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
+  sharedCaptureFor: async (workspace) => {
+    await warmCredentialCache();
+    const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
+    const credentials = cachedCredentials;
+    if (!marker || !credentials?.relayUrl || !marker.relayUrl ||
+      !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) || marker.ended ||
+      marker.grantedSelector?.access !== "edit" ||
+      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) return null;
+    const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
+      selector: value?.grantedSelector, ended: value?.ended === true});
+    const pinned = identity(marker);
+    return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      preserveDraft: draft => preserveNamedLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
+      credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
+        signal: ownerDeliveryCredentialLifetime.signal},
+      assertCurrent() {
+        const current = findWorkspace(workspace.workspaceId);
+        if (cachedCredentials?.token !== credentials.token || cachedCredentials?.userId !== credentials.userId ||
+          cachedCredentials?.relayUrl !== credentials.relayUrl || current?.rootPath !== workspace.rootPath || identity(current.shareView) !== pinned) {
+          throw new Error("The shared file session changed.");
+        }
+      },
+    });
+  },
   resolveDocumentPath: async (workspace, path) => {
     try {
       return (await resolveWorkspaceFile(workspace.rootPath, path, "write"))

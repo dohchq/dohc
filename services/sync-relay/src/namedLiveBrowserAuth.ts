@@ -14,6 +14,7 @@ export interface NamedLiveBrowserContext extends NamedLiveBrowserScope {
 
 export function createNamedLiveBrowserResolver(options: {
   resolveActor: ResolveActor;
+  authentication?: "cookie" | "bearer";
   storage: Parameters<typeof authorizeNamedLiveEditShareGrant>[0]["storage"];
 }) {
   // Callers supply trusted route scope and the production session resolver.
@@ -21,8 +22,9 @@ export function createNamedLiveBrowserResolver(options: {
   return async (request: Request, scope: NamedLiveBrowserScope): Promise<NamedLiveBrowserContext | null> => {
     const { workspaceId, shareId, grantId } = scope;
     const headers = new Headers();
-    const cookie = request.headers.get("cookie");
-    if (cookie !== null) headers.set("cookie", cookie);
+    const field = options.authentication === "bearer" ? "authorization" : "cookie";
+    const credential = request.headers.get(field);
+    if (credential !== null) headers.set(field, credential);
     let actor;
     try {
       actor = await options.resolveActor(new Request(request.url, { headers, signal: request.signal }), workspaceId);

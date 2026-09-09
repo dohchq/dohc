@@ -5722,6 +5722,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // Main could no longer resolve the live file at the path the renderer read.
   // The caller must not recreate it through the writable plain editor.
   documentUnavailable: z.boolean().optional(),
+  liveHostUnavailable: z.boolean().optional(),
   // The open did not land, and a session for this document may still be the
   // engine's. It is raised by an open that hit its retry deadline while the
   // engine was unreachable, an open whose refusal could not release its
