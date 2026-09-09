@@ -115,6 +115,7 @@ pub struct AdmittedApplicationInput {
     pub(crate) registration: Arc<Registration>,
     pub(crate) operation: LiveApplicationOperation,
     pub(crate) reservation: Arc<dyn Send + Sync>,
+    pub(crate) working_reserve_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -870,7 +871,12 @@ impl EngineService {
                 LiveApplicationOperation::Apply(event) => input
                     .registration
                     .handle
-                    .apply_with_reservation(event, Arc::new(NoFaults), Some(input.reservation))
+                    .apply_with_reservation(
+                        event,
+                        Arc::new(NoFaults),
+                        Some(input.reservation),
+                        input.working_reserve_bytes,
+                    )
                     .await
                     .map(|result| match result {
                         ApplicationResult::Applied(ack) => {

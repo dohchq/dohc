@@ -300,40 +300,18 @@ mod tests {
                 markdown_digest: hex_sha256(source.as_bytes()),
                 projection_digest: hex_sha256(projection.as_bytes()),
             },
-            owner_origin: Some(f.cut.clone()),
         };
-        for damage in [
-            "absent",
-            "id",
-            "namespace",
-            "moment",
-            "source",
-            "sequence",
-            "terminal",
-            "omitted",
-            "metadata",
-            "bytes",
-        ] {
+        for damage in ["id", "namespace", "origin", "sequence"] {
             let mut changed = input.clone();
-            if damage == "absent" {
-                changed.owner_origin = None;
-            } else {
-                let cut = changed.owner_origin.as_mut().unwrap();
-                match damage {
-                    "id" => cut.adoption_id = "other".into(),
-                    "namespace" => cut.relay_database_namespace = "other".into(),
-                    "moment" => cut.source_moment_id = "other".into(),
-                    "source" => cut.source_digest = "f".repeat(64),
-                    "sequence" => cut.expected_local_sequence += 1,
-                    "terminal" => cut.terminal_receipt = None,
-                    "omitted" => {
-                        cut.events.clear();
-                        cut.terminal_receipt = None;
-                    }
-                    "metadata" => cut.events[0].metadata.accepted.received_at_ms += 1,
-                    "bytes" => cut.events[0].update_bytes = vec![0, 0],
-                    _ => unreachable!(),
+            match damage {
+                "id" => changed.fence.operation.operation_id = "other".into(),
+                "namespace" => changed.fence.operation.relay_database_namespace = "other".into(),
+                "origin" => {
+                    changed.fence.operation.origin =
+                        RestoreDeliveryOrigin::Owner { id: "other".into() }
                 }
+                "sequence" => changed.fence.local_head_sequence += 1,
+                _ => unreachable!(),
             }
             assert!(
                 f._owner
@@ -360,7 +338,7 @@ mod tests {
                 &NoFaults,
             )
             .unwrap();
-        assert_eq!(prepared.receipt().accepted_sources.len(), 1);
+        assert_eq!(prepared.receipt().accepted_history.suffix.len(), 1);
         assert_eq!(prepared.receipt().point.journal_cursor, 0);
         assert_eq!(
             f.store
@@ -384,7 +362,7 @@ mod tests {
             serde_json::to_vec(&replay).unwrap()
         );
         let mut changed = input;
-        changed.owner_origin.as_mut().unwrap().source_moment_id = "changed-on-replay".into();
+        changed.point.receipt_digest = "f".repeat(64);
         assert!(f
             ._owner
             .prepare_restore(&mut f.store, changed, coordinate, 1_000_000, 100, &NoFaults)
@@ -685,7 +663,8 @@ mod tests {
                 &mut WriterDocCache::new(),
                 &f.handle,
                 event.clone(),
-                &NoFaults
+                &NoFaults,
+                100_000_000
             ),
             Err(ApplicationError::Conflict)
         ));
@@ -702,6 +681,7 @@ mod tests {
             &f.handle,
             event.clone(),
             &NoFaults,
+            100_000_000,
         )
         .unwrap();
         assert!(matches!(applied, ApplicationResult::Applied(_)));
@@ -1246,6 +1226,8 @@ pub fn adopt_owner_committed(
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
+        accepted_history::initialize(tx, &held, &cut.baseline_bytes)?;
+        for event in &cut.events { accepted_history::append(tx, &held, event, max_bytes)?; }
         Ok(OwnerAdoptionAck { adoption_id:cut.adoption_id.clone(),local_ydoc_sequence:marker.head_update_seq,terminal_cursor,adoption_replayed:false })
     })?;
     match result {

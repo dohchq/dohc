@@ -26,7 +26,6 @@ struct Params {
 struct Header {
     fence: NativeRestoreFenceReceipt,
     point: NativeRestorePoint,
-    owner_origin_limits: Option<dohc_engine_collab::OwnerOutboxLimits>,
     candidate_digest: Option<String>,
     native_source_manifest_digest: Option<String>,
     admitted: Option<AdmittedLiveUpdateMetadata>,
@@ -50,6 +49,9 @@ impl Upload {
         self.deadline
     }
     pub(super) fn start(&mut self, start: &BlobStart) -> Result<(), WireError> {
+        if start.stream_id != self.stream.id {
+            return Err(invalid("invalid-native-restore-stream"));
+        }
         if Instant::now() >= self.deadline {
             return Err(invalid("restore-upload-expired"));
         }
@@ -87,7 +89,8 @@ impl LiveApplicationIngress {
             .checked_add(self.config.application_working_reserve_bytes)?
             .checked_add(MAX_CHUNK_BYTES * 2)
             .filter(|bytes| {
-                config.max_bytes > 0
+                config.max_bytes >= 5
+                    && self.config.application_working_reserve_bytes > 0
                     && config.max_events > 0
                     && config.max_events < MAX_WIRE_INTEGER as usize
                     && *bytes <= self.config.aggregate_bytes
@@ -118,7 +121,7 @@ pub(super) fn begin(
         .restore_host(connection, request.workspace.as_ref())?;
     let params: Params = serde_json::from_value(std::mem::take(&mut request.params))
         .map_err(|_| invalid("invalid-native-restore-upload"))?;
-    if params.byte_length < 8
+    if params.byte_length < 5
         || params.byte_length > config.max_bytes
         || ingress
             .last_stream_id
@@ -193,24 +196,12 @@ fn decode(
 ) -> Result<RestoreOperation, WireError> {
     let header: Header = serde_json::from_slice(field(&mut bytes)?)
         .map_err(|_| invalid("invalid-native-restore-header"))?;
-    let origin = field(&mut bytes)?;
     if !bytes.is_empty() {
         return Err(invalid("native-restore-trailing-bytes"));
     }
-    let owner_origin = match (origin.is_empty(), header.owner_origin_limits) {
-        (true, None) => None,
-        (false, Some(limits)) => {
-            limits
-                .validate()
-                .map_err(|_| invalid("invalid-native-restore-origin-limits"))?;
-            Some(adoption::decode_restore(origin, config.max_events, limits)?)
-        }
-        _ => return Err(invalid("invalid-native-restore-origin")),
-    };
     let preparation = NativeRestorePreparation {
         fence: header.fence,
         point: header.point,
-        owner_origin,
     };
     preparation
         .validate_budget(config.max_bytes, config.max_events)
@@ -537,7 +528,6 @@ mod tests {
         let json = serde_json::to_vec(header).unwrap();
         let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
         bytes.extend(json);
-        bytes.extend(0u32.to_le_bytes());
         bytes
     }
 
@@ -705,6 +695,16 @@ mod tests {
         assert_eq!(f.ingress.budget.available_permits(), capacity);
         f.ingress.begin(request.clone(), &f.owner.handle()).unwrap();
         assert!(f.ingress.budget.available_permits() < capacity);
+        assert!(
+            f.ingress
+                .start(BlobStart {
+                    request_id: request.id,
+                    stream_id: 51,
+                    total_bytes: Some(bytes.len() as u64),
+                    sha256: Some(hex_sha256(&bytes)),
+                })
+                .is_err()
+        );
         assert!(f.ingress.cancel(request.id));
         assert_eq!(f.ingress.budget.available_permits(), capacity);
         assert!(

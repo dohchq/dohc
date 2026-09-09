@@ -1545,6 +1545,46 @@ CREATE TABLE live_device_bootstraps (
     FOREIGN KEY (baseline_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TABLE live_accepted_updates (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 1 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+    delivery_id TEXT NOT NULL,
+    metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    suffix_count INTEGER NOT NULL CHECK (suffix_count BETWEEN 1 AND 4095),
+    suffix_bytes INTEGER NOT NULL CHECK (suffix_bytes BETWEEN 1 AND 41943040),
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, event_count),
+    UNIQUE (relay_database_namespace, delivery_id),
+    UNIQUE (relay_database_namespace, journal_cursor),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_accepted_updates_cursor ON live_accepted_updates
+    (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor);
+
+CREATE TABLE live_accepted_checkpoints (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 0 AND 9007199254740991),
+    terminal_json TEXT NOT NULL CHECK (json_valid(terminal_json)),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    origin_stamp TEXT NOT NULL CHECK (length(origin_stamp)=64 AND origin_stamp NOT GLOB '*[^0-9a-f]*'),
+    state_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, event_count),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE live_restore_fences (
     workspace_id TEXT NOT NULL,
     main_version_id TEXT NOT NULL,

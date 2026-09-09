@@ -45,17 +45,6 @@ pub(super) fn decode(
     })
 }
 
-/// Restore carries the retained canonical cut. Decode it without an intermediate JSON tree.
-pub(super) fn decode_restore(
-    bytes: &[u8],
-    max_events: usize,
-    outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
-) -> Result<OwnerAdoptionCut, WireError> {
-    decode_with(bytes, max_events, outbox_limits, |bytes| {
-        serde_json::from_slice(bytes).map_err(|_| invalid("invalid-owner-adoption-event"))
-    })
-}
-
 fn decode_with(
     mut bytes: &[u8],
     max_events: usize,

@@ -43,6 +43,24 @@ struct RestoreOutputGuard {
     fence: RestoreFenceOutputGuard,
     _reservation: Arc<dyn Send + Sync>,
 }
+impl RestoreOutputGuard {
+    fn unavailable(&self) -> WireError {
+        if self.fence.cancel.is_cancelled() {
+            WireError::new(ErrorCode::Cancelled, "native restore cancelled")
+        } else if self
+            .fence
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "native restore deadline elapsed",
+            )
+        } else {
+            workspace_unavailable()
+        }
+    }
+}
 impl std::fmt::Debug for RestoreOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestoreOutputGuard").finish_non_exhaustive()
@@ -195,7 +213,7 @@ impl EngineService {
             _reservation: input.reservation.clone(),
         });
         if !guard.is_current() {
-            return Err(cancellation.interruption("native restore"));
+            return Err(guard.unavailable());
         }
         let now_ms = super::super::request::now_ms()?;
         let events = self.events.clone();
@@ -252,6 +270,7 @@ impl EngineService {
                 RestoreOperation::Settle(application) => {
                     let binding = application.preparation.fence.operation.old_binding.clone();
                     let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    // The commit observer survives a failed post-commit actor reply fence.
                     let reconcile_required = observed.clone();
                     let workspace = host.open.workspace_id.clone();
                     let path = binding.current_path.clone();
@@ -290,7 +309,10 @@ impl EngineService {
                                 token,
                             )
                             .await
-                            .map_err(map_runtime)?;
+                            .map_err(|error| {
+                                host.open.request_collection_reconcile();
+                                map_runtime(error)
+                            })?;
                         if !paths.is_empty() {
                             reconcile_events.emit(crate::CAPTURE_MOMENT_RECORDED_EVENT, json!({
                                 "workspaceId":host.open.workspace_id,"appliedCount":paths.len(),"notOwnedCount":0,
@@ -312,7 +334,7 @@ impl EngineService {
         let (status, bytes) = outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "native restore interrupted"))??;
         if !guard.is_current() {
-            return Err(workspace_unavailable());
+            return Err(guard.unavailable());
         }
         let digest = dohc_engine_storage::hex_sha256(&bytes);
         Ok(ServiceResponse {

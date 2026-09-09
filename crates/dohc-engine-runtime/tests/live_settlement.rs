@@ -66,7 +66,6 @@ async fn applied_restore(
             markdown_digest: hex_sha256(markdown.as_bytes()),
             projection_digest: hex_sha256(markdown.as_bytes()),
         },
-        owner_origin: None,
     };
     let proposal = f
         .owner
@@ -657,7 +656,10 @@ impl Fixture {
             update_bytes: bytes,
         };
         assert!(matches!(
-            self.handle.apply(event, Arc::new(NoFaults)).await.unwrap(),
+            self.handle
+                .apply(event, Arc::new(NoFaults), 100_000_000)
+                .await
+                .unwrap(),
             ApplicationResult::Applied(_)
         ));
         receipt
@@ -701,7 +703,10 @@ impl Fixture {
             update_bytes: vec![0, 0],
         };
         assert!(matches!(
-            handle.apply(event, Arc::new(NoFaults)).await.unwrap(),
+            handle
+                .apply(event, Arc::new(NoFaults), 100_000_000)
+                .await
+                .unwrap(),
             ApplicationResult::Applied(_)
         ));
         self.handle = self
@@ -839,7 +844,7 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
         },
         update_bytes: vec![0, 0],
     };
-    let mut remote = Box::pin(f.handle.apply(remote, Arc::new(NoFaults)));
+    let mut remote = Box::pin(f.handle.apply(remote, Arc::new(NoFaults), 100_000_000));
     std::future::poll_fn(|cx| {
         assert!(local.as_mut().poll(cx).is_pending());
         assert!(remote.as_mut().poll(cx).is_pending());
@@ -1613,7 +1618,6 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
                 markdown_digest: hex_sha256(source.as_bytes()),
                 projection_digest: hex_sha256(projection.as_bytes()),
             },
-            owner_origin: None,
         };
         let proposal = f
             .owner

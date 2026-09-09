@@ -3,6 +3,318 @@ use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
 use serde_json::json;
 
+fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<LiveUpdateReceipt> {
+    let held = f.handle.registration.lock().unwrap();
+    let outcome = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let start: i64 = tx
+                .query_row(
+                    "SELECT coalesce(max(event_count),0) FROM live_accepted_updates",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(read_sql)?;
+            let mut receipts = Vec::new();
+            for ordinal in start + 1..=start + copies {
+                let receipt = LiveUpdateReceipt {
+                    delivery_id: format!("history-{ordinal}"),
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: ordinal * 3,
+                    accepting_host_epoch: 1,
+                };
+                let event = AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: receipt.clone(),
+                            binding: f.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            },
+                            received_at_ms: ordinal,
+                        },
+                        first_seen: vec![],
+                    },
+                    update_bytes: bytes.clone(),
+                };
+                event.validate()?;
+                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                if f.sequence > 0 {
+                    insert_application(tx, &held, &event, f.sequence)?;
+                }
+                receipts.push(receipt);
+            }
+            Ok(receipts)
+        })
+        .unwrap();
+    let TxnOutcome::Committed(receipts) = outcome else {
+        panic!("history append interrupted")
+    };
+    receipts
+}
+
+#[test]
+fn accepted_history_checkpoints_bound_lifetime_replay_and_keep_old_delivery_identity() {
+    let mut f = Fixture::new("accepted history");
+    let bytes = f.doc.encode_full_state();
+    let receipts = append_history_copies(&mut f, 4098, bytes);
+    let held = f.handle.registration.lock().unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let mut budget = Budget {
+                remaining: 1_000_000,
+            };
+            let history =
+                accepted_history::read(conn, &held, receipts[4097].journal_cursor, &mut budget, 3)?;
+            assert_eq!(history.proof.checkpoint.event_count, 4095);
+            assert_eq!(
+                history.proof.checkpoint.terminal,
+                Some(receipts[4094].clone())
+            );
+            assert_eq!(history.proof.event_count, 4098);
+            assert_eq!(history.proof.suffix.len(), 3);
+            assert!(crate::replay_parity::structurally_equal_v2(
+                &history.doc,
+                &f.doc
+            )?);
+            let old = accepted_history::accepted_source(
+                conn,
+                &held,
+                &receipts[0].delivery_id,
+                &mut budget,
+            )?
+            .unwrap();
+            assert_eq!(old.accepted.receipt, receipts[0]);
+            assert!(
+                accepted_history::accepted_source(conn, &held, "never-accepted", &mut budget)?
+                    .is_none()
+            );
+            assert!(accepted_history::read(
+                conn,
+                &held,
+                receipts[4097].journal_cursor,
+                &mut Budget {
+                    remaining: 1_000_000
+                },
+                2
+            )
+            .is_err());
+            assert!(accepted_history::read(
+                conn,
+                &held,
+                receipts[4097].journal_cursor - 1,
+                &mut Budget {
+                    remaining: 1_000_000
+                },
+                3
+            )
+            .is_err());
+            assert!(accepted_history::read(
+                conn,
+                &held,
+                receipts[4097].journal_cursor,
+                &mut Budget { remaining: 1 },
+                3
+            )
+            .is_err());
+            // A historical selection and its evidence are independent of the latest checkpoint.
+            let point = accepted_history::read(
+                conn,
+                &held,
+                receipts[1].journal_cursor,
+                &mut Budget {
+                    remaining: 1_000_000,
+                },
+                2,
+            )?;
+            assert_eq!(point.proof.event_count, 2);
+            assert_eq!(point.proof.checkpoint.event_count, 0);
+            Ok(())
+        })
+        .unwrap();
+    for sql in [
+        "UPDATE live_accepted_checkpoints SET terminal_json=json_set(terminal_json,'$.deliveryId','forged') WHERE event_count=4095",
+        "UPDATE live_accepted_checkpoints SET evidence_digest=printf('%064d',0) WHERE event_count=4095",
+        "UPDATE live_accepted_updates SET suffix_count=1 WHERE event_count=4095",
+        "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receivedAtMs',999) WHERE event_count=4098",
+        "UPDATE live_device_bootstraps SET bootstrap_moment_id='changed-origin'",
+        "DELETE FROM live_accepted_checkpoints WHERE event_count=4095",
+    ] {
+        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
+            tx.execute_batch("SAVEPOINT damage").map_err(write_sql)?;
+            tx.execute(sql,[]).map_err(write_sql)?;
+            assert!(accepted_history::read(tx,&held,receipts[4097].journal_cursor,&mut Budget{remaining:1_000_000},3).is_err(),"{sql}");
+            tx.execute_batch("ROLLBACK TO damage; RELEASE damage").map_err(write_sql)?;
+            Ok(())
+        }).unwrap();
+    }
+    for sql in [
+        "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receivedAtMs',999) WHERE event_count=1",
+        "UPDATE live_accepted_updates SET evidence_digest=printf('%064d',0) WHERE event_count=1",
+    ] {
+        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
+            tx.execute_batch("SAVEPOINT old_source_damage").map_err(write_sql)?;
+            tx.execute(sql,[]).map_err(write_sql)?;
+            assert!(accepted_history::accepted_source(tx,&held,&receipts[0].delivery_id,&mut Budget{remaining:1_000_000}).is_err(),"{sql}");
+            tx.execute_batch("ROLLBACK TO old_source_damage; RELEASE old_source_damage").map_err(write_sql)?;
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn restore_preparation_uses_native_checkpoints_for_a_long_applied_history() {
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted current", 3);
+    let bytes = f.doc.encode_full_state();
+    let receipts = append_history_copies(&mut f, 4097, bytes);
+    let terminal = receipts.last().unwrap().clone();
+    f.terminal = Some(terminal.clone());
+    let selected = point(&f.doc, terminal.journal_cursor, terminal.update_digest);
+    let input = f.freeze(selected);
+    let proposal = f
+        .owner
+        .prepare_restore(
+            &mut f.store,
+            input.clone(),
+            f.host.clone(),
+            1_000_000,
+            6,
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(
+        proposal.receipt().accepted_history.checkpoint.event_count,
+        4095
+    );
+    assert_eq!(proposal.receipt().accepted_history.event_count, 4098);
+    assert_eq!(proposal.receipt().selected_history.suffix.len(), 3);
+    let replay = f
+        .owner
+        .prepare_restore(&mut f.store, input, f.host.clone(), 1_000_000, 6, &NoFaults)
+        .unwrap();
+    assert_eq!(replay.receipt(), proposal.receipt());
+}
+
+#[test]
+fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_application() {
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted", 3);
+    let bytes = f.doc.encode_full_state();
+    append_history_copies(&mut f, 4093, bytes.clone());
+    let snapshot = |store: &EngineStore| {
+        store.read_with(|conn|conn.query_row(
+        "SELECT (SELECT count(*) FROM live_accepted_updates),(SELECT max(event_count) FROM live_accepted_updates),(SELECT count(*) FROM live_accepted_checkpoints),(SELECT count(*) FROM live_device_update_applications),(SELECT count(*) FROM binary_blobs),(SELECT head_update_seq FROM ydoc_docs),(SELECT count(*) FROM owner_ydoc_outbox_entries)",[],
+        |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,i64>(5)?,r.get::<_,i64>(6)?)))).unwrap()
+    };
+    let before = snapshot(&f.store);
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "due".into(),
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: 20_000,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 20_000,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: bytes,
+    };
+    assert!(apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event.clone(),
+        &NoFaults,
+        4096
+    )
+    .is_err());
+    assert_eq!(snapshot(&f.store), before);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| crate::replay_parity::structurally_equal_v2(
+            &durable::load_doc_in(conn, &key)?,
+            &f.doc
+        ))
+        .unwrap());
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000
+        )
+        .unwrap(),
+        ApplicationResult::Applied(_)
+    ));
+    let after = snapshot(&f.store);
+    assert_eq!(after.0, 4095);
+    assert_eq!(after.2, 2);
+}
+
+#[test]
+fn accepted_history_checkpoints_follow_byte_cadence_without_a_local_pending_snapshot() {
+    let mut f = Fixture::new(&"a".repeat(524_288));
+    let baseline = f.doc.encode_full_state();
+    let due = (20_971_520_u64).div_ceil(baseline.len() as u64) as i64;
+    assert!(due < 4095);
+    let pending = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "unaccepted native work",
+        )
+        .unwrap();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            durable::record_update_in_tx(tx, &key, &pending, None, None, 99)
+        })
+        .unwrap();
+    let receipts = append_history_copies(&mut f, due + 1, baseline.clone());
+    let held = f.handle.registration.lock().unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let history = accepted_history::read(
+                conn,
+                &held,
+                receipts[due as usize].journal_cursor,
+                &mut Budget {
+                    remaining: 40_000_000,
+                },
+                1,
+            )?;
+            assert_eq!(history.proof.checkpoint.event_count, due);
+            assert_eq!(history.proof.suffix.len(), 1);
+            let accepted = Ydoc::wire();
+            accepted.apply(&baseline)?;
+            assert!(crate::replay_parity::structurally_equal_v2(
+                &history.doc,
+                &accepted
+            )?);
+            assert!(!crate::replay_parity::structurally_equal_v2(
+                &history.doc,
+                &f.doc
+            )?);
+            assert!(crate::replay_parity::structurally_equal_v2(
+                &durable::load_doc_in(conn, &key)?,
+                &f.doc
+            )?);
+            Ok(())
+        })
+        .unwrap();
+}
+
 pub(in crate::live_update_application) fn record_test_projection(
     store: &mut EngineStore,
     audit: &LiveSettlementAudit,
@@ -171,6 +483,7 @@ impl Fixture {
             &self.handle,
             event,
             &NoFaults,
+            100_000_000,
         )
         .unwrap();
         let ApplicationResult::Applied(ack) = result else {
@@ -197,11 +510,7 @@ impl Fixture {
             .owner
             .fence_restore(&mut self.store, operation, self.host.clone(), 50, &NoFaults)
             .unwrap();
-        NativeRestorePreparation {
-            fence,
-            point,
-            owner_origin: None,
-        }
+        NativeRestorePreparation { fence, point }
     }
     fn prepare(
         &mut self,
@@ -238,7 +547,7 @@ fn prepares_one_forward_restore_of_an_exact_source_point_and_replays_after_resta
     let input = f.freeze(selected);
     let proposal = f.prepare(input.clone()).unwrap();
     assert_eq!(proposal.receipt().fence.local_head_sequence, 2);
-    assert_eq!(proposal.receipt().accepted_sources.len(), 2);
+    assert_eq!(proposal.receipt().accepted_history.suffix.len(), 2);
     assert!(!proposal.receipt().replacement_ranges.is_empty());
     assert_eq!(
         proposal
@@ -448,7 +757,8 @@ fn durable_replay_rejects_modified_replacement_ranges_and_source_evidence() {
         match damage {
             "ranges" => receipt["replacementRanges"][0]["endClock"] = serde_json::json!(1),
             "source" => {
-                receipt["acceptedSources"][0]["accepted"]["receivedAtMs"] = serde_json::json!(99)
+                receipt["acceptedHistory"]["suffix"][0]["accepted"]["receivedAtMs"] =
+                    serde_json::json!(99)
             }
             "vector" => receipt["afterStateVector"] = serde_json::json!([0]),
             "content" => receipt["finalContentDigest"] = serde_json::json!("f".repeat(64)),

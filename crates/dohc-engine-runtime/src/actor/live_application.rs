@@ -510,8 +510,10 @@ impl ActorLiveApplicationHandle {
         &self,
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
+        working_reserve_bytes: usize,
     ) -> Result<ApplicationResult, RuntimeError> {
-        self.apply_with_reservation(event, faults, None).await
+        self.apply_with_reservation(event, faults, None, working_reserve_bytes)
+            .await
     }
 
     /// Keep input memory charged while its command remains on the writer queue,
@@ -521,6 +523,7 @@ impl ActorLiveApplicationHandle {
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
+        working_reserve_bytes: usize,
     ) -> Result<ApplicationResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         if event.update_bytes.len() > MAX_YDOC_UPDATE_BYTES {
@@ -540,6 +543,7 @@ impl ActorLiveApplicationHandle {
                 event,
                 faults,
                 reservation,
+                working_reserve_bytes,
                 reply,
             })))
             .await
@@ -683,6 +687,7 @@ pub(super) enum Request {
         event: AdmittedLiveUpdate,
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
+        working_reserve_bytes: usize,
         reply: Reply<ApplicationResult>,
     },
     Close {
@@ -961,11 +966,19 @@ impl Request {
                 event,
                 faults,
                 reservation: _reservation,
+                working_reserve_bytes,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
-                    apply_committed(store, cache, &application, event, faults.as_ref())
-                        .map_err(Into::into)
+                    apply_committed(
+                        store,
+                        cache,
+                        &application,
+                        event,
+                        faults.as_ref(),
+                        working_reserve_bytes,
+                    )
+                    .map_err(Into::into)
                 });
                 let _ = reply.send(result);
             }

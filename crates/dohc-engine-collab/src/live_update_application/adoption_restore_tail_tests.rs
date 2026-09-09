@@ -80,6 +80,7 @@ fn native_tail_apply(
         &f.handle,
         event,
         &NoFaults,
+        100_000_000,
     )
     .unwrap() else {
         panic!("application refused")
@@ -129,7 +130,6 @@ fn native_tail_input(
             markdown_digest: hex_sha256(source.as_bytes()),
             projection_digest: hex_sha256(projection.as_bytes()),
         },
-        owner_origin: Some(f.cut.clone()),
     }
 }
 
@@ -148,6 +148,78 @@ fn native_tail_inventory(store: &EngineStore) -> Value {
         let entries=q.query_map([],|r|Ok(serde_json::json!([r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,Option<String>>(9)?]))).unwrap().collect::<Result<Vec<_>,_>>()?;
         Ok::<_,rusqlite::Error>(serde_json::json!(entries))
     }).unwrap()
+}
+
+#[test]
+fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let source = native_tail_edit(&mut f, "accepted native edit", 11);
+    let ack = native_tail_apply(&mut f, source.update.clone(), source.delivery_id.clone(), 7);
+    let old_receipt = LiveUpdateReceipt {
+        delivery_id: ack.delivery_id,
+        update_digest: ack.update_digest,
+        journal_cursor: ack.journal_cursor,
+        accepting_host_epoch: ack.accepting_host_epoch,
+    };
+    let held = f.handle.registration.lock().unwrap();
+    let terminal = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let mut terminal = old_receipt.clone();
+            for ordinal in 2..=4095 {
+                let event = AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: LiveUpdateReceipt {
+                                delivery_id: format!("tail-history-{ordinal}"),
+                                update_digest: hex_sha256(&[0, 0]),
+                                journal_cursor: ordinal * 7,
+                                accepting_host_epoch: 1,
+                            },
+                            binding: f.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            },
+                            received_at_ms: ordinal,
+                        },
+                        first_seen: vec![],
+                    },
+                    update_bytes: vec![0, 0],
+                };
+                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                insert_application(tx, &held, &event, ack.local_ydoc_sequence)?;
+                terminal = event.metadata.accepted.receipt;
+            }
+            Ok(terminal)
+        })
+        .unwrap();
+    drop(held);
+    let TxnOutcome::Committed(terminal) = terminal else {
+        panic!("tail history interrupted")
+    };
+    let input = native_tail_input(&mut f, Some(terminal), ack.local_ydoc_sequence);
+    let before = native_tail_inventory(&f.store);
+    let proposal = native_tail_prepare(&mut f, input).unwrap();
+    assert_eq!(
+        proposal.receipt().accepted_history.checkpoint.event_count,
+        4095
+    );
+    assert!(proposal.receipt().accepted_history.suffix.is_empty());
+    assert_eq!(proposal.receipt().native_sources.len(), 1);
+    assert_eq!(
+        proposal.receipt().native_sources[0].accepted_receipt,
+        Some(old_receipt)
+    );
+    assert_eq!(
+        proposal.receipt().native_sources[0].source.native_sequence,
+        1
+    );
+    assert!(
+        matches!(&proposal.receipt().native_sources[0].source.origin,
+        owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:Some(id), ..} if id=="native-agent")
+    );
+    assert_eq!(native_tail_inventory(&f.store), before);
 }
 
 #[test]
@@ -211,7 +283,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
                 .count(),
             1
         );
-        assert_eq!(proposal.receipt().accepted_sources.len(), 2);
+        assert_eq!(proposal.receipt().accepted_history.suffix.len(), 2);
         assert_eq!(before, native_tail_inventory(&f.store));
         let queued = owner_outbox::read_pending(
             &f.store,
@@ -584,7 +656,7 @@ fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
     let inventory = native_tail_inventory(&f.store);
     let proposal = native_tail_prepare(&mut f, input).unwrap();
     assert_eq!(proposal.receipt().native_sources.len(), 1);
-    assert_eq!(proposal.receipt().accepted_sources.len(), 1);
+    assert_eq!(proposal.receipt().accepted_history.suffix.len(), 1);
     assert_eq!(
         proposal.receipt().native_sources[0].accepted_receipt,
         Some(receipt)
@@ -644,7 +716,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         .native_sources
         .iter()
         .all(|source| source.accepted_receipt.is_none()));
-    assert!(proposal.receipt().accepted_sources.is_empty());
+    assert!(proposal.receipt().accepted_history.suffix.is_empty());
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
 

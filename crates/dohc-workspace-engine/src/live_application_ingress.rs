@@ -611,6 +611,7 @@ impl LiveApplicationIngress {
                 registration: upload.registration,
                 operation,
                 reservation: upload.permit,
+                working_reserve_bytes: self.config.application_working_reserve_bytes,
             })),
         )))
     }

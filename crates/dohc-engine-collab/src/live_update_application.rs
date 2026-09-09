@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
+mod accepted_history;
 mod adoption;
+pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod restore_content;
@@ -656,6 +658,7 @@ pub fn apply_committed(
     handle: &ApplicationHandle,
     event: AdmittedLiveUpdate,
     faults: &dyn FaultInjector,
+    working_reserve_bytes: usize,
 ) -> Result<ApplicationResult, ApplicationError> {
     event.validate()?;
     let held = handle
@@ -749,6 +752,7 @@ pub fn apply_committed(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
+            accepted_history::append(tx, &held, &event, working_reserve_bytes)?;
             let readback = read_application(tx, &held.namespace, &event.metadata.accepted.receipt)?
                 .ok_or(ApplicationError::Corrupt)?;
             if readback.event != event
@@ -1220,7 +1224,7 @@ mod tests {
         handle: &ApplicationHandle,
         event: AdmittedLiveUpdate,
     ) -> ApplicationResult {
-        apply_committed(store, cache, handle, event, &NoFaults).unwrap()
+        apply_committed(store, cache, handle, event, &NoFaults, 100_000_000).unwrap()
     }
     fn ack(result: ApplicationResult) -> LiveUpdateHostApplicationAck {
         match result {
@@ -1287,8 +1291,14 @@ mod tests {
                         }).unwrap();
                     }
                 }
-                let result =
-                    apply_committed(&mut store, &mut cache, &handle, update.clone(), &NoFaults);
+                let result = apply_committed(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    update.clone(),
+                    &NoFaults,
+                    100_000_000,
+                );
                 if cursor == 64 && fail_fold {
                     assert!(matches!(result, Err(ApplicationError::Collab(_))));
                 } else {
@@ -1674,7 +1684,8 @@ mod tests {
                             &mut cache,
                             &handle,
                             update.clone(),
-                            &Crash(dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck)
+                            &Crash(dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck),
+                            100_000_000
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
@@ -1720,7 +1731,14 @@ mod tests {
         let mut wrong = update.clone();
         wrong.metadata.accepted.binding.workspace_id = "foreign".into();
         assert!(matches!(
-            apply_committed(&mut store, &mut cache, &handle, wrong, &NoFaults),
+            apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                wrong,
+                &NoFaults,
+                100_000_000
+            ),
             Err(ApplicationError::WorkspaceMismatch)
         ));
         let replacement = owner
@@ -1754,7 +1772,8 @@ mod tests {
                 &mut cache,
                 &replacement,
                 update.clone(),
-                &NoFaults
+                &NoFaults,
+                100_000_000
             ),
             Err(ApplicationError::MainVersionMismatch)
         ));
@@ -1787,7 +1806,14 @@ mod tests {
         let mut collision = update.clone();
         collision.metadata.accepted.receipt.delivery_id = "different".into();
         assert!(matches!(
-            apply_committed(&mut store, &mut cache, &handle, collision, &NoFaults),
+            apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                collision,
+                &NoFaults,
+                100_000_000
+            ),
             Err(ApplicationError::Conflict)
         ));
         store.write_with(&NoFaults, |tx| {
@@ -1844,7 +1870,7 @@ mod tests {
                 end_clock: 1,
             }];
             assert!(matches!(
-                apply_committed(&mut store, &mut cache, &handle, conflict, &NoFaults),
+                apply_committed(&mut store, &mut cache, &handle, conflict, &NoFaults, 100_000_000),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -1862,7 +1888,7 @@ mod tests {
                         &mut cache,
                         &handle,
                         event("noop", 3, vec![0, 0]),
-                        &NoFaults
+                        &NoFaults, 100_000_000
                     ),
                     Err(ApplicationError::Corrupt)
                 ),
@@ -1871,7 +1897,7 @@ mod tests {
             assert_eq!(count(&store, "ydoc_updates"), before);
             if damage.contains("workspace_id='damaged'") {
                 assert!(matches!(
-                    apply_committed(&mut store, &mut cache, &handle, first, &NoFaults),
+                    apply_committed(&mut store, &mut cache, &handle, first, &NoFaults, 100_000_000),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -1948,7 +1974,14 @@ mod tests {
             .unwrap();
             assert!(
                 !matches!(
-                    apply_committed(&mut store, &mut cache, &handle, changed, &NoFaults),
+                    apply_committed(
+                        &mut store,
+                        &mut cache,
+                        &handle,
+                        changed,
+                        &NoFaults,
+                        100_000_000
+                    ),
                     Ok(ApplicationResult::Applied(_))
                 ),
                 "{pointer}"
@@ -1959,7 +1992,14 @@ mod tests {
         changed_bytes.metadata.accepted.receipt.update_digest =
             hex_sha256(&changed_bytes.update_bytes);
         assert!(matches!(
-            apply_committed(&mut store, &mut cache, &handle, changed_bytes, &NoFaults),
+            apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                changed_bytes,
+                &NoFaults,
+                100_000_000
+            ),
             Err(ApplicationError::Conflict)
         ));
         assert_eq!(count(&store, "ydoc_updates"), 1);
@@ -1993,7 +2033,7 @@ mod tests {
                 .unwrap();
             assert!(
                 !matches!(
-                    apply_committed(&mut store, &mut cache, &handle, update, &NoFaults),
+                    apply_committed(&mut store, &mut cache, &handle, update, &NoFaults, 100_000_000),
                     Ok(ApplicationResult::Applied(_))
                 ),
                 "{damage}"
@@ -2018,7 +2058,15 @@ mod tests {
                 start_clock: 0,
                 end_clock: 1,
             }];
-            assert!(apply_committed(&mut store, &mut cache, &handle, update, &NoFaults).is_err());
+            assert!(apply_committed(
+                &mut store,
+                &mut cache,
+                &handle,
+                update,
+                &NoFaults,
+                100_000_000
+            )
+            .is_err());
             store = reopen(store, &dir);
             assert_eq!(count(&store, "ydoc_updates"), 0);
             assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2044,7 +2092,7 @@ mod tests {
                 })
                 .unwrap();
             assert!(
-                apply_committed(&mut store, &mut cache, &handle, update, &NoFaults).is_err(),
+                apply_committed(&mut store, &mut cache, &handle, update, &NoFaults, 100_000_000).is_err(),
                 "{damage}"
             );
         }
@@ -2067,7 +2115,8 @@ mod tests {
                     &mut cache,
                     &handle,
                     update.clone(),
-                    &Crash(point)
+                    &Crash(point),
+                    100_000_000
                 ),
                 Err(ApplicationError::Interrupted)
             ));

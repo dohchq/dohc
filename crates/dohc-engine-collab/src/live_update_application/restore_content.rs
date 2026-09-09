@@ -20,12 +20,11 @@ pub struct NativeRestorePoint {
     pub projection_digest: String,
 }
 
-/// The authenticated host supplies the original adoption proof, not replacement Markdown.
+/// Native storage owns the accepted history; the caller selects an authenticated point.
 #[derive(Clone)]
 pub struct NativeRestorePreparation {
     pub fence: NativeRestoreFenceReceipt,
     pub point: NativeRestorePoint,
-    pub owner_origin: Option<OwnerAdoptionCut>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,8 +41,8 @@ pub struct NativeRestoreProposalReceipt {
     /// These new ranges belong to the restoring owner, not to the point's writers.
     pub replacement_ranges: Vec<LiveUpdateStructRange>,
     pub origin_evidence_digest: String,
-    /// Exact ordered admission evidence. This is not a per-span ancestry map.
-    pub accepted_sources: Vec<AdmittedLiveUpdateMetadata>,
+    pub selected_history: NativeRestoreHistoryProof,
+    pub accepted_history: NativeRestoreHistoryProof,
     pub native_sources: Vec<NativeRestoreSource>,
     pub native_source_manifest_digest: String,
 }
@@ -77,11 +76,11 @@ impl NativeRestoreProposal {
     }
 }
 
-struct Budget {
-    remaining: usize,
+pub(super) struct Budget {
+    pub(super) remaining: usize,
 }
 impl Budget {
-    fn charge(&mut self, bytes: usize) -> Result<(), ApplicationError> {
+    pub(super) fn charge(&mut self, bytes: usize) -> Result<(), ApplicationError> {
         self.remaining = self.remaining.checked_sub(bytes).ok_or(invalid(
             "restore preparation exceeds configured byte budget",
         ))?;
@@ -105,7 +104,11 @@ impl Budget {
         self.charge(length)?;
         Ok(length)
     }
-    fn blob(&mut self, conn: &Connection, digest: &str) -> Result<Vec<u8>, ApplicationError> {
+    pub(super) fn blob(
+        &mut self,
+        conn: &Connection,
+        digest: &str,
+    ) -> Result<Vec<u8>, ApplicationError> {
         self.blob_length(conn, digest)?;
         get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)
     }
@@ -163,14 +166,6 @@ impl NativeRestorePreparation {
             &self.point.projection_digest,
         ] {
             digest(value)?;
-        }
-        if let Some(cut) = &self.owner_origin {
-            adoption::validate_cut(
-                cut,
-                &self.fence.operation.old_binding,
-                max_bytes,
-                max_events,
-            )?;
         }
         Ok(())
     }
@@ -271,94 +266,52 @@ fn prepare_in(
         return Err(invalid("restore frozen head has missing dependencies"));
     }
 
-    let (origin_digest, mut events, baseline) =
-        origin(tx, held, input, &mut budget, max_bytes, max_events)?;
-    let origin_cursor = events
-        .last()
-        .map_or(0, |event| event.metadata.accepted.receipt.journal_cursor);
-    let mut query = tx.prepare("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,update_byte_length,first_seen_count FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor>?6 AND restore_fence_generation=?8 ORDER BY journal_cursor LIMIT ?7").map_err(read_sql)?;
-    let mut rows = query
-        .query(params![
-            held.namespace,
-            b.workspace_id,
-            b.main_version_id,
-            b.object_id,
-            b.lineage_claim_id,
-            origin_cursor,
-            max_events as i64 + 1,
-            operation.old_binding.restore_fence_generation
-        ])
-        .map_err(read_sql)?;
-    while let Some(row) = rows.next().map_err(read_sql)? {
-        if events.len() >= max_events {
-            return Err(invalid("restore event count exceeds configured budget"));
-        }
-        let receipt = LiveUpdateReceipt {
-            delivery_id: row.get(0).map_err(read_sql)?,
-            update_digest: row.get(1).map_err(read_sql)?,
-            journal_cursor: row.get(2).map_err(read_sql)?,
-            accepting_host_epoch: row.get(3).map_err(read_sql)?,
-        };
-        let length = usize::try_from(row.get::<_, i64>(4).map_err(read_sql)?)
-            .map_err(|_| ApplicationError::Corrupt)?;
-        let ranges = usize::try_from(row.get::<_, i64>(5).map_err(read_sql)?)
-            .map_err(|_| ApplicationError::Corrupt)?;
-        let blob_length: i64 = tx
-            .query_row(
-                "SELECT byte_length FROM binary_blobs WHERE sha256=?1",
-                [&receipt.update_digest],
-                |r| r.get(0),
-            )
-            .map_err(read_sql)?;
-        if usize::try_from(blob_length).ok() != Some(length) {
-            return Err(ApplicationError::Corrupt);
-        }
-        budget.charge(
-            length
-                .checked_add(
-                    ranges
-                        .checked_mul(std::mem::size_of::<LiveUpdateStructRange>())
-                        .ok_or(ApplicationError::Corrupt)?,
-                )
-                .ok_or(ApplicationError::Corrupt)?,
-        )?;
-        let record =
-            read_application(tx, &held.namespace, &receipt)?.ok_or(ApplicationError::Corrupt)?;
-        if record.event.metadata.accepted.binding != *b
-            || record.coordinate.host_id != operation.host_id
-            || record.sequence > input.fence.local_head_sequence
-        {
-            return Err(ApplicationError::Conflict);
-        }
-        events.push(record.event);
-    }
-    if events.last().map(|event| &event.metadata.accepted.receipt) != operation.terminal.as_ref() {
+    let (origin_digest, origin_sequence) = origin(tx, held, input, &mut budget)?;
+    let accepted_history = accepted_history::read(
+        tx,
+        held,
+        operation.terminal.as_ref().map_or(0, |r| r.journal_cursor),
+        &mut budget,
+        max_events,
+    )?;
+    if accepted_history.proof.terminal != operation.terminal {
         return Err(ApplicationError::Conflict);
     }
-    let accepted = Ydoc::wire();
-    accepted.apply(&baseline)?;
-    accepted.validate_public_baseline(&baseline)?;
-    let point = Ydoc::wire();
-    point.apply(&baseline)?;
-    let mut selected =
-        input.point.journal_cursor == 0 && input.point.receipt_digest == b.lineage_claim_id;
-    for event in &events {
-        accepted.apply(&event.update_bytes)?;
-        if event.metadata.accepted.receipt.journal_cursor <= input.point.journal_cursor {
-            point.apply(&event.update_bytes)?;
-        }
-        if event.metadata.accepted.receipt.journal_cursor == input.point.journal_cursor {
-            selected = event.metadata.accepted.receipt.update_digest == input.point.receipt_digest;
-        }
+    let selected_history = accepted_history::read(
+        tx,
+        held,
+        input.point.journal_cursor,
+        &mut budget,
+        max_events
+            .checked_sub(accepted_history.proof.suffix.len())
+            .ok_or(ApplicationError::Corrupt)?,
+    )?;
+    if selected_history
+        .proof
+        .terminal
+        .as_ref()
+        .map_or(b.lineage_claim_id.as_str(), |r| r.update_digest.as_str())
+        != input.point.receipt_digest
+    {
+        return Err(ApplicationError::Conflict);
     }
-    if !selected || point.has_missing_updates() || accepted.has_missing_updates() {
-        return Err(invalid("restore point is outside the authenticated prefix"));
-    }
+    let accepted = accepted_history.doc;
+    let point = selected_history.doc;
+    let event_count = accepted_history.proof.suffix.len() + selected_history.proof.suffix.len();
     let native_sources::ClassifiedNativeSources {
         sources: native_sources,
         bytes: native_source_bytes,
         digest: native_source_manifest_digest,
-    } = native_sources::classify(tx, input, &events, &accepted, &mut budget, max_events)?;
+    } = native_sources::classify(
+        tx,
+        held,
+        input,
+        origin_sequence,
+        event_count,
+        &accepted,
+        &mut budget,
+        max_events,
+    )?;
     if accepted.has_missing_updates()
         || !crate::replay_parity::structurally_equal_v2(&accepted, &frozen)?
     {
@@ -391,10 +344,8 @@ fn prepare_in(
         if receipt.origin_evidence_digest != origin_digest
             || receipt.native_sources != native_sources
             || receipt.native_source_manifest_digest != native_source_manifest_digest
-            || receipt
-                .accepted_sources
-                .iter()
-                .ne(events.iter().map(|event| &event.metadata))
+            || receipt.accepted_history != accepted_history.proof
+            || receipt.selected_history != selected_history.proof
             || saved.3.as_ref() != Some(&receipt.candidate_digest)
             || saved.4.as_ref() != Some(&receipt.frozen_state_digest)
             || saved.5.as_ref() != Some(&receipt.point_state_digest)
@@ -480,7 +431,8 @@ fn prepare_in(
         after_state_vector: frozen.encode_state_vector(),
         replacement_ranges,
         origin_evidence_digest: origin_digest,
-        accepted_sources: events.into_iter().map(|event| event.metadata).collect(),
+        accepted_history: accepted_history.proof,
+        selected_history: selected_history.proof,
         native_sources,
         native_source_manifest_digest,
     };
@@ -540,59 +492,39 @@ fn origin(
     held: &Registration,
     input: &NativeRestorePreparation,
     budget: &mut Budget,
-    max_bytes: usize,
-    max_events: usize,
-) -> Result<(String, Vec<AdmittedLiveUpdate>, Vec<u8>), ApplicationError> {
+) -> Result<(String, i64), ApplicationError> {
     let operation = &input.fence.operation;
     let b = &held.binding;
-    let baseline = budget.blob(conn, &b.lineage_claim_id)?;
     match &operation.origin {
         RestoreDeliveryOrigin::Bootstrap { id } => {
-            if input.owner_origin.is_some() {
-                return Err(ApplicationError::Conflict);
-            }
-            let (bootstrap, binding, coordinate, _) =
+            let (bootstrap, binding, coordinate, sequence) =
                 bootstrap::read_bootstrap(conn, held)?.ok_or(ApplicationError::Conflict)?;
             bootstrap.validate()?;
             if bootstrap.bootstrap_id != *id
                 || binding != *b
                 || coordinate.host_id != operation.host_id
                 || bootstrap.baseline_digest != b.lineage_claim_id
-                || bootstrap.baseline_byte_length != baseline.len() as i64
             {
                 return Err(ApplicationError::Conflict);
             }
-            Ok((hex_sha256(&budget.json(&bootstrap)?), Vec::new(), baseline))
+            Ok((hex_sha256(&budget.json(&bootstrap)?), sequence))
         }
         RestoreDeliveryOrigin::Owner { id } => {
-            let cut = input.owner_origin.as_ref().ok_or(invalid(
-                "restore requires the original authenticated owner adoption cut",
-            ))?;
-            let digest = adoption::validate_cut(cut, b, max_bytes, max_events)?;
-            let saved: (String,String,i64,String,String) = conn.query_row("SELECT evidence_digest,binding_json,local_ydoc_sequence,terminal_receipt_json,host_coordinate_json FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
-                params![held.namespace,id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
+            let saved: (String,String,i64,String) = conn.query_row(
+                "SELECT evidence_digest,binding_json,local_ydoc_sequence,host_coordinate_json FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
+                params![held.namespace,id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
             let binding: LiveObjectBinding =
                 serde_json::from_str(&saved.1).map_err(|_| ApplicationError::Corrupt)?;
-            let terminal: Option<LiveUpdateReceipt> =
-                serde_json::from_str(&saved.3).map_err(|_| ApplicationError::Corrupt)?;
             let host: ApplicationHostCoordinate =
-                serde_json::from_str(&saved.4).map_err(|_| ApplicationError::Corrupt)?;
-            if cut.adoption_id != *id
-                || cut.relay_database_namespace != held.namespace
-                || cut.baseline_bytes != baseline
-                || saved.0 != digest
-                || binding != *b
-                || saved.2 != cut.expected_local_sequence
-                || terminal != cut.terminal_receipt
-                || host.host_id != operation.host_id
-            {
+                serde_json::from_str(&saved.3).map_err(|_| ApplicationError::Corrupt)?;
+            if binding != *b || host.host_id != operation.host_id {
                 return Err(ApplicationError::Conflict);
             }
-            for event in &cut.events {
-                budget.charge(event.update_bytes.len())?;
-                budget.json(&event.metadata)?;
-            }
-            Ok((digest, cut.events.clone(), baseline))
+            digest(&saved.0)?;
+            integer(saved.2, 0, SAFE)?;
+            budget.charge(saved.0.len() + saved.1.len() + saved.3.len())?;
+            Ok((saved.0, saved.2))
         }
     }
 }

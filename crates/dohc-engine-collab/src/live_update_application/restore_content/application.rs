@@ -349,6 +349,7 @@ impl ApplicationOwner {
             if changed != 1 {
                 return Err(ApplicationError::Conflict);
             }
+            accepted_history::append(tx, &application_held, &event, max_bytes)?;
             Ok((receipt,record_facts))
         });
         cache.remove(&key);

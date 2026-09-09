@@ -186,6 +186,7 @@ where
         let marker = durable::read_marker_in(tx, &key).map_err(ApplicationError::from).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if marker.head_update_seq != 0 || marker.lineage_claim_id.as_deref() != Some(&input.baseline_digest) { return Err(E::from(ApplicationError::Corrupt)); }
         insert_bootstrap(tx, &held, &input, marker.head_update_seq).map_err(E::from)?;
+        accepted_history::initialize(tx, &held, &bytes).map_err(E::from)?;
         follow_up(tx, &written)?;
         let readback = read_bootstrap(tx, &held).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
         if readback != (input.clone(), binding.clone(), held.coordinate.clone(), marker.head_update_seq) { return Err(E::from(ApplicationError::Corrupt)); }

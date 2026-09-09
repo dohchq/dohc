@@ -39,10 +39,13 @@ struct Parent {
     observed: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn classify(
     conn: &Connection,
+    held: &Registration,
     input: &NativeRestorePreparation,
-    events: &[AdmittedLiveUpdate],
+    origin_sequence: i64,
+    event_count: usize,
     context: &Ydoc,
     budget: &mut Budget,
     max_events: usize,
@@ -120,7 +123,7 @@ pub(super) fn classify(
         let mut total = 0_i64;
         let mut observed_oldest = None;
         while let Some(row) = rows.next().map_err(read_sql)? {
-            if sources.len() + events.len() >= max_events {
+            if sources.len() + event_count >= max_events {
                 return Err(invalid("restore source count exceeds configured budget"));
             }
             let sequence: i64 = row.get(0).map_err(read_sql)?;
@@ -161,11 +164,13 @@ pub(super) fn classify(
             let RestoreDeliveryOrigin::Owner { id } = &operation.origin else {
                 return Err(ApplicationError::Conflict);
             };
-            let origin_sequence = input
-                .owner_origin
-                .as_ref()
-                .ok_or(ApplicationError::Conflict)?
-                .expected_local_sequence;
+            let covered: i64 = conn.query_row(
+                "SELECT covered_outbox_sequence FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2",
+                params![held.namespace,id], |row|row.get(0),
+            ).map_err(read_sql)?;
+            if sequence <= covered {
+                return Err(ApplicationError::Corrupt);
+            }
             if source.binding != *b
                 || source.adoption_id != *id
                 || source.update_digest != update_digest
@@ -186,20 +191,20 @@ pub(super) fn classify(
             if update.len() as i64 != length {
                 return Err(ApplicationError::Corrupt);
             }
-            let admitted = events
-                .iter()
-                .find(|event| event.metadata.accepted.receipt.delivery_id == delivery_id);
-            let accepted_receipt = if let Some(event) = admitted {
-                if event.metadata.accepted.receipt.update_digest != update_digest
-                    || event.metadata.accepted.binding != *b
+            let admitted = accepted_history::accepted_source(conn, held, &delivery_id, budget)?;
+            let accepted_receipt = if let Some(metadata) = admitted {
+                if metadata.accepted.receipt.update_digest != update_digest
+                    || metadata.accepted.binding != *b
+                    || metadata.accepted.receipt.journal_cursor
+                        > operation.terminal.as_ref().map_or(0, |r| r.journal_cursor)
                     || !matches!(
-                        event.metadata.accepted.authority,
+                        metadata.accepted.authority,
                         ServerDerivedLiveUpdateAuthority::Owner { .. }
                     )
                 {
                     return Err(ApplicationError::Conflict);
                 }
-                Some(event.metadata.accepted.receipt.clone())
+                Some(metadata.accepted.receipt)
             } else {
                 None
             };
