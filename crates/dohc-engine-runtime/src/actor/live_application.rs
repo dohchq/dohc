@@ -1109,18 +1109,30 @@ impl Request {
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+                        .ok_or(RuntimeError::ActorUnavailable)?;
                     adopt_owner_committed(
                         store,
                         &application,
                         cut,
                         max_bytes,
                         max_events,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-                            .ok_or(RuntimeError::ActorUnavailable)?,
+                        now_ms,
                         faults.as_ref(),
+                        |tx, namespace, binding, count| {
+                            dohc_engine_sync::journal_live_base_in_tx(tx, namespace, binding, now_ms)
+                                .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                                    dohc_engine_storage::StorageError::persist_public(error)))?;
+                            for event_count in 1..=count {
+                                dohc_engine_sync::journal_live_event_in_tx(tx, namespace, binding, event_count, now_ms)
+                                    .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                                        dohc_engine_storage::StorageError::persist_public(error)))?;
+                            }
+                            Ok(())
+                        },
                     )
                     .map_err(Into::into)
                 });

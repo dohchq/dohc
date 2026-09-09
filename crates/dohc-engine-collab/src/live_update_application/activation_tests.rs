@@ -60,6 +60,7 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
         10,
         4,
         &NoFaults,
+        |_, _, _, _| Ok(()),
     )
     .unwrap();
     assert!(!ack.adoption_replayed);
@@ -71,6 +72,7 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
         10,
         5,
         &NoFaults,
+        |_, _, _, _| Ok(()),
     )
     .unwrap();
     assert!(ack.adoption_replayed);
@@ -108,7 +110,8 @@ fn imported_activation_rejects_uncommitted_cursor_budget_and_changed_provenance(
             1_000_000,
             10,
             4,
-            &NoFaults
+            &NoFaults,
+            |_, _, _, _| Ok(())
         )
         .is_err()
     );
@@ -128,4 +131,59 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
         })
         .unwrap();
     assert!(capture_imported(&mut f, 1_000_000).is_err());
+}
+
+#[test]
+fn owner_adoption_publication_failure_rolls_back_and_replay_skips_publication() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    let before = f.counts();
+    let result = adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        100,
+        10,
+        &NoFaults,
+        |tx, namespace, binding, count| {
+            assert_eq!(namespace, "namespace");
+            assert_eq!(binding.object_id, "object");
+            assert_eq!(count, 0);
+            let adopted: i64 = tx
+                .query_row("SELECT count(*) FROM live_owner_adoptions", [], |row| {
+                    row.get(0)
+                })
+                .map_err(read_sql)?;
+            assert_eq!(adopted, 1);
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported)
+                VALUES('workspace','publication',0,'ydoc.update','{}',10,0)", []).map_err(write_sql)?;
+            Err(ApplicationError::Conflict)
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(f.counts(), before);
+    let published: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM replication_log WHERE origin_id='publication'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(published, 0);
+    assert!(!f.adopt().unwrap().adoption_replayed);
+    let ack = adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        100,
+        11,
+        &NoFaults,
+        |_, _, _, _| panic!("exact adoption replay must not republish"),
+    );
+    assert!(ack.unwrap().adoption_replayed);
 }
