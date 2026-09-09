@@ -45,13 +45,19 @@ export function startDesktopOwnerHost(options: {
       const bound = await options.bindings();
       if (stopped) return;
       bound.assertCurrent();
-      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = binding => {
-        bound.assertCurrent(); const owner = options.ownerFor(binding);
-        return {...owner,assertCurrent() {bound.assertCurrent(); owner.assertCurrent();}};
+      let connected: ReturnType<typeof connectDeviceHost> | undefined;
+      const assertCurrent = () => {
+        try {bound.assertCurrent();}
+        catch (error) {connected?.stop(); throw error;}
       };
-      connection = connectDeviceHost({url: options.config.url,credential: options.config.credential,limits: options.config.control,
-        onRegistered: () => bound.assertCurrent(),existingOwner: {...options.config.transport,...bound,ownerFor}});
-      await connection.closed;
+      const ownerFor: ExistingOwnerDeviceConfig["ownerFor"] = binding => {
+        assertCurrent(); const owner = options.ownerFor(binding);
+        return {...owner,assertCurrent() {assertCurrent(); owner.assertCurrent();}};
+      };
+      connected = connectDeviceHost({url: options.config.url,credential: options.config.credential,limits: options.config.control,
+        onRegistered: assertCurrent,existingOwner: {...options.config.transport,...bound,ownerFor}});
+      connection = connected;
+      await connected.closed;
     } catch (error) { if (!stopped) options.onError(error); }
     if (!stopped) {retry = setTimeout(() => {void connect();},options.config.reconnectDelayMs); retry.unref();}
   };
