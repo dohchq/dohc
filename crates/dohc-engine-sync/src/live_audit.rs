@@ -191,7 +191,7 @@ fn require_base_blob(conn: &Connection, record: &BaseRecord) -> Result<(), SyncE
         }
         hash.update(bytes);
     }
-    if format!("{:x}", hash.finalize()) != record.checkpoint.state_digest {
+    if dohc_engine_storage::hex(&hash.finalize()) != record.checkpoint.state_digest {
         return Err(SyncError::BlobInvalid);
     }
     Ok(())

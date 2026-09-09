@@ -165,8 +165,9 @@ fn read_observed_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<ObservedOwnerBinding>, OwnerOutboxError> {
+    type ObservedBindingRow = (String, String, i64, i64, i64, String, i64, i64);
     let b = binding;
-    let raw: Option<(String,String,i64,i64,i64,String,i64,i64)> = conn.query_row(
+    let raw: Option<ObservedBindingRow> = conn.query_row(
         &format!("SELECT binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms FROM ydoc_owner_bindings WHERE {SCOPE}"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
