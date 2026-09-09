@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {readFile,writeFile,mkdir,readdir,readlink} from 'node:fs/promises';
 import {writeFileSync} from 'node:fs';
-import {join,resolve,dirname} from 'node:path';
+import {join,resolve,dirname,isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
 // The coordinator supplies pins from the successful native build and admits the runtime lease.
@@ -57,6 +57,7 @@ assert.equal(release.publicEditGateGranted,true,'Public Edit release decision re
 assert.ok(Number.isSafeInteger(release.admittedConcurrency)&&release.admittedConcurrency>=2,'At least two admitted sessions required');
 assert.equal(release.editor.provider.frames.receive.maxFrameBytes,release.frames.receive.maxFrameBytes);
 assert.ok(release.workload?.path && release.workload?.sha256,'Selected public workload manifest required');
+assert.ok(isAbsolute(release.workload.path),'Public workload manifest path must be absolute');
 const workload=JSON.parse(await verify(release.workload));
 assert.equal(workload.version,1);assert.equal(workload.concurrency,release.admittedConcurrency);assert.ok(workload.rounds.length>0);
 const workloadPins=[workload.baseline.checkpoint,workload.baseline.markdown,

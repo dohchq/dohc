@@ -5,7 +5,9 @@ import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import {fileURLToPath} from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import {LIVE_TICKET_TABLE} from "../../sync-relay/src/storage/schema.js";
 import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
 import {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
@@ -115,6 +117,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   const browserErrors: string[] = [];
   const requests: {context: number; path: string; status: number}[] = [];
   const results: Record<string, unknown> = {};
+  let proofPassed = false;
   const protectedSecrets = new Set<string>(), publicBodies: Promise<string>[] = [];
   try {
     const authHttp = serveFetchHandler({ handler: request => auth.handler(request), maxBodyBytes: () => 8192,
@@ -173,7 +176,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         return fetch(request);
       },
       publicHosts: new Set([new URL(audience).host]), accountAuth: {publicOrigin: audience, upstreamUrl: authUrl},
-      viewerAssetsDir: resolve(new URL("../viewer/dist", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
+      viewerAssetsDir: fileURLToPath(new URL("../viewer/dist", import.meta.url)),
       linkLive: {publicOrigin: audience, requests: capacity.requests, editor: capacity.editor}});
     if (!application.linkLive) throw new Error("Public live composition missing.");
     const gateway = createLiveGateway({publicOrigin: audience, publicHosts: new Set([new URL(audience).host]), path: "/api/live/link",
@@ -190,6 +193,20 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         ...(body === undefined ? {} : {body: JSON.stringify(body)})});
       const value = await response.json();
       expect(response.status, JSON.stringify(value)).toBe(200); return value;
+    }
+    function assertTicketCapacity(grantId: string) {
+      const checkedAt = Date.now(), database = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
+      try {
+        // An upper bound for every principal on this grant also bounds the refused caller.
+        const row = database.prepare(`SELECT COALESCE(MAX(retained), 0) AS maximum FROM (
+          SELECT COUNT(*) AS retained FROM ${LIVE_TICKET_TABLE}
+          WHERE workspace_id = ? AND grant_id = ? AND expires_at_ms > ?
+          GROUP BY principal_kind, principal_id
+        )`).get("workspace", grantId, checkedAt);
+        const maximum = Number(row!.maximum), limit = capacity.liveTickets.retainedTicketsPerPrincipalGrant;
+        expect(maximum, "Ticket refusal must have unused retention capacity").toBeLessThan(limit);
+        return {checkedAt, maximumRetainedPerPrincipal: maximum, admittedLimit: limit};
+      } finally {database.close();}
     }
     // This fails closed until the release decision enables production owner Edit creation.
     const created = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/a.md"], access: "edit"});
@@ -279,6 +296,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     expect(restored.result.kind).toBe("resumed"); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello");
     const obsolete = await wire.connect(first.context, oldTicket, "old-unused-ticket"); expect(await obsolete.status).toBe(404); await obsolete.close();
     for (const peer of peers.slice(1)) await browserExpect(peer.editor).toHaveAttribute("contenteditable", "false");
+    const revokedTicketCapacity = assertTicketCapacity(grantId);
     const denied = await first.context.request.post(audience + "/api/live/link-ticket", {data: {discriminator: first.discriminator, objectId: "object"}, headers: {origin: audience}});
     expect(denied.status()).toBe(404);
     for (const dbPath of [join(root, "relay/relay.sqlite"), join(workspace, ".dohc/engine/engine.db")]) {
@@ -288,7 +306,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       } finally {database.close();}
     }
     results.restore = {admittedConcurrency: capacity.admittedConcurrency, stalePartialRefused: true, oldTicketRefused: true, oldGrantRefused: true,
-      exactBefore: settledMarkdown, exactAfter: "Hello", proposalDigest: reviewed.result.proposalDigest};
+      revokedTicketCapacity, exactBefore: settledMarkdown, exactAfter: "Hello", proposalDigest: reviewed.result.proposalDigest};
     const freshLink = await ownerRequest(`/sync/workspace/shares/${shareId}/links`, {access: "edit"});
     const freshPeers = [];
     for (let index = 0; index < capacity.admittedConcurrency; index++) freshPeers.push(await openLink(freshLink.url, peers.length + index));
@@ -304,9 +322,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     await browserExpect(outsidePeer.editor).toHaveText("Hello");
     await outsidePeer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency - 1);
+    const outsideTicketCapacity = assertTicketCapacity(freshLink.grantId);
     const outsideTicket = await freshFirst.context.request.post(audience + "/api/live/link-ticket", {
       data: {discriminator: freshFirst.discriminator, objectId: "outside-object"}, headers: {origin: audience}});
     expect(outsideTicket.status()).toBe(404);
+    const preRestartTicket = await wire.ticket(freshFirst.context, freshFirst.discriminator, "object");
     for (const path of ["docs/a.txt", "docs/other.md", "../docs/a.md"]) {
       const refused = await freshFirst.context.request.post(audience + "/api/live/link-document", {
         data: {discriminator: freshFirst.discriminator, path}, headers: {origin: audience}});
@@ -318,10 +338,10 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const pinned = await fetch(relayUrl + "/sync/workspace/shares/links", {method: "POST",
       headers: {authorization: `Bearer ${ownerToken}`, "content-type": "application/json"},
       body: JSON.stringify({paths: ["docs/a.md"], versionId: mainVersionId!, access: "edit"})});
-    expect(pinned.status).not.toBe(200);
+    expect(pinned.status).toBe(400); expect(await pinned.json()).toMatchObject({code: "invalid_access"});
     results.boundaries = {missingOriginRefused: true, foreignOriginRefused: true, pinnedEditCreationRefused: true,
-      nonMarkdownPathRefused: true, selectorEscapeRefused: true, validOutsideObjectControl: true, crossObjectTicketRefused: true, traversalRefused: true, currentMarkdownMetadataAccepted: true};
-    const preRestartTicket = await wire.ticket(freshFirst.context, freshFirst.discriminator, "object");
+      nonMarkdownPathRefused: true, selectorEscapeRefused: true, validOutsideObjectControl: true, crossObjectTicketRefused: true,
+      outsideTicketCapacity, samePrincipalTicketControl: true, traversalRefused: true, currentMarkdownMetadataAccepted: true};
     const oldEpoch = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), "pre-restart"); await oldEpoch.sync();
     const beforeRestartEpoch = oldEpoch.hostEpoch!;
     const epochDoc = new Y.Doc(); Y.applyUpdate(epochDoc, Y.encodeStateAsUpdate(oldEpoch.doc)); epochDoc.getMap("frontmatter").set("oldEpochProbe", "must refuse");
@@ -440,15 +460,19 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     }
     results.credentials = {protectedCookieProfiles: capacity.admittedConcurrency, protectedSecretsChecked: protectedSecrets.size, javascriptResponseBodiesChecked: exposedBodies.length, privateCredentialsExcluded: true};
     expect(browserErrors).toEqual([]); expect(hash(readFileSync(executable))).toBe(expectedHash);
-    writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash, admissionSha256: admissionDigest,
+    proofPassed = true;
+  } finally {
+    try {
+    writeFileSync(join(root, "result.json"), JSON.stringify({verdict: proofPassed ? "PASS" : "FAIL", executable, sha256: expectedHash, admissionSha256: admissionDigest,
       scope: "Owner HTTP Edit creation and anonymous protected-cookie exchange; tiny Chromium lifecycle at C; supplied baseline rendered and small real browser edits acknowledged and settled at C; separate client-distinct pinned wire workload acknowledged, converged and settled at C; tiny partial-transfer restore and restart stale-authority checks",
       omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Supplied workload updates through Chromium editor/provider; supplied updates use wire clients after Chromium baseline readiness"], results}, null, 2));
-  } finally {
+    } finally {
     for (const context of contexts) await context.close();
     await browser?.close();
     for (const close of closes.reverse()) await close();
     await Promise.allSettled(upgrades);
     await active?.close(); deployment.storage.close(); ownerDoc.destroy();
+    }
   }
   } finally {
     publicHttps.closeAllConnections(); await new Promise<void>(done => publicHttps.close(() => done()));
