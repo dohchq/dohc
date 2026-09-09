@@ -166,7 +166,8 @@ export function registerRelaySharesIpcHandlers<
       const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
       let path: string, body: unknown;
       if (input.action === "options") {
-        path = `${prefix}/options`; body = {path: input.path, ...(input.beforeCursor === undefined ? {} : {beforeCursor: input.beforeCursor})};
+        path = `${prefix}/options`; body = {path: input.path, ...(input.beforeCursor === undefined ? {} : {beforeCursor: input.beforeCursor}),
+          ...(input.grantCursor === undefined ? {} : {grantCursor: input.grantCursor})};
       } else if (input.action === "plan") {
         if (input.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
         path = `${prefix}/plan`; body = {document: input.document, shareId: input.shareId, grantId: input.grantId,

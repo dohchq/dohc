@@ -32,7 +32,7 @@ function fixture() {
   const recipients = [{grantId: "grant", principalKind: "link" as const, email: null, userId: null},
     {grantId: "dependent", principalKind: "user" as const, email: "reader@example.test", userId: "reader"}];
   const options = {document: documentKey, path: "notes.md", grants: [{...recipients[0]!, shareId: "share", generation: 1}],
-    points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: digest}], nextBeforeCursor: null, pendingOperation: null};
+    points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: digest}], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
   const call = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
     if (input.action === "options") return options;
     if (input.action === "plan") return {intent, path: "notes.md", recipients};
@@ -141,4 +141,22 @@ it("releases the local restore pause when scope changes while it is acquiring", 
   await act(async () => pause.resolve(f.release));
   expect(f.release).toHaveBeenCalledTimes(1); expect(f.restored).not.toHaveBeenCalled();
   expect(f.call.mock.calls.some(([input]) => input.action === "confirm")).toBe(false);
+});
+
+it("loads later access after an empty source page and preserves the selected point", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  const cursor = {shareCreatedAtMs: 1, shareId: "unrelated", grantCreatedAtMs: null, grantId: null};
+  f.call.mockImplementation(input => input.action === "options" ? Promise.resolve(input.grantCursor ? f.options :
+    {...f.options, grants: [], nextGrantCursor: cursor}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByRole("button", {name: "More access choices"});
+  expect(screen.queryByText("No active edit access is available for this file. Close this review.")).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", {name: "Shared restore point"}), {target: {value: "0"}});
+  fireEvent.click(screen.getByRole("button", {name: "More access choices"}));
+  await screen.findByRole("option", {name: "Anyone using this link"});
+  expect(screen.getByRole("combobox", {name: "Shared restore point"})).toHaveProperty("value", "0");
+  expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "options", path: "notes.md", grantCursor: cursor});
+  fireEvent.change(screen.getByRole("combobox", {name: "Access to stop"}), {target: {value: "grant"}});
+  fireEvent.click(screen.getByRole("button", {name: "Review affected access"}));
+  await screen.findByText("Stop access before restoring?");
 });

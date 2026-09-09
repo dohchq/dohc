@@ -70,19 +70,30 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     try {await work(token);} catch (error) {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});}
     finally {if (current(token)) {running.current = false; setBusy(false);}}
   }
-  async function load(token: number, beforeCursor?: number) {
-    const options = await bridge().ownerRestore({workspaceId, action: "options", path, ...(beforeCursor === undefined ? {} : {beforeCursor})});
+  async function load(token: number, beforeCursor?: number, grantCursor?: NonNullable<OwnerRestoreOptions["nextGrantCursor"]>) {
+    const options = await bridge().ownerRestore({workspaceId, action: "options", path, ...(beforeCursor === undefined ? {} : {beforeCursor}), ...(grantCursor === undefined ? {} : {grantCursor})});
     if (!current(token)) return;
     if (options.pendingOperation) {
       const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: options.pendingOperation.operationId});
       if (!current(token)) return;
       operation.current = saved;
       setState({kind: "pending", message: "Access stopped. Continue reviewing or finishing this restore."});
-    } else {setPoint(""); setState({kind: "options", options});}
+    } else {
+      if (grantCursor === undefined) setPoint("");
+      setState(previous => {
+        if (previous.kind !== "options") return {kind: "options", options};
+        if (grantCursor !== undefined) return {kind: "options", options: {...previous.options,
+          grants: [...new Map([...previous.options.grants, ...options.grants].map(grant => [grant.grantId, grant])).values()],
+          nextGrantCursor: options.nextGrantCursor}};
+        if (beforeCursor !== undefined) return {kind: "options", options: {...options,
+          grants: previous.options.grants, nextGrantCursor: previous.options.nextGrantCursor}};
+        return {kind: "options", options};
+      });
+    }
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
     void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -126,7 +137,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       <p className="text-[13px] text-muted">Choose the access to stop and the accepted change to restore to.</p>
       <label className="block text-[12px] text-muted">Access<select aria-label="Access to stop" disabled={busy} value={grantId} onChange={event => setGrantId(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose access</option>{state.options.grants.map(grant => <option key={grant.grantId} value={grant.grantId}>{recipient(grant)}</option>)}</select></label>
       <label className="block text-[12px] text-muted">Restore point<select aria-label="Shared restore point" disabled={busy} value={point} onChange={event => setPoint(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose a change</option>{state.options.points.map(p => <option key={p.cursor} value={p.cursor}>{p.kind === "baseline" ? "Before accepted edits" : `${new Date(p.receivedAtMs!).toLocaleString()} · Change ${p.cursor}`}</option>)}</select></label>
-      {!state.options.grants.length && <p className="text-[12px] text-muted">No active edit access is available for this file. Close this review.</p>}
+      {!state.options.grants.length && state.options.nextGrantCursor === null && <p className="text-[12px] text-muted">No active edit access is available for this file. Close this review.</p>}
+      {state.options.nextGrantCursor !== null && <SecondaryButton disabled={busy} onClick={() => void perform(token => load(token, undefined, state.options.nextGrantCursor!))}>More access choices</SecondaryButton>}
       {state.options.nextBeforeCursor !== null && <SecondaryButton disabled={busy} onClick={() => void perform(token => load(token, state.options.nextBeforeCursor!))}>Earlier changes</SecondaryButton>}
     </div>}
     {state.kind === "stop" && <>

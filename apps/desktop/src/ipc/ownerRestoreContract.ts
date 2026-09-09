@@ -24,10 +24,13 @@ export const OwnerRestoreStatus = z.object({operationId: id, document, path: z.s
     context.addIssue({code: "custom", message: "The restore status belongs to another operation or file."});
   }
 });
+export const OwnerRestoreGrantCursor = z.object({shareCreatedAtMs: integer, shareId: id,
+  grantCreatedAtMs: integer.nullable(), grantId: id.nullable()}).strict().refine(
+    cursor => (cursor.grantCreatedAtMs === null) === (cursor.grantId === null), "Invalid restore grant cursor.");
 export const OwnerRestoreOptions = z.object({document, path: z.string(),
   grants: z.array(OwnerRestoreRecipient.extend({shareId: id, generation: integer.min(1)})),
   points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest})),
-  nextBeforeCursor: integer.nullable(), pendingOperation: z.object({operationId: id, phase: OwnerRestorePhase, proposalDigest: digest.nullable()}).nullable(),
+  nextBeforeCursor: integer.nullable(), nextGrantCursor: OwnerRestoreGrantCursor.nullable(), pendingOperation: z.object({operationId: id, phase: OwnerRestorePhase, proposalDigest: digest.nullable()}).nullable(),
 });
 export const OwnerRestorePlan = z.object({intent: OwnerRestoreIntent, path: z.string(), recipients: z.array(OwnerRestoreRecipient)});
 const priorCut = z.object({operationId: id, proposalDigest: digest, restoreJournalCursor: integer,
@@ -53,7 +56,7 @@ export type OwnerRestorePlan = z.infer<typeof OwnerRestorePlan>;
 export type OwnerRestoreStatus = z.infer<typeof OwnerRestoreStatus>;
 const scope = {workspaceId: id};
 export const OwnerRestoreRequest = z.discriminatedUnion("action", [
-  z.object({...scope, action: z.literal("options"), path: z.string().min(1).max(4096), beforeCursor: integer.optional()}).strict(),
+  z.object({...scope, action: z.literal("options"), path: z.string().min(1).max(4096), beforeCursor: integer.min(1).optional(), grantCursor: OwnerRestoreGrantCursor.optional()}).strict(),
   z.object({...scope, action: z.literal("plan"), document, shareId: id, grantId: id, restorePointCursor: integer, restorePointReceiptDigest: digest}).strict(),
   z.object({...scope, action: z.literal("begin"), intent: OwnerRestoreIntent}).strict(),
   z.object({...scope, action: z.enum(["status", "prepare", "review"]), operationId: id}).strict(),
