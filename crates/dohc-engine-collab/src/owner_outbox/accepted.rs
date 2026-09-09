@@ -110,7 +110,8 @@ pub fn apply_frame_in_tx(
     }
     let digest = hex_sha256(&input.update_bytes);
     let json = binding_json(b)?;
-    let prior:Option<(String,String,String,i64,i64,i64,i64)>=tx.query_row(
+    type AppliedFrameRow = (String, String, String, i64, i64, i64, i64);
+    let prior:Option<AppliedFrameRow>=tx.query_row(
         &format!("SELECT binding_json,relay_database_namespace,update_digest,previous_cursor,previous_revision,previous_native_head,native_head_sequence FROM ydoc_owner_applied_frames WHERE {SCOPE} AND journal_cursor=?5"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,input.journal_cursor],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
