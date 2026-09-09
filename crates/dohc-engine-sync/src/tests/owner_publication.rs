@@ -398,3 +398,86 @@ fn first_accepted_operation_over_budget_returns_configuration_error() {
         })
     ));
 }
+
+#[test]
+fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() {
+    use dohc_engine_collab::owner_outbox::publication::contains_observed_update_in;
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let key = DocKey::new("ws", "main", "owner").unwrap();
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                contains_observed_update_in(
+                    conn,
+                    &key,
+                    "owner.md",
+                    &observed.binding.lineage_claim_id,
+                    &checkpoint
+                )
+                .unwrap(),
+                Some(true)
+            );
+            assert_eq!(
+                contains_observed_update_in(
+                    conn,
+                    &key,
+                    "other.md",
+                    &observed.binding.lineage_claim_id,
+                    &checkpoint
+                )
+                .unwrap(),
+                Some(false)
+            );
+            assert_eq!(
+                contains_observed_update_in(conn, &key, "owner.md", &"f".repeat(64), &checkpoint)
+                    .unwrap(),
+                Some(false)
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let op = candidate(&mut store, &observed, &checkpoint, 0);
+    assert_eq!(
+        owner_publication_prefix(
+            &store,
+            "ws",
+            std::slice::from_ref(&op),
+            checkpoint.len() * 2
+        )
+        .unwrap()
+        .allowed_ops,
+        1
+    );
+    // Same declared digest and byte length, changed persisted bytes: digest-only lookup is unsafe.
+    let mut corrupt = checkpoint.clone();
+    corrupt[0] ^= 1;
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                rusqlite::params![corrupt, observed.checkpoint_digest],
+            )
+            .unwrap();
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    store
+        .read_with(|conn| {
+            assert!(
+                contains_observed_update_in(
+                    conn,
+                    &key,
+                    "owner.md",
+                    &observed.binding.lineage_claim_id,
+                    &checkpoint
+                )
+                .is_err()
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let refused = owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2).unwrap();
+    assert_eq!(refused.allowed_ops, 0);
+    assert!(refused.pending.is_some());
+    assert!(!refused.budget_exhausted);
+}

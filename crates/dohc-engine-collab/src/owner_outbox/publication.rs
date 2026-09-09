@@ -167,6 +167,10 @@ pub fn contains_observed_update_in(
     }
     let observed = super::accepted::current(conn, &draft.binding)?;
     let checkpoint = super::draft::bounded_blob(conn, &observed.checkpoint_digest)?;
+    crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
+    if update == checkpoint {
+        return Ok(Some(true));
+    }
     let doc = Ydoc::wire();
     doc.apply(&checkpoint).map_err(collab)?;
     if doc.has_pending_dependencies() {
