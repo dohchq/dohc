@@ -48,7 +48,7 @@ export const adapterImplementationPaths = [
   "packages/ydoc-projection/src/browser-editor.ts", "packages/ydoc-projection/src/import-export.ts",
   "packages/ydoc-projection/src/liveDocumentValidation.ts", "packages/ydoc-projection/src/orderedLiveUpdateCut.ts", "pnpm-lock.yaml",
 ];
-const repo = fileURLToPath(new URL("../../../", import.meta.url));
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 function requireValue(condition: unknown, message: string): asserts condition {if (!condition) throw new Error(message);}
 function read(pin: WorkloadPin, base: string) {
   requireValue(pin && typeof pin.path === "string" && /^[a-f0-9]{64}$/iu.test(pin.sha256) && Number.isSafeInteger(pin.byteLength), "Invalid input pin.");

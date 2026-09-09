@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import {mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {isAbsolute, join, resolve} from "node:path";
+import {dirname, isAbsolute, join, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
+import {spawnSync} from "node:child_process";
 import {expect, it} from "vitest";
 import * as Y from "yjs";
 import {markdownToYDoc} from "@dohc/ydoc-projection";
@@ -11,7 +12,7 @@ import {renderPublicFixture} from "./publicWorkloadRendering.integration-helper.
 import {readPublicWorkload, type WorkloadPin} from "./publicLinkWorkload.integration-helper.js";
 import {readPublicTransitionWorkload, transitionNames, workloadHash as hash} from "./publicTransitionWorkload.integration-helper.js";
 
-const repo = fileURLToPath(new URL("../../../", import.meta.url));
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 function fixture(run: (f: ReturnType<typeof prepare>) => void) {
   const prefix = join(tmpdir(), "dohc-tiny-public-adapter-"), root = mkdtempSync(prefix);
   try {run(prepare(root));}
@@ -71,6 +72,16 @@ it("produces deterministic fixture manifests for the same pinned selection", () 
   const pin = f.seal(), one = preparePublicWorkload(pin, join(f.root, "one"), renderPublicFixture), two = preparePublicWorkload(pin, join(f.root, "two"), renderPublicFixture);
   expect(one.wirePin.sha256).toBe(two.wirePin.sha256); expect(one.transitionPin.sha256).toBe(two.transitionPin.sha256);
 }));
+it("executes the documented Node and tsx command with the existing JSX configuration", () => fixture(f => {
+  const pin = f.json("selection-pin.json", f.seal()), output = join(f.root, "cli-output");
+  const child = spawnSync(process.execPath, ["--import", "tsx", "scripts/prepare-public-workload.mjs", pin.path, output],
+    {cwd: resolve(repo, "services/share-web"), encoding: "utf8", timeout: 30000, windowsHide: true});
+  expect(child.error, child.stderr).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  const result = JSON.parse(readFileSync(join(output, "result.json"), "utf8"));
+  expect(readPublicWorkload(result.wirePin, 2).rounds).toHaveLength(2);
+  expect(readPublicTransitionWorkload(result.transitionPin, 2).cases.restore.continuation).toBeDefined();
+}), 30000);
 it("rejects absent selection, changed source pins and a baseline over explicit bounds", () => fixture(f => {
   f.selection.caseIds = []; expect(() => preparePublicWorkload(f.seal(), join(f.root, "missing"), renderPublicFixture)).toThrow("case IDs");
   f.selection.caseIds = ["tiny-registration"]; f.selection.admission.bounds.maxCheckpointBytes = 1;
