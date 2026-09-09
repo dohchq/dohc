@@ -11,7 +11,7 @@ import {OwnerRestoreActionResponse} from "../../../apps/desktop/src/ipc/ownerRes
 import type {startServiceLiveHost} from "../../sync-relay/src/serviceLiveHost.js";
 import type {SyncRelayStorage} from "../../sync-relay/src/storage.js";
 import type {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
-import {transitionNames, workloadHash as hash, type LoadedPublicTransitions} from "./publicTransitionWorkload.integration-helper.js";
+import {transitionNames, workloadHash as hash, validateInterruptedPublicUpdate, type LoadedPublicTransitions} from "./publicTransitionWorkload.integration-helper.js";
 
 export interface PublicProofPage {context: BrowserContext; page: Page; editor: Locator; discriminator: string}
 export interface PublicTransitionFixture {document: LiveDocumentKey; path: string; link: {url: string; shareId: string; grantId: string}}
@@ -19,6 +19,9 @@ export interface PublicTransitionHarness {
   root: string; workspace: string; audience: string; concurrency: number; timeoutMs: number;
   storage: SyncRelayStorage; ownerUserId: string;
   evidence: Record<string, unknown>;
+  validate: Parameters<typeof validateInterruptedPublicUpdate>[0]["validate"];
+  interruptedBounds: Parameters<typeof validateInterruptedPublicUpdate>[0]["bounds"];
+  assertTicketCapacity(grantId: string): unknown;
   host(): Awaited<ReturnType<typeof startServiceLiveHost>>;
   restart(): Promise<void>;
   listeners(): number;
@@ -49,6 +52,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
     for (const peer of peers) await browserExpect.poll(async () => hash(Buffer.from(await peer.editor.textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.editorText));
     const writer = peers.pop()!;
+    const extraContexts: BrowserContext[] = [];
     await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     let socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, fixture.document.objectId), `transition-${name}`);
@@ -69,6 +73,12 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       for (const step of selected.updates) await apply(step);
       const before = selected.updates.at(-1)!.expected;
       await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
+      const actualCut = h.storage.readLiveUpdateJournalCut({document: fixture.document});
+      if (actualCut.kind !== "cut") throw new Error("Interrupted update lacks a current journal cut.");
+      const candidateAdmission = validateInterruptedPublicUpdate({document: fixture.document, currentPath: fixture.path,
+        checkpoint: actualCut.cut.checkpoint.bytes, suffix: actualCut.cut.suffix.map(row => row.bytes), candidate: selected.interrupted!.bytes,
+        bounds: h.interruptedBounds, validate: h.validate});
+      Object.assign(stage, {candidateAdmission});
       const held = await socket.partialTransfer(selected.interrupted!.bytes, selected.interrupted!.deliveryId);
       const interruptedAt = Date.now(), oldEpoch = socket.hostEpoch;
       let restored: unknown;
@@ -114,6 +124,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       }
       if (name === "selectorDrift" || name === "accessChange" || name === "restore") {
         for (const peer of peers) await browserExpect(peer.editor).toHaveAttribute("contenteditable", "false", {timeout: h.timeoutMs});
+        Object.assign(stage, {deniedTicketCapacity: h.assertTicketCapacity(fixture.link.grantId)});
         const denied = await writer.context.request.post(h.audience + "/api/live/link-ticket", {data: {discriminator: writer.discriminator, objectId: fixture.document.objectId}, headers: {origin: h.audience}});
         expect(denied.status()).toBe(404);
       }
@@ -124,6 +135,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
           fixture.link = fresh;
           for (let index = 0; index < h.concurrency - 1; index++) peers.push(await h.openLink(fresh.url, index));
           const identity = await h.openLink(fresh.url, h.concurrency - 1);
+          extraContexts.push(identity.context);
           await identity.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
           socket = await h.wire.connect(identity.context, await h.wire.ticket(identity.context, identity.discriminator, fixture.document.objectId), `resumed-${name}`);
         } else {
@@ -143,6 +155,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       Object.assign(stage, {interruptedAt, staleAdmissionRefused: true, restored, verdict: "PASS"});
     } finally {
       await socket.close(); await writer.context.close(); for (const peer of peers) await peer.context.close();
+      for (const context of extraContexts) await context.close();
     }
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(0);
   }

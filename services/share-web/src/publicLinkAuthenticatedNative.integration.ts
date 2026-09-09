@@ -478,7 +478,8 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
-      listeners: () => frameChanges.listenerCount(), ownerRequest, openLink, wire,
+      listeners: () => frameChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
+      interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
       register: async (id, checkpoint, markdown) => {
         const path = `docs/${id}.md`, document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: id, lineageClaimId: hash(checkpoint)};
         const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({document, currentPath: path, checkpoint});
@@ -515,6 +516,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await browserExpect(editor).toHaveAttribute("contenteditable", "true");
       await browserExpect(page.getByRole("status")).toContainText("Ready to edit"); return {context, page, editor};
     });
+    for (const context of contexts) await context.close();
+    expect(browser!.contexts()).toHaveLength(0);
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
     results.automaticView = await runPublicAutomaticView({h: transitionHarness, selected: transitions.cases.view, admission: capacity.automaticView,
       executable, relayUrl, ownerToken, native: capacity.native, validation: validationPolicy, maxRegistrations: capacity.maxRegistrations,
       replaceHost: async config => {await active!.close(); active = undefined; writeFileSync(serviceConfig, JSON.stringify(config));
