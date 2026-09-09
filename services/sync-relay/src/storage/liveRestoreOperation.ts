@@ -60,7 +60,7 @@ export type StopRestoreApplied = {
 export type StopRestoreLookup = { operationId: string; workspaceId: string; ownerUserId: string };
 export type StopRestorePlanInput = {
   operationId: string; ownerUserId: string; document: LiveDocumentKey;
-  shareId: string; grantId: string; restorePointCursor: number; maxOutputBytes: number;
+  shareId: string; grantId: string; restorePointCursor: number; restorePointReceiptDigest: string; maxOutputBytes: number;
 };
 export type StopRestoreRecipient = {
   grantId: string; principalKind: "user" | "email" | "link"; userId: string | null; email: string | null;
@@ -217,6 +217,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     const cursor = integer(input.restorePointCursor);
     const digest = cursor === 0 ? row.baseline_digest : storage.db.prepare(`SELECT update_digest FROM sync_relay_live_update_journal
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor=?`).get(...key(document), cursor)?.update_digest;
+    if (parseLiveUpdateDigest(input.restorePointReceiptDigest) !== digest) refuse();
     const recipients: StopRestoreRecipient[] = [{grantId: grant.grantId, principalKind: grant.principalKind,
       userId: grant.principalUserId, email: grant.principalEmail}];
     const dependentIds: string[] = [];

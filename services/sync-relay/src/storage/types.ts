@@ -1,4 +1,5 @@
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
+import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
 import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
@@ -555,6 +556,8 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
+  readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
   beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
   readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;

@@ -1,5 +1,6 @@
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
+import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -328,6 +329,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
     return liveRestoreOperationStorage.readStopRestorePlan(this, input);
+  }
+  readOwnerRestoreOptions(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreOptions>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerRestoreOptions(this, input);
+  }
+  readOwnerRestoreStatus(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
   }
   beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
     return liveRestoreOperationStorage.beginStopRestore(this, input, now);
