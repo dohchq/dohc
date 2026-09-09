@@ -566,7 +566,6 @@ impl EngineService {
             }
         };
         retirement.0 = None;
-        check_interruption()?;
         let receipt = outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
             .map_err(map_runtime)?;
@@ -582,6 +581,7 @@ impl EngineService {
                 }
             });
         }
+        check_interruption()?;
         if !guard.is_current() {
             check_interruption()?;
             return Err(workspace_unavailable());
@@ -1369,11 +1369,17 @@ mod tests {
             .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        let baseline: Vec<u8> = serde_json::from_value(vectors[1]["bytes"].clone()).unwrap();
+        let markdown = vectors[1]["markdown"].as_str().unwrap();
         let binding = LiveObjectBinding {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
             object_id: "document".into(),
-            lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+            lineage_claim_id: hex_sha256(&baseline),
             current_path: "document.md".into(),
             selector_paths: vec!["document.md".into()],
             restore_fence_generation: 0,
@@ -1384,6 +1390,40 @@ mod tests {
             .unwrap()["registrationId"]
             .as_u64()
             .unwrap();
+        let bootstrap = if restore_fence {
+            let mut upload = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+            upload.begin(Request {
+                id: 73,
+                method: "liveApplication.bootstrap".into(),
+                workspace: Some(workspace.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({"registrationId":registration,"baselineStreamId":1,"baseline":{
+                    "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
+                    "baselineDigest":hex_sha256(&baseline),"baselineByteLength":baseline.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
+                }}),
+            }, &owner.handle()).unwrap();
+            upload
+                .start(BlobStart {
+                    request_id: 73,
+                    stream_id: 1,
+                    total_bytes: Some(baseline.len() as u64),
+                    sha256: Some(hex_sha256(&baseline)),
+                })
+                .unwrap();
+            let (request, input) = upload.chunk(1, true, &baseline).unwrap().unwrap();
+            let mut bootstrap_ctx = RequestContext::unbounded();
+            bootstrap_ctx.connection = Some(owner.handle());
+            let response = service
+                .call_with_input(bootstrap_ctx, request, Some(input))
+                .await
+                .unwrap();
+            assert_eq!(response.response.result["status"], "bootstrapped");
+            assert!(response.output_guard.as_ref().unwrap().is_current());
+            Some(response)
+        } else {
+            None
+        };
         let cancel = ctx.cancel.clone();
         let request = if restore_fence {
             fence_request(&workspace, &binding, "completion-test")
@@ -1425,12 +1465,44 @@ mod tests {
         .expect("the cancellation bridge wakes the unpolled settlement RPC");
         assert_eq!(waiting.await.unwrap_err().code, ErrorCode::Cancelled);
         assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
-        assert!(
-            service
-                .live_application_registration(&owner.handle(), Some(&workspace), registration)
-                .is_ok(),
-            "a terminal settlement must preserve the host when cancellation is also ready"
-        );
+        if let Some(bootstrap) = bootstrap {
+            let db = rusqlite::Connection::open_with_flags(
+                scratch.path().join(".dohc/engine/engine.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let fenced: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM live_restore_fences WHERE operation_id='restore-rpc'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(fenced, 1, "the native fence committed before cancellation");
+            assert!(
+                !bootstrap.output_guard.as_ref().unwrap().is_current(),
+                "a committed fence must retire queued output even when its reply is cancelled"
+            );
+            assert!(
+                service
+                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                    .is_err()
+            );
+            assert!(
+                lock(&service.live_applications)
+                    .hosts
+                    .get(&workspace)
+                    .unwrap()
+                    .current(&owner.handle())
+            );
+        } else {
+            assert!(
+                service
+                    .live_application_registration(&owner.handle(), Some(&workspace), registration)
+                    .is_ok(),
+                "a terminal settlement must preserve the host when cancellation is also ready"
+            );
+        }
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

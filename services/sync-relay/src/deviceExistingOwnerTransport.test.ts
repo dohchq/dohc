@@ -92,7 +92,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     sendLiveApplication: vi.fn(async (_request: unknown,_event: unknown) => ({result: {status: "applied",ack: {}}})) };
   const ownerFor = vi.fn(() => owner);
   transport = startExistingOwnerDeviceTransport({ config: { client: singleton as unknown as EngineClient,workspaces: [{workspaceId: "workspace",workspaceHandle: "ws-ordinary"}],ownerFor,
-    maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 10,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
+    maxQueuedBytes: 2_000_000,maxFrameBytes: 1_048_576,maxUploads: 2,maxRegistrations: 1,aggregateBytes: 200_000_000,maxAdoptionBytes: 1_000_000,maxAdoptionEvents: 10,requestDeadlineMs: 30_000 },start,ws: deviceSocket,limits,stop: () => peerConnection?.close() });
   try {
     await started; await peer!.ready();
     const discovery = await peer!.sendRequest({id: 1,method: "liveApplication.hosts",params: {}});
@@ -173,7 +173,24 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     const pending = await peer!.sendRequest({id: 14,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}});
     expect(pending.result).toMatchObject({status: "pending"});
     expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
-    await expect(peer!.sendRequest({id: 15,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    const resume = (id: number, target = binding) => peer!.sendRequest({id,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding: target,resumeAdoptionId: "adoption"}});
+    expect((await resume(15)).result).toMatchObject({status: "pending"});
+    const nativeRegisters = () => singleton.sendRequest.mock.calls.filter(call => call[0].method === "liveApplication.register").length;
+    const registeredCount = nativeRegisters();
+    expect((await resume(16)).result).toMatchObject({status: "pending"});
+    expect(nativeRegisters()).toBe(registeredCount);
+    await expect(resume(17,{...binding,objectId: "second",currentPath: "b.md",selectorPaths: ["b.md"]})).rejects.toThrow();
+    expect(nativeRegisters()).toBe(registeredCount);
+    singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
+    expect((await resume(18)).result).toEqual({registrationId: 9});
+    singleton.sendRequest.mockResolvedValueOnce({result: {...durableOwner,outboxId: "outbox",pendingBytes: 1,outboxState: "frozen"}});
+    await peer!.sendRequest({id: 19,method: "liveApplication.ownerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
+    singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
+    await resume(20);
+    singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});
+    await peer!.sendRequest({id: 21,method: "liveApplication.readOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
+    await expect(peer!.sendRequest({id: 22,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }
