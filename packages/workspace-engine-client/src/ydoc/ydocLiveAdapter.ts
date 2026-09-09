@@ -1091,60 +1091,64 @@ export class YdocAdapterSession {
 
   resync(): Promise<Uint8Array> {
     if (this.resyncPending) return this.resyncPending;
-    const pending = this.readResyncState();
-    this.resyncPending = pending;
-    const finished = () => {if (this.resyncPending === pending) this.resyncPending = null;};
-    void pending.then(finished, finished);
-    return pending;
+    this.resyncPending = this.readResyncState();
+    return this.resyncPending;
   }
 
   private async readResyncState(): Promise<Uint8Array> {
-    if (this.closed) {
-      throw new YdocAdapterError(
-        "session-closed",
-        "The Y.Doc adapter session is closed.",
-      );
-    }
-    await this.recordChain.catch(() => undefined);
-    const result = await this.requestResyncState();
-    if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
-    const update = result.update;
-    if (result.lineageClaimId !== this.lineageClaimId) {
-      const replacement = new Y.Doc();
-      declareDohcRootSchema(replacement);
-      Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
-      replacement.on("update", this.handleDocUpdate);
-      this.activeDoc.off("update", this.handleDocUpdate);
-      this.retiredDocs.add(this.activeDoc);
-      this.activeDoc = replacement;
-      this.lineageClaimId = result.lineageClaimId;
-      this.initialUpdate = update;
-      this.activeArtifactAssets = result.artifactAssets;
-      for (const listener of this.lineageReplacementListeners) {
-        listener(replacement, result.recoveredPaths);
+    try {
+      while (true) {
+        await this.recordChain.catch(() => undefined);
+        if (this.closed) {
+          throw new YdocAdapterError(
+            "session-closed",
+            "The Y.Doc adapter session is closed.",
+          );
+        }
+        const result = await this.requestResyncState();
+        if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
+        const update = result.update;
+        if (result.lineageClaimId !== this.lineageClaimId) {
+          const replacement = new Y.Doc();
+          declareDohcRootSchema(replacement);
+          Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
+          replacement.on("update", this.handleDocUpdate);
+          this.activeDoc.off("update", this.handleDocUpdate);
+          this.retiredDocs.add(this.activeDoc);
+          this.activeDoc = replacement;
+          this.lineageClaimId = result.lineageClaimId;
+          this.initialUpdate = update;
+          this.activeArtifactAssets = result.artifactAssets;
+          for (const listener of this.lineageReplacementListeners) {
+            listener(replacement, result.recoveredPaths);
+          }
+        } else {
+          Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+        }
+        // The event baseline is preserved across resync: transport event seqs
+        // stay monotone within a session generation, and clearing the position
+        // would let the first post-resync gap pass undetected (the next event
+        // would be accepted as a fresh baseline). Positions recorded during the
+        // stale window keep the continuity; a genuine gap after this resync
+        // marks stale again and converges through one more pass.
+        if (this.droppedWhileStale) {
+          // An update arrived after the engine produced this resync state but
+          // before it was applied here; its content is durable engine-side, so
+          // one more pass folds it in. The stale guard stays SET across the
+          // next pass: clearing it first would open an await-window where
+          // local edits journal against a baseline the second pass immediately
+          // advances past.
+          this.droppedWhileStale = false;
+          continue;
+        }
+        this.staleError = null;
+        if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);
+        return update;
       }
-    } else {
-      Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    } finally {
+      // Release the coalesced read before observers' queued invalidations run.
+      this.resyncPending = null;
     }
-    // The event baseline is preserved across resync: transport event seqs
-    // stay monotone within a session generation, and clearing the position
-    // would let the first post-resync gap pass undetected (the next event
-    // would be accepted as a fresh baseline). Positions recorded during the
-    // stale window keep the continuity; a genuine gap after this resync
-    // marks stale again and converges through one more pass.
-    if (this.droppedWhileStale) {
-      // An update arrived after the engine produced this resync state but
-      // before it was applied here; its content is durable engine-side, so
-      // one more pass folds it in. The stale guard stays SET across the
-      // recursive pass: clearing it first would open an await-window where
-      // local edits journal against a baseline the second pass immediately
-      // advances past.
-      this.droppedWhileStale = false;
-      return await this.readResyncState();
-    }
-    this.staleError = null;
-    if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);
-    return update;
   }
 
   private async requestResyncState(): Promise<{

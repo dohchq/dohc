@@ -181,6 +181,25 @@ it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as 
   peer.destroy();
 });
 
+it("resyncs an invalidation queued as the previous state finishes applying", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event))});
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const firstVector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "first ");
+  const firstUpdate = Y.encodeStateAsUpdate(peer, firstVector), secondVector = Y.encodeStateVector(peer);
+  peer.getText("plainText").insert(0, "second "); const secondUpdate = Y.encodeStateAsUpdate(peer, secondVector);
+  let queued = false;
+  session.onRemoteUpdate(() => {if (!queued) {queued = true; queueMicrotask(() => engine.applyRemoteUpdate(session.sessionId, secondUpdate));}});
+  engine.applyRemoteUpdate(session.sessionId, firstUpdate); await drain();
+  expect(engine.sessionText(session.sessionId)).toBe("second first seed");
+  expect(session.doc.getText("plainText").toString()).toBe("second first seed");
+  await session.applyLocalTextEdit({root: "plainText", index: 17, insert: " local"});
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
 it("shares one pending native resync between concurrent callers", async () => {
   const engine = seedPlaintextEngine("seed");
   let release!: () => void, resyncs = 0;
