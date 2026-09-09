@@ -1046,7 +1046,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let prefix =
                     crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
                         .map_err(local)?;
-                let blocked = prefix.pending.is_some();
+                let blocked = prefix.pending.is_some() || prefix.budget_exhausted;
                 let ops = &ops[..prefix.allowed_ops];
                 if let Some(pending) = prefix.pending {
                     owner_admission_pending.push(pending);

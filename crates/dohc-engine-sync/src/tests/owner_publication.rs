@@ -371,3 +371,30 @@ fn workspace_push_keeps_blocked_origin_position_and_continues_other_origins() {
             .any(|p| p.payload.get("updateBlobSha256") == op.payload.get("updateBlobSha256"))
     );
 }
+#[test]
+fn accepted_page_budget_exhaustion_is_resumable_without_pending_share() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = candidate(&mut store, &observed, &checkpoint, 0);
+    let second = candidate(&mut store, &observed, &checkpoint, 1);
+    let budget = checkpoint.len() * 2;
+    let prefix = owner_publication_prefix(&store, "ws", &[first, second.clone()], budget).unwrap();
+    assert_eq!(prefix.allowed_ops, 1);
+    assert!(prefix.pending.is_none());
+    assert!(prefix.budget_exhausted);
+    let resumed = owner_publication_prefix(&store, "ws", &[second], budget).unwrap();
+    assert_eq!(resumed.allowed_ops, 1);
+    assert!(resumed.pending.is_none());
+    assert!(!resumed.budget_exhausted);
+}
+
+#[test]
+fn first_accepted_operation_over_budget_returns_configuration_error() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let op = candidate(&mut store, &observed, &checkpoint, 0);
+    assert!(matches!(
+        owner_publication_prefix(&store, "ws", &[op], checkpoint.len() * 2 - 1),
+        Err(SyncError::InvalidInput {
+            reason: "owner publication proof exceeds configured read budget"
+        })
+    ));
+}

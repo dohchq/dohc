@@ -9,7 +9,15 @@ pub enum PublicationContentKind {
     Projection,
 }
 
-/// None means this exact native object has never been owner-bound. False keeps
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationProof {
+    Unbound,
+    Contained,
+    NotContained,
+    BudgetExhausted,
+}
+
+/// Unbound means this exact native object has never been owner-bound. NotContained keeps
 /// its immutable origin coordinate pending. Imported audit history is not read.
 pub fn contains_in(
     conn: &Connection,
@@ -19,25 +27,35 @@ pub fn contains_in(
     kind: PublicationContentKind,
     digest: &str,
     remaining: &mut usize,
-) -> Result<Option<bool>, OwnerOutboxError> {
+) -> Result<PublicationProof, OwnerOutboxError> {
     validate_digest(digest)?;
     let bound:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
     if !bound {
-        return Ok(None);
+        return Ok(PublicationProof::Unbound);
     }
+    let mut budget_exhausted = false;
     let proof = (|| -> Result<bool, OwnerOutboxError> {
-        let (binding, namespace, accepted) =
-            if let Some(draft) = super::draft::descriptor_for_key_in(conn, key)? {
-                let observed = super::accepted::current(conn, &draft.binding)?;
-                let checkpoint = read_blob(conn, &observed.checkpoint_digest, remaining)?;
-                let doc = Ydoc::wire();
-                doc.apply(&checkpoint).map_err(collab)?;
-                (observed.binding, observed.relay_database_namespace, doc)
-            } else {
-                crate::live_update_application::read_native_accepted_in(conn, key, remaining)
-                    .map_err(|_| OwnerOutboxError::Frozen)?
+        let (binding, namespace, accepted) = if let Some(draft) =
+            super::draft::descriptor_for_key_in(conn, key)?
+        {
+            let observed = super::accepted::current(conn, &draft.binding)?;
+            let checkpoint = read_blob(
+                conn,
+                &observed.checkpoint_digest,
+                remaining,
+                &mut budget_exhausted,
+            )?;
+            let doc = Ydoc::wire();
+            doc.apply(&checkpoint).map_err(collab)?;
+            (observed.binding, observed.relay_database_namespace, doc)
+        } else {
+            crate::live_update_application::read_native_accepted_in(conn, key, remaining)
+                    .map_err(|error| {
+                        budget_exhausted = matches!(error, crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded);
+                        OwnerOutboxError::Frozen
+                    })?
                     .ok_or(OwnerOutboxError::Frozen)?
-            };
+        };
         if binding.current_path != path
             || lineage.is_some_and(|id| id != binding.lineage_claim_id)
             || accepted.has_pending_dependencies()
@@ -47,7 +65,7 @@ pub fn contains_in(
         crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
         match kind {
             PublicationContentKind::Ydoc => {
-                let update = read_blob(conn, digest, remaining)?;
+                let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;
                 let before = bounded(&accepted)?;
                 accepted.apply(&update).map_err(collab)?;
                 Ok(!accepted.has_pending_dependencies() && bounded(&accepted)? == before)
@@ -69,7 +87,12 @@ pub fn contains_in(
                 // base is contained, including its delete set, before installing.
                 let original = Ydoc::wire();
                 original
-                    .apply(&read_blob(conn, &binding.lineage_claim_id, remaining)?)
+                    .apply(&read_blob(
+                        conn,
+                        &binding.lineage_claim_id,
+                        remaining,
+                        &mut budget_exhausted,
+                    )?)
                     .map_err(collab)?;
                 let before = bounded(&accepted)?;
                 accepted.apply(&bounded(&original)?).map_err(collab)?;
@@ -88,16 +111,35 @@ pub fn contains_in(
     })();
     // Failure to prove containment never uploads the bytes. Durable corruption
     // remains recoverable at the original queued coordinate.
-    Ok(Some(proof.unwrap_or(false)))
+    Ok(if budget_exhausted {
+        PublicationProof::BudgetExhausted
+    } else if proof.unwrap_or(false) {
+        PublicationProof::Contained
+    } else {
+        PublicationProof::NotContained
+    })
 }
 
 fn read_blob(
     conn: &Connection,
     digest: &str,
     remaining: &mut usize,
+    budget_exhausted: &mut bool,
 ) -> Result<Vec<u8>, OwnerOutboxError> {
-    let cap = (*remaining).min(crate::limits::MAX_YDOC_UPDATE_BYTES);
-    let bytes:Vec<u8>=conn.query_row("SELECT bytes FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes) AND byte_length BETWEEN 1 AND ?2",params![digest,cap as i64],|r|r.get(0)).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::Frozen)?;
+    let length: Option<i64> = conn.query_row("SELECT byte_length FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes) AND byte_length BETWEEN 1 AND ?2", params![digest, crate::limits::MAX_YDOC_UPDATE_BYTES as i64], |r|r.get(0)).optional().map_err(read_sql)?;
+    let length = usize::try_from(length.ok_or(OwnerOutboxError::Frozen)?)
+        .map_err(|_| OwnerOutboxError::Corrupt)?;
+    if length > *remaining {
+        *budget_exhausted = true;
+        return Err(OwnerOutboxError::Frozen);
+    }
+    let bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes) AND byte_length=?2",
+            params![digest, length as i64],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
     *remaining = remaining.saturating_sub(bytes.len());
     if hex_sha256(&bytes) != digest {
         return Err(OwnerOutboxError::Corrupt);

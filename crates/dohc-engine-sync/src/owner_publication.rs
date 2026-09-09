@@ -1,7 +1,7 @@
 use crate::{ReplicationEnvelope, SyncError};
 use dohc_engine_collab::{
     DocKey,
-    owner_outbox::publication::{PublicationContentKind, contains_in},
+    owner_outbox::publication::{PublicationContentKind, PublicationProof, contains_in},
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use serde::Serialize;
@@ -21,6 +21,7 @@ pub struct OwnerAdmissionPending {
 pub struct OwnerPublicationPrefix {
     pub allowed_ops: usize,
     pub pending: Option<OwnerAdmissionPending>,
+    pub budget_exhausted: bool,
 }
 struct Content {
     version: String,
@@ -221,9 +222,22 @@ pub fn owner_publication_prefix(
                 .map_err(|_| {
                     crate::error::local_corruption("queued owner publication proof is invalid")
                 })?;
-                if allowed == Some(false) {
+                if allowed == PublicationProof::BudgetExhausted {
+                    if allowed_ops == 0 {
+                        return Err(SyncError::InvalidInput {
+                            reason: "owner publication proof exceeds configured read budget",
+                        });
+                    }
                     return Ok(OwnerPublicationPrefix {
                         allowed_ops,
+                        pending: None,
+                        budget_exhausted: true,
+                    });
+                }
+                if allowed == PublicationProof::NotContained {
+                    return Ok(OwnerPublicationPrefix {
+                        allowed_ops,
+                        budget_exhausted: false,
                         pending: Some(OwnerAdmissionPending {
                             workspace_id: workspace.into(),
                             origin_id: op.origin_id.clone(),
@@ -238,6 +252,7 @@ pub fn owner_publication_prefix(
         }
         Ok(OwnerPublicationPrefix {
             allowed_ops: ops.len(),
+            budget_exhausted: false,
             pending: None,
         })
     })
