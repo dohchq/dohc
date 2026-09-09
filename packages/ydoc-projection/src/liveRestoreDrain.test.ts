@@ -1393,6 +1393,34 @@ function repeatedReviewFixture() {
   } catch (error) {f.close(); throw error;}
 }
 
+it.each(["complete", "missing-event", "wrong-proposal", "budget"])("confirms only an authenticated complete host restore review: %s", async state => {
+  const f = repeatedReviewFixture();
+  try {
+    const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: state === "budget" ? 3 : 40});
+    const sendLiveRestore = vi.fn(async () => {throw Error("simulated transport loss after admission");});
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
+      connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
+    if (state !== "budget") {
+      const before = lifecycleRows(f), review = await driver.review(options);
+      expect(review!.acceptedEvents).toHaveLength(3);
+      expect(review!.nativeSources).toHaveLength(2);
+      expect(lifecycleRows(f)).toEqual(before);
+    }
+    if (state === "missing-event") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+    const before = lifecycleRows(f);
+    const expected = state === "wrong-proposal" ? "f".repeat(64) : f.saved.proposalDigest;
+    if (state === "complete") {
+      await expect(driver.confirm(options, expected)).rejects.toThrow("simulated transport loss after admission");
+      expect(f.store.readStopRestoreLifecycle(f.input)?.phase).toBe("relay-admitted");
+      expect(sendLiveRestore).toHaveBeenCalledTimes(1);
+    } else {
+      await expect(driver.confirm(options, expected)).rejects.toThrow();
+      expect(lifecycleRows(f)).toEqual(before);
+      expect(sendLiveRestore).not.toHaveBeenCalled();
+    }
+  } finally {f.close();}
+});
+
 it("returns a complete private review across a restore checkpoint, including already-deleted native work", () => {
   const f = repeatedReviewFixture();
   try {

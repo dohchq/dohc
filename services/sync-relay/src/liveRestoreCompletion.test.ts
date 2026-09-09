@@ -18,6 +18,7 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
   let current = phase === null ? null : {...base, phase};
   const save = (next: Exclude<typeof phase, null>) => (current = {...base, phase: next});
   const store = {
+    readStopRestoreReview: vi.fn((): {proposalDigest: string} | null => ({proposalDigest: digest})),
     readStopRestoreLifecycle: vi.fn(() => current),
     admitStopRestoreProposal: vi.fn(() => save("relay-admitted")),
     acknowledgeStopRestoreReplacement: vi.fn(() => save("native-applied")),
@@ -32,8 +33,52 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
       instanceId: "instance", connectionId: "connection"}, deadlineMs: 1000, nextRequestId: () => 1}};
   const driver = new LiveRestorePreparation(config);
   const run = (expected = digest, signal?: AbortSignal) => driver.complete({...options, signal} as unknown as Parameters<typeof driver.complete>[0], expected);
-  return {store, send, run, save, options, base};
+  const confirm = (expected = digest, signal?: AbortSignal) => driver.confirm({...options, signal} as unknown as Parameters<typeof driver.confirm>[0], expected);
+  const review = (signal?: AbortSignal) => driver.review({...options, signal} as unknown as Parameters<typeof driver.review>[0]);
+  return {store, send, run, save, options, base, confirm, review};
 }
+
+describe("owner restore review boundary", () => {
+  it("rederives complete review before durable admission", async () => {
+    const f = fixture();
+    await expect(f.review()).resolves.toEqual({proposalDigest: digest});
+    expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
+    await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
+    expect(f.store.readStopRestoreReview).toHaveBeenCalledTimes(2);
+    expect(f.store.readStopRestoreReview.mock.invocationCallOrder[1]).toBeLessThan(f.store.admitStopRestoreProposal.mock.invocationCallOrder[0]!);
+  });
+
+  it.each(["missing", "changed", "incomplete", "cancelled"])("refuses %s review before any durable admission", async damage => {
+    const f = fixture(), abort = new AbortController();
+    if (damage === "missing") f.store.readStopRestoreReview.mockReturnValue(null);
+    if (damage === "changed") f.store.readStopRestoreReview.mockReturnValue({proposalDigest: "d".repeat(64)});
+    if (damage === "incomplete") f.store.readStopRestoreReview.mockImplementation(() => {throw Error("review budget exceeded");});
+    if (damage === "cancelled") f.store.readStopRestoreReview.mockImplementation(() => {abort.abort(Error("cancelled"));return {proposalDigest: digest};});
+    await expect(f.confirm(digest, abort.signal)).rejects.toThrow();
+    expect(f.store.admitStopRestoreProposal).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("retries an admitted confirmation without reopening the pre-admission review", async () => {
+    const f = fixture("native-applied");
+    f.store.readStopRestoreReview.mockImplementation(() => {throw Error("proposal is no longer readable before admission");});
+    await expect(f.confirm()).resolves.toHaveProperty("kind", "resumed");
+    expect(f.store.readStopRestoreReview).not.toHaveBeenCalled();
+    await expect(f.confirm("d".repeat(64))).rejects.toThrow("retained proposal");
+  });
+
+  it("shares the host reservation with native completion until it closes", async () => {
+    const f = fixture("relay-admitted");
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => {release = resolve;});
+    f.send.mockImplementationOnce(async () => {await pending;return {response: {result: {status: "apply"}}, bytes: Buffer.from("{}")};});
+    const active = f.confirm();
+    await expect(f.review()).rejects.toThrow("capacity is full");
+    await expect(f.confirm()).rejects.toThrow("capacity is full");
+    release();
+    await active;
+  });
+});
 
 describe("private restore continuation", () => {
   it.each([

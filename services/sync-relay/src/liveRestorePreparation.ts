@@ -84,8 +84,29 @@ export class LiveRestorePreparation {
     });
   }
 
+  /** Compute the complete owner review under the host-wide working reservation. */
+  async review(options: Parameters<typeof deliverStopRestore>[0]) {
+    const config = this.config, signal = options.signal;
+    const input = {...snapshotStopRestoreLookup(options.lookup), host: snapshotHostCoordinate(options.connection.host),
+      maxBytes: config.maxBytes, maxEvents: config.maxEvents, maxOutputBytes: config.maxBytes};
+    return this.#reserved(signal, async () => {
+      const review = options.store.readStopRestoreReview(input, config.validation);
+      if (signal?.aborted) throw signal.reason;
+      return review;
+    });
+  }
+
+  /** The caller must authenticate the owner before using this confirmation boundary. */
+  async confirm(options: Parameters<typeof deliverStopRestore>[0], expectedDigest: string) {
+    return this.#complete(options, expectedDigest, true);
+  }
+
   /** Continue only the durable proposal selected by the private caller. */
   async complete(options: Parameters<typeof deliverStopRestore>[0], expectedDigest: string) {
+    return this.#complete(options, expectedDigest, false);
+  }
+
+  async #complete(options: Parameters<typeof deliverStopRestore>[0], expectedDigest: string, requireReview: boolean) {
     const config = this.config, signal = options.signal, store = options.store, deliveryKind = options.deliveryKind;
     const proposalDigest = parseLiveUpdateDigest(expectedDigest);
     const connection = {...options.connection, host: snapshotHostCoordinate(options.connection.host),
@@ -94,8 +115,17 @@ export class LiveRestorePreparation {
       maxBytes: config.maxBytes, maxEvents: config.maxEvents};
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
-      let current = store.readStopRestoreLifecycle(input)
-        ?? store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now());
+      const retained = store.readStopRestoreLifecycle(input);
+      if (!retained) {
+        if (requireReview) {
+          const review = store.readStopRestoreReview({...input, maxOutputBytes: config.maxBytes}, config.validation);
+          if (!review || review.proposalDigest !== proposalDigest) {
+            throw new Error("Restore confirmation does not match a complete review.");
+          }
+          check();
+        }
+      }
+      let current = retained ?? store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now());
       const verify = () => {
         check();
         if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {
