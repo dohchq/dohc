@@ -125,6 +125,7 @@ export function startExistingOwnerDeviceTransport(options: {
         try {owner = existing?.owner ?? config.ownerFor(binding); owner.assertCurrent();}
         catch (error) {
           if (resumeAdoptionId === undefined) throw error;
+          owner = undefined;
           await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}},signal); return;
         }
         const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);

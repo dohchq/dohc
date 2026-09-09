@@ -8,14 +8,13 @@ import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
 import type {NativeRestoreFence} from "./liveRestoreFence.js";
 
-it.each(["ownerState","register","missingOwner","missingAdoption"])("releases cancelled %s capacity while its response is still backpressured",async method => {
+it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])("releases cancelled %s capacity while its response is still backpressured",async method => {
   const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
   const started = deferred(), held = deferred();
   const replies = new Map<number,ReturnType<typeof deferred>>();
   const decoder = new FrameDecoder(1_048_576,256*1024);
   let release: (() => void) | undefined;
   let heldReply: unknown;
-  const received = new Set<number>();
   const ws = {readyState:1,bufferedAmount:0,send(bytes:Buffer,options:{binary:boolean},done:() => void) {
     let hold = false;
     if (options.binary) decoder.push(bytes,frame => {
@@ -31,44 +30,56 @@ it.each(["ownerState","register","missingOwner","missingAdoption"])("releases ca
     host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
   const owner = {nativeSessionId:"session",assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
     finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
-  const client = {ready:async () => undefined,sendRequest:async (request:{method:string}) => ({result:
-    request.method === "liveApplication.register" ? {registrationId:9} : {adoptionId:"adoption",expectedLocalSequence:0,throughCursor:null,outboxId:null,pendingBytes:0,outboxState:null}})} as unknown as EngineClient;
-  const stop = vi.fn();
-  const transport = startExistingOwnerDeviceTransport({config:{client,workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor:binding => {
+  let stale = false;
+  const staleOwner = {...owner,nativeSessionId:"stale-session",assertCurrent:vi.fn(() => {if (stale) throw new Error("Owner session retired.");})};
+  const ownerFor = vi.fn((binding:{objectId:string}) => {
     if (binding.objectId === "missing-owner") throw new Error("Owner session unavailable.");
-    return owner;
-  },
+    return binding.objectId === "stale-owner" ? staleOwner : owner;
+  });
+  const client = {ready:async () => undefined,sendRequest:async (request:{method:string;params?:{binding?:{objectId?:string}}}) => ({result:
+    request.method === "liveApplication.register" ? {registrationId:request.params?.binding?.objectId === "stale-owner" ? 10 : 9}
+      : {adoptionId:"adoption",expectedLocalSequence:0,throughCursor:null,outboxId:null,pendingBytes:0,outboxState:null}})} as unknown as EngineClient;
+  const stop = vi.fn();
+  const transport = startExistingOwnerDeviceTransport({config:{client,workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor,
     maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,maxUploads:2,maxRegistrations:10,aggregateBytes:200_000_000,
     maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,requestDeadlineMs:30_000},start,ws,limits,stop});
   const send = (value:Record<string,unknown>) => new Promise<void>(resolve => setImmediate(() => {
     transport.receive(encodeFrame(FrameType.Control,0,Buffer.from(JSON.stringify(value)),1_048_576));
-    if (value.type === "request") received.add(value.id as number);
     resolve();
   }));
   const request = (id:number,method:string,params:object) => {
     const response = deferred(); replies.set(id,response);
-    void send({type:"request",id,method,workspace:"handle",params}); return response.promise;
+    return {delivered:send({type:"request",id,method,workspace:"handle",params}),response:response.promise};
   };
   try {
     await started.promise;
     await send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
     const registration = {binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
       currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1}};
-    await request(2,"liveApplication.register",registration);
+    const staleRegistration = {binding:{...registration.binding,objectId:"stale-owner"}};
+    if (method === "staleOwner") await request(1,"liveApplication.register",staleRegistration).response;
+    await request(2,"liveApplication.register",registration).response;
+    stale = true;
     const params = method === "missingOwner" ? {binding:{...registration.binding,objectId:"missing-owner"},resumeAdoptionId:"resume"}
-      : method === "missingAdoption" ? {...registration,resumeAdoptionId:"unavailable"} : method === "register" ? registration : {registrationId:9};
-    void request(3,method === "ownerState" ? "liveApplication.ownerState" : "liveApplication.register",params); await held.promise;
-    if (method === "missingOwner" || method === "missingAdoption") expect(heldReply).toMatchObject({type:"response",result:{status:"pending",
-      reason:method === "missingOwner" ? "The existing owner session is unavailable." : "The existing owner adoption is unavailable."}});
+      : method === "staleOwner" ? {...staleRegistration,resumeAdoptionId:"resume"} : method === "missingAdoption" ? {...registration,resumeAdoptionId:"unavailable"}
+      : method === "register" ? registration : {registrationId:9};
+    void request(3,method === "ownerState" ? "liveApplication.ownerState" : "liveApplication.register",params).response; await held.promise;
+    if (["missingOwner","missingAdoption","staleOwner"].includes(method)) expect(heldReply).toMatchObject({type:"response",result:{status:"pending",
+      reason:method === "missingAdoption" ? "The existing owner adoption is unavailable." : "The existing owner session is unavailable."}});
     await send({type:"cancel",id:3});
     const nextState = request(4,"liveApplication.ownerState",{registrationId:9});
     const nextRegistration = request(5,"liveApplication.register",registration);
-    await expect.poll(() => received.has(5)).toBe(true);
+    await nextRegistration.delivered;
     expect(stop).not.toHaveBeenCalled();
     expect(owner.finishHandoff.mock.calls).toEqual(method === "ownerState" ? [[false]] : []);
-    await expect.poll(() => owner.prepareHandoff.mock.calls.length).toBe(method === "ownerState" ? 2 : 1);
+    expect(owner.prepareHandoff.mock.calls.length).toBe(method === "ownerState" ? 2 : 1);
     release!(); release = undefined;
-    await Promise.all([nextState,nextRegistration]);
+    await Promise.all([nextState.response,nextRegistration.response]);
+    if (method === "staleOwner") {
+      await request(6,"liveApplication.register",staleRegistration).delivered;
+      expect(stop).toHaveBeenCalledOnce();
+      expect(ownerFor.mock.calls.filter(([binding]) => binding.objectId === "stale-owner")).toHaveLength(1);
+    }
   } finally {release?.(); await transport.close();}
 });
 
