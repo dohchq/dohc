@@ -301,13 +301,13 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     for index in 0..2_001 {
         let text = format!("blob-{index}");
         let sha256 = hex_sha256(text.as_bytes());
-        snapshots.push(json!({"blobSha256": sha256}));
+        snapshots.push(json!({"objectId": format!("object-{index}"), "path": format!("file-{index}.md"), "blobSha256": sha256}));
         blobs.push((sha256, text));
     }
     seed_identity_with_kind(
         &mut engine,
         "version.create",
-        &json!({"forkSnapshots": snapshots}),
+        &json!({"forkVersionId": "fork-version", "forkSnapshots": snapshots}),
     );
     engine
         .write_with(&NoFaults, |transaction| {

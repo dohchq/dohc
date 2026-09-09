@@ -66,6 +66,13 @@ impl EngineService {
     pub fn ordinary_live_host(
         config: OrdinaryLiveHostConfig,
     ) -> Result<(Arc<Self>, ConnectionOwner, LiveApplicationIngress), WireError> {
+        Self::new().configure_ordinary_live_host(config)
+    }
+
+    pub(super) fn configure_ordinary_live_host(
+        self,
+        config: OrdinaryLiveHostConfig,
+    ) -> Result<(Arc<Self>, ConnectionOwner, LiveApplicationIngress), WireError> {
         config
             .owner_outbox
             .validate()
@@ -87,7 +94,7 @@ impl EngineService {
                 "invalid ordinary live host bounds",
             ));
         }
-        let service = Arc::new(Self::new());
+        let service = Arc::new(self);
         let ingress = LiveApplicationIngress::new(service.clone(), config.ingress.validate()?)?;
         if let Some(config) = &config.restore {
             ingress.validate_restore_budget(config)?;

@@ -1581,13 +1581,12 @@ mod tests {
                 "maxRegistrations":4,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,"maxApplicationsPerSettlement":100,
                 "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":60_000}
             })).unwrap();
-            let (mut service, _owner, ingress) = EngineService::ordinary_live_host(config).unwrap();
-            drop(ingress);
             let probe = capture_driver::CaptureApplyProbe::default();
             probe.pause_next_open_budget();
-            let mutable = Arc::get_mut(&mut service).unwrap();
-            mutable.capture_apply_probe = Some(probe.clone());
-            mutable.supervisor = supervisor;
+            let mut service = EngineService::with_supervisor(supervisor);
+            service.capture_apply_probe = Some(probe.clone());
+            let (service, _owner, ingress) = service.configure_ordinary_live_host(config).unwrap();
+            drop(ingress);
             let params = json!({"rootDir":scratch.path(),"workspaceId":"cancelled-open-budget","captureMode":"none"});
             let mut ctx = RequestContext::unbounded();
             if deadline {

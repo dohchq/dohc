@@ -1988,17 +1988,18 @@ mod tests {
             "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes)
         })).await.unwrap_err();
         assert_eq!(refusal.message, "owner-outbox-frozen");
-        service
+        let refused_settlement = service
             .ydoc_settle(
                 &RequestContext::unbounded(),
                 Some(handle.clone()),
                 json!({"sessionId":session["sessionId"]}),
             )
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(refused_settlement.message, "owner-outbox-frozen");
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("notes/owner.md")).unwrap(),
-            "Later canonical edit"
+            markdown
         );
         service.workspace_close(Some(handle)).await.unwrap();
         {
@@ -2011,8 +2012,8 @@ mod tests {
             assert_eq!(row.1, dohc_engine_storage::hex_sha256(markdown.as_bytes()));
             assert_eq!(row.3, 2);
             assert_eq!(
-                row.4, 3,
-                "only the two explicit settlements add domain moments; refused moves add none"
+                row.4, 1,
+                "refused settlements and moves preserve the original source moment"
             );
             let original: String = store.read_with(|conn|conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id=?1 AND up_to_seq=0",[&object_id],|r|r.get(0))).unwrap();
             assert_eq!(row.2, original);
@@ -2099,11 +2100,20 @@ mod tests {
         root: &std::path::Path,
         db_path: &std::path::Path,
     ) -> Value {
-        service
+        let refused_close = service
             .ydoc_close(
                 &RequestContext::unbounded(),
                 Some(handle.clone()),
                 json!({"sessionId":session["sessionId"],"settle":true}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused_close.message, "owner-outbox-frozen");
+        service
+            .ydoc_evict(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":session["sessionId"]}),
             )
             .await
             .unwrap();
