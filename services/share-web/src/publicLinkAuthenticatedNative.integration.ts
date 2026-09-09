@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
 import {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
+import {readPublicWorkload} from "./publicLinkWorkload.integration-helper.js";
 import { Client, Pool } from "pg";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -35,6 +36,7 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 interface PublicProofAdmission {
   publicEditGateGranted: true;
   admittedConcurrency: number;
+  workload: {path: string; sha256: string};
   frames: Parameters<typeof createNamedLiveRoutes>[0]["frames"];
   route: Parameters<typeof createNamedLiveRoutes>[0]["limits"];
   bounds: Parameters<typeof createNamedLiveRoutes>[0]["bounds"];
@@ -57,6 +59,7 @@ if (capacity.publicEditGateGranted !== true || !Number.isSafeInteger(capacity.ad
   throw new Error("Public Edit release decision and at least two admitted sessions are required.");
 }
 const frames = capacity.frames, routeLimits = capacity.route, validationPolicy = capacity.validation;
+const workload = readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
 const exchangeKey = "public-native-exchange-".repeat(2), ticketKey = "public-native-tickets-".repeat(2), linkKey = "public-native-links-".repeat(2);
 // Opt-in integration filename. The pinned serial harness must select this file explicitly.
 it("exercises public Edit through owner creation, exchange and native application at admitted concurrency", async () => {
@@ -245,7 +248,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const settlement = await active.settle(document); expect(settlement.materialized).toBe(true);
     const settledMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
     for (let index = 0; index < peers.length; index++) expect(settledMarkdown).toContain(`Public peer ${index}.`);
-    results.initialLoad = {concurrency: peers.length, settlement, settledMarkdown};
+    results.tinyBrowserLifecycle = {concurrency: peers.length, settlement, settledMarkdown};
     const first = peers[0]!;
     await first.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency - 1);
@@ -353,6 +356,82 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       beforeRestartEpoch, afterRestartEpoch: newEpoch.hostEpoch!, freshAck: accepted.ack};
     await newEpoch.close();
     for (const [index, peer] of freshPeers.entries()) await peer.page.screenshot({path: join(root, `public-peer-${index}.png`), fullPage: true});
+    for (const peer of freshPeers.slice(1)) await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
+    const workloadDocument = {...document, objectId: "workload-object", lineageClaimId: hash(workload.checkpoint)};
+    const browserWorkloadDocument = {...workloadDocument, objectId: "browser-workload-object"};
+    for (const [fixtureDocument, path] of [[workloadDocument, "docs/workload.md"], [browserWorkloadDocument, "docs/browser-workload.md"]] as const) {
+    const workloadRegistration = createLiveMarkdownRegistrationValidator(validationPolicy)({document: fixtureDocument,
+      currentPath: path, checkpoint: workload.checkpoint});
+    if (workloadRegistration.kind !== "accepted") throw new Error(JSON.stringify(workloadRegistration));
+    expect(workloadRegistration.evidence.projectedMarkdownSha256).toBe(hash(workload.markdown));
+    storage.putBlob({workspaceId: "workspace", sha256: hash(workload.markdown), content: workload.markdown, createdAtMs: 4});
+    storage.appendLogBatch({workspaceId: "workspace", originId: fixtureDocument.objectId, ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 4,
+      payloadJson: JSON.stringify({objectId: fixtureDocument.objectId, momentId: fixtureDocument.objectId, versionId: mainVersionId!, recordedAtMs: 4,
+        operation: "write", metadata: {origin: "sync"}, beforePresent: "absent", path, payloadAfterPath: path,
+        payloadAfterBlobSha256: hash(workload.markdown), payloadAfterContentKind: "text", payloadAfterByteLength: workload.markdown.length})}]});
+    expect(storage.registerLiveDocumentBaseline({host: active.coordinate, evidence: workloadRegistration.evidence,
+      baselineBytes: workload.checkpoint, registeredAtMs: 5}).kind).toBe("registered");
+    }
+    const workloadLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/workload.md"], access: "edit"});
+    const browserWorkloadLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/browser-workload.md"], access: "edit"});
+    const workloadBrowsers = [];
+    for (let index = 0; index < capacity.admittedConcurrency; index++) workloadBrowsers.push(await openLink(browserWorkloadLink.url, contexts.length));
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    results.workloadBrowserBaseline = {concurrency: workloadBrowsers.length, ready: true, checkpointSha256: hash(workload.checkpoint)};
+    await Promise.all(workloadBrowsers.map(async (peer, index) => {
+      await peer.editor.click(); await peer.page.keyboard.press("Control+End"); await peer.page.keyboard.insertText(` Workload peer ${index}.`);
+      await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
+    }));
+    for (const peer of workloadBrowsers) for (let index = 0; index < workloadBrowsers.length; index++) await browserExpect(peer.editor).toContainText(`Workload peer ${index}.`);
+    const browserBinding = storage.resolveCurrentLiveDocumentBinding({document: browserWorkloadDocument, actor: {kind: "owner", userId: ownerUser.id, shareId: browserWorkloadLink.shareId}});
+    if (browserBinding.kind !== "current") throw new Error("Browser workload native binding missing.");
+    const browserNative = await active.captureNative(browserBinding.binding), browserJournal = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
+    try {
+      const rows = browserJournal.prepare("SELECT delivery_id, update_digest, principal_id FROM sync_relay_live_update_journal WHERE grant_id = ? ORDER BY journal_cursor").all(browserWorkloadLink.grantId);
+      expect(new Set(rows.map(row => row.principal_id)).size).toBe(capacity.admittedConcurrency);
+      for (const row of rows) expect(await browserNative.client.readLiveApplicationAck({id: browserNative.nextRequestId(), workspace: browserNative.workspace,
+        registrationId: browserNative.registrationId, deadlineMs: browserNative.deadlineMs}, {deliveryId: String(row.delivery_id), updateDigest: String(row.update_digest)}))
+        .toMatchObject({deliveryId: row.delivery_id, updateDigest: row.update_digest});
+      const settled = await active.settle(browserWorkloadDocument); expect(settled.materialized).toBe(true);
+      const markdown = readFileSync(join(workspace, "docs/browser-workload.md"), "utf8");
+      for (let index = 0; index < workloadBrowsers.length; index++) expect(markdown).toContain(`Workload peer ${index}.`);
+      results.workloadBrowserEdits = {concurrency: workloadBrowsers.length, applications: rows, settled, markdownSha256: hash(Buffer.from(markdown))};
+    } finally {browserJournal.close();}
+    for (const peer of workloadBrowsers) await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
+    const wireIdentities = [];
+    for (let index = 0; index < capacity.admittedConcurrency; index++) {
+      const peer = await openLink(workloadLink.url, contexts.length);
+      await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click(); wireIdentities.push(peer);
+    }
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
+    const workloadWires = [];
+    for (const [index, peer] of wireIdentities.entries()) {
+      const socket = await wire.connect(peer.context, await wire.ticket(peer.context, peer.discriminator, workloadDocument.objectId), `workload-${index}`);
+      await socket.sync(); expect(hash(Buffer.from(yDocToMarkdown(socket.doc)))).toBe(hash(workload.markdown)); workloadWires.push(socket);
+    }
+    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    const workloadCurrent = storage.resolveCurrentLiveDocumentBinding({document: workloadDocument, actor: {kind: "owner", userId: ownerUser.id, shareId: workloadLink.shareId}});
+    if (workloadCurrent.kind !== "current") throw new Error("Workload native binding missing.");
+    const workloadNative = await active.captureNative(workloadCurrent.binding), workloadRounds = [];
+    for (const [index, round] of workload.rounds.entries()) {
+      const startedAt = Date.now();
+      const acknowledgments = await Promise.all(round.updates.map(async update => {
+        const outcome = await workloadWires[update.client]!.submit(update.content, update.deliveryId);
+        if (outcome.kind !== "result" || outcome.result !== "success") throw new Error(`Workload application refused: ${update.deliveryId}`);
+        const ack = await workloadNative.client.readLiveApplicationAck({id: workloadNative.nextRequestId(), workspace: workloadNative.workspace,
+          registrationId: workloadNative.registrationId, deadlineMs: workloadNative.deadlineMs}, {deliveryId: update.deliveryId, updateDigest: hash(update.content)});
+        expect(ack).toMatchObject({deliveryId: update.deliveryId, updateDigest: hash(update.content)}); return ack;
+      }));
+      for (const peer of workloadWires) await peer.until(() => hash(Buffer.from(yDocToMarkdown(peer.doc))) === hash(round.markdown));
+      const settled = await active.settle(workloadDocument); expect(settled.materialized).toBe(true);
+      expect(hash(readFileSync(join(workspace, "docs/workload.md")))).toBe(hash(round.markdown));
+      workloadRounds.push({index, startedAt, finishedAt: Date.now(), acknowledgments, settled, markdownSha256: hash(round.markdown)});
+    }
+    for (const peer of workloadWires) await peer.close();
+    results.suppliedWireWorkload = {concurrency: workloadWires.length, manifest: capacity.workload, assets: workload.pins, rounds: workloadRounds, verdict: "PASS"};
+    readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
     const exposedBodies = await Promise.all(publicBodies);
     for (const secret of protectedSecrets) for (const body of exposedBodies) expect(body).not.toContain(secret);
     for (const context of contexts) for (const page of context.pages()) {
@@ -362,8 +441,8 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     results.credentials = {protectedCookieProfiles: capacity.admittedConcurrency, protectedSecretsChecked: protectedSecrets.size, javascriptResponseBodiesChecked: exposedBodies.length, privateCredentialsExcluded: true};
     expect(browserErrors).toEqual([]); expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash, admissionSha256: admissionDigest,
-      scope: "Owner HTTP Edit creation; actual anonymous exchange/protected cookies/Chromium editing/native ACK and settlement at supplied concurrency; live partial transfer stop-and-restore and native restart with stale ticket/frame refusal",
-      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery"], results}, null, 2));
+      scope: "Owner HTTP Edit creation and anonymous protected-cookie exchange; tiny Chromium lifecycle at C; supplied baseline rendered and small real browser edits acknowledged and settled at C; separate client-distinct pinned wire workload acknowledged, converged and settled at C; tiny partial-transfer restore and restart stale-authority checks",
+      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Supplied workload updates through Chromium editor/provider; supplied updates use wire clients after Chromium baseline readiness"], results}, null, 2));
   } finally {
     for (const context of contexts) await context.close();
     await browser?.close();

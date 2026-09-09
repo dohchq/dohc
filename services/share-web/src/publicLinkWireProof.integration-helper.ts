@@ -62,7 +62,9 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
     ws.on("message", data => {
       try {
         const bytes = new Uint8Array(data as Buffer), lease = protocol.receive(bytes);
-        const {frame, transfer} = lease.value; received.push(frame);
+        const {frame, transfer} = lease.value;
+        // Chunk payloads are held by the transfer and document, not the control history.
+        if (frame.kind !== "chunk") received.push(frame);
         events.push({label, received: frame.kind === "chunk" ? {...frame, bytes: {sha256: hash(frame.bytes), byteLength: frame.bytes.length}} : frame});
         try {
           if (transfer) {
@@ -110,11 +112,28 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
         target, witnessedCredit: received.find(coversBegin), at: Date.now()}); save(); return chunk;
     }
     async function submit(bytes: Uint8Array, deliveryId: string): Promise<Outcome> {
-      send(start(bytes, deliveryId));
+      const welcome = received.find((frame): frame is Extract<LiveFrame, {kind: "welcome"}> => frame.kind === "welcome");
+      if (!welcome) throw new Error("Server receive policy missing.");
+      const maximum = welcome.receivePolicy.maxFrameBytes;
+      const id = nextTransfer++;
+      const begin: LiveFrame = {kind: "begin", purpose: "submit-update", transferId: id, totalBytes: bytes.length, digest: hash(bytes), deliveryId};
+      await until(() => protocol.usage().outgoing.promisedFrames >= 1 &&
+        protocol.usage().outgoing.promisedBytes >= encodeLiveFrame(begin, maximum).length);
+      send(begin);
+      const overhead = encodeLiveFrame({kind: "chunk", transferId: id, offset: 0, bytes: new Uint8Array(1)}, maximum).length - 1;
+      for (let offset = 0; offset < bytes.length;) {
+        await until(() => protocol.usage().outgoing.promisedFrames >= 1 && protocol.usage().outgoing.promisedBytes > overhead);
+        const length = Math.min(maximum, frames.maxQueuedBytes, protocol.usage().outgoing.promisedBytes) - overhead;
+        if (length < 1) throw new Error("No admitted chunk capacity.");
+        const chunk = bytes.subarray(offset, offset + length);
+        send({kind: "chunk", transferId: id, offset, bytes: chunk}); offset += chunk.length;
+      }
       await until(() => closed !== undefined || received.some(frame => frame.kind === "result" &&
         (frame.result === "success" ? frame.ack.deliveryId : frame.deliveryId) === deliveryId));
-      return received.find((frame): frame is Extract<LiveFrame, {kind: "result"}> => frame.kind === "result" &&
-        (frame.result === "success" ? frame.ack.deliveryId : frame.deliveryId) === deliveryId) ?? {kind: "socket-closed", code: closed!};
+      const outcome = received.find((frame): frame is Extract<LiveFrame, {kind: "result"}> => frame.kind === "result" &&
+        (frame.result === "success" ? frame.ack.deliveryId : frame.deliveryId) === deliveryId);
+      if (outcome?.result === "success") {Y.applyUpdate(doc, bytes); notify();}
+      return outcome ?? {kind: "socket-closed", code: closed!};
     }
     async function hostileSend(frame: LiveFrame) {
       const bytes = encodeLiveFrame(frame, frames.receive.maxFrameBytes), state = ws.readyState;
