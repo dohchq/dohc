@@ -211,6 +211,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           [JSON.stringify(["owner-share", document.workspaceId, shareId]), limits.maxConnectionsPerGrant],
         ]);
         const native = await captureNative(current.binding, signal); signal.throwIfAborted(); check();
+        if (!isDeepStrictEqual({...native.binding, selectorPaths: current.binding.selectorPaths}, current.binding)) throw new Error("Native owner target changed.");
         const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
         host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, shareId, storage, native, bounds, validate});

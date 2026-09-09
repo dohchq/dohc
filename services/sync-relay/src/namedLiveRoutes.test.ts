@@ -401,3 +401,11 @@ it("refuses a stale owner lineage before native capture", async () => {
   expect(await f.connect("").status).toBe(404);
   expect(f.captureNative).not.toHaveBeenCalled();
 });
+
+
+it("refuses a native capture for a different owner document", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  f.captureNative.mockImplementationOnce(async () => ({...f.native, binding: {...f.native.binding, objectId: "other-object"}}));
+  expect(await f.connect("").status).toBe(404);
+  expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});
