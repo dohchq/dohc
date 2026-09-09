@@ -13,7 +13,7 @@ function fixture(bootstrap = true) {
     store.acknowledgeBootstrap(drain,{bootstrapId:b.bootstrapId,bootstrapMomentId:b.bootstrapMomentId,baselineDigest:b.baselineDigest,baselineMomentRelaySequence:b.baselineMomentRelaySequence,localYDocSequence:0,bootstrapReplayed:false});
     store.close(drain);
   }
-  const settlement={settlementId:"audit",previousCursor:0,terminalCursor:0,applicationCount:0,localYDocSequence:0,momentId:"moment",markdownDigest:hash(new Uint8Array()),materialized:true};
+  const settlement={settlementId:"audit",previousCursor:0,terminalCursor:0,applicationCount:0,localYDocSequence:0,momentId:"moment",markdownDigest:hash(new Uint8Array()),materialized:true,collectionReconcileRequired:false};
   const sendRequest=vi.fn(async (request:{method:string}, _signal?:AbortSignal)=>({result:request.method==="liveApplication.register"?{registrationId:1}:{status:"settled",settlement}}));
   let id=0;
   const consumer=new LiveCommittedDelivery(f.storage,history,{client:{sendRequest} as unknown as EngineClient,workspace:"workspace-handle",host,deadlineMs:1000,nextRequestId:()=>++id});
