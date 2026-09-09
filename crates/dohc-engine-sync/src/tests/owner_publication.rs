@@ -333,14 +333,16 @@ fn workspace_push_keeps_blocked_origin_position_and_continues_other_origins() {
         &NoFaults,
     )
     .unwrap();
-    apply_replication_envelope(
-        &mut store,
-        &mut WriterDocCache::new(),
-        &envelope("other", 0, "probe.safe", json!({})),
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
+    // Seed a retained local-origin row: imported peer rows are not pushed.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','other',0,'probe.safe','{}',11,0)",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
     let client = RelaySyncClient::new(FakeRelay::default());
     let result = client
         .push_workspace(&mut store, "ws", &NoFaults, 12, 1_000_000)

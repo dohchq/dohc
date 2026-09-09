@@ -31,6 +31,7 @@ pub(super) struct RestoreSource {
     native_source_manifest_digest: String,
     frozen_state_digest: String,
     point_state_digest: String,
+    final_content_digest: String,
 }
 
 impl HistoryEnd {
@@ -129,6 +130,7 @@ impl RestoreSource {
                 &self.native_source_manifest_digest,
                 &self.frozen_state_digest,
                 &self.point_state_digest,
+                &self.final_content_digest,
             ]
             .iter()
             .any(|v| !digest(v))
@@ -156,7 +158,7 @@ pub(super) fn read(
     namespace: &str,
     accepted: &RelayAcceptedLiveUpdate,
 ) -> Result<Option<RestoreSource>, SyncError> {
-    let source:Option<(String,String,String,String)>=conn.query_row("SELECT json_object('operationId',operation_id,'oldGeneration',old_generation,'origin',json_extract(input_json,'$.origin'),'hostId',json_extract(input_json,'$.hostId'),'appliedSequence',json_extract(input_json,'$.appliedSequence'),'fenceHeadSequence',json_extract(receipt_json,'$.localHeadSequence'),'fencedAtMs',json_extract(receipt_json,'$.recordedAtMs'),'point',json_extract(proposal_json,'$.point'),'selected',json_object('eventCount',json_extract(proposal_json,'$.selectedHistory.eventCount'),'terminal',json_extract(proposal_json,'$.selectedHistory.terminal'),'evidenceDigest',json_extract(proposal_json,'$.selectedHistory.evidenceDigest')),'accepted',json_object('eventCount',json_extract(proposal_json,'$.acceptedHistory.eventCount'),'terminal',json_extract(proposal_json,'$.acceptedHistory.terminal'),'evidenceDigest',json_extract(proposal_json,'$.acceptedHistory.evidenceDigest')),'originEvidenceDigest',json_extract(proposal_json,'$.originEvidenceDigest'),'nativeSourceManifestDigest',json_extract(proposal_json,'$.nativeSourceManifestDigest'),'frozenStateDigest',proposal_frozen_sha256,'pointStateDigest',proposal_point_sha256),json_extract(application_json,'$.admitted.accepted'),proposal_candidate_sha256,json_extract(proposal_json,'$.finalContentDigest') FROM live_restore_fences WHERE relay_database_namespace=?1 AND application_delivery_id=?2",params![namespace,accepted.receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?;
+    let source:Option<(String,String,String,String)>=conn.query_row("SELECT json_object('operationId',operation_id,'oldGeneration',old_generation,'origin',json_extract(input_json,'$.origin'),'hostId',json_extract(input_json,'$.hostId'),'appliedSequence',json_extract(input_json,'$.appliedSequence'),'fenceHeadSequence',json_extract(receipt_json,'$.localHeadSequence'),'fencedAtMs',json_extract(receipt_json,'$.recordedAtMs'),'point',json_extract(proposal_json,'$.point'),'selected',json_object('eventCount',json_extract(proposal_json,'$.selectedHistory.eventCount'),'terminal',json_extract(proposal_json,'$.selectedHistory.terminal'),'evidenceDigest',json_extract(proposal_json,'$.selectedHistory.evidenceDigest')),'accepted',json_object('eventCount',json_extract(proposal_json,'$.acceptedHistory.eventCount'),'terminal',json_extract(proposal_json,'$.acceptedHistory.terminal'),'evidenceDigest',json_extract(proposal_json,'$.acceptedHistory.evidenceDigest')),'originEvidenceDigest',json_extract(proposal_json,'$.originEvidenceDigest'),'nativeSourceManifestDigest',json_extract(proposal_json,'$.nativeSourceManifestDigest'),'frozenStateDigest',proposal_frozen_sha256,'pointStateDigest',proposal_point_sha256,'finalContentDigest',json_extract(proposal_json,'$.finalContentDigest')),json_extract(application_json,'$.admitted.accepted'),proposal_candidate_sha256,json_extract(proposal_json,'$.finalContentDigest') FROM live_restore_fences WHERE relay_database_namespace=?1 AND application_delivery_id=?2",params![namespace,accepted.receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?;
     let Some((json, application, candidate, final_digest)) = source else {
         return Ok(None);
     };
@@ -164,7 +166,7 @@ pub(super) fn read(
     if serde_json::from_str::<RelayAcceptedLiveUpdate>(&application).map_err(SyncError::corrupt)?
         != *accepted
         || candidate != accepted.receipt.update_digest
-        || final_digest != source.point.markdown_digest
+        || final_digest != source.final_content_digest
     {
         return Err(invalid("native restore application source differs"));
     }

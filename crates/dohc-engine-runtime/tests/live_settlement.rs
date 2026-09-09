@@ -860,6 +860,16 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     );
     f.supervisor.close(&f.db).unwrap();
     let mut source = EngineStore::open(&f.db, 40).unwrap();
+    let final_content_digest: String = source
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(proposal_json,'$.finalContentDigest') FROM live_restore_fences WHERE operation_id='restore-settlement'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_ne!(final_content_digest, hex_sha256(&expected));
     let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
     assert!(matches!(
         dohc_engine_collab::maybe_compact(&mut source, &key, 0, &NoFaults, 40).unwrap(),
@@ -986,6 +996,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             assert_eq!(audit["sourceRestore"]["accepted"]["eventCount"],1);
             assert_eq!(audit["metadata"]["accepted"]["binding"]["restoreFenceGeneration"],1);
             assert_eq!(audit["sourceRestore"]["point"]["markdownDigest"],hex_sha256(&expected));
+            assert_eq!(audit["sourceRestore"]["finalContentDigest"],final_content_digest);
             assert!(audit["sourceRestore"].get("nativeSources").is_none());
             for table in [
                 "live_device_settlements",

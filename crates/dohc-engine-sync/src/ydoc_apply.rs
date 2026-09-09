@@ -1644,6 +1644,9 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                 let projection =
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
+                    // An adopted owner cannot accept an ordinary rewrite.
+                    // Retain this moment instead of waiting for that rewrite.
+                    ensure_adopted_owner_binding_unchanged(tx, &complete.key, None)?;
                     if marker.content_kind == ContentKind::Scene {
                         // The origin of an external scene edit retires its
                         // lineage instead of emitting a Markdown rewrite (a
