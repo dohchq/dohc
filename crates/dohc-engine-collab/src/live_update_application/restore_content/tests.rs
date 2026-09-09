@@ -796,6 +796,65 @@ fn native_restore_apply_replay_refuses_damaged_saved_admission_and_application()
 }
 
 #[test]
+fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
+    let mut f = Fixture::new("# Original\n");
+    f.edit("# Later\n", 7);
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(&mut f, prep.clone());
+    let candidate = f.prepare(prep.clone()).unwrap().candidate_bytes().to_vec();
+    apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    let before = f.canonical();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=zeroblob(byte_length) WHERE sha256=?1",
+                [&input.candidate_digest],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(f
+        .owner
+        .fence_restore(
+            &mut f.store,
+            prep.fence.operation.clone(),
+            f.host.clone(),
+            100,
+            &NoFaults
+        )
+        .is_err());
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        2
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE binary_blobs SET bytes=?2 WHERE sha256=?1",
+                params![input.candidate_digest, candidate],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert_eq!(
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                prep.fence.operation.clone(),
+                f.host.clone(),
+                100,
+                &NoFaults
+            )
+            .unwrap(),
+        prep.fence
+    );
+    assert!(crate::replay_parity::structurally_equal_v2(&before, &f.canonical()).unwrap());
+}
+
+#[test]
 fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
     for replay in [false, true] {
         let mut f = Fixture::new("# Original\n");

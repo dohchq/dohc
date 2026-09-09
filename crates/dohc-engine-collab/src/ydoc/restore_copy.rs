@@ -310,6 +310,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_copy_refuses_string_embed_even_when_projection_can_render_it() {
+        let point = Ydoc::wire();
+        point.richdoc_append_paragraph("point");
+        {
+            let body = point.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            let mut txn = point.doc.transact_mut();
+            let XmlOut::Element(paragraph) = body.get(&txn, 0).unwrap() else {
+                panic!()
+            };
+            let XmlOut::Text(text) = paragraph.get(&txn, 0).unwrap() else {
+                panic!()
+            };
+            text.insert_embed(&mut txn, 0, Any::String("embedded ".into()));
+        }
+        let source = point.project(ContentKind::Richdoc).unwrap().content;
+        assert!(source.contains("embedded"));
+        let frozen = Ydoc::wire();
+        frozen.richdoc_append_paragraph("unchanged");
+        let before = frozen.encode_full_state();
+        assert!(matches!(
+            frozen.rewrite_richdoc_preserving_source_bounded(&source,&point,2_000_000),
+            Err(CollabError::MalformedUpdate {reason}) if reason == "unsupported restore point value"
+        ));
+        assert_eq!(before, frozen.encode_full_state());
+    }
+
+    #[test]
     fn restore_copy_refuses_unsupported_values_and_excess_depth_without_mutating_frozen() {
         for case in 0..4 {
             let point = Ydoc::wire();

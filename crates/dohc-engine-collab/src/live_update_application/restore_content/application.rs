@@ -181,9 +181,9 @@ pub(in crate::live_update_application) fn fence_replay_head(
     {
         return Err(ApplicationError::Corrupt);
     }
-    let candidate = budget.blob(conn, &receipt.candidate_digest)?;
+    let candidate_length = budget.blob_length(conn, &receipt.candidate_digest)?;
     let record =
-        read_restore_application(conn, &held.namespace, &receipt.admitted, candidate.len())?
+        read_restore_application(conn, &held.namespace, &receipt.admitted, candidate_length)?
             .ok_or(ApplicationError::Corrupt)?;
     if record.event.metadata != receipt.admitted
         || record.sequence != receipt.local_head_sequence

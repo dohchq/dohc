@@ -87,7 +87,7 @@ impl Budget {
         ))?;
         Ok(())
     }
-    fn blob(&mut self, conn: &Connection, digest: &str) -> Result<Vec<u8>, ApplicationError> {
+    fn blob_length(&mut self, conn: &Connection, digest: &str) -> Result<usize, ApplicationError> {
         let (length, actual): (i64, i64) = conn
             .query_row(
                 "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
@@ -101,7 +101,12 @@ impl Budget {
         {
             return Err(ApplicationError::Corrupt);
         }
-        self.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+        let length = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
+        self.charge(length)?;
+        Ok(length)
+    }
+    fn blob(&mut self, conn: &Connection, digest: &str) -> Result<Vec<u8>, ApplicationError> {
+        self.blob_length(conn, digest)?;
         get_binary_blob(conn, digest)?.ok_or(ApplicationError::Corrupt)
     }
     fn json(&mut self, value: &impl Serialize) -> Result<Vec<u8>, ApplicationError> {
