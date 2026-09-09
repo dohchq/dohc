@@ -1,9 +1,10 @@
 use super::error::{map_runtime, workspace_unavailable};
 use super::request::{OperationCancellation, parse};
 use crate::{EngineService, lock};
+use dohc_engine_protocol::cancel::CancelSignal;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::{
-    BlobEgress, CancelSignal, ConnectionHandle, OutputGuard, RequestContext, ServiceResponse,
+    BlobEgress, ConnectionHandle, OutputGuard, RequestContext, ServiceResponse,
 };
 use dohc_engine_protocol::wire::{Request, Response};
 use serde::Deserialize;

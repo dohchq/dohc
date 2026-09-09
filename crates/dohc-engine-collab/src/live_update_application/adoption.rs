@@ -1230,7 +1230,12 @@ pub fn adopt_owner_committed(
     max_events: usize,
     now_ms: i64,
     faults: &dyn FaultInjector,
-    follow_up: impl FnOnce(&Transaction<'_>, &str, &LiveObjectBinding, i64) -> Result<(), ApplicationError>,
+    follow_up: impl FnOnce(
+        &Transaction<'_>,
+        &str,
+        &LiveObjectBinding,
+        i64,
+    ) -> Result<(), ApplicationError>,
 ) -> Result<OwnerAdoptionAck, ApplicationError> {
     let held = handle
         .registration

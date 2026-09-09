@@ -32,7 +32,9 @@ pub use sync::{
     NextAppliedUpdate,
 };
 mod activation;
-pub use activation::{capture_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource};
+pub use activation::{
+    capture_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
+};
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
