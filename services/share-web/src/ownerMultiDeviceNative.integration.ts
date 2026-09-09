@@ -32,6 +32,8 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnect
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const exchangeKey = "native-network-exchange-".repeat(2);
 import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession.js";
+import {YdocOwnerDraftPendingError} from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
+import {isLiveSettlementCapacityRefusal} from "../../../packages/workspace-engine-client/src/live/daemonLiveAdapter.js";
 import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {startDesktopOwnerDelivery} from "../../../apps/desktop/src/workspaces/desktopOwnerDelivery.js";
 import type {OwnerYDocDrainResult} from "../../../apps/desktop/src/workspaces/ownerYDocOutbox.js";
@@ -234,13 +236,17 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     results.claims = [firstClaim, secondClaim];
     await first.pull(); await second.pull();
     let updateObserved: (() => void) | undefined;
-    let ownerRefreshGeneration = 0, ownerRefreshObserved: (() => void) | undefined;
+    let ownerRefreshObserved: ((draft: YdocOwnerDraftPendingError["draft"]) => void) | undefined;
     const rendererDoc = new Y.Doc();
     const provider = await openEngineYdocProviderSession({transport: first.client, workspace: first.workspaceHandle,
       versionId: mainVersionId!, path: "docs/a.md", expectedObjectId: "object", contentKind: "richdoc",
       onRemoteUpdate(update) {Y.applyUpdate(rendererDoc, update); updateObserved?.();},
-      onSessionError(error) {results.providerError = String(error);},
-      scheduleSettle() {ownerRefreshGeneration++; ownerRefreshObserved?.(); return () => undefined;}});
+      onSessionError(error) {
+        if (isLiveSettlementCapacityRefusal(error)) {
+          ((results.providerCapacityRefusals ??= []) as unknown[]).push(error instanceof EngineRequestError ? error.wireError : String(error));
+        } else results.providerError = String(error);
+      },
+      onSettleError(error) {if (error instanceof YdocOwnerDraftPendingError) ownerRefreshObserved?.(error.draft);}});
     Y.applyUpdate(rendererDoc, provider.initialUpdate);
     async function expectProviderText(text: string, run: () => Promise<unknown>) {
       let observed!: () => void;
@@ -267,15 +273,15 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const recovered = await startOwner("owner-b");
     expect(await recovered.client.ownerYDocPrepareEnrollment(recovered.request(), target)).toEqual(captured);
     results.stage = "enroll owner A and observe provider refresh";
-    const beforeEnrollmentRefresh = ownerRefreshGeneration;
-    const enrollmentRefresh = new Promise<void>(resolve => {
-      ownerRefreshObserved = () => {if (ownerRefreshGeneration > beforeEnrollmentRefresh) resolve();};
-    });
-    try {expect(await first.pass()).toBe("empty"); await enrollmentRefresh;}
+    const enrollmentRefresh = new Promise<YdocOwnerDraftPendingError["draft"]>(resolve => {ownerRefreshObserved = resolve;});
+    let providerDraft: YdocOwnerDraftPendingError["draft"];
+    try {expect(await first.pass()).toBe("empty"); providerDraft = await enrollmentRefresh;}
     finally {ownerRefreshObserved = undefined;}
     results.stage = "read enrolled owner A descriptor";
     const firstDraft = await first.client.ownerYDocPrepareEnrollment(first.request(), target);
     expect(firstDraft.status).toBe("observed");
+    if (firstDraft.status !== "observed") throw new Error("Owner A enrollment did not commit.");
+    expect(providerDraft).toEqual(firstDraft.draft);
     results.stage = "refuse foreign owner account";
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
     const refused = await runNativeOwnerDeliveryPass({client: first.client, workspaceHandle: first.workspaceHandle,
