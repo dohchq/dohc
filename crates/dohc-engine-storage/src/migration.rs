@@ -607,6 +607,18 @@ CREATE INDEX replication_refused_moment_text_blobs
 CREATE INDEX replication_refused_moment_binary_blobs
     ON replication_refused_moment_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
 
+CREATE TABLE replication_refused_ydoc_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX replication_refused_ydoc_binary_blobs
+    ON replication_refused_ydoc_blobs(update_sha256);
+
 CREATE TABLE replication_peers (
     workspace_id TEXT    NOT NULL,
     origin_id    TEXT    NOT NULL,
@@ -1760,6 +1772,10 @@ CREATE TABLE live_device_update_applications (
 
 CREATE INDEX live_device_applications_document_cursor
     ON live_device_update_applications(relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor);
+CREATE INDEX live_device_bindings_document
+    ON live_device_application_bindings(workspace_id, main_version_id, object_id);
+CREATE INDEX live_device_applications_content
+    ON live_device_update_applications(relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, update_digest);
 
 CREATE TABLE live_device_application_first_seen (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),

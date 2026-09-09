@@ -8,8 +8,8 @@ use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
 use dohc_engine_storage::hex_sha256;
 
 #[test]
-fn stopped_remote_update_retains_bytes_without_reporting_storage_corruption() {
-    let (_scratch, _path, mut store) = open_store();
+fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
+    let (_scratch, path, mut store) = open_store();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 0, &NoFaults)
         .unwrap();
@@ -103,22 +103,46 @@ fn stopped_remote_update_retains_bytes_without_reporting_storage_corruption() {
             "updateBlobSha256":pending_sha, "lineageClaimId":binding.lineage_claim_id, "isBaseState":false
         }),
     );
-    let before_ack = read_replication_acked_seq(&store, "ws", "stopped-peer").unwrap();
-    for _ in 0..2 {
-        let error = apply_ydoc_envelope(&mut store, &mut cache, &update, &NoFaults, &NoLiveLeases)
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                SyncError::RetryableState {
-                    reason: "live document is stopped"
-                }
-            ),
-            "{error:?}"
-        );
+    #[cfg(feature = "fault-injection")]
+    {
+        let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+        assert!(matches!(
+            apply_ydoc_envelope(
+                &mut store,
+                &mut cache,
+                &update,
+                faults.as_ref(),
+                &NoLiveLeases
+            )
+            .unwrap()
+            .primary,
+            ApplyDisposition::Crashed { committed: false }
+        ));
         assert_eq!(
             read_replication_acked_seq(&store, "ws", "stopped-peer").unwrap(),
-            before_ack
+            -1
+        );
+        assert_eq!(
+            store
+                .table_row_count("replication_refused_ydoc_blobs")
+                .unwrap(),
+            0
+        );
+    }
+    for attempt in 0..2 {
+        let result =
+            apply_ydoc_envelope(&mut store, &mut cache, &update, &NoFaults, &NoLiveLeases).unwrap();
+        if attempt == 0 {
+            assert!(
+                matches!(result.primary, ApplyDisposition::Refused(ref refusal)
+                if refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE)
+            );
+        } else {
+            assert!(matches!(result.primary, ApplyDisposition::Skipped));
+        }
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", "stopped-peer").unwrap(),
+            0
         );
         assert_eq!(
             store
@@ -149,4 +173,75 @@ fn stopped_remote_update_retains_bytes_without_reporting_storage_corruption() {
             receipt
         );
     }
+    store.read_with(|conn| {
+        let retained: String = conn.query_row("SELECT update_sha256 FROM replication_refused_ydoc_blobs WHERE workspace_id='ws' AND origin_id='stopped-peer' AND origin_seq=0", [], |r| r.get(0))?;
+        assert_eq!(retained, pending_sha);
+        assert!(conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&pending_sha]).is_err());
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
+    let echo = envelope(
+        "base-echo",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId":"main","objectId":"object","path":"note.md","contentKind":"richdoc",
+            "updateBlobSha256":binding.lineage_claim_id,"lineageClaimId":binding.lineage_claim_id,"isBaseState":true
+        }),
+    );
+    let before = store.table_row_count("ydoc_updates").unwrap();
+    assert!(
+        matches!(apply_ydoc_envelope(&mut store,&mut cache,&echo,&NoFaults,&NoLiveLeases).unwrap().primary,
+        ApplyDisposition::Applied(ref result) if result.reason == Some("native-live-content-echo"))
+    );
+    assert_eq!(store.table_row_count("ydoc_updates").unwrap(), before);
+    assert!(
+        crate::ydoc_apply::redelivered_materialization_changes(&store, &echo)
+            .unwrap()
+            .is_empty()
+    );
+    // A page admitted under an earlier ordinary lease can still be queued
+    // when the native live binding becomes known.
+    let mut queued = envelope("queued-peer", 0, "ydoc.update", update.payload.clone());
+    queued.payload["lineageClaimId"] = json!("f".repeat(64));
+    crate::apply_envelope_with(&mut store,&queued,&NoFaults,|tx,op| {
+        tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq)
+          VALUES ('ws','main','object',?1,?2,?3,?4,?5)",params![op.origin_id,op.origin_seq,op.recorded_at_ms,op.payload["lineageClaimId"].as_str().unwrap(),op.relay_seq]).map_err(SyncError::persist)?;
+        Ok(())
+    }).unwrap();
+    let drained = drain_deferred_ydoc_for_live_session(
+        &mut store,
+        &mut cache,
+        &DocKey::new("ws", "main", "object").unwrap(),
+        Some(&binding.lineage_claim_id),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(drained.refusals.len(), 1);
+    assert_eq!(
+        drained.refusals[0].reason.message(),
+        crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
+    );
+    assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    assert_eq!(store.table_row_count("ydoc_updates").unwrap(), before);
+    drop(store);
+    let mut store = EngineStore::open(&path, 3000).unwrap();
+    assert_eq!(
+        store
+            .table_row_count("replication_refused_ydoc_blobs")
+            .unwrap(),
+        2
+    );
+    assert_eq!(store.get_binary_blob(&pending_sha).unwrap(), Some(pending));
+    let mut conflicting = update.clone();
+    conflicting.payload["path"] = json!("different.md");
+    assert!(matches!(
+        apply_ydoc_envelope(
+            &mut store,
+            &mut cache,
+            &conflicting,
+            &NoFaults,
+            &NoLiveLeases
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
 }

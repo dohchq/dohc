@@ -51,6 +51,76 @@ struct YdocUpdatePayload {
     is_base_state: bool,
 }
 
+pub(crate) const LIVE_UNADMITTED_UPDATE: &str = "ordinary update has no native live admission";
+
+// Historical audit imports never populate either native binding table.
+fn live_ordinary_classification(
+    conn: &Connection,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+) -> Result<Option<bool>, SyncError> {
+    let bound: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if !bound {
+        return Ok(None);
+    }
+    if payload.content_kind != "richdoc" {
+        return Ok(Some(false));
+    }
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM live_device_application_bindings b
+           WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND b.object_id=?3
+             AND b.lineage_claim_id=?4 AND b.current_path=?5 AND (
+               EXISTS(SELECT 1 FROM live_device_update_applications a
+                 WHERE a.relay_database_namespace=b.relay_database_namespace AND a.workspace_id=b.workspace_id
+                   AND a.main_version_id=b.main_version_id AND a.object_id=b.object_id
+                   AND a.lineage_claim_id=?4 AND a.update_digest=?6 AND a.current_path=?5)
+               OR EXISTS(SELECT 1 FROM live_device_bootstraps a
+                 WHERE a.relay_database_namespace=b.relay_database_namespace AND a.workspace_id=b.workspace_id
+                   AND a.main_version_id=b.main_version_id AND a.object_id=b.object_id
+                   AND a.lineage_claim_id=?4 AND a.baseline_digest=?6)))
+         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings b
+           WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND b.object_id=?3
+             AND b.lineage_claim_id=?4 AND json_extract(b.binding_json,'$.currentPath')=?5 AND (
+               b.checkpoint_digest=?6 OR EXISTS(SELECT 1 FROM ydoc_owner_applied_frames f
+                 WHERE f.workspace_id=b.workspace_id AND f.main_version_id=b.main_version_id
+                   AND f.object_id=b.object_id AND f.lineage_claim_id=b.lineage_claim_id
+                   AND f.relay_database_namespace=b.relay_database_namespace AND f.binding_json=b.binding_json
+                   AND f.update_digest=?6)))",
+        params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id,payload.path,payload.update_blob_sha256],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    Ok(Some(applied))
+}
+
+pub(crate) fn retain_refused_ydoc_blob(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    origin: &str,
+    sequence: i64,
+) -> Result<(), SyncError> {
+    let changed = tx.execute(
+        "INSERT OR IGNORE INTO replication_refused_ydoc_blobs
+         SELECT workspace_id,origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256')
+         FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND op_kind='ydoc.update'",
+        params![workspace,origin,sequence],
+    ).map_err(SyncError::persist)?;
+    if changed == 0 {
+        let retained: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+            params![workspace,origin,sequence],|row|row.get(0),
+        ).map_err(SyncError::corrupt)?;
+        if !retained {
+            return Err(local_corruption("refused live update coordinate is absent"));
+        }
+    }
+    Ok(())
+}
+
 fn valid_lineage_claim_id(value: &str) -> bool {
     value.len() == 64
         && value
@@ -582,6 +652,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
 /// it and every later row remain queued until the session is removed and the
 /// ordinary full drain can replace the lineage. This prevents settle/resync
 /// from changing the durable generation underneath a still-live editor.
+/// Native live bindings classify old coordinates without replacing the lineage.
 pub fn drain_deferred_ydoc_for_live_session(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -714,8 +785,11 @@ fn drain_deferred_ydoc(
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+        let live_classification =
+            store.read_with(|conn| live_ordinary_classification(conn, key, &payload))?;
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
+            && live_classification.is_none()
         {
             break;
         }
@@ -724,6 +798,21 @@ fn drain_deferred_ydoc(
             .ok_or(SyncError::BlobInvalid)?;
         if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
             return Err(SyncError::BlobInvalid);
+        }
+        if let Some(echo) = live_classification {
+            if echo {
+                drained_coordinates.push((origin_id, origin_seq));
+            } else {
+                refusals.push(refuse_deferred_ydoc(
+                    store,
+                    key,
+                    &origin_id,
+                    origin_seq,
+                    LIVE_UNADMITTED_UPDATE,
+                    faults,
+                )?);
+            }
+            continue;
         }
         if payload.is_base_state {
             // A base can replace the lineage while reusing durable coordinates.
@@ -1093,6 +1182,11 @@ fn refuse_deferred_ydoc(
     let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
     match store.write_with(faults, |tx| {
         crate::apply::persist_refusal(tx, &refusal)?;
+        if refusal.reason.message() == LIVE_UNADMITTED_UPDATE {
+            retain_refused_ydoc_blob(tx, &key.workspace_id, origin_id, origin_seq)?;
+            tx.execute("UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![key.workspace_id,origin_id,origin_seq]).map_err(SyncError::persist)?;
+        }
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \
              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
@@ -2232,8 +2326,8 @@ pub fn apply_ydoc_envelope(
     }
     let key = match DocKey::new(
         envelope.workspace_id.clone(),
-        payload.version_id,
-        payload.object_id,
+        payload.version_id.clone(),
+        payload.object_id.clone(),
     ) {
         Ok(key) => key,
         Err(_) => {
@@ -2282,6 +2376,35 @@ pub fn apply_ydoc_envelope(
             reason: "pulled ydoc.update is missing its relay sequence",
         });
     };
+    if let Some(echo) =
+        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload))?
+    {
+        return crate::apply::apply_envelope_with_mutation_outcome(
+            store,
+            envelope,
+            faults,
+            |tx, _| {
+                if live_ordinary_classification(tx, &key, &payload)? != Some(echo) {
+                    return Err(SyncError::RetryableState {
+                        reason: "native live binding changed",
+                    });
+                }
+                if echo {
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("native-live-content-echo"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                } else {
+                    Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                        reason: LIVE_UNADMITTED_UPDATE.into(),
+                    })
+                }
+            },
+        );
+    }
     if leases.is_live(&key) {
         // Full durable validation before admission: byte caps, abort-safe
         // prevalidation, and the replay-parity gate — replayed on top of the

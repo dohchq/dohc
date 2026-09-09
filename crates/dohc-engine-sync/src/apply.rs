@@ -327,6 +327,12 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         {
             crate::moment_apply::retain_refused_moment_blobs(tx, envelope)?;
         }
+        if let Admission::Refused(refusal) = &admission
+            && envelope.op_kind == "ydoc.update"
+            && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
+        {
+            crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+        }
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);

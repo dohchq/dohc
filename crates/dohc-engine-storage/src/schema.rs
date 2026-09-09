@@ -135,6 +135,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "sync_identity",
     "replication_log",
     "replication_refused_moment_blobs",
+    "replication_refused_ydoc_blobs",
     "replication_pending_refusals",
     "replication_peers",
     "sync_relay_cursors",

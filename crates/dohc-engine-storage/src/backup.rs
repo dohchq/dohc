@@ -93,6 +93,7 @@ const COMPARED_TABLES: &[&str] = &[
     "owner_ydoc_outbox_entries",
     "replication_log",
     "replication_refused_moment_blobs",
+    "replication_refused_ydoc_blobs",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -508,6 +509,7 @@ mod tests {
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_publications VALUES ('relay','workspace','main','object',?1,'{}',?1,'peer',0)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();
@@ -529,6 +531,7 @@ mod tests {
             "live_device_application_first_seen",
             "replication_log",
             "replication_refused_moment_blobs",
+            "replication_refused_ydoc_blobs",
         ]
         .into_iter()
         .enumerate()
