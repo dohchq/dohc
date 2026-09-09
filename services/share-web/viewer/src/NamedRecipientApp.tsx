@@ -1,26 +1,17 @@
 import {useCallback, useEffect, useRef, useState, type FormEvent} from "react";
-import {createNamedLiveBrowserTransport, type NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {createNamedLiveBrowserTransport, type NamedLiveBrowserState, type NamedLiveSelection} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {accountUser, namedFiles, namedRequest, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
+import {DiscardDraft} from "./DiscardDraft";
 
 type Account = {id: string; name: string};
 type Selection = {session: NamedDocumentSession; path: string; objectId: string};
-function DiscardDraft({cancel, confirm}: {cancel(): void; confirm(): void}) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {dialog.current?.showModal(); return () => dialog.current?.close();}, []);
-  return <dialog ref={dialog} className="download-card" aria-label="Discard this draft?" onCancel={cancel}>
-    <h2>Discard this draft?</h2><p>Unsynced changes exist only in this tab. Continuing discards them.</p>
-    <p>Copy any changes you want to keep before continuing.</p>
-    <button autoFocus className="handoff-button secondary" onClick={cancel}>Keep reviewing</button>
-    <button className="handoff-button primary" onClick={confirm}>Discard draft and continue</button>
-  </dialog>;
-}
 export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
   const [account, setAccount] = useState<Account | null>(null), [files, setFiles] = useState<NamedRecipientFiles | null>(null);
   const [busy, setBusy] = useState(true), [error, setError] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null), [sessionState, setSessionState] = useState<NamedLiveBrowserState | null>(null);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
-  const request = useRef<AbortController | null>(null), transport = useRef<ReturnType<typeof createNamedLiveBrowserTransport> | null>(null);
+  const request = useRef<AbortController | null>(null), transport = useRef<ReturnType<typeof createNamedLiveBrowserTransport<NamedLiveSelection>> | null>(null);
   const currentSelection = useRef<Selection | null>(null);
   const receiveState = useCallback((state: NamedLiveBrowserState) => setSessionState(state), []);
   const clearSelection = () => {transport.current?.close(); transport.current = null; currentSelection.current = null; setSelection(null); setSessionState(null);};

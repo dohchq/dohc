@@ -1,5 +1,5 @@
 import { asRecord } from "@dohc/workspace-core/records";
-export type ShareAccess = "view" | "comment";
+export type ShareAccess = "view" | "comment" | "edit";
 
 export interface ViewMeta {
   access: ShareAccess;
@@ -232,7 +232,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
       "profileName",
     ]) ||
     activity.ok !== true ||
-    (activity.access !== "view" && activity.access !== "comment") ||
+    (activity.access !== "view" && activity.access !== "comment" && activity.access !== "edit") ||
     !isRevision(activity.latestRevision) ||
     !isRevision(activity.cursorRevision) ||
     activity.cursorRevision > activity.latestRevision ||

@@ -11,7 +11,7 @@ import { createSyncRelayHandler } from "./server.js";
 import { createOwnerLiveRoutes, createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
 import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
-import { createNamedLiveProvider } from "../../share-web/viewer/src/namedLiveProvider.js";
+import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 import { createLiveMembershipRegistry, type LiveMembershipPolicy } from "./liveMembership.js";
 import { liveBrowserActor } from "./liveBrowserContext.js";
 import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";

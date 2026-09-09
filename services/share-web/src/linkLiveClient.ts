@@ -6,10 +6,17 @@ import {parseLiveTicketToken} from "@dohc/live-session-contract/live-ticket";
 import type {LinkBrowserMaterial} from "./server";
 import type {LiveGatewayOptions, LiveGatewaySession, LiveGatewayHostRoute} from "./liveGateway";
 import {parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits} from "./namedLiveBrowserClient";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "../viewer/src/namedLiveBrowserTransport";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {isSessionDiscriminator} from "./sessionDiscriminator";
 
 const exact = (value: unknown, keys: string): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys;
+async function untilAborted<T>(work: Promise<T>, signal: AbortSignal, refusal: () => T): Promise<T> {
+  let abort!: () => void;
+  const cancelled = new Promise<T>(resolve => {abort = () => resolve(refusal()); signal.addEventListener("abort", abort, {once: true});});
+  if (signal.aborted) abort();
+  try {return await Promise.race([work, cancelled]);}
+  finally {signal.removeEventListener("abort", abort);}
+}
 function browserRequest(request: IncomingMessage, origin: string, signal: AbortSignal): Request | null {
   const cookies: string[] = [];
   for (let i = 0; i < request.rawHeaders.length; i += 2) if (request.rawHeaders[i]!.toLowerCase() === "cookie") cookies.push(request.rawHeaders[i + 1]!);
@@ -51,6 +58,7 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" || request.signal.aborted || pending >= limits.maxPendingRequests) return refused();
     pending++;
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(limits.timeoutMs)]);
+    const work = (async () => {
     try {
       const body = await readBoundedJson(request, limits.maxRequestBytes, signal);
       if (!exact(body, document ? "discriminator,path" : "discriminator,objectId") || typeof body.discriminator !== "string" || !isSessionDiscriminator(body.discriminator)) return refused();
@@ -72,11 +80,15 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
         ...(result.setCookie ? {"set-cookie": result.setCookie} : {})}});
     } catch {return refused();}
     finally {pending--;}
+    })();
+    // A transport that ignores cancellation keeps its admission slot until it settles.
+    return untilAborted(work, signal, refused);
   }
   const resolveSession: LiveGatewayOptions["resolveSession"] = async (incoming, discriminator, signal): Promise<LiveGatewaySession | null> => {
     const request = browserRequest(incoming, options.publicOrigin, signal);
     if (!request || pending >= limits.maxPendingRequests) return null;
     pending++;
+    const work = (async (): Promise<LiveGatewaySession | null> => {
     try {
       const result = await relayRequest(request, discriminator, "/sync/live/link-session", {discriminator}, signal);
       if (!result || !exact(result.value, "grantId,kind,principalId,sessionId,shareId,workspaceId") || result.value.kind !== "link") return null;
@@ -85,6 +97,8 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
         grantId: parseLiveUpdateIdentifier(value.grantId), principalId: parseLiveUpdateIdentifier(value.principalId), sessionId: parseLiveUpdateIdentifier(value.sessionId)};
     } catch {return null;}
     finally {pending--;}
+    })();
+    return untilAborted(work, signal, () => null);
   };
   const openHostRoute: LiveGatewayOptions["openHostRoute"] = async (input, signal, receive) => {
     const request = browserRequest(input.request, options.publicOrigin, signal);
