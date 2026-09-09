@@ -165,7 +165,7 @@ export class ServiceActivationStore {
         return {document, replayed: true, completed: prior.completion_json !== null};
       }
       const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base.evidence,
-        validateJournal:input.validateJournal,bounds:input.bounds});
+        validateJournal:input.validateJournal,validateRegistration:input.validateBaseline,bounds:input.bounds});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
       const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
         evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.evidence.checkpoint.ranges},

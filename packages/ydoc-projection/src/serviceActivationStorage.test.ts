@@ -106,6 +106,16 @@ it('rejects different CRDT history even when its rendered Markdown matches the o
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{changed.destroy();f.close()}
 })
+it('rejects a claimed full state that borrows missing baseline structs from the ordinary checkpoint',()=>{
+  const f=fixture(),base=new Y.Doc(),full=new Y.Doc();try{
+    Y.applyUpdate(base,f.capture.baselineBytes);Y.applyUpdate(full,f.capture.fullState)
+    const suffix=Y.encodeStateAsUpdate(full,Y.encodeStateVector(base))
+    expect(suffix.length).toBeLessThan(f.capture.fullState.length)
+    Object.assign(f.capture,{fullState:suffix});Object.assign(f.capture.source,{fullStateDigest:hash(suffix),fullStateByteLength:suffix.length})
+    expect(f.prepare).toThrow()
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{base.destroy();full.destroy();f.close()}
+})
 it('keeps an earlier projecting moment when a later ordinary suffix only adds deleted CRDT history',()=>{
   const f=fixture(),changed=new Y.Doc();try{
     Y.applyUpdate(changed,f.capture.fullState);const before=Y.encodeStateVector(changed)

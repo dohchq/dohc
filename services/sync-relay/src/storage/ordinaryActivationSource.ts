@@ -4,7 +4,7 @@ import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/da
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
-import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownJournalValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownJournalValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
 
@@ -25,8 +25,9 @@ function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
 }
 export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;
   baselineBytes:Uint8Array;fullState:Uint8Array;baseline:LiveMarkdownRegistrationEvidence;
-  validateJournal:ReturnType<typeof createLiveMarkdownJournalValidator>;bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
-  const {source,document,baselineBytes,fullState,baseline,validateJournal,bounds}=input;
+  validateJournal:ReturnType<typeof createLiveMarkdownJournalValidator>;validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;
+  bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
+  const {source,document,baselineBytes,fullState,baseline,validateJournal,validateRegistration,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
@@ -72,7 +73,10 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     const result=validateJournal({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix,candidate});
     requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");return result.evidence;
   };
-  const captured=normalize([],fullState),ordinary=normalize(updates.slice(1,-1),updates.length===1?new Uint8Array([0,0]):updates.at(-1)!);
+  charge(fullState.length);
+  const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
+  requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
+  const captured=full.evidence,ordinary=normalize(updates.slice(1,-1),updates.length===1?new Uint8Array([0,0]):updates.at(-1)!);
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
     Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
