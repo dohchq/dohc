@@ -8,6 +8,7 @@ import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdat
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
+import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -109,7 +110,7 @@ function appliedPosition(value: unknown): NativeAppliedPosition {
 
 interface PrivateLiveOutput {
   readonly maxBytes: number;
-  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state" | "draft";
+  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state" | "draft" | "captured";
   readonly allowEmpty?: boolean;
   wireId?: number;
   started: boolean;
@@ -796,6 +797,21 @@ export class EngineClient implements EngineTransport {
     return row.applied;
   }
 
+  async captureOwnerActivation(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    path: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<NativeOwnerActivation> {
+    if (typeof path !== "string" || path.length < 1 || path.length > 4096 || path.includes("\0") ||
+        !Number.isSafeInteger(maxBytes) || maxBytes < 4 || maxBytes > this.maxBlobBytes) {
+      throw new TypeError("Invalid owner activation capture bounds.");
+    }
+    const output: PrivateLiveOutput = { status: "captured", maxBytes, started: false };
+    const response = await this.sendLiveUpload(request, "liveApplication.captureOwnerActivation",
+      maxBytes + 3 * 1024 * 1024, () => ({ params: { path, maxBytes }, streams: [] }), signal, output);
+    return parseNativeOwnerActivation(response.result, output.blob!.bytes, path, maxBytes);
+  }
   async openLiveAppliedSync(request:LiveApplicationRequest, clientVector:Uint8Array, bounds:{maxInputBytes:number;maxOutputBytes:number}, signal?:AbortSignal):Promise<{
     binding:LiveObjectBinding;position:NativeAppliedPosition;observedLocalYDocHeadSequence:number;hostVector:Buffer;missingStateUpdate:Buffer;
   }> {

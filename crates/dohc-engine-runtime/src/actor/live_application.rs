@@ -1331,3 +1331,53 @@ fn settle_audited(
     result.collection_reconcile_required = settled.collection_reconcile_required;
     Ok(result)
 }
+
+impl ActorHandle {
+    pub async fn capture_imported_owner_activation(
+        &self,
+        namespace: String,
+        key: dohc_engine_collab::DocKey,
+        path: String,
+        max_bytes: usize,
+        token: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<dohc_engine_collab::live_update_application::ImportedOwnerActivation, RuntimeError>
+    {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            if store
+                .read_with(|conn| {
+                    dohc_engine_sync::open_sync_conflict_for_object(
+                        conn,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                    )
+                })?
+                .is_some()
+            {
+                return Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-conflict-open",
+                }
+                .into());
+            }
+            let result =
+                dohc_engine_collab::live_update_application::capture_imported_owner_activation(
+                    store,
+                    &namespace,
+                    &key,
+                    &path,
+                    max_bytes,
+                    &dohc_engine_storage::NoFaults,
+                )?;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(result)
+        })
+        .await
+    }
+}

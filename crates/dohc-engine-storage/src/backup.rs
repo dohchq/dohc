@@ -63,6 +63,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_device_bootstraps",
     "live_device_settlements",
     "ydoc_owner_base_sources",
+    "ydoc_owner_activation_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -511,6 +512,7 @@ mod tests {
             tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','owner',0)",[]).unwrap();
             tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
@@ -538,6 +540,7 @@ mod tests {
             "live_accepted_checkpoints",
             "live_restore_fences",
             "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
             "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",
@@ -630,6 +633,7 @@ mod tests {
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
             "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
         ] {
             assert!(
                 COMPARED_TABLES.contains(&table),

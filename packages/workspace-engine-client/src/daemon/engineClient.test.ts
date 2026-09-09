@@ -93,6 +93,50 @@ describe("private owner delivery transport", () => {
   });
 });
 
+describe("private imported owner capture", () => {
+  it("captures on an attached workspace before registration and preserves a shared client on cancellation", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close");
+    const arrived = Promise.withResolvers<void>();
+    let respond = false;
+    const baseline = Buffer.from([0, 0]), full = Buffer.from([1, 1, 1]), bytes = Buffer.concat([baseline, full]);
+    const digest = (value: Buffer) => createHash("sha256").update(value).digest("hex");
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      expect(envelope.method).toBe("liveApplication.captureOwnerActivation");
+      expect(envelope.params).toEqual({ path: "owner.md", maxBytes: 1000 });
+      arrived.resolve();
+      if (!respond) return;
+      const id = envelope.id;
+      peer.send({ type: "blobStart", requestId: id, streamId: id, totalBytes: bytes.length, sha256: digest(bytes) });
+      peer.sendRaw(blobChunkFrame(id, bytes, true));
+      peer.send({ type: "response", id, result: {
+        status: "captured", activationId: `ordinary-activation-${"a".repeat(64)}`, sessionId: "native-session",
+        baselineByteLength: baseline.length, streamId: id, byteLength: bytes.length, digest: digest(bytes),
+        source: { version: 1, relayDatabaseNamespace: "relay", workspaceId: "workspace", mainVersionId: "main",
+          objectId: "object", lineageClaimId: digest(baseline), currentPath: "owner.md", replicationEpoch: "epoch",
+          streamIdentity: "stream", committedCursor: 10, baseOriginId: "peer", baseOriginSeq: 2, baseRelaySeq: 8,
+          sourceMomentId: "source", sourceDigest: digest(Buffer.from("source")), sourceByteLength: 6,
+          nativeHeadSequence: 1, fullStateDigest: digest(full), fullStateByteLength: full.length },
+      } });
+    };
+    try {
+      const request = { id: 975, workspace: "workspace", deadlineMs: 30_000 };
+      const abort = new AbortController();
+      const pending = transport.captureOwnerActivation(request, "owner.md", 1000, abort.signal);
+      const rejected = expect(pending).rejects.toThrow();
+      await arrived.promise; abort.abort(); await rejected;
+      expect(closed).not.toHaveBeenCalled();
+      respond = true;
+      const captured = await transport.captureOwnerActivation({ ...request, id: 976 }, "owner.md", 1000);
+      expect(captured.sessionId).toBe("native-session");
+      expect(captured.fullState).toEqual(full);
+    } finally { transport.close(); }
+  });
+});
+
 describe("private applied sync transport",()=>{
   const request={id:970,workspace:"workspace",registrationId:7,deadlineMs:30_000};
   const position={eventCount:0,journalCursor:0,evidenceDigest:"ab".repeat(32)};

@@ -263,6 +263,21 @@ impl EngineService {
         }
     }
 
+    pub(super) fn configured_ordinary_namespace(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+    ) -> Result<String, WireError> {
+        if !self.configured_ordinary_request(ctx, request) {
+            return Err(invalid("ordinary service connection unavailable"));
+        }
+        self.configured_live_host
+            .get()
+            .and_then(|host| host.result["relayNamespace"].as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("ordinary service namespace unavailable"))
+    }
+
     pub(super) fn configured_ordinary_request(
         &self,
         ctx: &RequestContext,

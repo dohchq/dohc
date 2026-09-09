@@ -31,6 +31,8 @@ pub use sync::{
     read_applied_sync, read_next_applied, AppliedPosition, AppliedSyncCut, AppliedSyncPolicy,
     NextAppliedUpdate,
 };
+mod activation;
+pub use activation::{capture_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource};
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;

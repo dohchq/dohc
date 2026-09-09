@@ -19,3 +19,5 @@ pub(super) mod versioned;
 pub(super) mod versions;
 pub(super) mod workspace;
 pub(super) mod ydoc;
+
+mod owner_activation;

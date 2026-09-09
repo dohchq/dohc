@@ -1705,6 +1705,24 @@ CREATE TABLE live_device_settlements (
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE ydoc_owner_activation_sources (
+    activation_id TEXT PRIMARY KEY,
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    full_state_digest TEXT NOT NULL,
+    descriptor_json TEXT NOT NULL CHECK (json_valid(descriptor_json)),
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (full_state_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX ydoc_owner_activation_source_document
+    ON ydoc_owner_activation_sources(relay_database_namespace,workspace_id,version_id,object_id,lineage_claim_id);
+
 CREATE TABLE ydoc_owner_base_sources (
     workspace_id TEXT NOT NULL,
     version_id TEXT NOT NULL,

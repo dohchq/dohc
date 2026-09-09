@@ -55,6 +55,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_device_bootstraps",
     "live_device_settlements",
     "ydoc_owner_base_sources",
+    "ydoc_owner_activation_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -443,6 +444,7 @@ mod tests {
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
             "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
         ] {
             let directory =
                 dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();

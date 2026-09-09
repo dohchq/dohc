@@ -28,6 +28,7 @@ mod tests {
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
     include!("adoption_restore_tail_tests.rs");
+    include!("activation_tests.rs");
 
     struct Fixture {
         store: EngineStore,
@@ -1108,6 +1109,112 @@ fn bounded_evidence(
     ))
 }
 
+type VerifiedAdoptionSource = (
+    String,
+    String,
+    i64,
+    String,
+    Option<super::activation::ImportedOwnerSource>,
+);
+fn read_adoption_source(
+    conn: &Connection,
+    namespace: &str,
+    adoption_id: &str,
+    b: &LiveObjectBinding,
+) -> Result<Option<VerifiedAdoptionSource>, ApplicationError> {
+    let imported: Option<String> = conn.query_row(
+        "SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1 AND relay_database_namespace=?2
+         AND workspace_id=?3 AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
+        params![adoption_id,namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).optional().map_err(read_sql)?;
+    if let Some(json) = imported {
+        if format!("ordinary-activation-{}", hex_sha256(json.as_bytes())) != adoption_id {
+            return Err(ApplicationError::Corrupt);
+        }
+        let source: super::activation::ImportedOwnerSource =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        if source.version != 1
+            || source.relay_database_namespace != namespace
+            || source.workspace_id != b.workspace_id
+            || source.main_version_id != b.main_version_id
+            || source.object_id != b.object_id
+            || source.lineage_claim_id != b.lineage_claim_id
+            || source.current_path != b.current_path
+            || source.base_relay_seq > source.committed_cursor
+        {
+            return Err(ApplicationError::Conflict);
+        }
+        integer(
+            source.source_byte_length,
+            0,
+            dohc_engine_domain::MAX_TEXT_BYTES as i64,
+        )?;
+        integer(source.native_head_sequence, 0, SAFE)?;
+        integer(source.committed_cursor, 0, SAFE)?;
+        integer(source.base_origin_seq, 0, SAFE)?;
+        integer(source.base_relay_seq, 0, source.committed_cursor)?;
+        if source.full_state_byte_length < 2
+            || source.full_state_byte_length > crate::limits::MAX_YDOC_UPDATE_BYTES
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        let valid_base: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3
+             AND imported=1 AND apply_disposition='applied' AND op_kind='ydoc.update'
+             AND json_extract(payload_json,'$.versionId')=?4 AND json_extract(payload_json,'$.objectId')=?5
+             AND json_extract(payload_json,'$.lineageClaimId')=?6 AND json_extract(payload_json,'$.updateBlobSha256')=?6
+             AND json_extract(payload_json,'$.contentKind')='richdoc' AND json_extract(payload_json,'$.isBaseState')=1)",
+            params![b.workspace_id,source.base_origin_id,source.base_origin_seq,b.main_version_id,b.object_id,b.lineage_claim_id],
+            |row|row.get(0)).map_err(read_sql)?;
+        if !valid_base {
+            return Err(ApplicationError::Conflict);
+        }
+        let retained_length: i64 = conn
+            .query_row(
+                "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1",
+                [&source.full_state_digest],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)?;
+        if retained_length != source.full_state_byte_length as i64 {
+            return Err(ApplicationError::Corrupt);
+        }
+        let full =
+            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
+        if full.len() != source.full_state_byte_length
+            || hex_sha256(&full) != source.full_state_digest
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        let text: Option<String> = conn.query_row("SELECT t.text FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+            WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5
+            AND m.after_blob_sha256=?6 AND m.after_content_kind='text' AND t.byte_length=?7",
+            params![b.workspace_id,b.main_version_id,b.object_id,source.current_path,source.source_moment_id,source.source_digest,source.source_byte_length],|r|r.get(0)).optional().map_err(read_sql)?;
+        let text = text.ok_or(ApplicationError::Corrupt)?;
+        if text.len() as i64 != source.source_byte_length
+            || hex_sha256(text.as_bytes()) != source.source_digest
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        return Ok(Some((
+            source.source_moment_id.clone(),
+            source.source_digest.clone(),
+            source.source_byte_length,
+            text,
+            Some(source),
+        )));
+    }
+    let source: Option<(String,String,i64,String)> = conn.query_row(
+        "SELECT s.source_moment_id,s.source_blob_sha256,s.source_byte_length,t.text
+         FROM ydoc_owner_base_sources s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
+         AND m.object_id=s.object_id AND m.path=s.path AND m.moment_id=s.source_moment_id
+         AND m.after_blob_sha256=s.source_blob_sha256 AND m.after_content_kind='text'
+         JOIN blobs t ON t.sha256=s.source_blob_sha256 AND t.byte_length=s.source_byte_length
+         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.lineage_claim_id=?4 AND s.path=?5",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?;
+    Ok(source.map(|(moment, digest, length, text)| (moment, digest, length, text, None)))
+}
+
 /// Prove an existing owner's state without changing its domain history, base,
 /// update sequence, or projection. First adoption can seed a pending local cut.
 /// The captured registration
@@ -1150,16 +1257,12 @@ pub fn adopt_owner_committed(
         let present:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path) WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text')",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path],|r|r.get(0)).map_err(read_sql)?;
         if !present { return Err(ApplicationError::Conflict); }
-        let source: Option<(String, String, i64, String)> = tx.query_row(
-            "SELECT s.source_moment_id,s.source_blob_sha256,s.source_byte_length,t.text
-             FROM ydoc_owner_base_sources s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
-             AND m.object_id=s.object_id AND m.path=s.path AND m.moment_id=s.source_moment_id
-             AND m.after_blob_sha256=s.source_blob_sha256 AND m.after_content_kind='text'
-             JOIN blobs t ON t.sha256=s.source_blob_sha256 AND t.byte_length=s.source_byte_length
-             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.lineage_claim_id=?4 AND s.path=?5",
-            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?;
-        let Some((moment,digest,length,text)) = source else { return Err(invalid("owner adoption source evidence missing")); };
+        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b)?
+            .ok_or(invalid("owner adoption source evidence missing"))?;
+        let evidence_digest = if let Some(source) = &imported_source {
+            if source.native_head_sequence != cut.expected_local_sequence { return Err(ApplicationError::Conflict); }
+            bounded_evidence(&("ordinary-replication", &evidence_digest, &source), max_bytes)?.1
+        } else { evidence_digest.clone() };
         if moment != cut.source_moment_id || digest != cut.source_digest || length != cut.source_byte_length
             || text.len() as i64 != length || hex_sha256(text.as_bytes()) != digest {
             return Err(ApplicationError::Conflict);
@@ -1196,6 +1299,13 @@ pub fn adopt_owner_committed(
         if marker.head_update_seq != cut.expected_local_sequence { return Err(invalid("owner adoption evidence is stale")); }
         require_local_replay_budget(tx, &key, max_bytes)?;
         let local = durable::load_doc_in(tx, &key)?;
+        if let Some(source) = &imported_source {
+            let full = local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
+            if full.len() != source.full_state_byte_length || hex_sha256(&full) != source.full_state_digest {
+                return Err(ApplicationError::Conflict);
+            }
+        }
         let journal = Ydoc::wire();
         journal.apply(&cut.baseline_bytes)?;
         journal.validate_public_baseline(&cut.baseline_bytes)?;
@@ -1378,17 +1488,31 @@ pub(super) fn read_origin(
     held: &Registration,
 ) -> Result<Option<AdoptedOrigin>, ApplicationError> {
     let b = &held.binding;
-    let raw: Option<(String,String,String,i64,i64,String)> = conn.query_row(
-        "SELECT a.binding_json,a.source_moment_id,a.source_digest,a.local_ydoc_sequence,a.terminal_cursor,a.terminal_receipt_json FROM live_owner_adoptions a
-        JOIN ydoc_owner_base_sources s ON s.workspace_id=a.workspace_id AND s.version_id=a.main_version_id AND s.object_id=a.object_id AND s.lineage_claim_id=a.lineage_claim_id AND s.source_moment_id=a.source_moment_id AND s.source_blob_sha256=a.source_digest AND s.source_byte_length=a.source_byte_length
-        JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id AND m.object_id=s.object_id AND m.path=s.path AND m.moment_id=s.source_moment_id AND m.after_blob_sha256=s.source_blob_sha256 AND m.after_content_kind='text'
-        JOIN ydoc_snapshots snap ON snap.workspace_id=a.workspace_id AND snap.version_id=a.main_version_id AND snap.object_id=a.object_id AND snap.up_to_seq=0 AND snap.snapshot_blob_sha256=a.lineage_claim_id
-        WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(read_sql)?;
-    let Some((binding, source_moment, source_digest, sequence, cursor, terminal)) = raw else {
+    let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
+        "SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,adoption_id FROM live_owner_adoptions
+         WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(read_sql)?;
+    let Some((binding, source_moment, source_digest, sequence, cursor, terminal, adoption_id)) =
+        raw
+    else {
         return Ok(None);
     };
-    let binding = serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    let Some((verified_moment, verified_digest, _, _, _)) =
+        read_adoption_source(conn, &held.namespace, &adoption_id, &binding)?
+    else {
+        return Err(ApplicationError::Corrupt);
+    };
+    if verified_moment != source_moment || verified_digest != source_digest {
+        return Err(ApplicationError::Corrupt);
+    }
+    let original: Option<String> = conn.query_row("SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq=0",
+        params![b.workspace_id,b.main_version_id,b.object_id],|r|r.get(0)).optional().map_err(read_sql)?;
+    if original.as_deref() != Some(b.lineage_claim_id.as_str()) {
+        return Err(ApplicationError::Corrupt);
+    }
     restore_resume::validate_origin_binding(conn, held, &binding)?;
     let terminal: Option<LiveUpdateReceipt> =
         serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;

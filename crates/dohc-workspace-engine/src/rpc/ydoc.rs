@@ -53,6 +53,31 @@ pub(crate) struct YdocSession {
     _lease: Lease,
 }
 
+impl YdocSession {
+    pub(super) fn imported_owner(
+        workspace: WorkspaceHandle,
+        key: DocKey,
+        captured: &dohc_engine_collab::live_update_application::ImportedOwnerActivation,
+        lease: Lease,
+    ) -> Self {
+        Self {
+            workspace,
+            key,
+            path: captured.source.current_path.clone(),
+            content_kind: ContentKind::Richdoc,
+            regime: Regime::Replicated,
+            lineage_claim_id: Some(captured.source.lineage_claim_id.clone()),
+            restore_generation: captured.restore_generation,
+            lineage_absent: false,
+            first_update_pending: false,
+            last_settled_sha: None,
+            open_head_sha: Some(captured.source.source_digest.clone()),
+            owner_seed_source: None,
+            _lease: lease,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct YdocSessionView {
     pub(super) key: DocKey,
