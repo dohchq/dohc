@@ -145,7 +145,7 @@ pub struct LiveUpdateReceipt {
     pub accepting_host_epoch: i64,
 }
 impl LiveUpdateReceipt {
-    fn validate(&self) -> Result<(), ApplicationError> {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
         identifier(&self.delivery_id, 512)?;
         digest(&self.update_digest)?;
         integer(self.journal_cursor, 1, SAFE)?;
