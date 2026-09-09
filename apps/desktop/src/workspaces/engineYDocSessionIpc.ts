@@ -671,7 +671,7 @@ class EngineYDocSessionIpc {
         assertCurrent,
         onDurableLocalChange: (handler: () => void) => {
           assertCurrent();
-          return native.onDurableLocalChange(() => {assertCurrent(); handler();});
+          return native.onDurableLocalChange(handler);
         },
         prepareHandoff: async (signal: AbortSignal) => {
           assertCurrent(); signal.throwIfAborted();

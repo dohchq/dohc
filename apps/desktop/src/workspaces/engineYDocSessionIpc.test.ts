@@ -178,6 +178,21 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("lets the transport retire a stale owner when a durable change arrives", async () => {
+    let notify!: () => void;
+    const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
+      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined)};
+    const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
+    await h.ipc.open(new FakeSender(7), openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1});
+    const stop = vi.fn();
+    owner.onDurableLocalChange(() => {try {owner.assertCurrent();} catch {stop();}});
+    h.setGeneration(2);
+    expect(() => notify()).not.toThrow();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
     const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
