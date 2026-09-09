@@ -150,6 +150,8 @@ impl RestoreAudit {
 }
 
 impl ApplicationOwner {
+    /// `max_bytes` bounds each serialized proof stage, not total IO or heap use.
+    /// The caller reserves concurrent proof, audit, output, and CRDT working memory.
     #[allow(clippy::too_many_arguments)]
     pub fn with_restore_settlement<E, T>(
         &mut self,
@@ -311,15 +313,29 @@ fn read_anchor(
     }))
 }
 
+// One object fence, then one settlement by its unique operation identity.
+// CROSS JOIN preserves that order when an ordinary object has no restore.
+const RESTORED_ORIGIN: &str = "SELECT s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_restore_fences f CROSS JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id WHERE f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4 AND f.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore'";
+
 pub(super) fn restored_origin(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<PriorAnchor>, ApplicationError> {
     let b = &held.binding;
-    let row: Option<(i64,i64)> = conn.query_row(
-        "SELECT s.terminal_cursor,length(CAST(f.application_json AS BLOB)) FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.settlement_kind='restore' ORDER BY s.terminal_cursor DESC LIMIT 1",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(read_sql)?;
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            RESTORED_ORIGIN,
+            params![
+                held.namespace,
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
     let Some((cursor, length)) = row else {
         return Ok(None);
     };
@@ -383,4 +399,61 @@ fn coverage(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_origin_probe_does_not_scan_ordinary_settlement_history() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("restore-origin-cost").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        store
+            .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+                tx.execute(
+                    "INSERT INTO versioned_workspaces VALUES ('workspace','main')",
+                    [],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok(())
+            })
+            .unwrap();
+        let steps = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(RESTORED_ORIGIN).unwrap();
+                    let result: Option<(i64, i64)> = statement
+                        .query_row(
+                            params!["relay", "workspace", "main", "object", "lineage"],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .unwrap();
+                    assert!(result.is_none());
+                    Ok::<_, StorageError>(statement.get_status(rusqlite::StatementStatus::VmStep))
+                })
+                .unwrap()
+        };
+        let empty = steps(&store);
+        store.write_with(&NoFaults,|tx|->Result<(),StorageError> {
+            tx.execute("WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<10000) INSERT INTO live_device_settlements SELECT 'settlement-'||value,'relay','workspace','main','object','lineage',value-1,value,value-1,value,1,printf('%064d',0),'moment',printf('%064d',0),printf('%064d',0),'{}','{}',0,'ordinary',NULL FROM n",[]).map_err(StorageError::persist_public)?;
+            Ok(())
+        }).unwrap();
+        let ordinary = steps(&store);
+        assert!(
+            ordinary <= empty + 8,
+            "ordinary history increased restore lookup work: {empty} -> {ordinary}"
+        );
+        store.write_with(&NoFaults,|tx|->Result<(),StorageError> {
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','stopped','{}','{}')",[]).map_err(StorageError::persist_public)?;
+            Ok(())
+        }).unwrap();
+        let stopped = steps(&store);
+        assert!(
+            stopped <= empty + 32,
+            "a stopped operation must use the unique operation lookup: {empty} -> {stopped}"
+        );
+        eprintln!("restore lookup VM steps: empty={empty}, ordinary10000={ordinary}, stopped10000={stopped}");
+    }
 }
