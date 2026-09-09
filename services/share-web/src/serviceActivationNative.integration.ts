@@ -25,7 +25,7 @@ import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
-import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "../viewer/src/namedLiveBrowserTransport.js";
+import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Explicit proof inputs, not product limits or release defaults.
@@ -81,8 +81,8 @@ const harness = vi.hoisted(() => ({
   transforms: [] as {from: string; to: string; insecureLoopbackForTests: true}[],
   captures: [] as {activationId: string; requestedActivationId?: string; source: unknown}[],
 }));
-vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => {
-  const actual = await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>();
+vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../../packages/workspace-engine-client/src/daemon/index.js")>();
   return {...actual, createEngineClient: async (options: Parameters<typeof actual.createEngineClient>[0]) => {
     const configPath = options.env?.DOHC_ENGINE_LIVE_HOST_CONFIG;
     if (configPath) {
@@ -158,6 +158,8 @@ it("resumes a real configured service activation after a lost native adoption re
     const configPath = join(root, "deployment.json");
     initializeRelayDeployment({configPath, relayPath: join(root, "relay/relay.sqlite"), continuityDirectory: join(root, "continuity")});
     deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
+    const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
+    closes.push(async () => relayRead.close());
     const {storage, history} = deployment, frameChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
@@ -191,11 +193,12 @@ it("resumes a real configured service activation after a lost native adoption re
     await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
     results.initialPush = await rpc("sync.push", {workspaceId: "workspace"});
     expect(storage.workspaceIsOwnedBy("workspace", ownerUser.id)).toBe(true);
-    expect(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_documents").get()!.count).toBe(0);
+    expect(relayRead.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_documents").get()!.count).toBe(0);
     storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: Date.now()},
       grant: {grantId: "grant", shareId: "share", principalKind: "user", principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}});
     expect(storage.provisionLiveHostControl({mode: "service", hostId: "service", updatedAtMs: Date.now(), guard: storage.captureStanding()}).ok).toBe(true);
-    const identity = storage.getWorkspaceBootstrap("workspace"), serviceConfig = join(root, "service.json");
+    const identity = storage.getWorkspaceBootstrap("workspace").identity, serviceConfig = join(root, "service.json");
+    if (!identity) throw new Error("Ordinary source owner did not establish a relay identity.");
     writeFileSync(serviceConfig, JSON.stringify({version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
       workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: 2, ordinaryReplication: {relay: {baseUrl: "https://service-activation-relay.example.test", bearerToken: bearer},
         identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: 8}}],
@@ -256,7 +259,7 @@ it("resumes a real configured service activation after a lost native adoption re
     await provider.reconnect(); await stateWhen(provider, state => state.status === "live");
     expect(yDocToMarkdown(provider.doc)).toBe(yDocToMarkdown(ownerDoc));
     const beforeNamedCursor = provider.state().lastApplied?.journalCursor ?? 0;
-    provider.doc.getMap("frontmatter").set("named", "after-service-resume");
+    expect(provider.edit(() => provider.doc.getMap("frontmatter").set("named", "after-service-resume"))).toBe(true);
     const ack = (await stateWhen(provider, state => (state.lastApplied?.journalCursor ?? 0) > beforeNamedCursor && state.pendingUpdates === 0)).lastApplied!;
     results.namedAck = ack;
     const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
@@ -267,7 +270,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const settled = await active.settle(document);
     const expected = yDocToMarkdown(provider.doc); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(expected);
     await vi.waitFor(() => {
-      const rows = storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' ORDER BY relay_seq DESC").all("workspace");
+      const rows = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' ORDER BY relay_seq DESC").all("workspace");
       expect(rows.some(row => JSON.parse(String(row.payload_json)).payloadAfterBlobSha256 === hash(Buffer.from(expected)))).toBe(true);
     }, {timeout: 30000});
     for (let page = 0; page < 8; page++) {
