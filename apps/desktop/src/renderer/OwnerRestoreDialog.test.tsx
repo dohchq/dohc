@@ -13,7 +13,7 @@ const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
 const receipt = (cursor: number) => ({deliveryId: `event-${cursor}`, updateDigest: digest, journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(1)});
 function reviewFixture() {
   return OwnerRestoreReview.parse({operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest,
-    recordedAtMs: 9, point: {journalCursor: 0, receiptDigest: digest, markdownDigest: digest}, frozenTerminal: receipt(3),
+    recordedAtMs: 9, selectedPointReceivedAtMs: null, point: {journalCursor: 0, receiptDigest: digest, markdownDigest: digest}, frozenTerminal: receipt(3),
     selectedEventCount: 0, acceptedEventCount: 3, selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
     content: {frozenMarkdown: "Current text", restoredMarkdown: "Earlier text", frozenMarkdownDigest: digest, restoredMarkdownDigest: digest,
       frozenMarkdownByteLength: 12, restoredMarkdownByteLength: 12},
@@ -25,14 +25,14 @@ function reviewFixture() {
       occurrences: [{operationId: "restore", proposalDigest, context: "current-fence", acceptedReceipt: receipt(3)}]}],
   });
 }
-function fixture() {
+function fixture(pointCursor = 0) {
   const intent = {deliveryKind: "owner" as const, operationId: "restore", document: documentKey, shareId: "share", grantId: "grant",
-    expectedGrantGeneration: 1, expectedDependentGrantIds: ["dependent"], expectedFence: 1, restorePointCursor: 0, restorePointReceiptDigest: digest};
+    expectedGrantGeneration: 1, expectedDependentGrantIds: ["dependent"], expectedFence: 1, restorePointCursor: pointCursor, restorePointReceiptDigest: digest};
   let status = {operationId: "restore", document: documentKey, path: "notes.md", phase: "authority-invalidated", intent, proposalDigest: null as string | null};
   const recipients = [{grantId: "grant", principalKind: "link" as const, email: null, userId: null},
     {grantId: "dependent", principalKind: "user" as const, email: "reader@example.test", userId: "reader"}];
   const options = {document: documentKey, path: "notes.md", grants: [{...recipients[0]!, shareId: "share", generation: 1}],
-    points: [{cursor: 0, receivedAtMs: null, kind: "baseline", receiptDigest: digest}], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
+    points: [{cursor: pointCursor, receivedAtMs: pointCursor ? 1788922800000 : null, kind: pointCursor ? "accepted" : "baseline", receiptDigest: digest}], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
   const call = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
     if (input.action === "options") return options;
     if (input.action === "plan") return {intent, path: "notes.md", recipients};
@@ -48,10 +48,10 @@ function fixture() {
   return {call, props, close, restored, release, options, intent, status: () => status};
 }
 afterEach(() => {cleanup(); delete window.dohcDesktop;});
-async function openStop() {
+async function openStop(point = "0") {
   await screen.findByRole("combobox", {name: "Access to stop"});
   fireEvent.change(screen.getByRole("combobox", {name: "Access to stop"}), {target: {value: "grant"}});
-  fireEvent.change(screen.getByRole("combobox", {name: "Shared restore point"}), {target: {value: "0"}});
+  fireEvent.change(screen.getByRole("combobox", {name: "Shared restore point"}), {target: {value: point}});
   fireEvent.click(screen.getByRole("button", {name: "Review affected access"}));
   await screen.findByText("Stop access before restoring?");
 }
@@ -62,6 +62,7 @@ it("requires separate stop and content confirmations and names every affected re
   expect(f.call.mock.calls.some(([i]) => i.action === "begin" || i.action === "confirm")).toBe(false);
   fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
   await screen.findByRole("button", {name: "Restore file"});
+  expect(screen.getByText("Restore point: Before accepted edits")).toBeTruthy();
   expect(f.call.mock.calls.some(([i]) => i.action === "confirm")).toBe(false);
   expect(screen.getByRole("textbox", {name: "Current file before restore"})).toHaveProperty("value", "Current text");
   expect(screen.getByRole("textbox", {name: "File after restore"})).toHaveProperty("value", "Earlier text");
@@ -159,4 +160,26 @@ it("loads later access after an empty source page and preserves the selected poi
   fireEvent.change(screen.getByRole("combobox", {name: "Access to stop"}), {target: {value: "grant"}});
   fireEvent.click(screen.getByRole("button", {name: "Review affected access"}));
   await screen.findByText("Stop access before restoring?");
+});
+
+it("identifies the accepted restore point in the review", async () => {
+  const f = fixture(7), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(async input => {
+    if (input.action !== "review") return original(input);
+    const review = reviewFixture(); review.point.journalCursor = 7; review.selectedPointReceivedAtMs = 1788922800000;
+    return {status: f.status(), result: OwnerRestoreReview.parse(review)};
+  });
+  render(<OwnerRestoreDialog {...f.props} />); await openStop("7");
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  expect(screen.getByText("Change 7")).toBeTruthy();
+  expect(document.querySelector("time")?.dateTime).toBe(new Date(1788922800000).toISOString());
+});
+
+it("rejects a missing accepted time, a fabricated baseline time, and dates the review cannot render", () => {
+  const baseline = reviewFixture();
+  expect(OwnerRestoreReview.safeParse({...baseline, selectedPointReceivedAtMs: 30}).success).toBe(false);
+  const accepted = {...baseline, point: {...baseline.point, journalCursor: 1}};
+  for (const selectedPointReceivedAtMs of [null, undefined, Number.MAX_SAFE_INTEGER]) {
+    expect(OwnerRestoreReview.safeParse({...accepted, selectedPointReceivedAtMs}).success).toBe(false);
+  }
 });

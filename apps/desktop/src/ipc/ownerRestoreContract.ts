@@ -38,7 +38,7 @@ const priorCut = z.object({operationId: id, proposalDigest: digest, restoreJourn
 export const OwnerRestoreReview = z.object({
   operationId: id, workspaceId: id, binding, proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer,
   point: z.object({journalCursor: integer, receiptDigest: digest, markdownDigest: digest}).passthrough(),
-  frozenTerminal: receipt.nullable(), selectedEventCount: integer, acceptedEventCount: integer,
+  selectedPointReceivedAtMs: integer.max(8_640_000_000_000_000).nullable(), frozenTerminal: receipt.nullable(), selectedEventCount: integer, acceptedEventCount: integer,
   selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
   content: z.object({frozenMarkdown: z.string(), restoredMarkdown: z.string(), frozenMarkdownDigest: digest,
     restoredMarkdownDigest: digest, frozenMarkdownByteLength: integer, restoredMarkdownByteLength: integer}),
@@ -49,7 +49,7 @@ export const OwnerRestoreReview = z.object({
     acceptedRelation: z.enum(["at-or-before-selected", "after-selected", "not-relay-accepted"]),
     occurrences: z.array(z.object({operationId: id, proposalDigest: digest, context: z.enum(["current-fence", "prior-restore"]), acceptedReceipt: receipt.nullable()})),
   })),
-});
+}).refine(review => (review.point.journalCursor === 0) === (review.selectedPointReceivedAtMs === null), "Invalid restore point time.");
 export type OwnerRestoreReview = z.infer<typeof OwnerRestoreReview>;
 export type OwnerRestoreOptions = z.infer<typeof OwnerRestoreOptions>;
 export type OwnerRestorePlan = z.infer<typeof OwnerRestorePlan>;

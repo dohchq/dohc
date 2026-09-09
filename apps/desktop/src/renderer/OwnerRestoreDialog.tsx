@@ -43,6 +43,8 @@ function SourceList({label, sources}: {label: string; sources: OwnerRestoreRevie
 function Review({review}: {review: OwnerRestoreReview}) {
   const outcomes = useMemo(() => ownerRestoreOutcomes(review), [review]);
   return <>
+    <p className="text-[12px] text-muted">Restore point: {review.point.journalCursor === 0 ? "Before accepted edits" :
+      <><time dateTime={new Date(review.selectedPointReceivedAtMs!).toISOString()}>{new Date(review.selectedPointReceivedAtMs!).toLocaleString()}</time> · <span className="font-mono">Change {review.point.journalCursor}</span></>}</p>
     <p className="text-[13px] text-muted">Restoring removes the changes listed below from this file.</p>
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="text-[12px] text-muted">Current file<textarea aria-label="Current file before restore" readOnly value={review.content.frozenMarkdown} className="mt-1 h-56 w-full rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-ink" /></label>

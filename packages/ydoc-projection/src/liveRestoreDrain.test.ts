@@ -27,8 +27,8 @@ const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
   c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalAcceptedMetadata(event.metadata))]);
-function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false) {
-  const f = readyNativeFence(kind, mode, acceptedNative ? "native" : true);
+function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false) {
+  const f = readyNativeFence(kind, mode, acceptedNative ? "native" : true, selectedPoint);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
   const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
   const selectedHistory = f.store.captureStopRestorePoint(input).proof;
@@ -110,8 +110,8 @@ function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBindi
     byteLength: bytes.byteLength, createdAtMs: 100, source, acceptedReceipt: null};
 }
 
-function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false) {
-  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative), pending);
+function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false, selectedPoint = false) {
+  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative, selectedPoint), pending);
 }
 function buildContentProposal<F extends Pick<ReturnType<typeof proposalSourcesFixture>, "store" | "input" | "document" | "receipt" | "proposal" | "close"> & {acceptedNative?: AcceptedNative}>(f: F, pending: boolean | "deleted" = false) {
   const point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
@@ -897,7 +897,7 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
 });
 
 type AcceptedNative = {bytes: Uint8Array; source: Omit<ReturnType<typeof pendingSource>, "acceptedReceipt"> & {acceptedReceipt: ReturnType<ReturnType<typeof fixture>["add"]>}};
-function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" = false) {
+function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" = false, selectedPoint = false) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
   let acceptedNative: AcceptedNative | undefined;
@@ -911,6 +911,10 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     receipts.push(committed.receipt); acceptedNative = {bytes, source: {...source, acceptedReceipt: committed.receipt}};
   } else if (events) receipts.push(f.add("first"));
   if (events) receipts.push(f.add("last"));
+  if (selectedPoint) {
+    f.intent.restorePointCursor = receipts[0]!.journalCursor;
+    f.intent.restorePointReceiptDigest = receipts[0]!.updateDigest;
+  }
   f.fence();
   const capture = f.open();
   if (kind === "bootstrap") {
@@ -1420,6 +1424,7 @@ it("parses the complete leased storage review through the desktop owner restore 
     try {
       const parsed = OwnerRestoreReview.parse(JSON.parse(JSON.stringify(lease.review)));
       expect(parsed.operationId).toBe(f.input.operationId);
+      expect(parsed.selectedPointReceivedAtMs).toBeNull();
       expect(parsed.acceptedEvents).toEqual(lease.review!.acceptedEvents);
       expect(parsed.priorRestoreCuts).toEqual(lease.review!.priorRestoreCuts);
       expect(parsed.priorRestoreCuts).toHaveLength(2);
@@ -1433,6 +1438,26 @@ it("parses the complete leased storage review through the desktop owner restore 
       expect(sendLiveRestore).not.toHaveBeenCalled();
     } finally {lease.close();}
     expect(lease.invalidated.aborted).toBe(true);
+  } finally {f.close();}
+});
+
+it("reads the selected accepted edit time from authenticated storage into the desktop review", () => {
+  const f = contentProposalFixture("owner", "device", false, false, true);
+  try {
+    f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const input = {...f.input, maxOutputBytes: 1_000_000}, before = lifecycleRows(f);
+    const review = OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy));
+    const selected = f.raw.prepare("SELECT received_at_ms FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+      .get(f.intent.restorePointCursor)!;
+    expect(review.point.journalCursor).toBe(1);
+    expect(review.selectedPointReceivedAtMs).toBe(selected.received_at_ms);
+    expect(review.selectedPointReceivedAtMs).toBe(30);
+    expect(review.recordedAtMs).toBe(200);
+    expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([2]);
+    expect(lifecycleRows(f)).toEqual(before);
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=?")
+      .run(f.intent.restorePointCursor);
+    expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
   } finally {f.close();}
 });
 
