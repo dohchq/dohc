@@ -658,9 +658,10 @@ where
             // Collection reconciliation already indexed the captured artifact.
             // Its declared first seed establishes the lineage without inventing
             // an absent-to-value field edit; later appends use the normal hook.
-            let index_frontmatter = seed_source_sha256.is_none()
+            let index_frontmatter = (seed_source_sha256.is_none()
                 || marker.head_update_seq > 0
-                || marker.head_snapshot_seq > 0;
+                || marker.head_snapshot_seq > 0)
+                && !crate::owner_outbox::has_adopted_owner_in(tx, key)?;
             let mut outcome = append_local_update_cached(
                 tx,
                 key,
@@ -2084,6 +2085,9 @@ pub fn record_update_in_tx(
 ) -> Result<AppendOutcome, CollabError> {
     crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
     crate::live_update_application::require_restore_open(tx, key)?;
+    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
+        return Err(CollabError::OwnerOutboxFrozen);
+    }
     record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
 }
 
@@ -2157,6 +2161,7 @@ pub fn settle(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<SettleOutcome>, CollabError> {
+    store.read_with(|conn| crate::owner_outbox::require_ordinary_settlement(conn, key))?;
     let persisted = match load_persisted(store, key)? {
         Some(p) => p,
         None => return Err(CollabError::NoMarker),
@@ -2167,7 +2172,7 @@ pub fn settle(
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
-        crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+        crate::owner_outbox::require_ordinary_settlement(tx, key)?;
         crate::live_update_application::require_restore_open(tx, key)?;
         // Persist the content and its provenance state vector as blobs. The
         // content digest was computed once above; the settle rows below reuse

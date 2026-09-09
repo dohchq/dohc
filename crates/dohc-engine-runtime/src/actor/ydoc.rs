@@ -1682,6 +1682,10 @@ pub(super) fn ydoc_record_update_on_store(
                 update,
                 now_ms,
             )?;
+            if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &journal_key)? {
+                outcome.emit_outbound = false;
+                return Ok(());
+            }
             // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
@@ -1956,6 +1960,7 @@ pub(super) fn ydoc_settle_on_store(
     }
     if live_audit.is_none() {
         store.read_with(|conn| {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
             dohc_engine_collab::live_update_application::require_restore_generation(
                 conn,
                 key,
@@ -2313,6 +2318,11 @@ pub(super) fn ydoc_settle_on_store(
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
         if live_audit.is_none() {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
+                |_| DomainError::InvalidInput {
+                    reason: "owner-outbox-frozen",
+                },
+            )?;
             dohc_engine_collab::live_update_application::require_restore_generation(
                 tx,
                 key,

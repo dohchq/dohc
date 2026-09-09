@@ -20,6 +20,28 @@ mod native_source;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
 
+pub fn has_adopted_owner_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+) -> Result<bool, crate::CollabError> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
+        .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+}
+
+/// Bound owners settle through the admitted host cut, including after their
+/// pending queue drains. Ordinary settlement carries no accepted audit cut.
+pub fn require_ordinary_settlement(
+    conn: &Connection,
+    key: &crate::DocKey,
+) -> Result<(), crate::CollabError> {
+    draft::require_ordinary_write(conn, key)?;
+    if has_adopted_owner_in(conn, key)? {
+        return Err(crate::CollabError::OwnerOutboxFrozen);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
     #[error("owner Y.Doc outbox input is invalid: {0}")]
@@ -489,6 +511,9 @@ pub fn append_adopted_local_update_in_tx(
     };
     let marker = crate::durable::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let Some(lineage) = marker.lineage_claim_id else {
+        if has_adopted_owner_in(tx, key)? {
+            return Err(CollabError::OwnerOutboxFrozen);
+        }
         return Ok(());
     };
     let saved: Option<(String, i64, i64, String)> = tx
@@ -502,6 +527,9 @@ pub fn append_adopted_local_update_in_tx(
         .map_err(read_sql)
         .map_err(map)?;
     let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
+        if has_adopted_owner_in(tx, key)? {
+            return Err(CollabError::OwnerOutboxFrozen);
+        }
         return Ok(());
     };
     let original: LiveObjectBinding =
