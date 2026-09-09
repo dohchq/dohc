@@ -74,3 +74,62 @@ it("checks budgets before scratch work and rechecks authority before returning",
   input.assertCurrent.mockReset().mockImplementationOnce(() => {}).mockImplementationOnce(() => {throw Error("retired");});
   expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("retired");
 });
+
+it("validates nonempty accepted and selected suffixes", () => {
+  const input = fixture(), empty = new Y.Doc({gc: false});
+  input.accepted.suffix = input.nativeSources;
+  input.nativeSources = [];
+  input.point.suffix = [input.point.checkpoint];
+  input.point.checkpoint = Y.encodeStateAsUpdate(empty);
+  empty.destroy();
+  expect(compareLiveRestoreContent(input, policy, budget).candidateDigest).toBe(hash(input.candidate));
+  expect(() => compareLiveRestoreContent(input, policy, {...budget, maxEvents: 1})).toThrow("event budget");
+});
+
+it("refuses shared buffers and checks initial authority before invalid budgets", () => {
+  const input = fixture(), shared = new Uint8Array(new SharedArrayBuffer(input.candidate.byteLength));
+  shared.set(input.candidate);input.candidate = shared;
+  expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("invalid bytes");
+  input.assertCurrent.mockImplementation(() => {throw Error("retired first");});
+  expect(() => compareLiveRestoreContent(input, policy, {...budget, maxBytes: 0})).toThrow("retired first");
+});
+
+it("refuses stale tagged metadata even while it has no effect on current Markdown", () => {
+  const input = fixture(), doc = new Y.Doc({gc: false});
+  try {
+    Y.applyUpdate(doc, input.frozenState);
+    const before = Y.encodeStateVector(doc);
+    Y.applyUpdate(doc, input.candidate);
+    doc.clientID = input.replacementRanges[0]!.clientId;
+    doc.getMap("meta").set("dohcTaggedFrontmatterPrefix", "---\na: !custom value\n---\n\n");
+    doc.getMap("meta").set("dohcTaggedFrontmatterBaseline", "a: value\n");
+    expect(hash(yDocToMarkdown(doc))).toBe(input.pointProjectionDigest);
+    input.candidate = Y.encodeStateAsUpdate(doc, before);
+    expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("invalid-schema");
+  } finally {doc.destroy();}
+});
+
+it("requires owner replacement writes even when deleting the native tail would recover the point", () => {
+  const input = fixture(), doc = new Y.Doc({gc: false});
+  try {
+    Y.applyUpdate(doc, input.frozenState);
+    const before = Y.encodeStateVector(doc);
+    doc.getXmlFragment("body").delete(0, 1);
+    input.candidate = Y.encodeStateAsUpdate(doc, before);
+    input.replacementRanges = [];
+    expect(hash(yDocToMarkdown(doc))).toBe(input.pointProjectionDigest);
+    expect(() => compareLiveRestoreContent(input, policy, budget)).toThrow("candidate makes no owner replacement writes");
+  } finally {doc.destroy();}
+});
+
+it("uses the same candidate reference for accounting and validation", () => {
+  const input = fixture(), candidate = input.candidate;
+  let reads = 0;
+  Object.defineProperty(input, "candidate", {enumerable: true, get() {
+    reads++;
+    if (reads > 1) throw Error("candidate was read again");
+    return candidate;
+  }});
+  expect(compareLiveRestoreContent(input, policy, budget).candidateDigest).toBe(hash(candidate));
+  expect(reads).toBe(1);
+});

@@ -43,11 +43,14 @@ function frontmatterStructure(map: Y.Map<unknown>): unknown {
 export function compareLiveRestoreContent(input: RestoreContentInput, policy: OrderedLiveUpdateCutPolicy,
   budget: {maxBytes: number; maxEvents: number}) {
   input.assertCurrent();
+  input = {...input, accepted: {...input.accepted}, point: {...input.point}};
   refuse(Number.isSafeInteger(budget.maxBytes) && budget.maxBytes > 0 &&
     Number.isSafeInteger(budget.maxEvents) && budget.maxEvents > 0, "invalid budget");
   const contextCount = input.accepted.suffix.length + input.nativeSources.length;
   refuse(contextCount <= MAX_OLD_SUFFIX_ENTRIES && input.point.suffix.length <= MAX_OLD_SUFFIX_ENTRIES &&
     contextCount + input.point.suffix.length <= budget.maxEvents, "event budget");
+  input = {...input, accepted: {...input.accepted, suffix: [...input.accepted.suffix]},
+    point: {...input.point, suffix: [...input.point.suffix]}, nativeSources: [...input.nativeSources]};
   const contextSuffix = [...input.accepted.suffix, ...input.nativeSources];
   // Charge every independent proof input, including repeated checkpoint bytes, before validation or scratch allocation.
   let bytes = 0;
@@ -55,7 +58,7 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
     input.frozenState, input.candidate]) {
     refuse(update instanceof Uint8Array && !(update.buffer instanceof SharedArrayBuffer), "invalid bytes");
     bytes += update.byteLength;
-    refuse(Number.isSafeInteger(bytes) && bytes <= budget.maxBytes && bytes <= 62_914_559, "byte budget");
+    refuse(Number.isSafeInteger(bytes) && bytes <= budget.maxBytes, "byte budget");
   }
   const document = {...input.document}, currentPath = input.currentPath;
   const registration = createLiveMarkdownRegistrationValidator(policy), journal = createLiveMarkdownJournalValidator(policy);
@@ -75,8 +78,9 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
   refuse(point.projectedMarkdownSha256 === input.pointMarkdownDigest, "selected artifact differs");
   const restored = journal({document, currentPath, checkpoint: context.stateUpdate, suffix: [], candidate: input.candidate});
   if (restored.kind !== "accepted") throw new Error(`Restore content refused: ${restored.reason}.`);
-  refuse(isDeepStrictEqual(restored.evidence.candidate.ranges, input.replacementRanges) && input.replacementRanges.length > 0,
-    "replacement ranges differ");
+  refuse(isDeepStrictEqual(restored.evidence.candidate.ranges, input.replacementRanges), "replacement ranges differ");
+  // The native restore producer records fresh owner replacement structs, including source metadata.
+  refuse(input.replacementRanges.length > 0, "candidate makes no owner replacement writes");
   const before = Y.decodeStateVector(frozen.evidence.stateVector);
   for (const range of input.replacementRanges) {
     refuse(range.startClock === 0 && !before.has(range.clientId), "replacement writer is not fresh");
