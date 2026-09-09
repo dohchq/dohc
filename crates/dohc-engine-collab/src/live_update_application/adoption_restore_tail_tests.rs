@@ -402,6 +402,95 @@ fn native_restore_tail_replay_refuses_changed_retained_metadata_after_compaction
 }
 
 #[test]
+fn native_restore_tail_first_prepare_refuses_changed_compacted_attribution() {
+    for (field, replacement) in [
+        ("$.origin.actorOriginId", serde_json::json!("other")),
+        ("$.origin.actorOriginId", serde_json::Value::Null),
+        ("$.origin.actorKind", serde_json::json!("automation")),
+        ("$.origin.onBehalfOf", serde_json::json!("other-owner")),
+        ("$.origin.chainDepth", serde_json::json!(2)),
+        ("$.origin.recordedAtMs", serde_json::json!(12)),
+        ("$.updateDigest", serde_json::json!("a".repeat(64))),
+    ] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        native_tail_edit(&mut f, "Pending", 11);
+        durable::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 20).unwrap();
+        assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+        let input = native_tail_input(&mut f, None, 0);
+        f.store.write_with(&NoFaults, |tx| tx.execute(
+        "UPDATE owner_ydoc_outbox_entries SET native_source_json=json_set(native_source_json,?1,json(?2))",
+        params![field, replacement.to_string()],
+    ).map_err(write_sql)).unwrap();
+        let before = native_tail_inventory(&f.store);
+        assert!(
+            native_tail_prepare(&mut f, input).is_err(),
+            "accepted changed {field}"
+        );
+        assert_eq!(before, native_tail_inventory(&f.store));
+    }
+}
+
+#[test]
+fn native_restore_append_identity_survives_retries_restart_and_acknowledgement() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Pending", 11);
+    let key = f.key.clone();
+    for acknowledged in [false, true] {
+        if acknowledged {
+            let ack = native_tail_apply(&mut f, entry.update.clone(), entry.delivery_id.clone(), 7);
+            let outbox: String = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                        [&entry.delivery_id],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            owner_outbox::acknowledge(
+                &mut f.store,
+                "workspace",
+                &outbox,
+                &[owner_outbox::OwnerDeliveryReceipt {
+                    delivery_id: ack.delivery_id,
+                    update_digest: ack.update_digest,
+                    journal_cursor: ack.journal_cursor,
+                    accepting_host_epoch: ack.accepting_host_epoch,
+                }],
+            )
+            .unwrap();
+        }
+        let before = native_tail_inventory(&f.store);
+        for now in [99, 111] {
+            drop(f.store);
+            f.store = EngineStore::open(&f._scratch.join("engine.db"), now).unwrap();
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    owner_outbox::append_adopted_local_update_in_tx(
+                        tx,
+                        &key,
+                        "owner.md",
+                        1,
+                        &entry.update,
+                        now,
+                    )
+                })
+                .unwrap();
+            assert_eq!(before, native_tail_inventory(&f.store));
+            assert_eq!(
+                f.store
+                    .table_row_count("owner_ydoc_outbox_entries")
+                    .unwrap(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn native_restore_tail_budgets_count_pending_sources_on_first_prepare_and_replay() {
     let mut f = Fixture::new();
     f.adopt().unwrap();

@@ -514,25 +514,12 @@ pub fn append_adopted_local_update_in_tx(
         .map_err(map)?
         .filter(|length| *length > 0)
         .ok_or_else(|| map(OwnerOutboxError::Corrupt))?;
-    // The immutable native coordinate survives caller retries and restarts.
-    let append_key = format!(
-        "adopted-local:{}",
-        hex_sha256(
-            &serde_json::to_vec(&(
-                key.workspace_id.as_str(),
-                key.version_id.as_str(),
-                key.object_id.as_str(),
-                lineage.as_str(),
-                sequence,
-            ))
-            .map_err(|_| map(OwnerOutboxError::Corrupt))?
-        )
-    );
     let source = native_source::read_native_update_source(tx, &binding, &adoption_id, sequence)
         .map_err(map)?;
     if source.update_digest != hex_sha256(update) {
         return Err(map(OwnerOutboxError::Corrupt));
     }
+    let append_key = source.append_key().map_err(map)?;
     let result = append_with_retained_base(
         tx,
         &key.workspace_id,

@@ -26,6 +26,13 @@ pub enum OwnerOutboxNativeOrigin {
 
 impl OwnerOutboxNativeSource {
     pub(crate) fn validate(&self, append_key: &str) -> Result<(), OwnerOutboxError> {
+        if append_key != self.append_key()? {
+            return Err(OwnerOutboxError::Corrupt);
+        }
+        Ok(())
+    }
+
+    pub(super) fn append_key(&self) -> Result<String, OwnerOutboxError> {
         self.binding
             .validate_canonical()
             .map_err(OwnerOutboxError::InvalidInput)?;
@@ -34,7 +41,7 @@ impl OwnerOutboxNativeSource {
         if !(0..=9_007_199_254_740_991).contains(&self.native_sequence) {
             return Err(OwnerOutboxError::Corrupt);
         }
-        let expected = match &self.origin {
+        Ok(match &self.origin {
             OwnerOutboxNativeOrigin::AdoptionSeed => format!(
                 "owner-adoption:{}",
                 hex_sha256(
@@ -79,23 +86,10 @@ impl OwnerOutboxNativeSource {
                 }
                 format!(
                     "adopted-local:{}",
-                    hex_sha256(
-                        &serde_json::to_vec(&(
-                            &self.binding.workspace_id,
-                            &self.binding.main_version_id,
-                            &self.binding.object_id,
-                            &self.binding.lineage_claim_id,
-                            self.native_sequence
-                        ))
-                        .map_err(|_| OwnerOutboxError::Corrupt)?
-                    )
+                    hex_sha256(&serde_json::to_vec(self).map_err(|_| OwnerOutboxError::Corrupt)?)
                 )
             }
-        };
-        if append_key != expected {
-            return Err(OwnerOutboxError::Corrupt);
-        }
-        Ok(())
+        })
     }
 
     pub(crate) fn verify_retained_row(&self, conn: &Connection) -> Result<(), OwnerOutboxError> {
