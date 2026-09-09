@@ -788,11 +788,57 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     let f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+    let before = f.doc.state_vector();
     let update = f
         .doc
         .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\n")
         .unwrap();
-    let terminal = f.apply(7, update).await;
+    let mut first_seen = Vec::new();
+    for (client, end) in f.doc.state_vector().iter() {
+        let start = before.get(client);
+        if *end > start {
+            first_seen.push(LiveUpdateStructRange {
+                client_id: i64::try_from(client.get()).unwrap(),
+                start_clock: i64::from(start),
+                end_clock: i64::from(*end),
+            });
+        }
+    }
+    first_seen.sort_by_key(|range| range.client_id);
+    assert!(!first_seen.is_empty());
+    let terminal = LiveUpdateReceipt {
+        delivery_id: "link-delivery".into(),
+        update_digest: hex_sha256(&update),
+        journal_cursor: 7,
+        accepting_host_epoch: 1,
+    };
+    let metadata = AdmittedLiveUpdateMetadata {
+        accepted: RelayAcceptedLiveUpdate {
+            receipt: terminal.clone(),
+            binding: f.binding.clone(),
+            authority: ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "link-principal".into(),
+                grant_id: "link-grant".into(),
+                grant_generation: 1,
+            },
+            received_at_ms: 2,
+        },
+        first_seen,
+    };
+    assert!(matches!(
+        f.handle
+            .apply(
+                AdmittedLiveUpdate {
+                    metadata: metadata.clone(),
+                    update_bytes: update,
+                },
+                Arc::new(NoFaults),
+                100_000_000
+            )
+            .await
+            .unwrap(),
+        ApplicationResult::Applied(_)
+    ));
     let second = f
         .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
         .await
@@ -813,7 +859,12 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         expected
     );
     f.supervisor.close(&f.db).unwrap();
-    let source = EngineStore::open(&f.db, 40).unwrap();
+    let mut source = EngineStore::open(&f.db, 40).unwrap();
+    let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    assert!(matches!(
+        dohc_engine_collab::maybe_compact(&mut source, &key, 0, &NoFaults, 40).unwrap(),
+        dohc_engine_storage::TxnOutcome::Committed(dohc_engine_collab::CompactOutcome::Compacted { pruned_updates, .. }) if pruned_updates > 0
+    ));
     let ops = dohc_engine_sync::list_replication_ops(&source, "workspace", "owner-origin", -1, 500)
         .unwrap();
     let settlements: Vec<_> = ops
@@ -911,6 +962,12 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     }
     drop(receiver);
     let mut receiver = EngineStore::open(&receiver_path, 41).unwrap();
+    let accepted_bytes = read_link_audit_record(&receiver);
+    let accepted_record: serde_json::Value = serde_json::from_slice(&accepted_bytes).unwrap();
+    assert_eq!(
+        accepted_record["metadata"],
+        serde_json::to_value(&metadata).unwrap()
+    );
     receiver
         .read_with(|conn| -> Result<(), rusqlite::Error> {
             let count: i64 =
@@ -1046,6 +1103,166 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             Ok(())
         })
         .unwrap();
+    resolve_imported_history_successor(
+        receiver,
+        &receiver_path,
+        &key,
+        &f.binding.lineage_claim_id,
+        &accepted_bytes,
+        &retained,
+    )
+    .await;
+}
+
+fn read_link_audit_record(store: &EngineStore) -> Vec<u8> {
+    store.read_with(|conn| {
+        conn.prepare("SELECT b.bytes FROM live_audit_events e JOIN live_audit_record_chunks c ON c.record_digest=e.record_digest JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE e.delivery_id='link-delivery' ORDER BY c.ordinal")?
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()
+    }).unwrap().into_iter().flatten().collect()
+}
+
+async fn resolve_imported_history_successor(
+    mut store: EngineStore,
+    db: &std::path::Path,
+    key: &dohc_engine_collab::DocKey,
+    predecessor: &str,
+    accepted_bytes: &[u8],
+    settlement_record: &str,
+) {
+    use dohc_engine_domain::{
+        ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, ResolveConflictKind,
+        ResolveTextConflict, TextConflict, VersionedTextStore,
+    };
+    let current = VersionedTextStore::new(&mut store)
+        .read_text("workspace", "main", "notes/example.md")
+        .unwrap()
+        .unwrap();
+    let mut incoming = current.clone();
+    incoming.version_id = "incoming-version".into();
+    incoming.object_id = "incoming-object".into();
+    incoming.text = "# Conflicting incoming\n".into();
+    incoming.blob_sha256 = hex_sha256(incoming.text.as_bytes());
+    incoming.latest_moment_id = "incoming-moment".into();
+    incoming.updated_at_ms = 50;
+    dohc_engine_sync::journal_local_replication_op(
+        &mut store,
+        "workspace",
+        "receiver-origin",
+        "epoch",
+        "stream",
+        "workspace.init",
+        &serde_json::json!({}),
+        50,
+        &NoFaults,
+    )
+    .unwrap();
+    dohc_engine_sync::commit_relay_cursor(
+        &mut store,
+        "workspace",
+        &dohc_engine_sync::RelayCursor {
+            cursor: 500,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            refusal_report_id: None,
+        },
+        &NoFaults,
+        50,
+    )
+    .unwrap();
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(db, 51).unwrap().actor;
+    actor
+        .conflict_open(
+            Box::new(TextConflict {
+                conflict_id: "imported-history-conflict".into(),
+                workspace_id: "workspace".into(),
+                path: current.path.clone(),
+                target_version_id: "main".into(),
+                source_version_id: "incoming-version".into(),
+                created_at_ms: 50,
+                updated_at_ms: 50,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("api"),
+                base: ConflictFileState::text(&current.path, None),
+                current: ConflictFileState::text(&current.path, Some(current.clone())),
+                incoming: ConflictFileState::text(&current.path, Some(incoming)),
+            }),
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    actor
+        .conflict_resolve(
+            ResolveTextConflict {
+                workspace_id: "workspace".into(),
+                conflict_id: "imported-history-conflict".into(),
+                resolution: ResolveConflictKind::KeepCurrent,
+                object_id: "successor-object".into(),
+                write_moment_id: "successor-write".into(),
+                delete_moment_id: "successor-delete".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 52,
+                request_id: Some("successor-request".into()),
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(db).unwrap();
+    let store = EngineStore::open(db, 53).unwrap();
+    let marker = dohc_engine_collab::read_marker(&store, key)
+        .unwrap()
+        .unwrap();
+    let successor = marker.lineage_claim_id.unwrap();
+    assert_ne!(successor, predecessor);
+    assert_eq!(marker.lineage_parent_claim_id.as_deref(), Some(predecessor));
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&store, key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content,
+        current.text
+    );
+    assert_eq!(read_link_audit_record(&store), accepted_bytes);
+    let records: Vec<String> = store
+        .read_with(|conn| {
+            conn.prepare("SELECT record_json FROM live_audit_settlements ORDER BY settlement_id")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, rusqlite::Error>>()
+        })
+        .unwrap();
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().any(|record| record == settlement_record));
+    let ops =
+        dohc_engine_sync::list_replication_ops(&store, "workspace", "receiver-origin", -1, 500)
+            .unwrap();
+    let resolutions: Vec<_> = ops
+        .iter()
+        .filter(|op| op.op_kind == "conflict.resolve")
+        .collect();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(
+        resolutions[0].payload["lineageTransition"]["predecessorClaimId"],
+        predecessor
+    );
+    assert_eq!(
+        resolutions[0].payload["lineageTransition"]["successor"]["lineageClaimId"],
+        successor
+    );
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
