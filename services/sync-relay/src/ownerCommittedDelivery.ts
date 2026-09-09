@@ -28,7 +28,7 @@ export class OwnerCommittedDelivery {
     restore?: LiveRestorePreparation;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
-    this.#store = storage.createLiveCommittedDeliveryStore(history);
+    this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);
     this.#registrations = new LiveHostRegistrations(connection);
   }
   captureRegistration(binding: LiveObjectBinding) { return this.#registrations.capture(binding); }

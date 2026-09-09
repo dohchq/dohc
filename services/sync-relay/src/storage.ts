@@ -1,3 +1,5 @@
+import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
+import { ServiceActivationStore } from "./storage/serviceActivation";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -348,8 +350,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveRestoreOperationStorage.readStopRestore(this, input);
   }
 
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
-    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
   }
 
   resolveLiveObjectHostBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveLiveObjectHostBinding>[1], objectId: string): liveDocumentAuthorityStorage.LiveObjectHostBindingResult {
@@ -364,16 +366,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input);
   }
 
-  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
-    return liveUpdateJournalStorage.commitLiveUpdateJournal(this, input);
+  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {
+    return liveUpdateJournalStorage.commitLiveUpdateJournal(this, input, activation);
   }
 
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
-  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore {
-    return new LiveCommittedDeliveryStore(this, history);
+  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore {
+    return new LiveCommittedDeliveryStore(this, history, activation);
+  }
+  createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore {
+    return new ServiceActivationStore(this,history);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {

@@ -1,5 +1,6 @@
 import {readRestoreAdmission,verifyRestoreCheckpoint} from "./liveRestoreCheckpoint";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
+import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
@@ -339,7 +340,7 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   return {metadata:storedMetadata,updateBytes};
 }
 
-export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
+export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {
     requireLiveJournalHistory(storage);
     const outer = baselineRecord(input, ["host", "actor", "expectedAuthority", "metadata", "cutToken", "validation", "updateBytes", "receivedAtMs"]);
     const host = snapshotHostCoordinate(outer.host);
@@ -377,11 +378,14 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (!history.length) return refused({ kind: "refused", reason: "baseline-missing" });
         const stored = history.find(row => row.current) ?? null;
         if (!stored || !stored.open) return refused({ kind: "refused", reason: "authority-refused" });
-        const current = authorizeLiveDocument(storage, request, currentHost, stored);
+        const current = authorizeLiveDocument(storage, request, currentHost, stored, activation);
         if (current.kind !== "current") return refused({ kind: "refused", reason: current.reason === "stale-document" || current.reason === "stale-selector" ? "stale-binding" : "authority-refused" });
         if (current.binding.restoreFenceGeneration !== metadata.binding.restoreFenceGeneration) return refused({ kind: "refused", reason: "restore-fenced" });
         if (!isDeepStrictEqual(current.binding, metadata.binding)) return refused({ kind: "refused", reason: "stale-binding" });
         if (!isDeepStrictEqual(current.authority, expectedAuthority)) return refused({ kind: "refused", reason: "authority-refused" });
+        if (!allowsServiceActivationCandidate(storage, request, host, current.binding, metadata.updateDigest, metadata.deliveryId, activation)) {
+          return refused({kind: "refused", reason: "authority-refused"});
+        }
         const replayRaw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE delivery_id=?`).get(metadata.deliveryId);
         if (replayRaw) {
           const row = decodeJournalRow(storage.db, replayRaw); assertJournalCheckpointPosition(storage.db, row);

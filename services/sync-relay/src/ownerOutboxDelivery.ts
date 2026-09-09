@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -8,6 +9,7 @@ import type { LiveJournalValidation } from "./storage/types.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 
 export interface OwnerOutboxAdmission {
+  readonly activation?: ServiceActivationAccess;
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
@@ -72,7 +74,7 @@ export async function drainOwnerOutbox(options: {
       if (!share || share.workspaceId !== binding.workspaceId) throw new Error("Owner share is unavailable.");
       const actor = {kind: "owner" as const,userId: share.granterUserId,shareId: share.shareId};
       const document = {workspaceId: binding.workspaceId,mainVersionId: binding.mainVersionId,objectId: binding.objectId,lineageClaimId: binding.lineageClaimId};
-      const current = storage.resolveCurrentLiveDocumentBinding({document,actor});
+      const current = storage.resolveCurrentLiveDocumentBinding({document,actor}, admission.activation);
       if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
@@ -80,7 +82,7 @@ export async function drainOwnerOutbox(options: {
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update});
       check();
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
-        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()});
+        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
       const receipt = committed.result.receipt;
       const applied = await options.applyThrough(receipt); check();

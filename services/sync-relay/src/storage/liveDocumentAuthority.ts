@@ -1,4 +1,5 @@
 import type { StoredLiveDocumentAuthority } from "./types";
+import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
 import type {
   CurrentLiveBindingRequest,
   LiveDocumentBaselineRegistrationInput,
@@ -290,9 +291,9 @@ export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareS
   });
 }
 
-export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     const request = snapshotCurrentBindingRequest(input);
-    return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request));
+    return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
   }
 
 export type LiveObjectHostBindingResult =
@@ -485,6 +486,14 @@ export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedem
   }
 
 export function registerLiveDocumentBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    return registerBaseline(storage, input, operation => storage.tx(operation));
+  }
+
+export function registerLiveDocumentBaselineInTransaction(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    return registerBaseline(storage, input, operation => operation());
+  }
+
+function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult): RelayBaselineRegistrationResult {
     let outer: Record<string, unknown>;
     try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
@@ -496,7 +505,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
     const { evidence, baselineBytes, registeredAtMs } = owned;
     const { document, currentPath, checkpoint } = evidence;
-    return storage.tx((): RelayBaselineRegistrationResult => {
+    return run(() => {
       const host = readLiveHostControl(storage.db);
       if (host !== null) assertCurrentAuthorityHost(storage.db, host);
       if (host === null || host.admissionState !== "open" || host.transition !== null) {
@@ -572,7 +581,7 @@ export function currentLiveDocumentMoment(storage: StorageContext, document: Liv
     return latest;
   }
 
-export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) {
@@ -580,11 +589,11 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
     const stored = readLiveDocumentAuthority(storage.db, document);
-    return authorizeLiveDocument(storage, { document, actor }, host, stored);
+    return authorizeLiveDocument(storage, { document, actor }, host, stored, activation);
   }
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
-    stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null): CurrentLiveBindingResult {
+    stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     let share: SyncRelayShareRow;
     let selector: ShareSelector;
     let authority: ServerDerivedLiveUpdateAuthority;
@@ -620,9 +629,10 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
     const bound = bindLiveDocument(storage, document, stored, share, selector);
     if (bound.kind !== "bound") return bound;
     const { binding } = bound;
-    return { kind: "current", binding, authority,
-      host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-        instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! } };
+    const coordinate = { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
+      instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
+    if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
+    return { kind: "current", binding, authority, host: coordinate };
   }
 
 function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey,

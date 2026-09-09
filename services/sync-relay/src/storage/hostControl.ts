@@ -194,7 +194,14 @@ export function registerLiveHost(storage: StorageContext, input: LiveHostConnect
   }): LiveHostControlResult {
     const coordinate = parseLiveHostConnectionCoordinate(input);
     const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host registration time");
-    return storage.tx(() => {
+    return storage.tx(() => registerLiveHostInTransaction(storage, {...coordinate, updatedAtMs, guard: input.guard}));
+  }
+
+export function registerLiveHostInTransaction(storage: StorageContext, input: LiveHostConnectionCoordinate & {
+    updatedAtMs: number; guard: () => void;
+  }): LiveHostControlResult {
+    const coordinate = parseLiveHostConnectionCoordinate(input);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host registration time");
       const snapshot = readLiveHostControl(storage.db);
       if (snapshot === null) return liveHostRefusal("not-provisioned");
       const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
@@ -230,7 +237,6 @@ export function registerLiveHost(storage: StorageContext, input: LiveHostConnect
         )
         .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
       return liveHostSuccess(readRequiredLiveHostControl(storage.db));
-    });
   }
 
 export function disconnectLiveHost(storage: StorageContext, input: LiveHostConnectionCoordinate & {

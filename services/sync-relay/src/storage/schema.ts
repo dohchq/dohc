@@ -1,4 +1,5 @@
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
+import { initializeServiceActivationSchema } from "./serviceActivationSchema";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1171,6 +1172,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeSessionHostControlSchema(db);
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeServiceActivationSchema(db);
     initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveCommittedDeliverySchema(db);
