@@ -201,7 +201,8 @@ export class YdocSessionQuarantinedError extends YdocAdapterError {
 export type YdocResyncReason =
   | "event-decode-failed"
   | "event-sequence-gap"
-  | "session-generation-changed";
+  | "session-generation-changed"
+  | "native-state-changed";
 
 export class YdocResyncNeededError extends YdocAdapterError {
   readonly reason: YdocResyncReason;
@@ -1086,6 +1087,7 @@ export class YdocAdapterSession {
     }
     await this.recordChain.catch(() => undefined);
     const result = await this.requestResyncState();
+    if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     const update = result.update;
     if (result.lineageClaimId !== this.lineageClaimId) {
       const replacement = new Y.Doc();
@@ -1136,6 +1138,7 @@ export class YdocAdapterSession {
       { sessionId: this.sessionId },
     );
     const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
+    if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     this.ownerDraft = result.ownerDraft;
     return {
       update: delivery.bytes,
@@ -1494,6 +1497,10 @@ export class YdocLiveAdapter {
       const payload = decodeYdocRemoteUpdatePayload(event.payload);
       const session = this.sessions.get(payload.sessionId);
       if (session === undefined) return;
+      if ("resyncRequired" in payload) {
+        session.markStale(new YdocResyncNeededError({reason: "native-state-changed", event}));
+        return;
+      }
       const previous = this.eventPositions.get(payload.sessionId);
       this.eventPositions.set(payload.sessionId, {
         seq: event.seq,

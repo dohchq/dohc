@@ -1,5 +1,6 @@
 use super::*;
 use dohc_engine_collab::{Ydoc, owner_outbox::draft::*};
+use dohc_engine_protocol::wire::Request;
 use dohc_engine_storage::{EngineStore, hex_sha256};
 
 #[tokio::test]
@@ -9,9 +10,10 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
         "ingress":{"aggregateBytes":1_000_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
         "maxRegistrations":2,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
         "maxApplicationsPerSettlement":100,
-        "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000}
+        "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+        "sync":{"policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,"maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},"workingReserveBytes":4_000_000}
     })).unwrap();
-    let (service, _connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+    let (service, connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
     let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"workspace","captureMode":"none"});
     let opened = service
         .workspace_open(&RequestContext::unbounded(), params.clone())
@@ -154,6 +156,56 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
         .await
         .unwrap_err();
     assert_eq!(error.message, "owner-outbox-frozen");
+    // Exercise the authenticated owner RPC while this real native editor stays open.
+    let mut events = service.events.subscribe();
+    let remote = Ydoc::wire();
+    remote.apply(&bytes).unwrap();
+    let update = remote.richdoc_append_paragraph("accepted peer edit");
+    doc.apply(&update).unwrap();
+    let mut ctx = RequestContext::unbounded();
+    ctx.connection = Some(connection.handle());
+    let input = crate::rpc::owner_delivery::OwnerInput {
+        params: crate::rpc::owner_delivery::OwnerUpload::Accepted(
+            crate::rpc::owner_delivery::OwnerUploadParams {
+                binding: binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: 1,
+                expected_native_head_sequence: 0,
+                previous_accepted_cursor: 0,
+                journal_cursor: 1,
+                stream_id: 4,
+                byte_length: update.len(),
+                digest: hex_sha256(&update),
+                host_vector_byte_length: None,
+            },
+        ),
+        bytes: update,
+        reservation: service.reserve_owner_delivery().unwrap(),
+    };
+    let response = service
+        .owner_delivery_apply(
+            ctx,
+            Request {
+                id: 4,
+                method: "ydoc.ownerDelivery.applyAcceptedFrame".into(),
+                workspace: Some(handle.clone()),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({}),
+            },
+            input,
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.response.result["acceptedCursor"], 1);
+    let notice = events.try_recv().unwrap();
+    assert_eq!(notice.name, "ydoc.remoteUpdate");
+    assert_eq!(
+        notice.payload,
+        json!({"sessionId":sid,"resyncRequired":true})
+    );
+    assert!(events.try_recv().is_err());
+    drop(response);
     let (_, resync) = service
         .ydoc_resync(
             &RequestContext::unbounded(),
@@ -207,6 +259,6 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
             .unwrap()
             .unwrap()
             .head_update_seq,
-        0
+        1
     );
 }

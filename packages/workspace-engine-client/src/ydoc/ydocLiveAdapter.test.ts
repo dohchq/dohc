@@ -88,6 +88,34 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await reopened.close();
 });
 
+it("resyncs a native invalidation into an open provider without losing its durable local edit", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const adapter = new YdocLiveAdapter({
+    ...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}}
+      : event)),
+  });
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  await session.applyLocalTextEdit({root: "plainText", index: 4, insert: " local"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, Y.encodeStateAsUpdate(session.doc));
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  let resolveUpdate!: () => void;
+  const updated = new Promise<void>(resolve => {resolveUpdate = resolve;});
+  session.onRemoteUpdate(() => {if (session.doc.getText("plainText").toString() === "remote seed local") resolveUpdate();});
+  const errors: YdocResyncNeededError[] = []; session.onResyncNeeded(error => errors.push(error));
+  engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await updated;
+  expect(errors.map(error => error.reason)).toEqual(["native-state-changed"]);
+  expect(engine.sessionText(session.sessionId)).toBe("remote seed local");
+  expect(session.doc.getText("plainText").toString()).toBe("remote seed local");
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(1);
+  const before = engine.requests.length;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1, payload: {sessionId: "closed-other-session", resyncRequired: true}});
+  expect(engine.requests).toHaveLength(before);
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
   engine.seedFile({

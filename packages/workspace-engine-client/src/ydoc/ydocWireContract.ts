@@ -172,10 +172,10 @@ const SettleResultSchema = mutableStruct({
 });
 const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
-const RemoteUpdatePayloadSchema = mutableStruct({
-  sessionId: Schema.String,
-  updateBase64: Schema.String,
-});
+const RemoteUpdatePayloadSchema = Schema.Union([
+  mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
+  mutableStruct({sessionId: Schema.String, resyncRequired: Schema.Literal(true)}),
+]);
 
 const YdocResultSchemas = {
   [YDOC_METHOD.open]: OpenResultSchema,

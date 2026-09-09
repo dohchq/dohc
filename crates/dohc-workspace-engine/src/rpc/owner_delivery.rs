@@ -180,6 +180,24 @@ fn invalid() -> WireError {
 }
 
 impl EngineService {
+    fn notify_owner_sessions(&self, workspace: &WorkspaceHandle, binding: &LiveObjectBinding) {
+        let sessions = crate::lock(&self.sessions);
+        for (session_id, session) in sessions.iter() {
+            if &session.workspace == workspace
+                && session.key.workspace_id == binding.workspace_id
+                && session.key.version_id == binding.main_version_id
+                && session.key.object_id == binding.object_id
+                && session.path == binding.current_path
+                && session.lineage_claim_id.as_deref() == Some(binding.lineage_claim_id.as_str())
+            {
+                self.events.emit(
+                    "ydoc.remoteUpdate",
+                    json!({"sessionId":session_id,"resyncRequired":true}),
+                );
+            }
+        }
+    }
+
     pub(super) fn reserve_owner_delivery(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
         self.ordinary_live_host
             .get()
@@ -209,6 +227,7 @@ impl EngineService {
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
+        let binding = params.binding.clone();
         let result = guard
             .open
             .actor
@@ -227,10 +246,7 @@ impl EngineService {
             .await
             .map_err(map_runtime)?
             .map_err(map_owner_outbox)?;
-        self.events.emit(
-            "ydoc.ownerDraftChanged",
-            json!({"workspaceId":guard.open.workspace_id,"outboxId":result.outbox_id}),
-        );
+        self.notify_owner_sessions(&guard.workspace, &binding);
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
@@ -491,6 +507,7 @@ impl EngineService {
         } else {
             None
         };
+        let binding = p.binding.clone();
         let applied = dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
             binding: p.binding,
             relay_database_namespace: p.relay_database_namespace,
@@ -528,6 +545,7 @@ impl EngineService {
         }
         .map_err(map_runtime)?
         .map_err(map_owner_outbox)?;
+        self.notify_owner_sessions(&guard.workspace, &binding);
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
@@ -604,10 +622,7 @@ impl EngineService {
                 session.owner_draft = Some(draft.clone());
             }
         }
-        self.events.emit(
-            "ydoc.ownerDraftChanged",
-            json!({"workspaceId":guard.open.workspace_id,"outboxId":draft.outbox_id}),
-        );
+        self.notify_owner_sessions(&guard.workspace, &draft.binding);
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }

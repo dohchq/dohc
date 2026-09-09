@@ -30,6 +30,7 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnect
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 30000, idleTimeoutMs: 60000, drainTimeoutMs: 1000 };
 const exchangeKey = "native-network-exchange-".repeat(2);
+import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession.js";
 import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {OwnerYDocOutbox} from "../../../packages/workspace-engine-client/src/ydoc/ownerYDocOutbox.js";
 // Selected explicitly by the sealed proof runner. Never skipped for missing prerequisites.
@@ -189,6 +190,22 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const secondClaim = await second.rpc("sync.adoptJoinIdentity", {workspaceId: "workspace", replicationEpoch: bootstrap.replicationEpoch, streamIdentity: bootstrap.streamIdentity});
     results.claims = [firstClaim, secondClaim];
     await first.pull(); await second.pull();
+    let updateObserved: (() => void) | undefined;
+    const rendererDoc = new Y.Doc();
+    const provider = await openEngineYdocProviderSession({transport: first.client, workspace: first.workspaceHandle,
+      versionId: mainVersionId!, path: "docs/a.md", expectedObjectId: "object", contentKind: "richdoc",
+      onRemoteUpdate(update) {Y.applyUpdate(rendererDoc, update); updateObserved?.();},
+      onSessionError(error) {results.providerError = String(error);},
+      scheduleSettle() {return () => undefined;}});
+    Y.applyUpdate(rendererDoc, provider.initialUpdate);
+    async function expectProviderText(text: string, run: () => Promise<unknown>) {
+      let observed!: () => void;
+      const update = new Promise<void>(resolve => {observed = resolve;});
+      const check = () => {if (yDocToMarkdown(rendererDoc) === text) observed();};
+      updateObserved = check;
+      try {await run(); check(); await update; expect(yDocToMarkdown(provider.doc)).toBe(text);}
+      finally {updateObserved = undefined;}
+    }
     const editor = await second.rpc("ydoc.open", {versionId: mainVersionId!, path: "docs/a.md", expectedObjectId: "object", contentKind: "richdoc"});
     expect(editor.lineageClaimId).toBe(binding.lineageClaimId);
     const local = new Y.Doc(); Y.applyUpdate(local, baseline);
@@ -250,7 +267,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     } finally {relayRead.close();}
     const settledPending = await recovered.outbox.readPending(discovered.draft.outboxId);
     expect(settledPending.entries).toHaveLength(0);
-    await first.pass();
+    await expectProviderText(yDocToMarkdown(local), () => first.pass());
     const a = await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1});
     const b = await recovered.client.ownerYDocOpenDraft(recovered.request(), {binding, expectedRevision: 1});
     const render = (bytes: Uint8Array) => {const doc = new Y.Doc(); try {Y.applyUpdate(doc, bytes); return yDocToMarkdown(doc);} finally {doc.destroy();}};
@@ -270,7 +287,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     expect(await reopened.outbox.readPending(pending.outboxId)).toEqual(beforeRestart);
     expect(await reopened.pass()).toBe("acknowledged");
     expect((await reopened.outbox.readPending(pending.outboxId)).entries).toHaveLength(0);
-    await first.pass();
+    await expectProviderText(yDocToMarkdown(local), () => first.pass());
     const convergedA = await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1});
     const convergedB = await reopened.client.ownerYDocOpenDraft(reopened.request(), {binding, expectedRevision: 1});
     expect(render(convergedA.initialUpdate)).toBe(render(convergedB.initialUpdate));
@@ -284,16 +301,18 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const deleted = await reopened.client.ownerYDocAppendDraft(reopened.request(), {binding, expectedRevision: 1, appendKey: "delete-only", updateBytes: deletion});
     expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(1);
     expect(await reopened.pass()).toBe("acknowledged");
-    await first.pass();
+    await expectProviderText("", () => first.pass());
     expect(render((await first.client.ownerYDocOpenDraft(first.request(), {binding, expectedRevision: 1})).initialUpdate)).toBe("");
     expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(0);
     results.delivery = {enrollment, captured, heldEvidence, pending: {deliveryId: pending.deliveryId, updateDigest: pending.updateDigest},
       deletion: {deliveryId: deleted.deliveryId, updateDigest: deleted.updateDigest}, convergedMarkdown: render(convergedB.initialUpdate)};
+    await provider.evict(); rendererDoc.destroy();
+    expect(results.providerError).toBeUndefined();
     local.destroy(); await first.close(); await reopened.close();
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
       scope: "Real BetterAuth/Postgres owner bearer, configured native service, two ordinary native replicas, production owner WS delivery, divergent enrollment, held publication, exact origin release, durable restart, native ACK, peer convergence, delete-only update.",
-      omitted: ["Electron renderer convergence", "Held receipt versus accepted-feed race", "ordinary publication carrier matrix beyond pending ydoc update", "delayed ordinary echo after pruning"], results}, null, 2));
+      omitted: ["Electron renderer UI (production provider and renderer update callback are exercised)", "Held receipt versus accepted-feed race", "ordinary publication carrier matrix beyond pending ydoc update", "delayed ordinary echo after pruning"], results}, null, 2));
   } finally {
     const cleanupErrors: unknown[] = [];
     for (const client of ownerClients) {try {client.close(); await client.waitForExit();} catch (error) {cleanupErrors.push(error);}}
