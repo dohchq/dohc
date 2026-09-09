@@ -2,7 +2,7 @@ use dohc_engine_domain::{DeleteTextFile, VersionedTextStore, WriteText};
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::MomentMaterializationChange;
-use dohc_engine_testkit::{engine_db_path, ScratchDir};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 
 fn write(text: &str, moment: &str, now_ms: i64) -> WriteText {
