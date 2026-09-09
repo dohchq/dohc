@@ -1,5 +1,5 @@
 import {createHash} from "node:crypto";
-import {readFileSync, writeFileSync} from "node:fs";
+import {readFileSync, appendFileSync} from "node:fs";
 import {join} from "node:path";
 import {WebSocket} from "ws";
 import type {BrowserContext} from "@playwright/test";
@@ -14,7 +14,11 @@ type Outcome = Extract<LiveFrame, {kind: "result"}> | {kind: "socket-closed"; co
 export function createPublicLinkWireProof(input: {audience: string; root: string; frames: LiveFrameSessionPolicy; timeoutMs: number}) {
   const {audience, root, frames, timeoutMs} = input;
   const sockets = new Set<WebSocket>(), documents = new Set<Y.Doc>(), events: unknown[] = [];
-  const save = () => writeFileSync(join(root, "public-wire-evidence.json"), JSON.stringify({events}, null, 2));
+  const save = () => {
+    if (!events.length) return;
+    appendFileSync(join(root, "public-wire-evidence.jsonl"), events.map(event => JSON.stringify(event) + "\n").join(""));
+    events.length = 0;
+  };
   async function ticket(context: BrowserContext, discriminator: string, objectId: string): Promise<Ticket> {
     const response = await context.request.post(audience + "/api/live/link-ticket", {data: {discriminator, objectId}, headers: {origin: audience}});
     expect(response.status()).toBe(200);
@@ -120,6 +124,7 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
       await until(() => protocol.usage().outgoing.promisedFrames >= 1 &&
         protocol.usage().outgoing.promisedBytes >= encodeLiveFrame(begin, maximum).length);
       send(begin);
+      // The codec uses fixed eight-byte transfer IDs and offsets; overhead is offset-independent.
       const overhead = encodeLiveFrame({kind: "chunk", transferId: id, offset: 0, bytes: new Uint8Array(1)}, maximum).length - 1;
       for (let offset = 0; offset < bytes.length;) {
         await until(() => protocol.usage().outgoing.promisedFrames >= 1 && protocol.usage().outgoing.promisedBytes > overhead);
