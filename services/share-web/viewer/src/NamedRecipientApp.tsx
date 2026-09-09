@@ -81,7 +81,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     }).catch(() => {if (!controller.signal.aborted) setError("dohc could not sign you out. Retry sign-out.");})
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   });
-  return <div className="viewer">
+  return <div className="viewer named-recipient">
     <header><div><p className="eyebrow">dohc</p><h1>Shared files</h1></div>
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={busy} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
@@ -91,17 +91,17 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
           <label>Password<input name="password" type="password" autoComplete="current-password" required disabled={busy}/></label>
           <button className="handoff-button primary" disabled={busy}>Sign in</button></form>
         {busy && <p role="status">Checking your account…</p>}{error && <p role="alert">{error}</p>}
-      </main> : <main className="layout">
-        <nav aria-label="Shared Markdown files"><p className="section-label">Files</p>
-          {files?.files.map(file => <button className="handoff-button secondary" key={file.objectId} disabled={busy}
+      </main> : <main className="layout named-recipient-layout">
+        <nav className="named-file-list" aria-label="Shared Markdown files"><p className="section-label">Files</p>
+          {files?.files.map(file => <button className="handoff-button secondary named-file" key={file.objectId} disabled={busy}
             aria-current={selection?.objectId === file.objectId ? "page" : undefined} onClick={() => open(file.objectId, file.path)}>{file.path}</button>)}
           {files && !files.files.length && <p>No Markdown files are available. Refresh after the owner adds a file.</p>}
-          <button className="handoff-button secondary" disabled={busy} onClick={() => leave(refresh)}>Refresh files</button>
+          <button className="handoff-button secondary named-refresh" disabled={busy} onClick={() => leave(refresh)}>Refresh files</button>
           {busy && <p role="status">Opening shared files…</p>}{error && <p role="alert">{error}</p>}
         </nav>
         {selection ? <NamedDocumentEditor key={selection.session.doc.guid} session={selection.session} path={selection.path} onState={receiveState}/> :
           <section className="content"><p>Choose a Markdown file to open it.</p></section>}
-        {selection && (sessionState?.pendingUpdates || sessionState?.status === "quarantined") ? <aside className="comments-panel" aria-label="Draft recovery">
+        {selection && (sessionState?.pendingUpdates || sessionState?.status === "quarantined") ? <aside className="comments-panel named-draft-recovery" aria-label="Draft recovery">
           <h2>Review your draft</h2><p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
           <p>Copy the changes you want to keep from the editor. Open the current file, then paste and review them.</p>
           <button className="handoff-button secondary" onClick={() => open(selection.objectId, selection.path)}>Open current file</button>
