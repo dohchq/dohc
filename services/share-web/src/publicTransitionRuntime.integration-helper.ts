@@ -153,8 +153,8 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
           const continuation = selected.continuation;
           for (const peer of peers) await browserExpect.poll(async () => hash(Buffer.from(await peer.editor.textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.editorText));
           const directory = join(h.root, "restore-continuation"); mkdirSync(directory);
-          const save = (name: string, bytes: Uint8Array) => {
-            const path = join(directory, name); writeFileSync(path, bytes, {flag: "wx"});
+          const save = (file: string, bytes: Uint8Array) => {
+            const path = join(directory, file); writeFileSync(path, bytes, {flag: "wx"});
             return {path, sha256: hash(bytes), byteLength: bytes.length};
           };
           const checkpoint = Y.encodeStateAsUpdate(socket.doc), restoredCheckpoint = save("restored-checkpoint.bin", checkpoint);
@@ -182,6 +182,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
             suffixSha256: actual.cut.suffix.map(row => hash(row.bytes))}, null, 2) + "\n"));
           Object.assign(continuationEvidence, {admission, admissionReceipt});
           await apply({deliveryId: continuation.deliveryId, bytes: generated.bytes, expected: continuation.expected});
+          Object.assign(continuationEvidence, {editorWitnessVerified: true});
         } else await apply(selected.resumed!);
       }
       if (name !== "selectorDrift") {
@@ -190,7 +191,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
         if (restoredViewer && continuationEvidence) {
           await browserExpect.poll(async () => hash(Buffer.from(await restoredViewer!.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(expected.viewText));
-          Object.assign(continuationEvidence, {editorWitnessVerified: true, viewWitnessVerified: true, verdict: "PASS"});
+          Object.assign(continuationEvidence, {viewWitnessVerified: true, verdict: "PASS"});
           writeFileSync(join(h.root, "restore-continuation", "result.json"), JSON.stringify(continuationEvidence, null, 2) + "\n", {flag: "wx"});
         }
       }

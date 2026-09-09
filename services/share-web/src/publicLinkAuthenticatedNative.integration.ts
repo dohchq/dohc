@@ -542,7 +542,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   } finally {
     try {
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: proofPassed ? "PASS" : "FAIL", executable, sha256: expectedHash, admissionSha256: admissionDigest,
-      scope: "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access/restore at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
+      scope: "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access and restore recipe with runtime-derived continuation at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
       omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Large pinned updates are wire-authored; Chromium receives and renders them through the production provider", "Transition stages use one active submitter and C-1 browser receivers", "Internal ordinary replication TLS; native sync uses the recorded owned-loopback transport seam"], results}, null, 2));
     } catch (error) {
       if (proofPassed) throw error;
