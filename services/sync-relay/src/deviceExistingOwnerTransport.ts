@@ -125,7 +125,7 @@ export function startExistingOwnerDeviceTransport(options: {
         try {owner = existing?.owner ?? config.ownerFor(binding); owner.assertCurrent();}
         catch (error) {
           if (resumeAdoptionId === undefined) throw error;
-          await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}}); return;
+          await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner session is unavailable."}},signal); return;
         }
         const nativeId = existing?.nativeId ?? integer(configRecord((await config.client.sendRequest({...request,method: operation.method,params: {binding: {...binding,selectorPaths: [...binding.selectorPaths]}}},signal)).result,["registrationId"]).registrationId,1);
         registration = existing ?? {nativeId,binding,owner,adopted: false};
@@ -137,7 +137,7 @@ export function startExistingOwnerDeviceTransport(options: {
           owner.assertCurrent();
           const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
           if (state.throughCursor === null) {
-            await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}}); return;
+            await send({type: "response",id: operation.id,result: {status: "pending",reason: "The existing owner adoption is unavailable."}},signal); return;
           }
           integer(state.throughCursor);
           if (state.adoptionId !== resumeAdoptionId) throw new Error("Owner adoption identity mismatch.");
