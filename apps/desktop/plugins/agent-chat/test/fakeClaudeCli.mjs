@@ -63,11 +63,6 @@ function runSession() {
     process.exit(1);
   }
 
-  if (mode === "no-handshake") {
-    // Names the process that must not survive dohc giving up on it.
-    writeFileSync(join(process.cwd(), "no-handshake.pid"), String(process.pid));
-  }
-
   const write = (text) => process.stdout.write(text);
 
   /** Writes one message, in fragments when the test asks for fragments. */
