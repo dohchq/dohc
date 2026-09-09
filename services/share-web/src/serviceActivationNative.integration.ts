@@ -135,6 +135,7 @@ it("resumes a real configured service activation after a lost native adoption re
   mkdirSync(output, {recursive: true});
   const root = mkdtempSync(join(resolve(output), "service-activation-")), workspace = join(root, "service"), ownerRoot = join(root, "owner");
   mkdirSync(workspace); mkdirSync(ownerRoot);
+  mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
   const admin = new Client({connectionString, connectionTimeoutMillis: 5000});
   const pool = new Pool({connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000});
@@ -177,7 +178,8 @@ it("resumes a real configured service activation after a lost native adoption re
       relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000});
     const handle = (opened.result as {workspace: string}).workspace;
     async function rpc(method: string, params: Record<string, any>) {
-      return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000})).result as Record<string, any>;
+      try {return (await owner!.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: 30000})).result as Record<string, any>;}
+      catch (cause) {throw new Error(`Service proof source RPC failed: ${method}`, {cause});}
     }
     results.claim = await rpc("sync.claim", {workspaceId: "workspace"});
     const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
