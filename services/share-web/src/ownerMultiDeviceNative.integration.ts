@@ -211,12 +211,13 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     results.claims = [firstClaim, secondClaim];
     await first.pull(); await second.pull();
     let updateObserved: (() => void) | undefined;
+    let ownerRefreshGeneration = 0, ownerRefreshObserved: (() => void) | undefined;
     const rendererDoc = new Y.Doc();
     const provider = await openEngineYdocProviderSession({transport: first.client, workspace: first.workspaceHandle,
       versionId: mainVersionId!, path: "docs/a.md", expectedObjectId: "object", contentKind: "richdoc",
       onRemoteUpdate(update) {Y.applyUpdate(rendererDoc, update); updateObserved?.();},
       onSessionError(error) {results.providerError = String(error);},
-      scheduleSettle() {return () => undefined;}});
+      scheduleSettle() {ownerRefreshGeneration++; ownerRefreshObserved?.(); return () => undefined;}});
     Y.applyUpdate(rendererDoc, provider.initialUpdate);
     async function expectProviderText(text: string, run: () => Promise<unknown>) {
       let observed!: () => void;
@@ -243,14 +244,16 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const recovered = await startOwner("owner-b");
     expect(await recovered.client.ownerYDocPrepareEnrollment(recovered.request(), target)).toEqual(captured);
     results.stage = "enroll owner A and observe provider refresh";
-    let enrollmentObserved!: () => void;
-    const enrollmentRefresh = new Promise<void>(resolve => {enrollmentObserved = resolve;});
-    updateObserved = enrollmentObserved;
+    const beforeEnrollmentRefresh = ownerRefreshGeneration;
+    const enrollmentRefresh = new Promise<void>(resolve => {
+      ownerRefreshObserved = () => {if (ownerRefreshGeneration > beforeEnrollmentRefresh) resolve();};
+    });
     try {expect(await first.pass()).toBe("empty"); await enrollmentRefresh;}
-    finally {updateObserved = undefined;}
+    finally {ownerRefreshObserved = undefined;}
     results.stage = "read enrolled owner A descriptor";
     const firstDraft = await first.client.ownerYDocPrepareEnrollment(first.request(), target);
     expect(firstDraft.status).toBe("observed");
+    results.stage = "refuse foreign owner account";
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
     const refused = await runNativeOwnerDeliveryPass({client: first.client, workspaceHandle: first.workspaceHandle,
       document: selected, config: deliveryConfig, signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, assertCurrent() {}});
@@ -261,6 +264,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const release = new Promise<void>(done => {releaseCapture = done;});
     const arrived = new Promise<void>(done => {captureArrived = done;});
     heldCapture = {remaining: 2, arrived: captureArrived, release};
+    results.stage = "enroll divergent owner B and hold submission";
     const enrollmentPass = recovered.pass();
     let heldEvidence: {retainedDigest: string; draftDigest: string; push: Record<string, any>} | undefined;
     try {
@@ -277,6 +281,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       expect(storage.getBlob("workspace", hash(divergent))).toBeNull();
       heldEvidence = {retainedDigest: retained.entries[0]!.updateDigest, draftDigest: hash(localDraft.initialUpdate), push};
     } finally {releaseCapture();}
+    results.stage = "finish divergent enrollment and release ordinary publication";
     const enrollment = await enrollmentPass;
     expect(["acknowledged", "empty"]).toContain(enrollment);
     const discovered = await recovered.client.ownerYDocPrepareEnrollment(recovered.request(), target);
@@ -293,6 +298,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     } finally {relayRead.close();}
     const settledPending = await recovered.outbox.readPending(discovered.draft.outboxId);
     expect(settledPending.entries).toHaveLength(0);
+    results.stage = "observe accepted owner delivery in open provider";
     await expectProviderText(yDocToMarkdown(local), () => first.pass());
     const a = await first.openDraft();
     const b = await recovered.openDraft();
@@ -301,6 +307,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     expect(render(a.initialUpdate)).toBe(render(b.initialUpdate));
     // A durable draft waits while the bounded native delivery pass is deliberately not running.
     Y.applyUpdate(local, b.initialUpdate);
+    results.stage = "retain pending update across owner restart";
     const pendingUpdate = append("Pending across restart");
     const pending = await recovered.appendDraft("pending-restart", pendingUpdate);
     const beforeRestart = await recovered.outbox.readPending(pending.outboxId);
@@ -312,6 +319,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     expect(await reopened.outbox.readPending(pending.outboxId)).toEqual(beforeRestart);
     expect(await reopened.pass()).toBe("acknowledged");
     expect((await reopened.outbox.readPending(pending.outboxId)).entries).toHaveLength(0);
+    results.stage = "observe accepted owner delivery in open provider";
     await expectProviderText(yDocToMarkdown(local), () => first.pass());
     const convergedA = await first.openDraft();
     const convergedB = await reopened.openDraft();
@@ -391,8 +399,9 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       scope: "Real BetterAuth/Postgres owner bearer, configured native service, two ordinary native replicas, production owner WS delivery, divergent enrollment, held publication, exact origin release, durable restart, receipt held before accepted feed, native ACK, open provider convergence, delete-only update, old echo and original base after real pruning.",
       omitted: ["Electron renderer UI (production provider and renderer update callback are exercised)", "ordinary publication carrier matrix beyond pending ydoc update"], results}, null, 2));
   } catch (error) {
-    writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "FAIL", executable, sha256: expectedHash,
-      error: error instanceof Error ? {...error, name: error.name, message: error.message, stack: error.stack} : String(error), results}, null, 2));
+    try {writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "FAIL", executable, sha256: expectedHash,
+      error: error instanceof Error ? {...error, name: error.name, message: error.message, stack: error.stack} : String(error), results}, null, 2));}
+    catch (evidenceError) {console.error("Owner proof failure evidence could not be written", evidenceError);}
     throw error;
   } finally {
     const cleanupErrors: unknown[] = [];
