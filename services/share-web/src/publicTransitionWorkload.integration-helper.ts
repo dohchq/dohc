@@ -97,7 +97,7 @@ export function readPublicTransitionWorkload(pin: {path: string; sha256: string}
       return {baseline, updates, interrupted, resumed};
     } finally {doc.destroy();}
   }
-  const cases = Object.fromEntries([...transitionNames, "view"].map(name => [name, load(name)])) as Record<TransitionName | "view", ReturnType<typeof load>>;
+  const cases = Object.fromEntries(([...transitionNames, "view"] as const).map(name => [name, load(name)])) as Record<TransitionName | "view", ReturnType<typeof load>>;
   return {manifest, cases, pins};
 }
 export type LoadedPublicTransitions = ReturnType<typeof readPublicTransitionWorkload>;

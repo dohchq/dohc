@@ -174,7 +174,7 @@ export function createPublicLinkWireProof(input: {audience: string; root: string
     }
     async function close() {if (closed === undefined) {ws.close(); await until(() => closed !== undefined);} protocol.close(); doc.destroy(); documents.delete(doc);}
     return {ws, status, sync, doc, partial, partialTransfer, submit, hostileSend, close, until, receiptTimes,
-      get membership() {return received.findLast((frame): frame is Extract<LiveFrame, {kind: "membership"}> => frame.kind === "membership");},
+      get membership() {return [...received].reverse().find((frame): frame is Extract<LiveFrame, {kind: "membership"}> => frame.kind === "membership");},
       get binding() {return initialBinding;}, get hostEpoch() {return received.find((frame): frame is Extract<LiveFrame, {kind: "welcome"}> => frame.kind === "welcome")?.hostEpoch;}, get closed() {return closed;}};
   }
 

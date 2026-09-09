@@ -5,6 +5,7 @@ import type {BrowserContext, Page} from "@playwright/test";
 import {expect as browserExpect} from "@playwright/test";
 import {expect, vi} from "vitest";
 import {createEngineClient} from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
+import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
 import type {ServiceActivationConfig} from "../../sync-relay/src/serviceActivationDriver.js";
 import type {PublicTransitionHarness, PublicTransitionFixture} from "./publicTransitionRuntime.integration-helper.js";
 import {assertPublicApplication} from "./publicTransitionRuntime.integration-helper.js";
@@ -34,13 +35,13 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/engineClient.js", 
 export interface AutomaticViewAdmission {
   readContexts: number;
   maxPagesPerPull: number;
-  activation: Omit<ServiceActivationConfig, "targets" | "validation">;
+  activation: Omit<ServiceActivationConfig, "targets" | "validateBaseline" | "validateJournal">;
   adoption: {maxBytes: number; maxEvents: number; ownerOutbox: {maxPendingBytes: number; maxPendingAgeMs: number}};
 }
 interface Options {
   h: PublicTransitionHarness; selected: LoadedPublicTransitions["cases"]["view"];
   admission: AutomaticViewAdmission; executable: string; relayUrl: string; ownerToken: string;
-  native: Record<string, unknown>; validation: ServiceActivationConfig["validation"]; maxRegistrations: number;
+  native: Record<string, unknown>; validation: OrderedLiveUpdateCutPolicy; maxRegistrations: number;
   replaceHost(config: unknown): Promise<void>;
   newView(url: string): Promise<{context: BrowserContext; page: Page}>;
 }
@@ -63,9 +64,9 @@ export async function runPublicAutomaticView(options: Options) {
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId, captureMode: "none",
       relay: {baseUrl: options.relayUrl, bearerToken: options.ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: h.timeoutMs});
     const handle = (opened.result as {workspace: string}).workspace;
-    const rpc = async (method: string, params: Record<string, unknown>) => {
+    const rpc = async (method: string, params: Parameters<typeof owner.sendRequest>[0]["params"]) => {
       const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs});
-      if (response.error) throw new Error(JSON.stringify(response.error)); return response.result as Record<string, any>;
+      return response.result as Record<string, any>;
     };
     await rpc("sync.claim", {workspaceId});
     const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
