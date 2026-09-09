@@ -164,6 +164,39 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it.each(["closed", "reopened"])("rejects discovered owner handles after a capture directly closes its %s session", async mode => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-capture-close-");
+    f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => { throw new Error("No editor in this discovery test."); });
+    ownerHostMock.read.mockReturnValue({ nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: { aggregateBytes: 1024, maxUploads: 1 } });
+    ownerHostMock.start.mockImplementation(() => ({ stop: vi.fn() }));
+    let handles = 0;
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async input => input.method === "workspace.open" && workspaceIdOf(input) === "owner"
+      ? { id: input.id, result: { workspace: `owner-${++handles}` } } : originalSend(input);
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const lease = f.authorities.acquire("owner");
+      const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
+      lease.release();
+      const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
+      const captured = await discover();
+      expect(() => captured.assertCurrent()).not.toThrow();
+      // Temporary dispatch capture closes its store after the paused relay close.
+      await f.engine.sessions!.closeWorkspace(workspace);
+      if (mode === "reopened") await f.engine.sessions!.run(workspace, async () => undefined);
+      expect(() => captured.assertCurrent()).toThrow();
+      const current = await discover();
+      expect(current.client).toBe(captured.client);
+      expect(current.workspaces[0].workspaceHandle).not.toBe(captured.workspaces[0].workspaceHandle);
+      expect(() => current.assertCurrent()).not.toThrow();
+      expect(() => captured.assertCurrent()).toThrow();
+    } finally { await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset(); }
+  });
+
   it.each(["initial", "credential", "cloud", "rejecting-close", "quitting"])("retires discovered owner bindings before the first relay request after %s rebind", async mode => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

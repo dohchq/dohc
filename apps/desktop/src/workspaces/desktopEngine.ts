@@ -87,6 +87,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const client = daemon.currentClient();
         if (!(client instanceof EngineClient)) throw new Error("Owner host requires the desktop daemon client.");
         const workspaces = [];
+        const bindingChecks: (() => void)[] = [];
         for (const workspaceId of config.workspaceIds) {
           workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
             lease.assertCurrent();
@@ -94,12 +95,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             return sessions.run(workspace, async binding => {
               lease.assertCurrent();
               if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner host daemon changed.");
+              bindingChecks.push(() => sessions.assertCurrentBinding(workspace, binding));
               return {workspaceId,workspaceHandle: binding.workspace};
             });
           }));
         }
         return {client,workspaces,assertCurrent: () => {
           if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
+          for (const check of bindingChecks) check();
         }};
       },
     });
