@@ -14,6 +14,7 @@ import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.j
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
+import * as restoreProof from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
 import {canonicalAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
@@ -1367,33 +1368,48 @@ const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"jou
   operations:f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),owners:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all(),
   edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
 
-function repeatedReviewFixture() {
+function repeatedReviewFixture(rounds = 1) {
   const f = admittedRestoreFixture("owner", "deleted");
   try {
     f.complete();
-    f.raw.exec("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'");
-    const intent = {...f.intent, operationId: "review-second", expectedFence: 2, expectedGrantGeneration: 6};
-    beginStopRestore(f.context, intent, 300);
-    const lookup = {...f.lookup, operationId: intent.operationId};
-    advanceStopRestoreFence(f.context, lookup, 301);
-    const opened = f.store.openStopRestoreCut(lookup);
-    if (opened.kind !== "ready") throw Error(opened.kind);
-    expect(f.store.nextStopRestoreCut(opened.capture).kind).toBe("done");
-    f.store.completeStopRestoreCut(opened.capture);
-    const receipt = {operation: f.store.pendingStopRestoreFence(lookup).operation, localHeadSequence: 12, recordedAtMs: 302};
-    f.store.acknowledgeStopRestoreFence(lookup, receipt);
-    const input = {...lookup, maxBytes: 1_000_000, maxEvents: 40};
-    const proposal = {...f.receipt, fence: receipt, point: resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy),
-      selectedHistory: f.store.captureStopRestorePoint(input).proof, acceptedHistory: f.store.captureStopRestoreAcceptedCut(input).proof,
-      originEvidenceDigest: f.store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
-      nativeSources: [], nativeSourceManifestDigest: jsonHash([receipt, []])};
-    const second = buildContentProposal({...f, input, lookup, receipt, proposal});
-    const saved = f.store.recordStopRestoreProposal(input, second.encoded, policy, 303);
-    return {...second, first: f, saved, reviewInput: {...input, maxOutputBytes: 1_000_000}};
+    for (let round = 1; ; round++) {
+      const at = 200 + 100 * round, grantGeneration = 4 + 2 * round;
+      f.raw.prepare("UPDATE sync_relay_share_grants SET status='active',generation=?,revoked_at_ms=NULL WHERE grant_id='grant'").run(grantGeneration);
+      const intent = {...f.intent, operationId: round === 1 ? "review-second" : `review-${round + 1}`, expectedFence: 1 + round, expectedGrantGeneration: grantGeneration};
+      beginStopRestore(f.context, intent, at);
+      const lookup = {...f.lookup, operationId: intent.operationId};
+      advanceStopRestoreFence(f.context, lookup, at + 1);
+      const opened = f.store.openStopRestoreCut(lookup);
+      if (opened.kind !== "ready") throw Error(opened.kind);
+      expect(f.store.nextStopRestoreCut(opened.capture).kind).toBe("done");
+      f.store.completeStopRestoreCut(opened.capture);
+      const receipt = {operation: f.store.pendingStopRestoreFence(lookup).operation, localHeadSequence: 2 + 10 * round, recordedAtMs: at + 2};
+      f.store.acknowledgeStopRestoreFence(lookup, receipt);
+      const input = {...lookup, maxBytes: 1_000_000, maxEvents: 40};
+      const proposal = {...f.receipt, fence: receipt, point: resolveLiveRestorePoint(f.store.captureStopRestorePoint(input), policy),
+        selectedHistory: f.store.captureStopRestorePoint(input).proof, acceptedHistory: f.store.captureStopRestoreAcceptedCut(input).proof,
+        originEvidenceDigest: f.store.captureStopRestoreOwnerOrigin(input).evidenceDigest,
+        nativeSources: [], nativeSourceManifestDigest: jsonHash([receipt, []])};
+      const second = buildContentProposal({...f, input, lookup, receipt, proposal});
+      const saved = f.store.recordStopRestoreProposal(input, second.encoded, policy, at + 3);
+      if (round === rounds) return {...second, first: f, saved, reviewInput: {...input, maxOutputBytes: 1_000_000}};
+      const admitted = f.store.admitStopRestoreProposal(input, saved.proposalDigest, policy, at + 4);
+      const application = {...f.application, fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest,
+        nativeSourceManifestDigest: admitted.nativeSourceManifestDigest, admitted: admitted.admitted,
+        localHeadSequence: receipt.localHeadSequence + 1, recordedAtMs: at + 5};
+      f.store.acknowledgeStopRestoreReplacement(input, application);
+      const settlement = {...f.settlement, settlementId: `settlement-${round}`, momentId: `moment-${round}`,
+        terminalCursor: admitted.admitted.accepted.receipt.journalCursor, localYDocSequence: application.localHeadSequence,
+        markdownDigest: admitted.preparation.point.markdownDigest};
+      f.store.acknowledgeStopRestoreSettlement(input, settlement);
+      f.store.acknowledgeStopRestoreResume(input, {...f.resume, operationId: input.operationId, binding: admitted.admitted.accepted.binding,
+        applicationReceipt: admitted.admitted.accepted.receipt, settlementId: settlement.settlementId, momentId: settlement.momentId,
+        markdownDigest: settlement.markdownDigest, localHeadSequence: application.localHeadSequence, recordedAtMs: at + 7});
+    }
   } catch (error) {f.close(); throw error;}
 }
 
-it.each(["complete", "missing-event", "wrong-proposal", "budget", "changed-after-review", "cancelled-after-review"])("confirms only an authenticated complete host restore review: %s", async state => {
+it.each(["complete", "missing-event", "missing-proposal", "wrong-proposal", "budget", "changed-after-review", "cancelled-after-review"])("confirms only an authenticated complete host restore review: %s", async state => {
   const f = repeatedReviewFixture();
   try {
     const driver = new LiveRestorePreparation({...preparationConfig(), maxEvents: state === "budget" ? 3 : 40});
@@ -1407,20 +1423,28 @@ it.each(["complete", "missing-event", "wrong-proposal", "budget", "changed-after
       expect(lifecycleRows(f)).toEqual(before);
     }
     if (state === "missing-event") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+    if (state === "missing-proposal") f.raw.exec("DELETE FROM sync_relay_live_restore_proposals WHERE operation_id='review-second'");
     const abort = new AbortController();
     if (state === "changed-after-review" || state === "cancelled-after-review") {
-      const read = f.store.readStopRestoreReview.bind(f.store);
-      vi.spyOn(f.store, "readStopRestoreReview").mockImplementation((...args) => {
-        const review = read(...args);
-        if (state === "changed-after-review") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
-        else abort.abort(Error("confirmation cancelled"));
-        return review;
+      const read = f.store.readStopRestoreLifecycle.bind(f.store);
+      let reads = 0;
+      vi.spyOn(f.store, "readStopRestoreLifecycle").mockImplementation((...args) => {
+        const lifecycle = read(...args);
+        // The driver first checks recovery; admission checks again after preparing the review.
+        if (++reads === 2) {
+          if (state === "changed-after-review") f.raw.exec("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=1");
+          else abort.abort(Error("confirmation cancelled"));
+        }
+        return lifecycle;
       });
     }
     const before = lifecycleRows(f);
     const expected = state === "wrong-proposal" ? "f".repeat(64) : f.saved.proposalDigest;
     if (state === "complete") {
+      const validation = vi.spyOn(restoreProof, "validateLiveRestoreProposal");
       await expect(driver.confirm(options, expected)).rejects.toThrow("simulated transport loss after admission");
+      expect(validation).toHaveBeenCalledTimes(1);
+      validation.mockRestore();
       expect(f.store.readStopRestoreLifecycle(f.input)?.phase).toBe("relay-admitted");
       expect(sendLiveRestore).toHaveBeenCalledTimes(1);
     } else {
@@ -1445,6 +1469,10 @@ it("returns a complete private review across a restore checkpoint, including alr
     const before = lifecycleRows(f), review = f.store.readStopRestoreReview(f.reviewInput, policy)!;
     expect(review.proposalDigest).toBe(f.saved.proposalDigest);
     expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([1, 2, 3]);
+    expect(review.priorRestoreCuts).toEqual([{operationId: "restore", proposalDigest: f.first.proposal.proposalDigest,
+      restoreJournalCursor: 3, selectedEventCount: f.first.receipt.selectedHistory.eventCount,
+      acceptedEventCount: f.first.receipt.acceptedHistory.eventCount,
+      selectedTerminal: f.first.receipt.selectedHistory.terminal, frozenTerminal: f.first.receipt.acceptedHistory.terminal}]);
     expect(review.nativeSources).toHaveLength(2);
     expect(review.nativeSources.map(source => source.acceptedRelation)).toEqual(["not-relay-accepted", "not-relay-accepted"]);
     expect(review.nativeSources[1]!.source.deliveryId).toBe(f.first.receipt.nativeSources[1]!.deliveryId);
@@ -1453,6 +1481,24 @@ it("returns a complete private review across a restore checkpoint, including alr
     }]);
     expect(review.content.frozenMarkdownDigest).toBe(hash(Buffer.from(review.content.frozenMarkdown)));
     expect(review.content.restoredMarkdownDigest).toBe(f.receipt.point.markdownDigest);
+    expect(lifecycleRows(f)).toEqual(before);
+  } finally {f.close();}
+});
+
+it("retains overlapping authenticated prior restore cuts without duplicating accepted events or deletion-only sources", () => {
+  const f = repeatedReviewFixture(2);
+  try {
+    const before = lifecycleRows(f), review = f.store.readStopRestoreReview(f.reviewInput, policy)!;
+    expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([1, 2, 3, 4]);
+    expect(review.priorRestoreCuts.map(cut => ({operationId: cut.operationId, selected: cut.selectedTerminal?.journalCursor ?? 0,
+      frozen: cut.frozenTerminal?.journalCursor ?? 0, restored: cut.restoreJournalCursor,
+      selectedEvents: cut.selectedEventCount, acceptedEvents: cut.acceptedEventCount}))).toEqual([
+      {operationId: "restore", selected: 0, frozen: 2, restored: 3, selectedEvents: 0, acceptedEvents: 2},
+      {operationId: "review-second", selected: 0, frozen: 3, restored: 4, selectedEvents: 0, acceptedEvents: 3},
+    ]);
+    expect(review.nativeSources).toHaveLength(2);
+    expect(review.nativeSources[1]!.source.deliveryId).toBe(f.first.receipt.nativeSources[1]!.deliveryId);
+    expect(Y.decodeUpdate(f.first.bytes.nativeSourceBytes[1]!).structs).toHaveLength(0);
     expect(lifecycleRows(f)).toEqual(before);
   } finally {f.close();}
 });

@@ -61,6 +61,9 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
   const acceptedByDelivery = new Map(events.map(event => [event.metadata.accepted.receipt.deliveryId, event.metadata]));
   require(acceptedByDelivery.size === events.length);
   const sources = new Map<string, ReviewSource>();
+  const priorRestoreCuts: {operationId: string; proposalDigest: string; restoreJournalCursor: number;
+    selectedEventCount: number; acceptedEventCount: number;
+    selectedTerminal: LiveUpdateReceipt | null; frozenTerminal: LiveUpdateReceipt | null}[] = [];
   const add = (source: NativeSource, occurrence: Omit<SourceOccurrence, "acceptedReceipt">) => {
     budget.chargeEvents(1);
     const accepted = acceptedByDelivery.get(source.deliveryId) ?? readAcceptedHistoryDeliveryMetadata(storage, {
@@ -87,10 +90,14 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
     if (event.restoreOperationId === null) continue;
     const previous = historicalSources(storage, {document, namespace, operationId: event.restoreOperationId, metadata: event.metadata}, budget);
     require(previous.receipt.fence.operation.newFence <= receipt.fence.operation.oldBinding.restoreFenceGeneration);
+    priorRestoreCuts.push({operationId: event.restoreOperationId, proposalDigest: previous.proposalDigest,
+      restoreJournalCursor: event.metadata.accepted.receipt.journalCursor,
+      selectedEventCount: previous.receipt.selectedHistory.eventCount, acceptedEventCount: previous.receipt.acceptedHistory.eventCount,
+      selectedTerminal: previous.receipt.selectedHistory.terminal, frozenTerminal: previous.receipt.acceptedHistory.terminal});
     for (const source of previous.receipt.nativeSources) add(source, {operationId: event.restoreOperationId,
       proposalDigest: previous.proposalDigest, context: "prior-restore"});
   }
   for (const source of receipt.nativeSources) add(source, {operationId: receipt.fence.operation.operationId,
     proposalDigest: input.proposalDigest, context: "current-fence"});
-  return {acceptedEvents: events, nativeSources: [...sources.values()]};
+  return {acceptedEvents: events, nativeSources: [...sources.values()], priorRestoreCuts};
 }

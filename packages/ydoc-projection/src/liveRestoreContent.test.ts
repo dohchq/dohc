@@ -105,9 +105,15 @@ it("returns the validated frozen and restored Markdown with their exact byte dig
   expect(result.restoredMarkdownByteLength).toBe(Buffer.byteLength(result.restoredMarkdown));
   expect(result.frozenMarkdownByteLength).toBeGreaterThan(result.frozenMarkdown.length);
   const exact=result.frozenMarkdownByteLength+result.restoredMarkdownByteLength;
+  const prepared = validateLiveRestoreProposal(f.capture, f.bytes, policy, budget);
+  const frozenBytes = f.bytes.frozenStateBytes.slice();
+  f.bytes.frozenStateBytes.fill(0);
+  expect(prepared.projectReview(exact)).toEqual(result);
+  f.bytes.frozenStateBytes.set(frozenBytes);
   expect(projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact})).toEqual(result);
   expect(()=>projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact-1})).toThrow("output budget");
   f.capture.assertCurrent.mockImplementation(()=>{throw Error("retired");});
+  expect(()=>prepared.projectReview(exact)).toThrow("retired");
   expect(()=>projectLiveRestoreReviewContent(f.capture,f.bytes,policy,{...budget,maxOutputBytes:exact})).toThrow("retired");
 });
 it.each(["Selected **bold** and 🦀.", "# Title\n\n- one\n- two", "[Selected](https://example.com)"])(

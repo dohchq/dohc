@@ -64,7 +64,7 @@ import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from ".
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
-import {projectLiveRestoreReviewContent,validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
+import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
 import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES } from "./liveRestoreOperationSchema";
@@ -1040,6 +1040,10 @@ export class LiveCommittedDeliveryStore {
   }
   readStopRestoreProposal(input: RestoreProposalInput,
     policy: OrderedLiveUpdateCutPolicy) {
+    const prepared = this.#prepareStopRestoreProposal(input, policy);
+    return prepared ? {...prepared.saved, receipt: prepared.capture.receipt} : null;
+  }
+  #prepareStopRestoreProposal(input: RestoreProposalInput, policy: OrderedLiveUpdateCutPolicy) {
     const lookup = {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
       ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)}, host = snapshotHostCoordinate(input.host);
     const budget = {maxBytes: authorityInteger(input.maxBytes, 1), maxEvents: authorityInteger(input.maxEvents, 1)};
@@ -1058,26 +1062,29 @@ export class LiveCommittedDeliveryStore {
     });
     if (!saved) return null;
     integrity(createHash("sha256").update(saved.bytes).digest("hex") === saved.proposalDigest);
-    const decoded = decodeNativeRestoreProposal(saved.bytes, budget), capture = this.captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson);
+    const decoded = decodeNativeRestoreProposal(saved.bytes, budget);
+    const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson, decoded.bytes.nativeSourceBytes);
     const validated = validateLiveRestoreProposal(capture, decoded.bytes, policy, budget);
     integrity(validated.content.candidateDigest === saved.candidateDigest);
-    return {...saved, receipt: capture.receipt};
+    return {saved, capture, validated, assertCurrentInTransaction};
   }
   captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string) {
     return this.#captureStopRestoreProposal(input, receiptJson).capture;
   }
   /** Private complete projection only. Reading it does not authorize replacement or resume. */
   readStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, policy: OrderedLiveUpdateCutPolicy) {
+    return this.#prepareStopRestoreReview(input, policy)?.review ?? null;
+  }
+  #prepareStopRestoreReview(input: RestoreProposalInput & {maxOutputBytes: number}, policy: OrderedLiveUpdateCutPolicy) {
     const request = lifecycleInput(input), maxOutputBytes = authorityInteger(input.maxOutputBytes, 1);
     const assertDatabaseCurrent = captureSqliteReadRevision(this.#storage.db);
-    const saved = this.readStopRestoreProposal(request, policy);
-    if (!saved) return null;
+    const prepared = this.#prepareStopRestoreProposal(request, policy);
+    if (!prepared) return null;
+    const {saved, capture, validated} = prepared;
     const budget = new RestoreHistoryBudget(request.maxBytes, request.maxEvents);
     budget.chargeBytes(saved.bytes.byteLength);
-    const decoded = decodeNativeRestoreProposal(saved.bytes, request);
-    budget.chargeEvents(decoded.receipt.selectedHistory.suffix.length + decoded.receipt.acceptedHistory.suffix.length);
-    const capture = this.captureStopRestoreProposal(request, decoded.receiptJson);
-    const content = projectLiveRestoreReviewContent(capture, decoded.bytes, policy, {...request, maxOutputBytes});
+    budget.chargeEvents(capture.receipt.selectedHistory.suffix.length + capture.receipt.acceptedHistory.suffix.length);
+    const content = validated.projectReview(maxOutputBytes);
     capture.assertCurrent();
     const history = this.#storage.readTx(() => {
       assertDatabaseCurrent(); this.#restore(request, request.host);
@@ -1094,7 +1101,7 @@ export class LiveCommittedDeliveryStore {
     if (outputBytes > maxOutputBytes) throw new Error("Restore review exceeds its output budget.");
     budget.chargeBytes(outputBytes);
     capture.assertCurrent(); assertDatabaseCurrent();
-    return review;
+    return {review, prepared};
   }
   #captureStopRestoreProposal(input: RestoreProposalInput, receiptJson: string,ownedSourceBytes?:readonly Uint8Array[]) {
     const assertDatabaseCurrent=captureSqliteReadRevision(this.#storage.db);
@@ -1245,24 +1252,23 @@ export class LiveCommittedDeliveryStore {
     policy: OrderedLiveUpdateCutPolicy, now: number, signal?: AbortSignal): RestoreLifecycle {
     signal?.throwIfAborted();
     const assertReviewCurrent = captureSqliteReadRevision(this.#storage.db);
-    const review = this.readStopRestoreReview(input, policy);
-    integrity(review && review.proposalDigest === expectedProposalDigest);
+    const prepared = this.#prepareStopRestoreReview(input, policy);
+    integrity(prepared && prepared.review.proposalDigest === expectedProposalDigest);
     return this.#admitStopRestoreProposal(input, expectedProposalDigest, policy, now, () => {
       signal?.throwIfAborted();
       assertReviewCurrent();
-    });
+    }, () => prepared.prepared);
   }
   #admitStopRestoreProposal(input: RestoreProposalInput, expectedProposalDigest:string, policy: OrderedLiveUpdateCutPolicy,
-    now:number, assertReviewCurrent?: () => void):RestoreLifecycle {
+    now:number, assertReviewCurrent?: () => void, prepare = () => this.#prepareStopRestoreProposal(input, policy)):RestoreLifecycle {
     const assertProposalCurrent=captureSqliteReadRevision(this.#storage.db);
     input=lifecycleInput(input);
     expectedProposalDigest=parseLiveUpdateDigest(expectedProposalDigest);
     const historical=this.readStopRestoreLifecycle(input);
     if (historical) {integrity(historical.proposalDigest===expectedProposalDigest);return historical;}
-    const proposal=this.readStopRestoreProposal(input,policy);integrity(proposal && proposal.proposalDigest===expectedProposalDigest);
-    const decoded=decodeNativeRestoreProposal(proposal.bytes,input);
-    const {capture,assertCurrentInTransaction}=this.#captureStopRestoreProposal(input,decoded.receiptJson,decoded.bytes.nativeSourceBytes);
-    const validated=validateLiveRestoreProposal(capture,decoded.bytes,policy,input),updateBytes=validated.candidateBytes,checkpointBytes=validated.content.stateUpdate;
+    const prepared=prepare();integrity(prepared && prepared.saved.proposalDigest===expectedProposalDigest);
+    const {saved:proposal,capture,validated,assertCurrentInTransaction}=prepared;
+    const updateBytes=validated.candidateBytes,checkpointBytes=validated.content.stateUpdate;
     const checkpointDigest=createHash("sha256").update(checkpointBytes).digest("hex"),at=authorityInteger(now);
     const {fence,point,nativeSourceManifestDigest}=capture.receipt,document=journalDocument({workspaceId:fence.operation.oldBinding.workspaceId,mainVersionId:fence.operation.oldBinding.mainVersionId,objectId:fence.operation.oldBinding.objectId,lineageClaimId:fence.operation.oldBinding.lineageClaimId});
     const binding=parseLiveObjectBinding({...fence.operation.oldBinding,restoreFenceGeneration:fence.operation.newFence});

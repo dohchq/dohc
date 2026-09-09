@@ -76,30 +76,35 @@ export function validateLiveRestoreProposal(capture: ProposalCapture, input: Liv
       }
       return Object.freeze(merged.map(range=>Object.freeze(range)));
     });
-    return Object.freeze({content: result,nativeSourceRanges:Object.freeze(nativeSourceRanges),get candidateBytes() {return new Uint8Array(candidate);}});
+    return Object.freeze({content: result,nativeSourceRanges:Object.freeze(nativeSourceRanges),get candidateBytes() {return new Uint8Array(candidate);},
+      projectReview: (maxOutputBytes: number) => projectValidatedReview(capture, frozen, result, policy, maxOutputBytes)});
   } finally {frozenDoc.destroy();restoredDoc.destroy();}
 }
 
 /** Validated artifact text for a separate owner review. This does not establish a complete loss list or consent. */
 export function projectLiveRestoreReviewContent(capture: ProposalCapture, input: LiveRestoreProposalBytes,
   policy: OrderedLiveUpdateCutPolicy, budget: {maxBytes: number; maxEvents: number; maxOutputBytes: number}) {
+  return validateLiveRestoreProposal(capture, input, policy, budget).projectReview(budget.maxOutputBytes);
+}
+
+function projectValidatedReview(capture: ProposalCapture, frozenBytes: Uint8Array,
+  content: ReturnType<typeof compareLiveRestoreContent>, policy: OrderedLiveUpdateCutPolicy, maxOutputBytes: number) {
   capture.assertCurrent();
-  require(Number.isSafeInteger(budget.maxOutputBytes) && budget.maxOutputBytes > 0);
-  const validated = validateLiveRestoreProposal(capture, input, policy, budget);
+  require(Number.isSafeInteger(maxOutputBytes) && maxOutputBytes > 0);
   const binding = capture.selected.binding;
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const registration = createLiveMarkdownRegistrationValidator(policy);
-  const frozen = registration({document,currentPath:binding.currentPath,checkpoint:input.frozenStateBytes});
-  const restored = registration({document,currentPath:binding.currentPath,checkpoint:validated.content.stateUpdate});
+  const frozen = registration({document,currentPath:binding.currentPath,checkpoint:frozenBytes});
+  const restored = registration({document,currentPath:binding.currentPath,checkpoint:content.stateUpdate});
   if (frozen.kind !== "accepted" || restored.kind !== "accepted") throw new Error("Restore review content refused.");
-  require(frozen.evidence.checkpoint.updateDigest === validated.content.frozenStateDigest);
+  require(frozen.evidence.checkpoint.updateDigest === content.frozenStateDigest);
   require(restored.evidence.projectedMarkdownSha256 === capture.receipt.point.markdownDigest);
-  if (frozen.evidence.projectedMarkdownByteLength > budget.maxOutputBytes - restored.evidence.projectedMarkdownByteLength) {
+  if (frozen.evidence.projectedMarkdownByteLength > maxOutputBytes - restored.evidence.projectedMarkdownByteLength) {
     throw new Error("Restore review exceeds its output budget.");
   }
   capture.assertCurrent();
-  return Object.freeze({candidateDigest:validated.content.candidateDigest,
+  return Object.freeze({candidateDigest:content.candidateDigest,
     frozenMarkdown:frozen.evidence.projectedMarkdown, frozenMarkdownDigest:frozen.evidence.projectedMarkdownSha256,
     frozenMarkdownByteLength:frozen.evidence.projectedMarkdownByteLength,
     restoredMarkdown:restored.evidence.projectedMarkdown, restoredMarkdownDigest:restored.evidence.projectedMarkdownSha256,
