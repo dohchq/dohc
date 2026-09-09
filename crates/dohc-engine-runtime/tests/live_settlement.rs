@@ -785,16 +785,18 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
         ApplyDisposition, BlobContent, BlobHydration, NoLiveLeases, SyncError,
         apply_replication_envelope, hydrate_blob_content,
     };
+    use yrs::updates::decoder::Decode;
     let f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
-    let before = f.doc.state_vector();
+    let before = yrs::StateVector::decode_v1(&f.doc.encode_state_vector()).unwrap();
     let update = f
         .doc
         .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\n")
         .unwrap();
     let mut first_seen = Vec::new();
-    for (client, end) in f.doc.state_vector().iter() {
+    let after = yrs::StateVector::decode_v1(&f.doc.encode_state_vector()).unwrap();
+    for (client, end) in after.iter() {
         let start = before.get(client);
         if *end > start {
             first_seen.push(LiveUpdateStructRange {
