@@ -19,13 +19,21 @@ import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSett
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
+import {parseServiceOrdinaryReplicationConfig, ServiceOrdinaryReplication, type ServiceOrdinaryReplicationConfig} from "./serviceOrdinaryReplication.js";
+import type {RelayMaterializedPath} from "@dohc/workspace-contracts/relay";
+
+export type ServiceOrdinaryMaterializer = (paths: readonly RelayMaterializedPath[], native: {
+  readonly client: EngineClient; readonly workspace: string; readonly workspaceId: string; readonly root: string;
+  readonly signal: AbortSignal; assertCurrent(): void;
+}) => Promise<void>;
 
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
   readonly hostId: string;
   readonly instanceId: string;
-  readonly workspaces: readonly { readonly root: string; readonly workspaceId: string; readonly maxRegistrations: number }[];
+  readonly workspaces: readonly { readonly root: string; readonly workspaceId: string; readonly maxRegistrations: number;
+    readonly ordinaryReplication?: ServiceOrdinaryReplicationConfig }[];
   readonly ingress: { readonly aggregateBytes: number; readonly applicationWorkingReserveBytes: number; readonly maxUploads: number; readonly uploadDeadlineMs: number };
   readonly client: { readonly aggregateBytes: number; readonly maxUploads: number; readonly connectTimeoutMs: number; readonly requestDeadlineMs: number };
   readonly settlement?: LiveSettlementConfig;
@@ -56,8 +64,9 @@ function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
     ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.map(item => {
-    const row = record(item, ["root", "workspaceId", "maxRegistrations"]);
-    return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"), maxRegistrations: integer(row.maxRegistrations) });
+    const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["ordinaryReplication"]);
+    return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"),
+      maxRegistrations: integer(row.maxRegistrations), ordinaryReplication: parseServiceOrdinaryReplicationConfig(row.ordinaryReplication) });
   });
   if (new Set(workspaces.map(row => row.workspaceId)).size !== workspaces.length ||
     new Set(workspaces.map(row => process.platform === "win32" ? row.root.toLowerCase() : row.root)).size !== workspaces.length) throw new TypeError("Duplicate service workspace.");
@@ -90,11 +99,13 @@ export async function startServiceLiveHost(options: {
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath);
+  const preparingOrdinary = config.workspaces.some(row => row.ordinaryReplication !== undefined);
   const standing = storage.captureStanding();
   if (!history.reconciled || held.has(storage)) throw new Error("Service host is unavailable.");
   const control = storage.getLiveHostControl();
   if (!control || control.configuredMode !== "service" || control.configuredHostId !== config.hostId || control.transition ||
     (control.registeredInstanceId !== null && control.registeredInstanceId !== config.instanceId)) throw new Error("Service host does not match provisioned control.");
+  if (preparingOrdinary && control.registeredConnectionId !== null) throw new Error("Ordinary service preparation requires an unregistered host.");
   const coordinate: LiveHostConnectionCoordinate = Object.freeze({ mode: "service", hostId: config.hostId, hostEpoch: control.hostEpoch,
     instanceId: config.instanceId, connectionId: randomUUID() });
   const host = { hostId: coordinate.hostId, hostEpoch: coordinate.hostEpoch, instanceId: coordinate.instanceId, connectionId: coordinate.connectionId };
@@ -104,6 +115,7 @@ export async function startServiceLiveHost(options: {
   const changes = options.frameChanges;
   const stopObserving = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
   const consumers = new Map<string, LiveCommittedDelivery>();
+  const ordinary = new Map<string, ServiceOrdinaryReplication>();
   const documents = new LiveDocumentWork();
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
@@ -123,6 +135,10 @@ export async function startServiceLiveHost(options: {
     if (!current || current.transition || current.configuredMode !== "service" || current.configuredHostId !== coordinate.hostId ||
       current.hostEpoch !== coordinate.hostEpoch || current.registeredInstanceId !== coordinate.instanceId ||
       current.registeredConnectionId !== coordinate.connectionId || current.admissionState !== "open") throw new Error("Service host registration was retired.");
+  };
+  const checkPreparing = () => {
+    standing(); signal.throwIfAborted();
+    if (!history.reconciled || !isDeepStrictEqual(storage.getLiveHostControl(), control)) throw new Error("Ordinary service preparation was retired.");
   };
   const close = (): Promise<void> => {
     if (closing) return closing;
@@ -168,7 +184,9 @@ export async function startServiceLiveHost(options: {
     temporary = await mkdtemp(join(tmpdir(), "dohc-service-live-host-"));
     const nativeConfig = join(temporary, "host.json");
     await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
-      workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement, sync: config.sync,
+      workspaces: config.workspaces.map(({ordinaryReplication, ...workspace}) => ({...workspace,
+        ...(ordinaryReplication ? {relay: ordinaryReplication.relay} : {})})),
+      ingress: config.ingress, settlement: config.settlement, sync: config.sync,
       restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 });
     client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
@@ -191,15 +209,34 @@ export async function startServiceLiveHost(options: {
       handles.add(row.workspaceHandle);
       consumers.set(row.workspaceId as string, new LiveCommittedDelivery(storage, history, { client, workspace: row.workspaceHandle,
         host: coordinate, deadlineMs: config.client.requestDeadlineMs, nextRequestId, restore }));
+      const attachment = config.workspaces[index]!.ordinaryReplication;
+      if (attachment) ordinary.set(row.workspaceId as string, new ServiceOrdinaryReplication({client, workspace: row.workspaceHandle,
+        workspaceId: row.workspaceId as string, nextRequestId, deadlineMs: config.client.requestDeadlineMs,
+        signal, assertCurrent: checkPreparing}, attachment));
     }
     standing();
     if (signal.aborted || !history.reconciled) throw new Error("Service host startup cancelled.");
-    const registration = storage.registerLiveHost({ ...coordinate, updatedAtMs: Date.now(), guard: standing });
-    if (!registration.ok) throw new Error("Service host registration refused.");
-    registered = true;
-    check();
+    if (preparingOrdinary) {
+      // Imported-lineage activation must finish before this instance serves live documents.
+      checkPreparing();
+    } else {
+      const registration = storage.registerLiveHost({ ...coordinate, updatedAtMs: Date.now(), guard: standing });
+      if (!registration.ok) throw new Error("Service host registration refused.");
+      registered = true;
+      check();
+    }
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      async prepareOrdinary(workspaceId: string, materializePage: ServiceOrdinaryMaterializer, callerSignal?: AbortSignal) {
+        const driver = ordinary.get(workspaceId);
+        if (!driver) throw new Error("Workspace has no ordinary replication attachment.");
+        if (typeof materializePage !== "function") throw new Error("Ordinary pull requires workspace materialization.");
+        const joined = callerSignal ? AbortSignal.any([signal, callerSignal]) : signal;
+        const native = Object.freeze({client: client!, workspace: driver.connection.workspace, workspaceId,
+          root: config.workspaces.find(row => row.workspaceId === workspaceId)!.root, signal: joined,
+          assertCurrent() {joined.throwIfAborted(); checkPreparing();}});
+        return driver.pull(paths => materializePage(paths, native), joined);
+      },
       async captureNative(value: LiveObjectBinding, callerSignal?: AbortSignal) {
         if (!changes || !config.sync) throw new Error("Named frame sync is not configured on this service host.");
         const binding = parseLiveObjectBinding(value);

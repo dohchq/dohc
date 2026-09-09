@@ -58,6 +58,54 @@ it("registers only the discovered engine identity and releases its incarnation o
   expect(f.storage.getLiveHostControl()?.admissionState).toBe("closed");
 });
 
+it("prepares attached ordinary replication without registering a partly activated live host", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  const attachment = {relay: {baseUrl: "https://relay.example", bearerToken: "actual-owner-credential"},
+    identity: {kind: "join", replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 1};
+  Object.assign(f.config.workspaces[0]!, {ordinaryReplication: attachment}); await f.save();
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    const discovery = captured.client.sendRequest.getMockImplementation()!;
+    captured.client.sendRequest.mockImplementation(async (...args: unknown[]) => {
+      const request = args[0] as {method: string};
+      if (request.method === "liveApplication.hosts") return discovery();
+      if (request.method === "sync.adoptJoinIdentity") return {result: {adopted: true}} as never;
+      if (request.method === "sync.commitCursor") return {result: {committed: true, sharingDeclined: []}} as never;
+      return {result: {status: "complete", nextCursor: 7, pendingCursor: {kind: "relay", token: "native-issued-token"},
+        hasMore: false, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
+        changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}]}} as never;
+    });
+    return captured.client;
+  });
+  const before = f.storage.getLiveHostControl();
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.workspaces[0]).toEqual({root: f.config.workspaces[0]!.root, workspaceId: "workspace", maxRegistrations: 8, relay: attachment.relay});
+    expect(captured.config.workspaces[0]).not.toHaveProperty("ordinaryReplication");
+    expect(f.storage.getLiveHostControl()).toEqual(before);
+    expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
+    await expect(host.drain({workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)})).rejects.toThrow("retired");
+    const materialize = vi.fn(async () => {});
+    expect(await host.prepareOrdinary("workspace", materialize)).toMatchObject({nextCursor: 7, hasMore: false});
+    expect(materialize).toHaveBeenCalledWith([{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}],
+      expect.objectContaining({client: captured.client, workspace: "actual-open-handle", workspaceId: "workspace", root: f.config.workspaces[0]!.root}));
+    expect(f.storage.getLiveHostControl()).toEqual(before);
+  } finally { await host.close(); }
+  expect(f.storage.getLiveHostControl()).toEqual(before);
+});
+
+it("requires a materializer before starting an attached pull", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  Object.assign(f.config.workspaces[0]!, {ordinaryReplication: {relay: {baseUrl: "https://relay.example", bearerToken: "owner"},
+    identity: {kind: "claim"}, maxPagesPerPull: 1}}); await f.save();
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const host = await startServiceLiveHost(f);
+  try {
+    await expect(host.prepareOrdinary("workspace", undefined as never)).rejects.toThrow("materialization");
+    expect(captured.client.sendRequest).toHaveBeenCalledTimes(1);
+  } finally {await host.close();}
+});
+
 it("refuses forged engine discovery before opening relay admission", async () => {
   const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
   spawn.mockImplementation(async options => {
