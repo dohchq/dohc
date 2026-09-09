@@ -165,6 +165,21 @@ function ownerCapture(f:ReturnType<typeof fixture>){
     localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
   return {capture,delivery,acknowledge}
 }
+it.each(['selector','host'] as const)('revalidates a private pending activation binding after its %s changes',change=>{
+  const f=fixture();try{
+    f.prepare()
+    const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+    const captured=delivery.captureOwnerBinding({host,document:f.document,actor})
+    expect(captured.binding).toMatchObject(f.document)
+    expect(captured.assertCurrent).not.toThrow()
+    const wrong=f.storage.createLiveCommittedDeliveryStore(f.history,{activationId:'wrong-activation'})
+    expect(()=>wrong.captureOwnerBinding({host,document:f.document,actor})).toThrow()
+    if(change==='selector')f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
+      .run(JSON.stringify({paths:['other'],versionId:null}))
+    else f.raw.exec("UPDATE sync_relay_session_host_control SET registered_connection_id='different-connection'")
+    expect(captured.assertCurrent).toThrow()
+  }finally{f.close()}
+})
 it('revalidates the frozen activation source before acknowledging a captured owner cut',()=>{
   const f=fixture();try{
     const owner=ownerCapture(f)
