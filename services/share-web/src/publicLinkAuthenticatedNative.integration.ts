@@ -12,6 +12,13 @@ import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowse
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
 import {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
 import {readPublicWorkload} from "./publicLinkWorkload.integration-helper.js";
+import {readPublicTransitionWorkload} from "./publicTransitionWorkload.integration-helper.js";
+import {runPublicTransitions, type PublicTransitionHarness} from "./publicTransitionRuntime.integration-helper.js";
+import {runPublicAutomaticView, type AutomaticViewAdmission} from "./publicAutomaticView.integration-helper.js";
+import {runPublicMixedPresence} from "./publicMixedPresence.integration-helper.js";
+import {createLiveMembershipRegistry} from "../../sync-relay/src/liveMembership.js";
+import {createLiveConnectionAdmission} from "../../sync-relay/src/liveConnectionAdmission.js";
+import {createNamedLiveRelayRoute, namedLiveGatewayRequest} from "./namedLiveRelayRoute.js";
 import { Client, Pool } from "pg";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -39,6 +46,9 @@ interface PublicProofAdmission {
   publicEditGateGranted: true;
   admittedConcurrency: number;
   workload: {path: string; sha256: string};
+  transitions: {path: string; sha256: string};
+  automaticView: AutomaticViewAdmission;
+  namedSessions: NonNullable<Parameters<typeof createSyncRelayHandler>[0]["namedBrowserSessionLimits"]>;
   frames: Parameters<typeof createNamedLiveRoutes>[0]["frames"];
   route: Parameters<typeof createNamedLiveRoutes>[0]["limits"];
   bounds: Parameters<typeof createNamedLiveRoutes>[0]["bounds"];
@@ -62,6 +72,7 @@ if (capacity.publicEditGateGranted !== true || !Number.isSafeInteger(capacity.ad
 }
 const frames = capacity.frames, routeLimits = capacity.route, validationPolicy = capacity.validation;
 const workload = readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
+const transitions = readPublicTransitionWorkload(capacity.transitions, capacity.admittedConcurrency);
 const exchangeKey = "public-native-exchange-".repeat(2), ticketKey = "public-native-tickets-".repeat(2), linkKey = "public-native-links-".repeat(2);
 // Opt-in integration filename. The pinned serial harness must select this file explicitly.
 it("exercises public Edit through owner creation, exchange and native application at admitted concurrency", async () => {
@@ -149,11 +160,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         payloadAfterContentKind: "text", payloadAfterByteLength: evidence.projectedMarkdownByteLength})}]});
     expect(storage.registerLiveDocumentBaseline({host: active.coordinate, evidence: outsideRegistration.evidence, baselineBytes: baseline, registeredAtMs: 3}).kind).toBe("registered");
     const relayApp = createSyncRelayHandler({storage, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
-      resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
-    let routes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
+      namedBrowserSessionLimits: capacity.namedSessions, resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
+    let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
     const relayHttp = serveFetchHandler({handler: request => {
       const path = new URL(request.url).pathname;
-      return path === "/sync/live/link-tickets" ? routes.handle(request)
+      return path === "/sync/live/named-tickets" ? namedRoutes.handle(request) : path === "/sync/live/link-tickets" ? routes.handle(request)
         : ["/sync/live/link-session", "/sync/live/link-document"].includes(path) ? linkHttp(request) : relayApp(request);
     }, maxBodyBytes: () => capacity.requests.maxRequestBytes, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
@@ -163,11 +174,16 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       if (!active) throw new Error("Native host unavailable."); return active.captureNative(binding);
     };
     const tickets = createLiveTickets({storage, audience, key: ticketKey, hostReports: createLiveHostReports({storage, captureNative})});
+    const membership = createLiveMembershipRegistry({maxSessions: routeLimits.maxConnections, maxMembers: routeLimits.maxConnections,
+      maxSnapshotBytes: frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage)), sharedAdmission = createLiveConnectionAdmission();
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
-      bounds: capacity.bounds, validate, sessions: createLinkLiveBrowserResolver({storage, linkKey}), tickets, captureNative});
+      bounds: capacity.bounds, validate, sessions: createLinkLiveBrowserResolver({storage, linkKey}), tickets, captureNative, membership, admission: sharedAdmission});
+    namedRoutes = createNamedLiveRoutes({kind: "named", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
+      bounds: capacity.bounds, validate, sessions: {resolve: relayApp.resolveNamedBrowserSession}, tickets, captureNative, membership, admission: sharedAdmission});
     linkHttp = createLinkLiveHttp({storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
     closes.push(async () => routes.close());
-    relayHttp.on("upgrade", (request, socket, head) => {upgrades.push(routes.handleUpgrade(request, socket, head));});
+    closes.push(async () => namedRoutes.close());
+    relayHttp.on("upgrade", (request, socket, head) => {upgrades.push((new URL(request.url!, relayUrl).pathname === "/sync/live/link" ? routes : namedRoutes).handleUpgrade(request, socket, head));});
     const application = createShareWebApplication({relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey,
       fetchRelay: async request => {
         const bearer = request.headers.get("authorization")?.replace(/^(Bearer|LinkCapability) /, "");
@@ -176,16 +192,22 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         return fetch(request);
       },
       publicHosts: new Set([new URL(audience).host]), accountAuth: {publicOrigin: audience, upstreamUrl: authUrl},
+      namedBrowserSessionLimits: capacity.requests, namedLiveTickets: true, namedRecipientBrowserLimits: capacity.editor,
       viewerAssetsDir: fileURLToPath(new URL("../viewer/dist", import.meta.url)),
       linkLive: {publicOrigin: audience, requests: capacity.requests, editor: capacity.editor}});
     if (!application.linkLive) throw new Error("Public live composition missing.");
     const gateway = createLiveGateway({publicOrigin: audience, publicHosts: new Set([new URL(audience).host]), path: "/api/live/link",
       limits: capacity.gateway, resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute});
     closes.push(async () => gateway.close());
+    const namedGateway = createLiveGateway({publicOrigin: audience, publicHosts: new Set([new URL(audience).host]), limits: capacity.gateway,
+      resolveSession: async (request, discriminator, signal) => {const authenticated = namedLiveGatewayRequest(request, audience, signal);
+        return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null;},
+      openHostRoute: createNamedLiveRelayRoute({relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: capacity.gateway.upgradeTimeoutMs})});
+    closes.push(async () => namedGateway.close());
     const publicHttp = serveFetchHandler({handler: application.handle, maxBodyBytes: () => capacity.requests.maxRequestBytes,
       oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     publicHttps.on("request", (request, response) => publicHttp.emit("request", request, response));
-    publicHttps.on("upgrade", (request, socket, head) => {upgrades.push(gateway.handleUpgrade(request, socket, head));});
+    publicHttps.on("upgrade", (request, socket, head) => {upgrades.push((new URL(request.url!, audience).pathname === "/api/live/link" ? gateway : namedGateway).handleUpgrade(request, socket, head));});
     const ownerToken = (await auth.api.signInEmail({body: {email: ownerUser.email, password}})).token;
     async function ownerRequest(path: string, body?: unknown) {
       const response = await fetch(relayUrl + path, {method: body === undefined ? "GET" : "POST",
@@ -452,6 +474,58 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     for (const peer of workloadWires) await peer.close();
     results.suppliedWireWorkload = {concurrency: workloadWires.length, manifest: capacity.workload, assets: workload.pins, rounds: workloadRounds, verdict: "PASS"};
     readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
+    const transitionHarness: PublicTransitionHarness = {root, workspace, audience, concurrency: capacity.admittedConcurrency,
+      timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
+        if (!active) throw new Error("Transition host is offline."); return active;
+      }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+      listeners: () => frameChanges.listenerCount(), ownerRequest, openLink, wire,
+      register: async (id, checkpoint, markdown) => {
+        const path = `docs/${id}.md`, document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: id, lineageClaimId: hash(checkpoint)};
+        const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({document, currentPath: path, checkpoint});
+        if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
+        expect(registration.evidence.projectedMarkdownSha256).toBe(hash(markdown));
+        storage.putBlob({workspaceId: "workspace", sha256: hash(markdown), content: markdown, createdAtMs: Date.now()});
+        storage.appendLogBatch({workspaceId: "workspace", originId: id, ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: Date.now(),
+          payloadJson: JSON.stringify({objectId: id, momentId: id, versionId: mainVersionId!, recordedAtMs: Date.now(), operation: "write",
+            metadata: {origin: "sync"}, beforePresent: "absent", path, payloadAfterPath: path, payloadAfterBlobSha256: hash(markdown),
+            payloadAfterContentKind: "text", payloadAfterByteLength: markdown.length})}]});
+        expect(storage.registerLiveDocumentBaseline({host: active!.coordinate, evidence: registration.evidence, baselineBytes: checkpoint, registeredAtMs: Date.now()}).kind).toBe("registered");
+        const link = await ownerRequest("/sync/workspace/shares/links", {paths: [path], access: "edit"}); return {document, path, link};
+      }};
+    results.loadedTransitions = await runPublicTransitions(transitionHarness, transitions);
+    const namedUser = (await auth.api.signUpEmail({body: {email: "public-proof-named@example.test", password, name: "Named collaborator"}})).user;
+    const namedGrants = new Map<string, string>();
+    results.publicMixedPresence = await runPublicMixedPresence(transitionHarness, transitions, async fixture => {
+      let grantId = namedGrants.get(fixture.document.objectId);
+      if (!grantId) {
+        grantId = randomUUID(); namedGrants.set(fixture.document.objectId, grantId);
+        const shareId = randomUUID();
+        storage.createShare({share: {shareId, workspaceId: fixture.document.workspaceId, granterUserId: ownerUser.id,
+          selectorJson: JSON.stringify({paths: [fixture.path], versionId: null}), createdAtMs: Date.now()}, grant: {grantId, shareId, principalKind: "user",
+          principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}});
+      }
+      const context = await browser!.newContext({ignoreHTTPSErrors: true}); contexts.push(context); const page = await context.newPage();
+      page.on("pageerror", error => browserErrors.push(String(error)));
+      await page.goto(`${audience}/s/edit/${encodeURIComponent(grantId)}`);
+      await page.getByLabel("Email", {exact: true}).fill(namedUser.email); await page.getByLabel("Password", {exact: true}).fill(password);
+      await page.getByRole("button", {name: "Sign in", exact: true}).click();
+      await browserExpect(page.getByRole("button", {name: "Sign out", exact: true})).toBeVisible();
+      await page.getByRole("button", {name: fixture.path, exact: true}).click();
+      const editor = page.getByRole("textbox", {name: "Shared file editor"});
+      await browserExpect(editor).toHaveAttribute("contenteditable", "true");
+      await browserExpect(page.getByRole("status")).toContainText("Ready to edit"); return {context, page, editor};
+    });
+    results.automaticView = await runPublicAutomaticView({h: transitionHarness, selected: transitions.cases.view, admission: capacity.automaticView,
+      executable, relayUrl, ownerToken, native: capacity.native, validation: validationPolicy, maxRegistrations: capacity.maxRegistrations,
+      replaceHost: async config => {await active!.close(); active = undefined; writeFileSync(serviceConfig, JSON.stringify(config));
+        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+      newView: async url => {
+        const context = await browser!.newContext({ignoreHTTPSErrors: true}); contexts.push(context); const page = await context.newPage();
+        page.on("pageerror", error => browserErrors.push(String(error)));
+        const exchange = page.waitForResponse(response => new URL(response.url()).pathname === "/api/exchange");
+        await page.goto(url); expect((await exchange).status()).toBe(200); return {context, page};
+      }});
+    readPublicTransitionWorkload(capacity.transitions, capacity.admittedConcurrency);
     const exposedBodies = await Promise.all(publicBodies);
     for (const secret of protectedSecrets) for (const body of exposedBodies) expect(body).not.toContain(secret);
     for (const context of contexts) for (const page of context.pages()) {
@@ -464,11 +538,12 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   } finally {
     try {
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: proofPassed ? "PASS" : "FAIL", executable, sha256: expectedHash, admissionSha256: admissionDigest,
-      scope: "Owner HTTP Edit creation and anonymous protected-cookie exchange; tiny Chromium lifecycle at C; supplied baseline rendered and small real browser edits acknowledged and settled at C; separate client-distinct pinned wire workload acknowledged, converged and settled at C; tiny partial-transfer restore and restart stale-authority checks",
-      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Supplied workload updates through Chromium editor/provider; supplied updates use wire clients after Chromium baseline readiness"], results}, null, 2));
+      scope: "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access/restore at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
+      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Large pinned updates are wire-authored; Chromium receives and renders them through the production provider", "Transition stages use one active submitter and C-1 browser receivers", "Internal ordinary replication TLS; native sync uses the recorded owned-loopback transport seam"], results}, null, 2));
     } catch (error) {
       if (proofPassed) throw error;
       console.error("Could not retain public proof results after failure:", error);
+
     } finally {
     for (const context of contexts) await context.close();
     await browser?.close();

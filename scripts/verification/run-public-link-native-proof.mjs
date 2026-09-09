@@ -65,6 +65,21 @@ const workloadPins=[workload.baseline.checkpoint,workload.baseline.markdown,
  .map(pin=>({...pin,path:resolve(dirname(release.workload.path),pin.path)}));
 async function verifyWorkload(){await verify(release.workload);for(const pin of workloadPins)assert.equal((await verify(pin)).length,pin.byteLength);}
 await verifyWorkload();
+assert.ok(release.transitions?.path && release.transitions?.sha256,'Selected public transition manifest required');
+assert.ok(isAbsolute(release.transitions.path),'Transition manifest path must be absolute');
+const transitionManifest=JSON.parse(await verify(release.transitions));
+const transitionNames=['restart','staleFrame','selectorDrift','accessChange','restore'];
+assert.equal(transitionManifest.version,1);assert.equal(transitionManifest.concurrency,release.admittedConcurrency);
+assert.deepEqual(Object.keys(transitionManifest.cases).sort(),[...transitionNames,'view'].sort());
+const projectionPins=value=>[value.markdown,value.editorText,value.viewText];
+const transitionPins=Object.values(transitionManifest.cases).flatMap(value=>[
+ value.baseline.checkpoint,...projectionPins(value.baseline),
+ ...value.updates.flatMap(update=>[update.bytes,...projectionPins(update.expected)]),
+ ...(value.interrupted?[value.interrupted.bytes]:[]),...(value.resumed?[value.resumed.bytes,...projectionPins(value.resumed.expected)]:[])
+]).map(pin=>({...pin,path:resolve(dirname(release.transitions.path),pin.path)}));
+async function verifyTransitions(){await verify(release.transitions);for(const pin of transitionPins)assert.equal((await verify(pin)).length,pin.byteLength);}
+await verifyTransitions();
+assert.ok(Number.isSafeInteger(release.automaticView.readContexts)&&release.automaticView.readContexts>=1,'Explicit concurrent View admission required');
 const before=await snapshot();
 await mkdir(output);
 await writeFile(join(output,'source-before.json'),JSON.stringify(before,null,2)+'\n');
@@ -77,7 +92,7 @@ const caseOutput=join(output,'cases');await mkdir(caseOutput);
 const {run,pnpm}=await import(pathToFileURL(join(root,'scripts/verification/process.mjs')));
 const {postgres}=await import(pathToFileURL(join(root,'scripts/verification/verify.mjs')));
 const result={author:'gpt-6-astra',root,head,nativeHead,nativeSource,nativeSourceBytesMatch:true,binary,runnerPin,configPin,admissionSha256:hash(admissionBytes),nativeInputCount:nativeInputs.size,
- workload:{manifest:release.workload,assets:workloadPins},startedAt:new Date().toISOString(),verdict:'RUNNING',fullGate:false};
+ workload:{manifest:release.workload,assets:workloadPins},transitions:{manifest:release.transitions,assets:transitionPins},startedAt:new Date().toISOString(),verdict:'RUNNING',fullGate:false};
 const save=()=>writeFileSync(join(output,'result.json'),JSON.stringify(result,null,2)+'\n');save();
 let database;
 try{
@@ -102,13 +117,21 @@ try{
  assert.equal(proof.results.suppliedWireWorkload.concurrency,release.admittedConcurrency);assert.equal(proof.results.suppliedWireWorkload.verdict,'PASS');
  assert.equal(proof.results.suppliedWireWorkload.rounds.length,workload.rounds.length);
  assert.deepEqual(proof.results.suppliedWireWorkload.manifest,release.workload);
+ assert.deepEqual(proof.results.loadedTransitions.map(row=>row.name),transitionNames);
+ for(const row of proof.results.loadedTransitions){assert.equal(row.verdict,'PASS');assert.equal(row.concurrency,release.admittedConcurrency);assert.equal(row.staleAdmissionRefused,true);}
+ assert.equal(proof.results.publicMixedPresence.verdict,'PASS');assert.equal(proof.results.publicMixedPresence.concurrency,release.admittedConcurrency);
+ assert.equal(proof.results.automaticView.verdict,'PASS');assert.equal(proof.results.automaticView.readContexts,release.automaticView.readContexts);
+ assert.equal(proof.results.automaticView.manualSettlementsDuringMeasurement,0);assert.equal(proof.results.automaticView.acceptedEnvelopeMs,5000);
+ assert.equal(proof.results.automaticView.rounds.length,transitionManifest.cases.view.updates.length);
+ for(const row of proof.results.automaticView.rounds)for(const elapsed of row.conservativeSubmitToViewMs)assert.ok(elapsed>=0&&elapsed<=5000);
+ await verifyTransitions();
  assert.equal(proof.results.restore.stalePartialRefused,true);assert.equal(proof.results.restart.oldPartialRefused,true);assert.equal(proof.results.credentials.privateCredentialsExcluded,true);for(const pin of assets)await verify(pin);await verify(admission.publicRelease);await verifyWorkload();
  result.caseResult={path:casePath,sha256:hash(bytes)};result.scope=proof.scope;result.omitted=proof.omissions;result.verdict='PASS';
 }catch(error){result.verdict='FAIL';result.error=String(error);}
 finally{
  try{if(database){await database.stop();assert.equal(execFileSync('docker',['ps','-aq','--filter',`id=${database.id}`],{encoding:'utf8',windowsHide:true}).trim(),'');result.postgresClosed=true;}}
  catch(error){result.verdict='FAIL';result.cleanupError=String(error);}
- try{const after=await snapshot();assert.deepEqual(after,before);await verify(runnerPin);await verify(configPin);await verifyWorkload();await writeFile(join(output,'source-after.json'),JSON.stringify(after,null,2)+'\n');result.sourceUnchanged=true;}
+ try{const after=await snapshot();assert.deepEqual(after,before);await verify(runnerPin);await verify(configPin);await verifyWorkload();await verifyTransitions();await writeFile(join(output,'source-after.json'),JSON.stringify(after,null,2)+'\n');result.sourceUnchanged=true;}
  catch(error){result.verdict='FAIL';result.verificationError=String(error);}
  try{result.log={path:join(output,'run.log'),sha256:hash(await readFile(join(output,'run.log')))};}catch{}
  result.finishedAt=new Date().toISOString();save();
