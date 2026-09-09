@@ -106,7 +106,7 @@ export function startExistingOwnerDeviceTransport(options: {
         const params = configRecord(operation.params,["binding"]), binding = parseLiveObjectBinding(params.binding);
         if (workspaces.get(operation.workspace) !== binding.workspaceId) throw new Error("Owner workspace mismatch.");
         const existing = [...registrations.values()].find(row => isDeepStrictEqual(row.binding,binding));
-        if (existing) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}}); return; }
+        if (existing) { owner = existing.owner; owner.assertCurrent(); await send({type: "response",id: operation.id,result: {registrationId: existing.nativeId}},signal); return; }
         if (registrations.size >= config.maxRegistrations) throw new Error("Owner registration capacity exceeded.");
         owner = config.ownerFor(binding); owner.assertCurrent();
         const response = await config.client.sendRequest({ ...request,method: operation.method,params: { binding: { ...binding,selectorPaths: [...binding.selectorPaths] } } },signal);

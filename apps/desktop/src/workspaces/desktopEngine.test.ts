@@ -188,6 +188,8 @@ describe("desktop engine construction", () => {
       const remaining = await discover();
       expect(remaining.workspaces).toEqual([{workspaceId:"second",workspaceHandle:"handle-second"}]);
       expect(() => remaining.assertCurrent()).not.toThrow();
+      await f.authorities.invalidate("second"); f.rows.delete("second");
+      await expect(discover()).rejects.toThrow("Owner host has no registered workspaces.");
     } finally {await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();}
   });
 

@@ -7,7 +7,7 @@ import type { DeviceControlLimits } from "@dohc/live-session-contract/device-con
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
 
-it("releases a cancelled owner-state handoff while its response is still backpressured",async () => {
+it.each(["ownerState","register"])("releases cancelled %s capacity while its response is still backpressured",async method => {
   const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
   const started = deferred(), held = deferred();
   const replies = new Map<number,ReturnType<typeof deferred>>();
@@ -42,15 +42,20 @@ it("releases a cancelled owner-state handoff while its response is still backpre
   try {
     await started.promise;
     send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
-    await request(2,"liveApplication.register",{binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
-      currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1}});
-    void request(3,"liveApplication.ownerState",{registrationId:9}); await held.promise;
+    const registration = {binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
+      currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1}};
+    await request(2,"liveApplication.register",registration);
+    void request(3,`liveApplication.${method}`,method === "register" ? registration : {registrationId:9}); await held.promise;
+    const beforeCancel = owner.assertCurrent.mock.calls.length;
     send({type:"cancel",id:3});
-    await expect.poll(() => owner.finishHandoff.mock.calls,{timeout:1000}).toEqual([[false]]);
+    await expect.poll(() => owner.assertCurrent.mock.calls.length,{timeout:1000}).toBeGreaterThan(beforeCancel);
+    expect(owner.finishHandoff.mock.calls).toEqual(method === "ownerState" ? [[false]] : []);
+    const nextState = request(4,"liveApplication.ownerState",{registrationId:9});
+    const nextRegistration = request(5,"liveApplication.register",registration);
+    await expect.poll(() => owner.prepareHandoff.mock.calls.length).toBe(method === "ownerState" ? 2 : 1);
     expect(stop).not.toHaveBeenCalled();
     release!(); release = undefined;
-    await request(4,"liveApplication.ownerState",{registrationId:9});
-    expect(owner.prepareHandoff).toHaveBeenCalledTimes(2);
+    await Promise.all([nextState,nextRegistration]);
   } finally {release?.(); await transport.close();}
 });
 

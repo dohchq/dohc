@@ -102,6 +102,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             });
           }));
         }
+        if (!workspaces.length) throw new Error("Owner host has no registered workspaces.");
         return {client,workspaces,assertCurrent: () => {
           if (isQuitting() || ownerHostGeneration !== generation || daemon.currentClient() !== client) throw new Error("Owner host daemon retired.");
           for (const check of bindingChecks) check();
