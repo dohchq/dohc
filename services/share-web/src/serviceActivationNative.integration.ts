@@ -80,6 +80,7 @@ const harness = vi.hoisted(() => ({
   relayUrl: "", holdAdoption: true, committed: undefined as undefined | (() => void),
   transforms: [] as {from: string; to: string; insecureLoopbackForTests: true}[],
   captures: [] as {activationId: string; requestedActivationId?: string; source: unknown}[],
+  tracePath: "", calls: [] as {method: string; status: "started" | "complete" | "failed"; message?: string; code?: string}[],
 }));
 vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../../../packages/workspace-engine-client/src/daemon/index.js")>();
@@ -100,9 +101,19 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
     const client = await actual.createEngineClient(options);
     if (!configPath) return client;
     const capture = client.captureOwnerActivation.bind(client), adopt = client.sendLiveOwnerAdoption.bind(client);
+    async function trace<T>(method: string, operation: () => Promise<T>): Promise<T> {
+      const record = (status: "started" | "complete" | "failed", error?: unknown) => {
+        harness.calls.push({method, status, ...(error instanceof Error ? {message: error.message, code: String((error as {code?: unknown}).code ?? "")} : {})});
+        writeFileSync(harness.tracePath, JSON.stringify({calls: harness.calls, transforms: harness.transforms, captures: harness.captures}, null, 2));
+      };
+      record("started");
+      try {const result = await operation(); record("complete"); return result;}
+      catch (error) {record("failed", error); throw error;}
+    }
     return new Proxy(client, {get(target, property) {
+      if (property === "sendRequest") return (...args: Parameters<typeof client.sendRequest>) => trace(args[0].method, () => client.sendRequest(...args));
       if (property === "captureOwnerActivation") return async (...args: Parameters<typeof capture>) => {
-        const result = await capture(...args);
+        const result = await trace("captureOwnerActivation", () => capture(...args));
         harness.captures.push({activationId: result.activationId, requestedActivationId: args[4], source: result.source});
         return result;
       };
@@ -134,6 +145,7 @@ it("resumes a real configured service activation after a lost native adoption re
   expect(hash(readFileSync(executable))).toBe(expectedHash);
   mkdirSync(output, {recursive: true});
   const root = mkdtempSync(join(resolve(output), "service-activation-")), workspace = join(root, "service"), ownerRoot = join(root, "owner");
+  harness.tracePath = join(root, "service-rpc-trace.json");
   mkdirSync(workspace); mkdirSync(ownerRoot);
   mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, "docs/a.md"), "Hello");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
