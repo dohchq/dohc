@@ -178,6 +178,29 @@ fn require_projection(conn: &Connection, sha: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
+fn require_restore_application(
+    conn: &Connection,
+    record: &SettlementRecord,
+) -> Result<(), SyncError> {
+    let Some(operation) = &record.restore_operation_id else {
+        return Ok(());
+    };
+    let p = scope(&record.relay_database_namespace, &record.binding);
+    let proof:Option<(Option<String>,Option<String>)>=conn.query_row(&format!("SELECT restore_operation_id,restore_markdown_digest FROM live_audit_events WHERE {SCOPE} AND journal_cursor=?6"),params![p[0],p[1],p[2],p[3],p[4],record.terminal_cursor],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    let proof = proof.ok_or(SyncError::RetryableState {
+        reason: "settlement restore application is unavailable",
+    })?;
+    if proof
+        != (
+            Some(operation.clone()),
+            Some(record.markdown_digest.clone()),
+        )
+    {
+        return Err(invalid("settlement restore provenance differs"));
+    }
+    Ok(())
+}
+
 fn read_native(
     conn: &Connection,
     workspace: &str,
@@ -198,6 +221,7 @@ fn read_native(
     record.accepted_event_count = count;
     record.accepted_interval_digest = digest;
     record.validate(workspace)?;
+    require_restore_application(conn, &record)?;
     require_projection(conn, &record.markdown_digest)?;
     Ok(record)
 }
@@ -274,6 +298,7 @@ pub(super) fn apply_settlement_envelope(
         ) {
             return Err(invalid("historical settlement interval differs"));
         }
+        require_restore_application(tx, &record)?;
         require_projection(tx, &record.markdown_digest)?;
         let prior: Option<String> = tx
             .query_row(

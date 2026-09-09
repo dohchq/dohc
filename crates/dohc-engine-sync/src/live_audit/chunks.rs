@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 pub(super) const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 // Native metadata fits its u32 ingress reservation. The remainder covers
 // source coordinates and the portable record wrapper, not more update bytes.
-const MAX_RECORD_BYTES: u64 = u32::MAX as u64 + 16_384;
+const MAX_RECORD_BYTES: u64 = u32::MAX as u64 + 32_768;
 const MAX_CHUNKS: usize = MAX_RECORD_BYTES.div_ceil(CHUNK_BYTES as u64) as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

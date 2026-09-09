@@ -1919,6 +1919,11 @@ CREATE TABLE live_audit_events (
     evidence_digest TEXT NOT NULL,
     journal_cursor INTEGER NOT NULL CHECK(journal_cursor BETWEEN 1 AND 9007199254740991),
     delivery_id TEXT NOT NULL,
+    accepting_host_epoch INTEGER NOT NULL CHECK(accepting_host_epoch BETWEEN 1 AND 9007199254740991),
+    restore_operation_id TEXT,
+    restore_markdown_digest TEXT,
+    CHECK ((restore_operation_id IS NULL AND restore_markdown_digest IS NULL) OR
+           (restore_operation_id IS NOT NULL AND restore_markdown_digest IS NOT NULL)),
     PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count),
     UNIQUE(relay_database_namespace,journal_cursor),
     UNIQUE(relay_database_namespace,delivery_id)

@@ -918,6 +918,18 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
                     row.get(0)
                 })?;
             assert_eq!(count, 3);
+            let restore:(String,String)=conn.query_row("SELECT restore_operation_id,restore_markdown_digest FROM live_audit_events WHERE restore_operation_id IS NOT NULL",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(restore,("restore-settlement".into(),hex_sha256(&expected)));
+            let chunks:Vec<Vec<u8>>=conn.prepare("SELECT b.bytes FROM live_audit_events e JOIN live_audit_record_chunks c ON c.record_digest=e.record_digest JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE e.restore_operation_id IS NOT NULL ORDER BY c.ordinal")?.query_map([],|r|r.get(0))?.collect::<Result<_,_>>()?;
+            let bytes:Vec<u8>=chunks.into_iter().flatten().collect();
+            let audit:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(audit["sourceRestore"]["operationId"],"restore-settlement");
+            assert_eq!(audit["sourceRestore"]["oldGeneration"],0);
+            assert_eq!(audit["sourceRestore"]["selected"]["eventCount"],0);
+            assert_eq!(audit["sourceRestore"]["accepted"]["eventCount"],1);
+            assert_eq!(audit["metadata"]["accepted"]["binding"]["restoreFenceGeneration"],1);
+            assert_eq!(audit["sourceRestore"]["point"]["markdownDigest"],hex_sha256(&expected));
+            assert!(audit["sourceRestore"].get("nativeSources").is_none());
             for table in [
                 "live_device_settlements",
                 "live_device_application_bindings",
@@ -944,6 +956,41 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             Ok(())
         })
         .unwrap();
+    let mut forged_restore = settlements[2].clone();
+    forged_restore.origin_id = "forged-restore-linkage".into();
+    forged_restore.origin_seq = 0;
+    forged_restore.relay_seq = Some(199);
+    let valid_restore_json = serde_json::to_string(&forged_restore.payload["record"]).unwrap();
+    let forged_restore_json = valid_restore_json.replace("restore-settlement", "forged-restore");
+    assert_ne!(forged_restore_json, valid_restore_json);
+    forged_restore.payload["record"] = serde_json::from_str(&forged_restore_json).unwrap();
+    // Hash the typed record's canonical field order retained in the source payload.
+    let stored_restore: String = receiver
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_json FROM live_audit_settlements WHERE settlement_id=?1",
+                [&final_settlement.settlement_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    forged_restore.payload["recordDigest"] = serde_json::json!(hex_sha256(
+        stored_restore
+            .replace("restore-settlement", "forged-restore")
+            .as_bytes()
+    ));
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut receiver,
+            &mut cache,
+            &forged_restore,
+            &NoFaults,
+            &NoLiveLeases
+        )
+        .unwrap()
+        .primary,
+        ApplyDisposition::Refused(_)
+    ));
     let retained: String = receiver
         .read_with(|conn| {
             conn.query_row(

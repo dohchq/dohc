@@ -764,7 +764,19 @@ fn conflicting_audit_identity_keeps_both_records_and_classifies_the_coordinate()
     conflict.origin_seq += 1;
     conflict.relay_seq = Some(conflict.origin_seq + 1);
     let mut payload: BasePayload = serde_json::from_value(original.payload.clone()).unwrap();
-    payload.record.origin_stamp = "f".repeat(64);
+    if let origin_record::OriginRecord::Bootstrap { source, .. } = &mut payload.record.origin {
+        source.bootstrap_id = "different-authenticated-bootstrap".into();
+    } else {
+        panic!("expected native bootstrap");
+    }
+    payload.record.origin_stamp = receiver
+        .read_with(|conn| {
+            payload
+                .record
+                .origin
+                .stamp(conn, &payload.record.checkpoint.binding)
+        })
+        .unwrap();
     conflict.payload = payload.record.payload().unwrap();
     assert!(matches!(
         apply_base_envelope(&mut receiver, &conflict, &NoFaults)
@@ -942,4 +954,53 @@ fn bounded_event_zero_payload_fits_the_existing_operation_ceiling() {
     payload.record.base_byte_length = dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
     // Overstate escaping even for paths the canonical binding validator rejects.
     assert!(serde_json::to_vec(&payload).unwrap().len() < crate::MAX_PAYLOAD_JSON_BYTES);
+}
+
+#[test]
+fn native_origin_details_survive_import_and_forged_source_is_rejected() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let (_scratch, _path, mut receiver) = import_source(&f);
+    let original = published(&f);
+    let payload: BasePayload = serde_json::from_value(original.payload.clone()).unwrap();
+    match &payload.record.origin {
+        origin_record::OriginRecord::Bootstrap {
+            source,
+            local_ydoc_sequence,
+            ..
+        } => {
+            assert_eq!(source.as_ref(), &f.input);
+            assert_eq!(*local_ydoc_sequence, 0);
+        }
+        _ => panic!("native bootstrap provenance missing"),
+    }
+    let imported: String = receiver
+        .read_with(|conn| {
+            conn.query_row("SELECT record_json FROM live_audit_bases", [], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<BaseRecord>(&imported).unwrap(),
+        payload.record
+    );
+    let mut forged = original.clone();
+    forged.origin_seq += 1;
+    forged.relay_seq = Some(forged.origin_seq + 1);
+    let mut record = payload.record;
+    if let origin_record::OriginRecord::Bootstrap { source, .. } = &mut record.origin {
+        source.bootstrap_id = "forged-source".into();
+    }
+    forged.payload = record.payload().unwrap();
+    assert!(matches!(
+        apply_base_envelope(&mut receiver, &forged, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    assert_eq!(
+        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
+        forged.origin_seq
+    );
+    assert_eq!(count(&receiver, "live_device_bootstraps"), 0);
+    assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
 }

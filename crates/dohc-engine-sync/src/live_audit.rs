@@ -14,6 +14,8 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, journal_local_op_in_tx
 mod application_record;
 mod chunks;
 pub(crate) mod enrollment;
+mod origin_record;
+mod restore_record;
 mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
 pub use enrollment::journal_live_event_or_defer_in_tx;
@@ -52,6 +54,7 @@ struct BaseRecord {
     relay_database_namespace: String,
     checkpoint: NativeAcceptedCheckpoint,
     origin_stamp: String,
+    origin: origin_record::OriginRecord,
     base_byte_length: usize,
     base_coordinate: BaseCoordinate,
 }
@@ -257,6 +260,10 @@ pub fn journal_live_base_in_tx(
         .map_err(SyncError::corrupt)?
         .ok_or(SyncError::BlobInvalid)?;
     let base_byte_length = usize::try_from(base_byte_length).map_err(SyncError::corrupt)?;
+    let origin = origin_record::read(tx, namespace, &source_binding)?;
+    if origin.stamp(tx, &source_binding)? != checkpoint.3 {
+        return Err(invalid("native origin stamp differs"));
+    }
     let make_record = |base_coordinate| BaseRecord {
         relay_database_namespace: namespace.to_owned(),
         checkpoint: NativeAcceptedCheckpoint {
@@ -268,6 +275,7 @@ pub fn journal_live_base_in_tx(
             evidence_digest: checkpoint.2.clone(),
         },
         origin_stamp: checkpoint.3.clone(),
+        origin: origin.clone(),
         base_byte_length,
         base_coordinate,
     };
@@ -438,6 +446,9 @@ pub(crate) fn apply_base_envelope(
         }
         let record = payload.record;
         record.validate(&op.workspace_id)?;
+        if record.origin.stamp(tx, &record.checkpoint.binding)? != record.origin_stamp {
+            return Err(invalid("historical origin stamp differs"));
+        }
         let json = record.canonical_json()?;
         if payload.record_digest != hex_sha256(json.as_bytes()) {
             return Err(invalid("native base audit digest differs"));

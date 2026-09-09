@@ -31,6 +31,7 @@ struct SourceApplication {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Suffix {
     source_application: Option<SourceApplication>,
+    source_restore: Option<restore_record::RestoreSource>,
     content_coordinate: BaseCoordinate,
 }
 
@@ -151,6 +152,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
         })?;
         let suffix = Suffix {
             source_application: next_field(&mut map, "sourceApplication")?,
+            source_restore: next_field(&mut map, "sourceRestore")?,
             content_coordinate: next_field(&mut map, "contentCoordinate")?,
         };
         end_fields(&mut map)?;
@@ -161,6 +163,22 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             source
                 .host_coordinate
                 .validate()
+                .map_err(serde::de::Error::custom)?;
+        }
+        if let Some(restore) = &suffix.source_restore {
+            let source = suffix
+                .source_application
+                .as_ref()
+                .ok_or_else(|| serde::de::Error::custom("restore application source missing"))?;
+            restore
+                .verify(
+                    self.conn,
+                    &header.relay_database_namespace,
+                    header.event_count,
+                    &accepted,
+                    source.local_ydoc_sequence,
+                    &source.host_coordinate.host_id,
+                )
                 .map_err(serde::de::Error::custom)?;
         }
         crate::model::bounded(
@@ -451,7 +469,7 @@ fn insert_event(
             .iter()
             .all(|saved| saved == &manifest.record_digest));
     }
-    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id]).map_err(SyncError::persist)?;
+    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,record.suffix.source_restore.as_ref().map(|s|&s.operation_id),record.suffix.source_restore.as_ref().map(|s|&s.point.markdown_digest)]).map_err(SyncError::persist)?;
     Ok(true)
 }
 
@@ -532,6 +550,7 @@ pub fn journal_live_event_in_tx(
     {
         return Err(invalid("native audit source identity differs"));
     }
+    let source_restore = restore_record::read(tx, namespace, &accepted)?;
     let path = accepted.binding.current_path;
     let header = Header {
         kind: "application".into(),
@@ -581,6 +600,7 @@ pub fn journal_live_event_in_tx(
     let source_application=tx.query_row("SELECT local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2",params![namespace,delivery],|r|Ok(SourceApplication{local_ydoc_sequence:r.get(0)?,host_coordinate:ApplicationHostCoordinate{host_id:r.get(1)?,host_epoch:r.get(2)?,instance_id:r.get(3)?,connection_id:r.get(4)?}})).optional().map_err(SyncError::corrupt)?;
     let suffix = Suffix {
         source_application,
+        source_restore,
         content_coordinate,
     };
     let mut writer = ChunkWriter::new(tx);
