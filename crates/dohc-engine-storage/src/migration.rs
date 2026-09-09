@@ -1589,6 +1589,13 @@ CREATE TABLE live_device_settlements (
     binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
     host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
     recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms BETWEEN 0 AND 9007199254740991),
+    settlement_kind TEXT NOT NULL DEFAULT 'ordinary' CHECK (settlement_kind IN ('ordinary','restore')),
+    restore_operation_id TEXT,
+    CHECK ((settlement_kind='ordinary' AND restore_operation_id IS NULL)
+        OR (settlement_kind='restore' AND restore_operation_id IS NOT NULL)),
+    UNIQUE (relay_database_namespace, restore_operation_id),
+    FOREIGN KEY (relay_database_namespace, restore_operation_id)
+        REFERENCES live_restore_fences(relay_database_namespace, operation_id) ON DELETE RESTRICT,
     UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, terminal_cursor),
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;

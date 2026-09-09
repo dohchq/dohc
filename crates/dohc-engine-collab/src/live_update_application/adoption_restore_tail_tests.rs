@@ -764,8 +764,8 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
             .apply_restore(
                 &mut store,
                 &mut WriterDocCache::new(),
-                input,
-                coordinate,
+                input.clone(),
+                coordinate.clone(),
                 2_000_000,
                 100,
                 140,
@@ -775,4 +775,42 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     );
     assert_eq!(inventory, native_tail_inventory(&store));
     assert_eq!(store.table_row_count("moments").unwrap(), 1);
+    let settled = owner
+        .with_restore_settlement(
+            &mut store,
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "restored-tail-moment")
+            },
+        )
+        .unwrap();
+    assert!(!settled.materialized);
+    assert_eq!(
+        settled.markdown_digest,
+        input.preparation.point.markdown_digest
+    );
+    assert_eq!(settled.application_count, 1);
+    assert_eq!(settled.local_ydoc_sequence, 3);
+    assert_eq!(inventory, native_tail_inventory(&store));
+    assert_eq!(store.table_row_count("moments").unwrap(), 2);
+    drop(store);
+    let mut store = EngineStore::open(&backup.backup_path, 150).unwrap();
+    let replay = owner
+        .with_restore_settlement(
+            &mut store,
+            input,
+            coordinate,
+            2_000_000,
+            100,
+            |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "restored-tail-moment")
+            },
+        )
+        .unwrap();
+    assert_eq!(settled.settlement_id, replay.settlement_id);
+    assert_eq!(inventory, native_tail_inventory(&store));
+    assert_eq!(store.table_row_count("moments").unwrap(), 2);
 }

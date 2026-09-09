@@ -7,7 +7,7 @@ pub(super) mod application;
 mod native_sources;
 pub use application::{NativeRestoreApplication, NativeRestoreApplicationReceipt};
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 pub use native_sources::NativeRestoreSource;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +504,30 @@ fn prepare_in(
         point_state_bytes,
         native_source_bytes,
     })
+}
+
+pub(super) fn applied_proposal(
+    tx: &Transaction<'_>,
+    held: &Registration,
+    input: &NativeRestoreApplication,
+    max_bytes: usize,
+    max_events: usize,
+) -> Result<(NativeRestoreProposal, NativeRestoreApplicationReceipt), ApplicationError> {
+    input.validate_budget(max_bytes, max_events)?;
+    let mut budget = Budget {
+        remaining: max_bytes,
+    };
+    budget.json(&input.admitted)?;
+    let receipt =
+        application::read_saved(tx, held, &mut budget)?.ok_or(ApplicationError::Conflict)?;
+    if receipt.admitted != input.admitted
+        || receipt.candidate_digest != input.candidate_digest
+        || receipt.native_source_manifest_digest != input.native_source_manifest_digest
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let proposal = prepare_in(tx, held, &input.preparation, budget.remaining, max_events)?;
+    Ok((proposal, receipt))
 }
 
 fn origin(

@@ -20,6 +20,511 @@ struct Fixture {
     doc: Ydoc,
 }
 
+fn restore_coordinate() -> ApplicationHostCoordinate {
+    ApplicationHostCoordinate {
+        host_id: "host".into(),
+        host_epoch: 1,
+        instance_id: "instance".into(),
+        connection_id: "connection".into(),
+    }
+}
+
+async fn applied_restore(
+    f: &Fixture,
+    terminal: Option<LiveUpdateReceipt>,
+    sequence: i64,
+) -> NativeRestoreApplication {
+    let point = Ydoc::wire();
+    point.apply(&vector("rich-unicode")).unwrap();
+    let markdown = point.project(ContentKind::Richdoc).unwrap().content;
+    let fence = f
+        .owner
+        .fence_restore(
+            NativeRestoreFence {
+                operation_id: "restore-settlement".into(),
+                relay_database_namespace: "relay".into(),
+                old_binding: f.binding.clone(),
+                host_id: "host".into(),
+                new_fence: 1,
+                origin: RestoreDeliveryOrigin::Bootstrap {
+                    id: "bootstrap".into(),
+                },
+                terminal,
+                applied_sequence: sequence,
+            },
+            restore_coordinate(),
+            20,
+            Arc::new(NoFaults),
+        )
+        .await
+        .unwrap();
+    let preparation = NativeRestorePreparation {
+        fence,
+        point: NativeRestorePoint {
+            journal_cursor: 0,
+            receipt_digest: f.binding.lineage_claim_id.clone(),
+            markdown_digest: hex_sha256(markdown.as_bytes()),
+            projection_digest: hex_sha256(markdown.as_bytes()),
+        },
+        owner_origin: None,
+    };
+    let proposal = f
+        .owner
+        .prepare_restore(
+            preparation.clone(),
+            restore_coordinate(),
+            2_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = 1;
+    let input = NativeRestoreApplication {
+        preparation,
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "restore-delivery".into(),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: 71,
+                    accepting_host_epoch: 1,
+                },
+                binding,
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 21,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+        },
+    };
+    f.owner
+        .apply_restore(
+            input.clone(),
+            restore_coordinate(),
+            2_000_000,
+            100,
+            22,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    input
+}
+
+async fn settle_restore(
+    f: &Fixture,
+    input: NativeRestoreApplication,
+    faults: Arc<dyn FaultInjector>,
+) -> Result<LiveSettlementResult, RuntimeError> {
+    f.owner
+        .settle_restore(
+            input,
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            30,
+            faults,
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn restore_settlement_materializes_selected_point_and_preserves_old_anchor() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let expected = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\n")
+        .unwrap();
+    let terminal = f.apply(7, update).await;
+    let old = f
+        .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let old_count = f.counts();
+    let input = applied_restore(&f, Some(terminal), 1).await;
+    let result = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(result.materialized);
+    assert_eq!(result.previous_cursor, 7);
+    assert_eq!(result.terminal_cursor, 71);
+    assert_eq!(result.application_count, 1);
+    assert_eq!(
+        std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+        expected
+    );
+    assert_eq!(result.markdown_digest, hex_sha256(&expected));
+    assert_eq!(f.counts(), (old_count.0 + 1, old_count.1 + 1));
+    assert_eq!(
+        settle_restore(&f, input, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .settlement_id,
+        result.settlement_id
+    );
+    assert_eq!(f.counts(), (old_count.0 + 1, old_count.1 + 1));
+    f.read(|db| {
+        let retained: String = db
+            .query_row(
+                "SELECT settlement_id FROM live_device_settlements WHERE terminal_cursor=7",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, old.settlement_id);
+        let kind: String = db
+            .query_row(
+                "SELECT settlement_kind FROM live_device_settlements WHERE terminal_cursor=71",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "restore");
+        let available: bool = db
+            .query_row(
+                "SELECT available FROM live_device_application_bindings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!available);
+    });
+    assert!(f.settle(None, 100, Arc::new(NoFaults)).await.is_err());
+}
+
+#[tokio::test]
+async fn restore_settlement_replays_real_projection_commit_and_materialization_crashes() {
+    for fault in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+        FaultPoint::MaterializeAfterJobCommit,
+        FaultPoint::MaterializeAfterRenameBeforeComplete,
+    ] {
+        let f = Fixture::new().await;
+        let input = applied_restore(&f, None, 0).await;
+        let _interrupted = settle_restore(&f, input.clone(), Arc::new(Crash(fault))).await;
+        let result = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert!(result.materialized, "{fault:?}");
+        assert_eq!(
+            result.markdown_digest,
+            input.preparation.point.markdown_digest
+        );
+        assert_eq!(f.counts(), (1, 2));
+        assert_eq!(
+            std::fs::read(f.root.path().join(&f.binding.current_path))
+                .map(|bytes| hex_sha256(&bytes))
+                .unwrap(),
+            result.markdown_digest
+        );
+        assert_eq!(
+            settle_restore(&f, input, Arc::new(NoFaults))
+                .await
+                .unwrap()
+                .settlement_id,
+            result.settlement_id
+        );
+        assert_eq!(f.counts(), (1, 2));
+    }
+}
+
+#[tokio::test]
+async fn restore_settlement_keeps_pending_artifact_and_rejects_damaged_anchor_before_replay() {
+    for damage in [
+        None,
+        Some("UPDATE live_device_settlements SET interval_digest=printf('%064d',0)"),
+        Some("UPDATE live_device_settlements SET source_state_vector_digest=printf('%064d',0)"),
+        Some(
+            "UPDATE live_device_settlements SET settlement_kind='ordinary',restore_operation_id=NULL",
+        ),
+        Some(
+            "UPDATE live_restore_fences SET application_json=json_set(application_json,'$.admitted.accepted.receivedAtMs',99)",
+        ),
+    ] {
+        let f = Fixture::new().await;
+        let input = applied_restore(&f, None, 0).await;
+        std::fs::write(f.root.path().join("notes"), "owned obstacle").unwrap();
+        let initial = settle_restore(&f, input.clone(), Arc::new(NoFaults)).await;
+        assert!(initial.as_ref().map_or(true, |result| !result.materialized));
+        assert_eq!(f.counts(), (1, 2));
+        if let Some(sql) = damage {
+            rusqlite::Connection::open(&f.db)
+                .unwrap()
+                .execute(sql, [])
+                .unwrap();
+        }
+        std::fs::remove_file(f.root.path().join("notes")).unwrap();
+        let replay = settle_restore(&f, input, Arc::new(NoFaults)).await;
+        if damage.is_some() {
+            assert!(replay.is_err(), "{damage:?}");
+            assert!(!f.root.path().join(&f.binding.current_path).exists());
+        } else {
+            assert!(replay.unwrap().materialized);
+        }
+        assert_eq!(f.counts(), (1, 2));
+    }
+}
+
+#[tokio::test]
+async fn restore_settlement_checks_old_anchor_and_retains_exact_same_content_moment() {
+    for damage in [false, true] {
+        let f = Fixture::new().await;
+        let original = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+        let before = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+        let input = applied_restore(&f, None, 0).await;
+        if damage {
+            rusqlite::Connection::open(&f.db)
+                .unwrap()
+                .execute(
+                    "UPDATE live_device_settlements SET markdown_digest=printf('%064d',0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let result = settle_restore(&f, input, Arc::new(NoFaults)).await;
+        if damage {
+            assert!(result.is_err());
+            assert_eq!(f.counts(), (1, 2));
+        } else {
+            let result = result.unwrap();
+            assert!(result.materialized);
+            assert_eq!(result.moment_id, original.moment_id);
+            assert_eq!(f.counts(), (2, 2));
+        }
+        assert_eq!(
+            std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_settlement_preserves_collection_index_and_requests_id_reconciliation() {
+    let f = Fixture::new().await;
+    f.supervisor
+        .open(&f.db, 2)
+        .unwrap()
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "notes/.collection.json".into(),
+                text: "{\"fields\":[],\"views\":[]}".into(),
+                moment_id: "schema-moment".into(),
+                metadata_origin: "test".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let raw = rusqlite::Connection::open(&f.db).unwrap();
+    raw.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
+    raw.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/example.md','object','adopted')",[]).unwrap();
+    drop(raw);
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "---\nid: rec_00000000000000000000000000\nstatus: later\n---\n# Later\n",
+        )
+        .unwrap();
+    let terminal = f.apply(5, update).await;
+    f.settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    f.read(|db| {
+        assert_eq!(
+            db.query_row(
+                "SELECT value_json FROM collection_record_fields WHERE field_name='status'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "\"later\""
+        )
+    });
+    let input = applied_restore(&f, Some(terminal), 1).await;
+    f.read(|db| {
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM collection_record_fields WHERE field_name='status'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        )
+    });
+    let result = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(result.materialized);
+    assert!(result.collection_reconcile_required);
+    assert!(
+        settle_restore(&f, input, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .collection_reconcile_required
+    );
+    assert_eq!(
+        std::fs::read(f.root.path().join(&f.binding.current_path))
+            .map(|bytes| hex_sha256(&bytes))
+            .unwrap(),
+        result.markdown_digest
+    );
+}
+
+#[tokio::test]
+async fn restore_settlement_refuses_wrong_host_budget_cancel_and_changed_admission_before_write() {
+    let f = Fixture::new().await;
+    let input = applied_restore(&f, None, 0).await;
+    for variant in 0..5 {
+        let mut attempted = input.clone();
+        let mut coordinate = restore_coordinate();
+        let mut max_bytes = 2_000_000;
+        let mut max_events = 100;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        match variant {
+            0 => coordinate.host_id = "foreign-host".into(),
+            1 => max_bytes = 1,
+            2 => max_events = 0,
+            3 => cancel.cancel(),
+            4 => attempted.admitted.accepted.received_at_ms += 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            f.owner
+                .settle_restore(
+                    attempted,
+                    coordinate,
+                    max_bytes,
+                    max_events,
+                    f.root.path().to_owned(),
+                    30,
+                    Arc::new(NoFaults),
+                    cancel,
+                    Arc::new(())
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(f.counts(), (0, 1));
+        assert!(!f.root.path().join(&f.binding.current_path).exists());
+    }
+    assert!(
+        settle_restore(&f, input, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .materialized
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_settlement_retains_queued_proof_after_caller_drop_and_replays_after_restart() {
+    struct Hold {
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl FaultInjector for Hold {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                    self.release.lock().unwrap().recv().unwrap();
+                }
+            }
+            FaultAction::Continue
+        }
+    }
+    struct Reservation(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    for retire in [false, true] {
+        let mut f = Fixture::new().await;
+        let input = applied_restore(&f, None, 0).await;
+        let (entered, at_commit) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut call = Box::pin(f.owner.settle_restore(
+            input.clone(),
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(Hold {
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: std::sync::Mutex::new(wait),
+            }),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(Reservation(disposed.clone())),
+        ));
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx).is_pending()))
+                .await
+        );
+        at_commit.await.unwrap();
+        if retire {
+            f.owner.retire();
+        }
+        drop(call);
+        assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).unwrap();
+        // A queued owner request establishes completion without polling time.
+        f.owner = f
+            .supervisor
+            .open(&f.db, 35)
+            .unwrap()
+            .actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+        let settled = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+            .await
+            .unwrap();
+        let counts = f.counts();
+        f.supervisor.close(&f.db).unwrap();
+        f.owner = f
+            .supervisor
+            .open(&f.db, 40)
+            .unwrap()
+            .actor
+            .live_application_owner("workspace".into())
+            .await
+            .unwrap();
+        let replay = settle_restore(&f, input, Arc::new(NoFaults)).await.unwrap();
+        assert!(replay.materialized);
+        assert_eq!(replay.settlement_id, settled.settlement_id);
+        assert_eq!(f.counts(), counts);
+        assert!(f.settle(None, 100, Arc::new(NoFaults)).await.is_err());
+    }
+}
+
 fn vector(name: &str) -> Vec<u8> {
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"

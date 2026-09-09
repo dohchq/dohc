@@ -3,6 +3,33 @@ use dohc_engine_storage::{FaultAction, FaultPoint};
 use dohc_test_scratch::ScratchDir;
 use serde_json::json;
 
+pub(in crate::live_update_application) fn record_test_projection(
+    store: &mut EngineStore,
+    audit: &LiveSettlementAudit,
+    moment: &str,
+) -> Result<LiveSettlementResult, ApplicationError> {
+    let b = audit.binding();
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let doc = store.read_with(|conn| durable::load_doc_in(conn, &key))?;
+    let projected = doc.project(ContentKind::Richdoc)?.content;
+    let content = doc
+        .preserved_markdown_source(&projected)
+        .unwrap_or(projected);
+    let vector = hex_sha256(&doc.encode_state_vector());
+    let result = store.write_with(&NoFaults,|tx| -> Result<_, ApplicationError> {
+        let written = dohc_engine_domain::write_projected_text_in_tx(tx,dohc_engine_domain::ProjectedWriteText {
+            workspace_id:&b.workspace_id,version_id:&b.main_version_id,object_id:&b.object_id,path:std::borrow::Cow::Borrowed(&b.current_path),text:std::borrow::Cow::Borrowed(&content),moment_id:moment,metadata_origin:"ydoc",metadata_summary:None,metadata_correlation_id:None,author_json:None,now_ms:90,request_id:None,
+        }).map_err(|_|ApplicationError::Corrupt)?;
+        tx.execute("UPDATE ydoc_docs SET last_settled_sha=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256]).map_err(write_sql)?;
+        let id=audit.record_in_tx(tx,moment,&written.snapshot.blob_sha256,&vector,90)?;
+        Ok(audit.result(id,moment.into(),written.snapshot.blob_sha256,false))
+    })?;
+    let TxnOutcome::Committed(result) = result else {
+        return Err(ApplicationError::Interrupted);
+    };
+    Ok(result)
+}
+
 struct Fixture {
     store: EngineStore,
     owner: ApplicationOwner,
@@ -797,4 +824,105 @@ fn native_restore_apply_enforces_budget_on_first_apply_and_replay() {
         }
         apply_restore(&mut f, input, &NoFaults).unwrap();
     }
+}
+
+#[test]
+fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_binding() {
+    let mut f = Fixture::new("# Original\n");
+    f.edit("# Later\n", 7);
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(&mut f, prep);
+    apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    let restored = f
+        .owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "restore-moment"),
+        )
+        .unwrap();
+    assert!(f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            input.admitted.accepted.binding.clone()
+        )
+        .is_err());
+    // Simulate only the registration state a future reopen must authenticate.
+    let mut held = f.handle.registration.lock().unwrap();
+    held.live = true;
+    held.binding = input.admitted.accepted.binding.clone();
+    f.store
+        .write_with(&NoFaults, |tx| install_binding(tx, &held))
+        .unwrap();
+    drop(held);
+    let replay = with_settlement(
+        &mut f.store,
+        &f.handle,
+        Some(input.admitted.accepted.receipt.clone()),
+        100,
+        |store, audit| record_test_projection(store, audit, "restore-moment"),
+    )
+    .unwrap();
+    assert_eq!(replay.settlement_id, restored.settlement_id);
+    assert_eq!(replay.previous_cursor, restored.previous_cursor);
+    assert_eq!(replay.application_count, restored.application_count);
+    let before = f.canonical();
+    let edited = Ydoc::wire();
+    edited.apply(&before.encode_full_state()).unwrap();
+    let bytes = edited.richdoc_append_paragraph("Fresh owner edit");
+    let mut event = AdmittedLiveUpdate {
+        metadata: input.admitted.clone(),
+        update_bytes: bytes,
+    };
+    event.metadata.accepted.receipt.delivery_id = "fresh-delivery".into();
+    event.metadata.accepted.receipt.journal_cursor = 82;
+    event.metadata.accepted.receipt.update_digest = hex_sha256(&event.update_bytes);
+    event.metadata.first_seen.clear();
+    let held = f.handle.registration.lock().unwrap();
+    let key = DocKey::new(
+        &held.binding.workspace_id,
+        &held.binding.main_version_id,
+        &held.binding.object_id,
+    )
+    .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+            let (_, seq, _) = durable::append_and_index_update(
+                tx,
+                &key,
+                ContentKind::Richdoc,
+                &before,
+                &event.update_bytes,
+                &event.metadata.accepted.receipt.update_digest,
+                true,
+                None,
+                None,
+                None,
+                100,
+            )?;
+            insert_application(tx, &held, &event, seq)
+        })
+        .unwrap();
+    drop(held);
+    let next = with_settlement(
+        &mut f.store,
+        &f.handle,
+        Some(event.metadata.accepted.receipt),
+        100,
+        |store, audit| record_test_projection(store, audit, "fresh-moment"),
+    )
+    .unwrap();
+    assert_eq!(next.previous_cursor, 71);
+    assert_eq!(next.terminal_cursor, 82);
+    assert_eq!(next.application_count, 1);
+    assert_eq!(
+        f.store.table_row_count("live_device_settlements").unwrap(),
+        2
+    );
 }

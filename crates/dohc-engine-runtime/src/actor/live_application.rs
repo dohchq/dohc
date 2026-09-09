@@ -86,6 +86,47 @@ impl ActorHandle {
 }
 
 impl ActorLiveApplicationOwner {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn settle_restore(
+        &self,
+        input: NativeRestoreApplication,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<LiveSettlementResult, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        input.validate_budget(max_bytes, max_events)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::SettleRestore {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                input: Box::new(input),
+                coordinate,
+                max_bytes,
+                max_events,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reservation,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        let result = receive
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        current(&self.actor, &self.token)?;
+        Ok(result)
+    }
+
     /// Apply one saved proposal through the current actor owner.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_restore(
@@ -477,6 +518,20 @@ impl Registry {
 }
 
 pub(super) enum Request {
+    SettleRestore {
+        workspace_id: String,
+        token: Token,
+        input: Box<NativeRestoreApplication>,
+        coordinate: ApplicationHostCoordinate,
+        max_bytes: usize,
+        max_events: usize,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        cancel: tokio_util::sync::CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+        reply: Reply<LiveSettlementResult>,
+    },
     ApplyRestore {
         workspace_id: String,
         token: Token,
@@ -582,6 +637,33 @@ impl Request {
         cache: &mut WriterDocCache,
     ) {
         match self {
+            Self::SettleRestore {
+                workspace_id,
+                token,
+                input,
+                coordinate,
+                max_bytes,
+                max_events,
+                root,
+                now_ms,
+                faults,
+                cancel,
+                reservation: _reservation,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    if cancel.is_cancelled() {return Err(RuntimeError::Cancelled);}
+                    owner.with_restore_settlement(store,*input,coordinate,max_bytes,max_events,|store,audit| {
+                        let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel)?;
+                        result.materialized &= matches!(
+                            dohc_engine_files::probe_projection_target(&root,&audit.binding().current_path,dohc_engine_files::ProjectionTargetKind::Plaintext),
+                            dohc_engine_files::ProjectionTargetState::Text {sha256} if sha256 == result.markdown_digest
+                        );
+                        Ok(result)
+                    })
+                });
+                let _ = reply.send(result);
+            }
             Self::ApplyRestore {
                 workspace_id,
                 token,
@@ -713,39 +795,15 @@ impl Request {
                         terminal,
                         max_applications,
                         |store, audit| {
-                            let binding = audit.binding();
-                            let key = dohc_engine_collab::DocKey::new(
-                                &binding.workspace_id,
-                                &binding.main_version_id,
-                                &binding.object_id,
-                            )?;
-                            let outcome = super::ydoc::ydoc_settle_on_store(
+                            settle_audited(
                                 store,
                                 cache,
                                 &root,
-                                &key,
-                                &binding.current_path,
-                                dohc_engine_collab::ContentKind::Richdoc,
-                                false,
-                                Some(&binding.lineage_claim_id),
-                                Some(audit.expected_head().to_owned()),
-                                None,
-                                "configured-live-application",
-                                &(),
+                                audit,
                                 now_ms,
                                 faults.as_ref(),
                                 &cancel,
-                                None,
-                                Some(audit),
-                            )?;
-                            let settled = outcome.into_settlement_for_internal_caller()?;
-                            let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
-                            Ok(audit.result(
-                                id,
-                                settled.moment_id,
-                                settled.sha256,
-                                settled.materialized,
-                            ))
+                            )
                         },
                     )
                 });
@@ -858,4 +916,45 @@ impl Request {
             }
         }
     }
+}
+
+fn settle_audited(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    root: &std::path::Path,
+    audit: &dohc_engine_collab::live_update_application::LiveSettlementAudit,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<LiveSettlementResult, RuntimeError> {
+    let binding = audit.binding();
+    let key = dohc_engine_collab::DocKey::new(
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+    )?;
+    let outcome = super::ydoc::ydoc_settle_on_store(
+        store,
+        cache,
+        root,
+        &key,
+        &binding.current_path,
+        dohc_engine_collab::ContentKind::Richdoc,
+        false,
+        Some(&binding.lineage_claim_id),
+        Some(audit.expected_head().to_owned()),
+        None,
+        "configured-live-application",
+        &(),
+        now_ms,
+        faults,
+        cancel,
+        None,
+        Some(audit),
+    )?;
+    let settled = outcome.into_settlement_for_internal_caller()?;
+    let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
+    let mut result = audit.result(id, settled.moment_id, settled.sha256, settled.materialized);
+    result.collection_reconcile_required = settled.collection_reconcile_required;
+    Ok(result)
 }
