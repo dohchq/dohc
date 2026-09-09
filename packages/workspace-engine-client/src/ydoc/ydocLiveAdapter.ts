@@ -615,6 +615,7 @@ export class YdocAdapterSession {
   ownerDraft: YdocOwnerDraft | undefined;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly durableLocalChangeListeners = new Set<() => void>();
+  private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<
     (error: RemoteYdocApplyError) => void
   >();
@@ -1016,6 +1017,11 @@ export class YdocAdapterSession {
     return () => this.durableLocalChangeListeners.delete(handler);
   }
 
+  onOwnerDraftChanged(handler: () => void): () => void {
+    this.ownerDraftChangedListeners.add(handler);
+    return () => this.ownerDraftChangedListeners.delete(handler);
+  }
+
   onRemoteApplyError(handler: (error: RemoteYdocApplyError) => void): () => void {
     this.remoteApplyErrorListeners.add(handler);
     return () => this.remoteApplyErrorListeners.delete(handler);
@@ -1123,6 +1129,7 @@ export class YdocAdapterSession {
       return await this.resync();
     }
     this.staleError = null;
+    if (this.ownerDraft) this.notifyListeners(this.ownerDraftChangedListeners, undefined);
     return update;
   }
 
@@ -1166,6 +1173,7 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.ownerDraftChangedListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
@@ -1189,6 +1197,7 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.durableLocalChangeListeners.clear();
+    this.ownerDraftChangedListeners.clear();
     this.doc.off("update", this.handleDocUpdate);
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();

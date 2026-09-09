@@ -51,10 +51,11 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await seed.close({settle:false});
   seedAdapter.dispose();
   let revision = 1;
+  let accepted = false;
   const descriptor = () => ({
     binding: {workspaceId:"workspace",mainVersionId:VERSION,objectId,lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0},
-    relayDatabaseNamespace:"relay",revision,acceptedCursor:0,nativeHeadSequence:1,
-    outboxId:"outbox",pendingBytes:20,state:"active",
+    relayDatabaseNamespace:"relay",revision,acceptedCursor:accepted ? 1 : 0,nativeHeadSequence:1,
+    outboxId:"outbox",pendingBytes:accepted ? 0 : 20,state:"active",
   });
   const transport: EngineTransport = {
     ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
@@ -78,6 +79,17 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await expect(provider.settleNow()).rejects.toBeInstanceOf(YdocOwnerDraftPendingError);
   expect(onSettled).not.toHaveBeenCalled();
   expect(onSettleError.mock.calls.at(-1)?.[0]).toMatchObject({draft:{pendingBytes:40}});
+  expect(engine.requests.filter(request=>request.method===YDOC_METHOD.settle)).toHaveLength(0);
+  // An accepted echo can contain no new Yjs bytes. Its descriptor still
+  // changes the save status, without claiming local Markdown settlement.
+  accepted = true;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1,
+    payload: {sessionId: provider.nativeOwner!.sessionId, resyncRequired: true}});
+  await drain();
+  expect(scheduler.armed).toHaveLength(1);
+  scheduler.fire();
+  await vi.waitFor(() => expect(onSettleError.mock.calls.at(-1)?.[0]).toMatchObject({draft:{pendingBytes:0,acceptedCursor:1}}));
+  expect(onSettled).not.toHaveBeenCalled();
   expect(engine.requests.filter(request=>request.method===YDOC_METHOD.settle)).toHaveLength(0);
   await provider.close();
   expect(engine.activeSessionIds()).toHaveLength(0);

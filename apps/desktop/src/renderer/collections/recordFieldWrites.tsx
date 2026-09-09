@@ -246,6 +246,10 @@ export function CollectionRecordFieldWrite({
           }
         }
         return;
+      case "saved-to-host":
+        onDurabilityConfirmed?.("The session host accepted this change. The local file may still be updating.");
+        onHeldDurably("The session host accepted this change. The local file may still be updating.");
+        return;
       case "pending-share":
         onDurabilityConfirmed?.("Saved on this device. The shared file update is pending.");
         onHeldDurably("Saved on this device. The shared file update is pending.");

@@ -177,6 +177,22 @@ async function flushLocalBatch(): Promise<void> {
   });
 }
 
+it("reports host acceptance only for the current local edit", async () => {
+  render(<Harness workspaceId="ws-1" path="notes/a.md" />);
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  act(() => screen.getByTestId("type").click());
+  await waitFor(() => expect(harness.applyAttempts).toHaveLength(1));
+  act(() => harness.emitNow("saved-to-host", 1));
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved-to-host"));
+  act(() => screen.getByTestId("type").click());
+  await waitFor(() => expect(harness.applyAttempts).toHaveLength(2));
+  act(() => harness.emitNow("pending-share", 2));
+  act(() => harness.emitNow("saved-to-host", 1));
+  expect(screen.getByTestId("state").textContent).toBe("pending-share");
+  act(() => harness.emitNow("saved-to-host", 2));
+  expect(screen.getByTestId("state").textContent).toBe("saved-to-host");
+});
+
 it("keeps a failed lineage handoff visible and read-only", async () => {
   await mountBound();
   const retired = lastBoundDoc!;

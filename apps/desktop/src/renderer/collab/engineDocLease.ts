@@ -118,6 +118,7 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // open, and dohc kept that edit instead of overwriting it.
 // None is ever inferred — main pushes all of them from real outcomes.
 export type EngineDocSaveState =
+  | "saved-to-host"
   | "saved"
   | "saving"
   | "error"
@@ -421,6 +422,7 @@ function createEngineDocSession(
   let deletionPending = false;
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
+  let pendingSavedState: "saved" | "saved-to-host" = "saved";
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -501,7 +503,7 @@ function createEngineDocSession(
       !writesRefused.current &&
       pendingSavedSeq >= localSeq.current
     ) {
-      reportSaveState("saved");
+      reportSaveState(pendingSavedState);
     }
     pendingSavedSeq = null;
   };
@@ -929,14 +931,17 @@ function createEngineDocSession(
       releaseBinding();
       return;
     }
-    if (event.state === "saved") {
+    if (event.state === "saved" || event.state === "saved-to-host") {
       if (deliveryPending) {
         // Batches or unacknowledged deliveries are still outstanding — a
         // settle that raced ahead of them must not vouch for the mirror.
-        pendingSavedSeq = Math.max(pendingSavedSeq ?? 0, event.seq);
+        if (pendingSavedSeq === null || event.seq >= pendingSavedSeq) {
+          pendingSavedSeq = event.seq;
+          pendingSavedState = event.state;
+        }
         return;
       }
-      if (event.seq >= localSeq.current) reportSaveState("saved");
+      if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
     pendingSavedSeq = null;

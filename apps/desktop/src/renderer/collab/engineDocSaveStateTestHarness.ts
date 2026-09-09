@@ -245,6 +245,8 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   function emitNow(
     state:
+      | "saved-to-host"
+      | "pending-share"
       | "settling"
       | "saved"
       | "error"

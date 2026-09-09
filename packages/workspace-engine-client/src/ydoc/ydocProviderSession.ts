@@ -343,6 +343,9 @@ export async function openEngineYdocProviderSession(
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
   });
+  const unsubscribeOwnerDraft = session.onOwnerDraftChanged(() => {
+    if (!closed) requestSettle();
+  });
   if (session.ownerDraft) requestSettle();
 
   async function beginTeardown(): Promise<boolean> {
@@ -355,6 +358,7 @@ export async function openEngineYdocProviderSession(
     unsubscribeResync();
     unsubscribeReplacement();
     unsubscribeSessionError();
+    unsubscribeOwnerDraft();
     await journalChain.catch(() => undefined);
     await settleChain.catch(() => undefined);
     return false;

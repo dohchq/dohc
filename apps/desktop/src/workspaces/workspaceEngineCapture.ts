@@ -314,6 +314,7 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // the handle releases — distinct from "error" so the surface can say
 // what blocks the disk and that no user action is needed.
 export type EngineYDocSaveState =
+  | "saved-to-host"
   | "pending-share"
   | "settling"
   | "saved"
@@ -734,7 +735,10 @@ function isLineageChangedCause(error: unknown): boolean {
  * no longer depends on where the failure was raised.
  */
 function settleFailureSaveState(error: unknown): EngineYDocSaveState {
-  if (error instanceof YdocOwnerDraftPendingError) return "pending-share";
+  if (error instanceof YdocOwnerDraftPendingError) {
+    return error.draft.pendingBytes === 0 && (error.draft.state === "active" || error.draft.state === null) && error.draft.acceptedCursor > 0
+      ? "saved-to-host" : "pending-share";
+  }
   if (isFileLockedRefusal(error)) return "file-locked";
   if (isEngineStoreBusyRefusal(error)) return "settling";
   return "error";

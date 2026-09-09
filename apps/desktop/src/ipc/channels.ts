@@ -130,6 +130,7 @@ export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 // noise and "saved" would be a lie about the disk. "deleted" is terminal for
 // this live session: the path is gone and the renderer preserves its draft.
 export const ENGINE_YDOC_SAVE_STATES = [
+  "saved-to-host",
   "pending-share",
   "settling",
   "saved",

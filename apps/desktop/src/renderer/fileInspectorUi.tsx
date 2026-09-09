@@ -69,6 +69,10 @@ export const ENGINE_CHIP: Record<
   { label: string; title?: string }
 > = {
   saved: { label: "Saved" },
+  "saved-to-host": {
+    label: "Saved to host",
+    title: "The session host accepted your edits. The local file may still be updating.",
+  },
   "pending-share": {
     label: "Saved locally · Pending share",
     title: "Your edits are saved on this device. The shared file update is pending.",
