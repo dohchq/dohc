@@ -27,15 +27,40 @@ pub(crate) struct OwnerDraftUploadParams {
     digest: String,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OwnerEnrollmentUploadParams {
+    binding: LiveObjectBinding,
+    relay_database_namespace: String,
+    captured: dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentCapture,
+    journal_cursor: i64,
+    host_vector_byte_length: usize,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
 #[derive(Clone)]
 pub(crate) enum OwnerUpload {
     Accepted(OwnerUploadParams),
     Draft(OwnerDraftUploadParams),
+    Enrollment(OwnerEnrollmentUploadParams),
 }
 
 impl OwnerUpload {
     pub(crate) fn parse(method: &str, value: Value) -> Result<Self, WireError> {
-        if method == "ydoc.ownerDelivery.appendDraft" {
+        if method == "ydoc.ownerDelivery.enroll" {
+            let params: OwnerEnrollmentUploadParams =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            if !(1..=MAX).contains(&params.host_vector_byte_length)
+                || params.byte_length < params.host_vector_byte_length + 2
+                || params.byte_length - params.host_vector_byte_length > MAX
+            {
+                return Err(invalid());
+            }
+            params.binding.validate_canonical().map_err(|_| invalid())?;
+            Ok(Self::Enrollment(params))
+        } else if method == "ydoc.ownerDelivery.appendDraft" {
             let params: OwnerDraftUploadParams =
                 serde_json::from_value(value).map_err(|_| invalid())?;
             if !(2..=MAX).contains(&params.byte_length)
@@ -56,6 +81,7 @@ impl OwnerUpload {
         match self {
             Self::Accepted(p) => (p.stream_id, p.byte_length, p.digest.clone()),
             Self::Draft(p) => (p.stream_id, p.byte_length, p.digest.clone()),
+            Self::Enrollment(p) => (p.stream_id, p.byte_length, p.digest.clone()),
         }
     }
 }
@@ -433,6 +459,14 @@ impl EngineService {
                     )
                     .await;
             }
+            OwnerUpload::Enrollment(params) => {
+                if request.method != "ydoc.ownerDelivery.enroll" {
+                    return Err(invalid());
+                }
+                return self
+                    .owner_delivery_enroll(ctx, request, params, input.bytes, input.reservation)
+                    .await;
+            }
             OwnerUpload::Accepted(params) => params,
         };
         params.validate(&request.method)?;
@@ -501,6 +535,133 @@ impl EngineService {
             response: Response {
                 id: request.id,
                 result: json!({"revision":result.revision,"acceptedCursor":result.accepted_cursor,"nativeHeadSequence":result.native_head_sequence}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    async fn owner_delivery_enroll(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+        params: OwnerEnrollmentUploadParams,
+        mut bytes: Vec<u8>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<ServiceResponse, WireError> {
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            reservation,
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let _serial = self
+            .mutation_session_guard(&guard.open, &cancellation, "owner enrollment (queued)")
+            .await?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        let checkpoint = bytes.split_off(params.host_vector_byte_length);
+        let limits = self
+            .ordinary_live_host
+            .get()
+            .ok_or_else(workspace_unavailable)?
+            .owner_outbox
+            .clone();
+        let draft = guard
+            .open
+            .actor
+            .owner_ydoc_enroll(
+                guard.open.workspace_id.clone(),
+                dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentInput {
+                    binding: params.binding,
+                    relay_database_namespace: params.relay_database_namespace,
+                    captured: params.captured,
+                    journal_cursor: params.journal_cursor,
+                    checkpoint,
+                    host_vector: bytes,
+                },
+                limits,
+                now_ms()?,
+                cancellation.token(),
+                guard.reservation.clone(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        // The workspace mutation serial prevents a pre-enrollment editor write
+        // from being routed through ordinary publication after this commit.
+        for session in crate::lock(&self.sessions).values_mut() {
+            if session.workspace == guard.workspace
+                && session.key.workspace_id == draft.binding.workspace_id
+                && session.key.version_id == draft.binding.main_version_id
+                && session.key.object_id == draft.binding.object_id
+                && session.path == draft.binding.current_path
+                && session.lineage_claim_id.as_deref()
+                    == Some(draft.binding.lineage_claim_id.as_str())
+            {
+                session.owner_draft = Some(draft.clone());
+            }
+        }
+        self.events.emit(
+            "ydoc.ownerDraftChanged",
+            json!({"workspaceId":guard.open.workspace_id,"outboxId":draft.outbox_id}),
+        );
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!({"draft": draft}),
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        })
+    }
+
+    pub(crate) async fn owner_delivery_prepare_enrollment(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            binding: LiveObjectBinding,
+            relay_database_namespace: String,
+        }
+        let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, request.workspace.as_ref())?;
+        let reservation = self.reserve_owner_delivery()?;
+        let guard = self.owner_delivery_guard(
+            &ctx,
+            request.workspace.as_ref(),
+            Some(&params.binding),
+            reservation,
+        )?;
+        let cancellation = OperationCancellation::new(&ctx);
+        let result = guard
+            .open
+            .actor
+            .owner_ydoc_prepare_enrollment(
+                params.binding,
+                params.relay_database_namespace,
+                cancellation.token(),
+                guard.reservation.clone(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(ServiceResponse {
+            response: Response {
+                id: request.id,
+                result: json!(result),
             },
             blob_egress: None,
             output_guard: Some(guard),

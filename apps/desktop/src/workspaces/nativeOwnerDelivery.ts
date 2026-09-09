@@ -27,6 +27,7 @@ export async function runNativeOwnerDeliveryPass(options: {
   }
   const target = {binding: document.binding, relayDatabaseNamespace: document.relayDatabaseNamespace};
   const request = () => ({id: 0, workspace: options.workspaceHandle, deadlineMs: config.attemptTimeoutMs});
+  let preparation: Awaited<ReturnType<EngineClient["ownerYDocPrepareEnrollment"]>> | undefined;
   let position: {revision: number; acceptedCursor: number; nativeHeadSequence: number} | undefined;
   function bound(binding: typeof document.binding) {
     check();
@@ -40,12 +41,20 @@ export async function runNativeOwnerDeliveryPass(options: {
   const acceptedState: OwnerAcceptedState = {
     async readState(binding, attemptSignal) {
       bound(binding);
+      if (preparation?.status === "capture") return {stateVector: Uint8Array.of(0), journalCursor: 0};
       const state = await guarded(signal => client.ownerYDocReadState(request(), target, signal), attemptSignal);
       position = state;
       return {stateVector: state.stateVector, journalCursor: state.acceptedCursor};
     },
     async applyInitialSync(input, attemptSignal) {
       bound(input.binding);
+      if (preparation?.status === "capture") {
+        const captured = preparation.captured;
+        const draft = await guarded(signal => client.ownerYDocEnroll(request(), {...target, captured,
+          journalCursor: input.appliedThroughJournalCursor, hostVector: input.hostVector, checkpoint: input.missingStateUpdate}, signal), attemptSignal);
+        preparation = {status: "observed", draft}; position = draft;
+        return "applied";
+      }
       position = await guarded(signal => client.ownerYDocApplyInitialSync(request(), {...target, ...prior(),
         journalCursor: input.appliedThroughJournalCursor, hostVector: input.hostVector,
         updateBytes: input.missingStateUpdate}, signal), attemptSignal);
@@ -67,7 +76,19 @@ export async function runNativeOwnerDeliveryPass(options: {
   const delivery = new OwnerYDocFrameDelivery({relayUrl: config.relayUrl, shareId: document.shareId,
     frames: config.frames, attemptTimeoutMs: config.attemptTimeoutMs, signal, acceptedState,
     freshBearer: async () => {check(); return options.bearer;}});
-  const drainer = new OwnerYDocOutboxDrainer(outbox, document.outboxId, delivery);
-  try {return await drainer.drainOnce();}
-  finally {drainer.dispose(); delivery.dispose(); outbox.dispose(); await Promise.allSettled([...pending]);}
+  let drainer: OwnerYDocOutboxDrainer | undefined;
+  try {
+    preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
+    if (preparation.status === "capture" || preparation.draft.outboxId === null) {
+      const authority = await delivery.freshOwnerAuthority(document.binding);
+      check();
+      if (authority.kind !== "authority") return authority.kind === "quarantine" ? "frozen" : "retry";
+      // Re-read durable discovery after uncertain commits and concurrent draft writes.
+      preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
+    }
+    if (preparation.status !== "observed") return "retry";
+    if (preparation.draft.outboxId === null) return "empty";
+    drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery);
+    return await drainer.drainOnce();
+  } finally {drainer?.dispose(); delivery.dispose(); outbox.dispose(); await Promise.allSettled([...pending]);}
 }

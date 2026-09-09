@@ -169,6 +169,74 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    pub async fn owner_ydoc_prepare_enrollment(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        namespace: String,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentPreparation,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::enrollment::prepare_in(conn, &binding, &namespace)
+            }))
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_enroll(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentInput,
+        limits: dohc_engine_collab::OwnerOutboxLimits,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            cache.remove(&key);
+            Ok(
+                match store.write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::owner_outbox::enrollment::enroll_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        &limits,
+                        now_ms,
+                    )
+                }) {
+                    Ok(TxnOutcome::Committed(result)) => Ok(result),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_draft_for_key(
         &self,
         key: DocKey,

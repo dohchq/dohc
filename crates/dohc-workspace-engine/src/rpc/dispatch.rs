@@ -142,6 +142,9 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
+            return self.owner_delivery_prepare_enrollment(ctx, request).await;
+        }
         if request.method == "ydoc.ownerDelivery.listDrafts" {
             return self.owner_delivery_list_drafts(ctx, request).await;
         }

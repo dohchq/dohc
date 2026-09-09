@@ -360,6 +360,7 @@ impl LiveApplicationIngress {
             "liveApplication.apply"
                 | "ydoc.ownerDelivery.applyAcceptedFrame"
                 | "ydoc.ownerDelivery.applyInitialSync"
+                | "ydoc.ownerDelivery.enroll"
                 | "ydoc.ownerDelivery.appendDraft"
                 | "liveApplication.bootstrap"
                 | "liveApplication.adoptOwner"

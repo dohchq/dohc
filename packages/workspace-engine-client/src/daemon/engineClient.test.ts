@@ -55,6 +55,22 @@ describe("private owner delivery transport", () => {
       expect(await transport.ownerYDocAppendDraft({...request,id:972},{binding:target.binding,expectedRevision:1,appendKey:"edit",updateBytes:Uint8Array.of(0,0)})).toMatchObject({outboxId:"outbox",sequence:1,pendingBytes:2});
     } finally {transport.close();}
   });
+  it("captures native state and enrolls an exact binary host cut without caller limits", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge(); await transport.ready();
+    const captured={nativeHeadSequence:2,localStateDigest:"ab".repeat(32)}, draft={...target,revision:1,acceptedCursor:9,nativeHeadSequence:3,outboxId:"pending",pendingBytes:2,state:"active"};
+    let wireId=0;const chunks:Buffer[]=[];
+    peer.onEnvelope=e=>{if(e.type!=="request")return;
+      if(e.method==="ydoc.ownerDelivery.prepareEnrollment") {expect(e.params).toEqual(target);peer.send({type:"response",id:e.id,result:{status:"capture",captured}});}
+      else {expect(e.method).toBe("ydoc.ownerDelivery.enroll");expect(e.params).toMatchObject({...target,captured,journalCursor:9,hostVectorByteLength:1});expect(e.params).not.toHaveProperty("limits");wireId=e.id;}
+    };
+    peer.onBlobChunk=frame=>{chunks.push(Buffer.from(frame.payload));if(frame.fin)peer.send({type:"response",id:wireId,result:{draft}});};
+    try {
+      expect(await transport.ownerYDocPrepareEnrollment(request,target)).toEqual({status:"capture",captured});
+      expect(await transport.ownerYDocEnroll({...request,id:971},{...target,captured,journalCursor:9,hostVector:Uint8Array.of(0),checkpoint:Uint8Array.of(0,0)})).toEqual(draft);
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([0,0,0]));
+    } finally {transport.close();}
+  });
   it("reads a bounded accepted vector without a host registration", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge();await transport.ready();

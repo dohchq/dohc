@@ -8,7 +8,6 @@ import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
 
 export interface DesktopOwnerDeliveryDocument {
   binding: LiveObjectBinding;
-  outboxId: string;
   relayDatabaseNamespace: string;
   shareId: string;
 }
@@ -30,7 +29,7 @@ function delay(value: unknown): number {
   return value as number;
 }
 
-/** Targets existing native outboxes. This does not enroll a document or create authority. */
+/** Main-owned document selection; authenticated sync and native checks enroll each target. */
 export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDeliveryConfig {
   fields(value, ["version", "nativeConfigPath", "nativeClient", "relayUrl", "frames", "attemptTimeoutMs", "retryDelayMs", "documents"]);
   const relayUrl = typeof value.relayUrl === "string" ? canonicalRelayUrl(value.relayUrl) : null;
@@ -43,12 +42,12 @@ export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDel
   if (!Number.isSafeInteger(nativeClient.aggregateBytes) || nativeClient.aggregateBytes < 1 ||
     !Number.isSafeInteger(nativeClient.maxUploads) || nativeClient.maxUploads < 1) throw new TypeError("Invalid native owner client budget.");
   const documents = value.documents.map(raw => {
-    fields(raw, ["binding", "outboxId", "relayDatabaseNamespace", "shareId"]);
+    fields(raw, ["binding", "relayDatabaseNamespace", "shareId"]);
     const binding = parseLiveObjectBinding(raw.binding);
     if (binding.mainVersionId !== "main") throw new TypeError("Owner delivery requires main.");
-    return {binding, outboxId: parseLiveUpdateIdentifier(raw.outboxId), relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace), shareId: parseLiveUpdateIdentifier(raw.shareId)};
+    return {binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace), shareId: parseLiveUpdateIdentifier(raw.shareId)};
   });
-  const ids = documents.map(document => JSON.stringify([document.binding.workspaceId, document.outboxId]));
+  const ids = documents.map(document => JSON.stringify([document.binding.workspaceId, document.binding.mainVersionId, document.binding.objectId]));
   if (new Set(ids).size !== ids.length) throw new TypeError("Duplicate owner delivery target.");
   return {nativeConfigPath: value.nativeConfigPath, nativeClient, relayUrl, frames, documents, attemptTimeoutMs: delay(value.attemptTimeoutMs), retryDelayMs: delay(value.retryDelayMs)};
 }

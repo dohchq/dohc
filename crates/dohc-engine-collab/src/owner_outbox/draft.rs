@@ -1,4 +1,4 @@
-//! Unmounted non-host owner draft storage. No RPC installs these bindings.
+//! Non-host owner drafts backed by an authenticated accepted checkpoint.
 use super::*;
 use crate::{CollabError, DocKey, Ydoc};
 

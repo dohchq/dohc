@@ -751,6 +751,40 @@ export class EngineClient implements EngineTransport {
     return {...row,outboxId:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),deliveryId:parseLiveUpdateIdentifier(row.deliveryId,"delivery ID")};
   }
 
+  async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<
+    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor}
+  > {
+    const params=ownerDeliveryTarget(target);
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params,streams:[]}),signal);
+    const row=response.result as Record<string,unknown>;
+    if (row.status==="observed" && Object.keys(row).sort().join()==="draft,status") {
+      const draft=ownerDraftDescriptor(row.draft);
+      if (JSON.stringify(draft.binding)!==JSON.stringify(params.binding) || draft.relayDatabaseNamespace!==params.relayDatabaseNamespace) throw new TypeError("Owner enrollment target changed.");
+      return {status:"observed",draft};
+    }
+    if (row.status!=="capture" || Object.keys(row).sort().join()!=="captured,status") throw new TypeError("Invalid owner capture response.");
+    const captured=row.captured as {nativeHeadSequence:number;localStateDigest:string};
+    if (!captured || Object.keys(captured).sort().join()!=="localStateDigest,nativeHeadSequence" || !Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0) throw new TypeError("Invalid owner capture.");
+    return {status:"capture",captured:{nativeHeadSequence:captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(captured.localStateDigest)}};
+  }
+
+  async ownerYDocEnroll(request:OwnerYDocDeliveryRequest, input:OwnerYDocDeliveryTarget & {
+    captured:{nativeHeadSequence:number;localStateDigest:string};journalCursor:number;hostVector:Uint8Array;checkpoint:Uint8Array
+  }, signal?:AbortSignal):Promise<OwnerYDocDraftDescriptor> {
+    const target=ownerDeliveryTarget(input), captured={nativeHeadSequence:input.captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(input.captured.localStateDigest)};
+    if (!Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0 || !Number.isSafeInteger(input.journalCursor) || input.journalCursor<0 || input.hostVector.byteLength<1 || input.hostVector.byteLength>MAX_LIVE_UPDATE_BYTES || input.checkpoint.byteLength<2 || input.checkpoint.byteLength>MAX_LIVE_UPDATE_BYTES) throw new TypeError("Invalid owner enrollment cut.");
+    const byteLength=input.hostVector.byteLength+input.checkpoint.byteLength;
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.enroll",byteLength+3*1024*1024,()=>{
+      const bytes=Buffer.concat([input.hostVector,input.checkpoint],byteLength), digest=createHash("sha256").update(bytes).digest("hex"), streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      return {params:{...target,captured,journalCursor:input.journalCursor,hostVectorByteLength:input.hostVector.byteLength,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    if (Object.keys(response.result as object).join()!=="draft") throw new TypeError("Invalid owner enrollment response.");
+    const draft=ownerDraftDescriptor((response.result as Record<string,unknown>).draft);
+    if (JSON.stringify(draft.binding)!==JSON.stringify(target.binding) || draft.relayDatabaseNamespace!==target.relayDatabaseNamespace || draft.acceptedCursor!==input.journalCursor || draft.revision!==1) throw new TypeError("Owner enrollment differs from request.");
+    return draft;
+  }
+
   async ownerYDocReadState(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition & {stateVector: Buffer}> {
     const params=ownerDeliveryTarget(target);
     const output:PrivateLiveOutput={status:"state",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
@@ -1395,7 +1429,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||
