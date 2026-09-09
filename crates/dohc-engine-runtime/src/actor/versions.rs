@@ -895,11 +895,11 @@ impl ActorHandle {
                             (head.blob_sha256, Some(head.text.into_bytes()), equal) })
                 } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
                 let (operation, sha, inline) = match (change.operation, desired) {
-                    ("write", Some((_, _, true))) => continue,
-                    ("write", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
-                    ("delete", None) if matches!(state, ProjectionTargetState::Absent) => continue,
-                    ("delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
-                    _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization head changed" }.into()),
+                    ("write" | "delete", Some((_, _, true))) => continue,
+                    ("write" | "delete", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
+                    ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => continue,
+                    ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
+                    _ => return Err(DomainError::StateCorrupt { reason: "ordinary materialization operation is invalid" }.into()),
                 };
                 let projection = planned_projection(&workspace_id, &active, change.path, operation, sha,
                     preimage, now_ms, now_ms, secret, inline);
