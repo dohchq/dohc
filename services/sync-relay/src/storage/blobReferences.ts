@@ -80,6 +80,10 @@ export function referencedBlobShas(
     // blob GC treats a blob a live ydoc.update op references as a ROOT — a live
     // rich-doc update blob is never collected out from under the log.
     push(record.updateBlobSha256);
+  } else if (opKind === "live.audit.base") {
+    const audit = asRecord(record.record);
+    const checkpoint = audit ? asRecord(audit.checkpoint) : null;
+    if (checkpoint) push(checkpoint.stateDigest);
   } else if (opKind === "secret.file.put") {
     push(record.ciphertextSha256);
   } else if (opKind === "secret.version.fork") {

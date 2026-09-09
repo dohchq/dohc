@@ -2457,6 +2457,16 @@ fn collect_blob_refs(
                     BlobKind::Ydoc,
                 )?;
             }
+            "live.audit.base" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("record")
+                        .and_then(|record| record.get("checkpoint"))
+                        .and_then(|checkpoint| checkpoint.get("stateDigest")),
+                    BlobKind::Ydoc,
+                )?;
+            }
             "secret.file.put" => {
                 insert_optional_ref(
                     &mut refs,
@@ -4607,6 +4617,24 @@ mod conflict_resolve_blob_ref_tests {
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, SuccessorContentKindV1,
         SuccessorV1, build_conflict_resolve_v1,
     };
+
+    #[test]
+    fn native_event_zero_keeps_the_ydoc_blob_ceiling() {
+        let sha = "a".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.base".into(),
+            payload: serde_json::json!({"record":{"checkpoint":{"stateDigest":sha}}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([(sha, BTreeSet::from([BlobKind::Ydoc]))])
+        );
+    }
 
     #[test]
     fn conflict_resolve_collects_text_binary_and_successor_roots() {

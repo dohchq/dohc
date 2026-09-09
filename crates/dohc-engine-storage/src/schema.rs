@@ -38,6 +38,9 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "live_audit_base_publications",
+    "live_audit_bases",
+    "live_audit_base_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_restore_fences",
@@ -393,6 +396,9 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
             "live_restore_fences",

@@ -46,6 +46,9 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "live_audit_base_publications",
+    "live_audit_bases",
+    "live_audit_base_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_restore_fences",
@@ -503,9 +506,15 @@ mod tests {
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_base_publications VALUES ('relay','workspace','main','object',?1,'{}',?1,'peer',0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
             "live_restore_fences",
@@ -549,6 +558,9 @@ mod tests {
     #[test]
     fn backup_compares_live_application_tables() {
         for table in [
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
             "live_restore_fences",

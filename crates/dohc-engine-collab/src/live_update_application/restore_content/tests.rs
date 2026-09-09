@@ -612,7 +612,7 @@ impl Fixture {
             bootstrap,
             bytes,
             &NoFaults,
-            |_, _| Ok(()),
+            |_, _, _, _| Ok(()),
         )
         .unwrap();
         let baseline_point = point(&doc, 0, binding.lineage_claim_id.clone());
