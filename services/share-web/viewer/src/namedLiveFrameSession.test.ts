@@ -51,8 +51,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
     try { signal.throwIfAborted(); await block.promise; } finally { signal.removeEventListener("abort", aborted); }
   };
   const host: NamedFrameHostSession = {
-    ticket: { ticketId: "ticket", audience: "https://share.example", authority: { principalKind: "named", principalId: "user", grantId: "grant", grantGeneration: 1 },
-      binding, hostEpoch: parseHostEpoch(1), mintedAtMs: 0, expiresAtMs: 30000, redeemedAtMs: 1 },
+    hostEpoch: parseHostEpoch(1),
     invalidated: invalidated.signal, assertCurrent() { invalidated.signal.throwIfAborted(); }, close: hostClosed,
     async openSync(vector, signal) {
       await wait(blockedOpen, signal);

@@ -21,15 +21,16 @@ function harness() {
   const registry = createLiveMembershipRegistry({ maxSessions: 8, maxMembers: 8, maxSnapshotBytes: 153 }, read => read());
   const invalidated = new AbortController(), doc = new Y.Doc();
   let authorized = true;
+  const redeemed = ticket("recipient");
   const host: NamedFrameHostSession = {
-    ticket: ticket("recipient"), invalidated: invalidated.signal,
+    hostEpoch: redeemed.hostEpoch, invalidated: invalidated.signal,
     assertCurrent() { if (!authorized) throw new Error("recipient revoked"); invalidated.signal.throwIfAborted(); },
-    async openSync() { return { binding: host.ticket.binding, hostVector: Y.encodeStateVector(doc), missingStateUpdate: Y.encodeStateAsUpdate(doc), appliedThroughJournalCursor: 0,
+    async openSync() { return { binding: redeemed.binding, hostVector: Y.encodeStateVector(doc), missingStateUpdate: Y.encodeStateAsUpdate(doc), appliedThroughJournalCursor: 0,
       nextApplied(signal) { return new Promise((_, reject) => { signal.addEventListener("abort", () => reject(signal.reason), { once: true }); }); }, close() {} }; },
     async submit() { return { result: "retry", reason: "admission-unavailable" }; },
     close() { invalidated.abort(); },
   };
-  const membership = registry.join({ ticket: host.ticket, invalidated: host.invalidated, assertCurrent: () => host.assertCurrent() });
+  const membership = registry.join({ ticket: redeemed, invalidated: host.invalidated, assertCurrent: () => host.assertCurrent() });
   const provider = createNamedLiveProvider({ frames, maxPendingUpdateBytes: 8192, maxPendingUpdates: 8, maxDeliveryAttempts: 2 });
   const observed: LiveFrame[] = [], watchers = new Set<() => void>(), queued: Uint8Array[] = [];
   let session: ReturnType<typeof createNamedLiveFrameSession> | undefined, stall = true, release: (() => void) | undefined;
@@ -63,6 +64,7 @@ describe("membership on the real frame session and browser provider", () => {
   it("sends membership only after sync and coalesces changes behind one held control lease", async () => {
     const h = harness(); await h.until(h.isStalled);
     expect(h.provider.state().status).toBe("live");
+    expect(h.observed).toContainEqual(expect.objectContaining({kind: "welcome", hostEpoch: 1}));
     const first = h.join("first");
     expect(h.session.usage().outgoing).toMatchObject({ controlFrames: 1, controlBytes: 41 });
     const second = h.join("second"); first.close(); const third = h.join("third"); second.close();
