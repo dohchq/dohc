@@ -63,6 +63,33 @@ it('retains the original lineage and edited ordinary cut, closing ordinary autho
     expect(f.prepare()).toMatchObject({replayed:true,completed:false})
   }finally{f.close()}
 })
+it('activates a receiver projection derived from the ordinary Ydoc base and suffix without a matching file moment',()=>{
+  const f=fixture();try{
+    const baseline=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes})
+    if(baseline.kind!=='accepted')throw new Error(JSON.stringify(baseline))
+    f.raw.exec('DELETE FROM sync_relay_log; DELETE FROM sync_relay_object_moments')
+    const moment={versionId:'main',objectId:'object',momentId:'original-moment',path:'docs/a.md',operation:'write',
+      payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:baseline.evidence.projectedMarkdownSha256,
+      payloadAfterByteLength:baseline.evidence.projectedMarkdownByteLength}
+    const append=(relaySeq:number,originSeq:number,kind:string,payload:unknown)=>f.raw.prepare(
+      "INSERT INTO sync_relay_log(relay_seq,workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES (?,'workspace','origin',?,?,?,?)")
+      .run(relaySeq,originSeq,kind,JSON.stringify(payload),relaySeq)
+    append(1,0,'moment.append',moment)
+    append(2,1,'ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:true,
+      lineageClaimId:f.document.lineageClaimId,updateBlobSha256:f.document.lineageClaimId})
+    append(3,2,'ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:false,
+      lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(f.capture.fullState)})
+    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)")
+      .run(hash(f.capture.fullState),f.capture.fullState.length,f.capture.fullState)
+    f.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,1)")
+      .run(baseline.evidence.projectedMarkdownSha256,baseline.evidence.projectedMarkdownByteLength)
+    Object.assign(f.capture.source,{committedCursor:3,baseRelaySeq:2,nativeHeadSequence:1,
+      sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin','2'].join('\0')))}`})
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments').all()).toEqual([{moment_id:'original-moment'}])
+  }finally{f.close()}
+})
 it('rolls back host registration and baseline when the ordinary cursor advanced',()=>{
   const f=fixture();try{
     f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
