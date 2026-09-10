@@ -366,6 +366,7 @@ export function createLinkCredentialRoutes(
           return (
             authorized.ok &&
             authorized.grant.grantId === storedCode.grantId &&
+            authorized.grant.generation === storedCode.generation &&
             isPublicLinkAccess(authorized.grant.access, publicEditRelease) &&
             (authorized.grant.access !== "edit" || isLiveEditShareSelector(authorized.effectiveSelector))
           );
@@ -374,7 +375,7 @@ export function createLinkCredentialRoutes(
         }
       },
     });
-    if (!result.ok) return refused();
+    if (!result.ok || !isPublicLinkAccess(result.grant.access, publicEditRelease)) return refused();
     return jsonResponse({
       ok: true,
       shareId: result.shareId,

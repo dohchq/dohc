@@ -70,7 +70,7 @@ export function createFileLinkShare(storage: StorageContext, input: {
       grant.principalUserId !== null ||
       grant.principalEmail !== null ||
       grant.parentGrantId !== null ||
-      (grant.access !== "view" && grant.access !== "comment") ||
+      (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit") ||
       grant.status !== "active" ||
       grant.revokedAtMs !== null ||
       grant.generation !== 1 ||

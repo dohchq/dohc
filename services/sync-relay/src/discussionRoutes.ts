@@ -261,7 +261,7 @@ export function createDiscussionRoutes(
 
   const publicDiscussionActivityPage = (
     page: SyncRelayShareDiscussionActivityPage,
-    access: "view" | "comment",
+    access: "view" | "comment" | "edit",
     composerState: "available" | "blocked" | "paused",
     profileName: string | null,
   ): Record<string, unknown> => ({

@@ -1171,3 +1171,19 @@ describe("released Edit handoff", () => {
     expect((await closed(redeemRequest(RECIPIENT, handoff.code))).status).not.toBe(200);
   });
 });
+
+it.each(["view", "comment", "edit"] as const)("rechecks parent generation before replaying a redeemed %s handoff", async access => {
+  const state = await setup(access === "edit" ? {publicEditRelease: {version: 1},
+    namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000}} : {}, access);
+  const code = await mint(state);
+  const accepted = await serialized(await state.h(redeemRequest(RECIPIENT, code.code)));
+  expect(accepted.status).toBe(200);
+  expect(await serialized(await state.h(redeemRequest(RECIPIENT, code.code)))).toEqual(accepted);
+  const database = inspect(state.dbPath);
+  expect(codeCount(database)).toBe(1);
+  const before = dependentRows(database, String(state.link.grantId));
+  database.prepare("UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?").run(String(state.link.grantId));
+  await expectGeneric(await state.h(redeemRequest(RECIPIENT, code.code)));
+  expect(codeCount(database)).toBe(0);
+  expect(dependentRows(database, String(state.link.grantId))).toEqual(before);
+});

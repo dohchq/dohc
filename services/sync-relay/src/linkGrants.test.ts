@@ -1121,7 +1121,7 @@ describe("owner link contract", () => {
   });
 
   it.each(["view", "comment"] as const)(
-    "refuses retuning an active Edit link down to %s before Phase 4",
+    "narrows an active Edit link down to %s while public Edit issuance is disabled",
     async (access) => {
       const storage = await newStorage();
       const h = handler(storage);
@@ -1163,8 +1163,9 @@ describe("owner link contract", () => {
         ),
       );
 
-      expect(response.status).toBe(404);
-      expect(storage.getShareGrant(grantId)).toEqual(beforeGrant);
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({ok: true, access, generation: 1});
+      expect(storage.getShareGrant(grantId)).toEqual({...beforeGrant, access});
       expect(storage.getCurrentLinkCredential(grantId)).toEqual(beforeCredential);
     },
   );

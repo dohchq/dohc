@@ -148,21 +148,9 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
         return { ok: false };
       }
 
-      if (code.resultGrantId !== null) {
-        const grant = storage.getShareGrant(code.resultGrantId);
-        if (grant?.principalUserId !== input.principalUserId) {
-          return { ok: false };
-        }
-        if (
-          grant.principalKind !== "user" ||
-          grant.status !== "active" ||
-          grant.revokedAtMs !== null ||
-          (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
-        ) {
-          deleteCode();
-          return { ok: false };
-        }
-        return { ok: true, shareId: grant.shareId, grant };
+      const replayedGrant = code.resultGrantId === null ? null : storage.getShareGrant(code.resultGrantId);
+      if (code.resultGrantId !== null && replayedGrant?.principalUserId !== input.principalUserId) {
+        return { ok: false };
       }
 
       const refuseAndConsume = (): LinkHandoffRedeemResult => {
@@ -189,6 +177,22 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
       ) {
         return refuseAndConsume();
       }
+      if (code.resultGrantId !== null) {
+        const grant = storage.getShareGrant(code.resultGrantId);
+        if (
+          !grant ||
+          grant.principalUserId !== input.principalUserId ||
+          grant.principalKind !== "user" ||
+          grant.status !== "active" ||
+          grant.revokedAtMs !== null ||
+          (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
+        ) {
+          deleteCode();
+          return { ok: false };
+        }
+        return { ok: true, shareId: grant.shareId, grant };
+      }
+
       const share = storage.getShare(parent.shareId);
       if (!share || share.granterUserId === input.principalUserId) {
         return refuseAndConsume();
