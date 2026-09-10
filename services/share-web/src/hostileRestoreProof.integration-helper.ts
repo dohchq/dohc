@@ -11,7 +11,7 @@ import {createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, type LiveF
   type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-type Ticket = {discriminator: string; token: string};
+type Ticket = {discriminator: string; token: string; expiresAtMs: number};
 type Outcome = Extract<LiveFrame, {kind: "result"}> | {kind: "socket-closed"; code: number};
 
 /** Opt-in wire proof. Authentication, restore, admission and native application use real services. */
@@ -39,7 +39,9 @@ export async function prepareHostileRestoreProof(input: {
     };
     const session = await post("/api/live/named-session", {grantId});
     const minted = await post("/api/live/named-ticket", {discriminator: session.discriminator, objectId: "object"});
-    return {discriminator: session.discriminator, token: minted.token};
+    expect(Number.isSafeInteger(minted.expiresAtMs)).toBe(true);
+    expect(minted.expiresAtMs).toBeGreaterThan(Date.now());
+    return {discriminator: session.discriminator, token: minted.token, expiresAtMs: minted.expiresAtMs};
   }
   async function connect(context: BrowserContext, minted: Ticket, label: string) {
     const cookies = (await context.cookies(audience)).map(row => `${row.name}=${row.value}`).join("; ");
@@ -145,6 +147,7 @@ export async function prepareHostileRestoreProof(input: {
     }
     async function close() {if (closed === undefined) {ws.close(); await until(() => closed !== undefined);} protocol.close(); doc.destroy(); documents.delete(doc);}
     return {ws, status, sync, doc, partial, submit, hostileSend, close, until,
+      get deliveryResults() {return received.filter((frame): frame is Extract<LiveFrame, {kind: "result"}> => frame.kind === "result");},
       get binding() {return initialBinding;}, get closed() {return closed;}};
   }
   function persisted(label: string) {
@@ -189,12 +192,23 @@ export async function prepareHostileRestoreProof(input: {
       await old.hostileSend({kind: "chunk", transferId: id, offset: 0, bytes: offlineBytes});
       await old.until(() => old.closed !== undefined);
       const snapshot = persisted("after-stop");
-      cases.oldGeneration = {closed: old.closed, snapshot, pass: snapshot.journal.length === 0 && snapshot.applications.length === 0}; save();
+      cases.oldGeneration = {closed: old.closed, snapshot, deliveryResults: old.deliveryResults,
+        observation: "An acknowledged partial transfer was active before invalidation. The client attempted its remaining bytes while locally OPEN; the connection then closed without journal or native admission.",
+        postInvalidationServerReadProven: false, commitRecheckProven: false,
+        pass: old.closed !== undefined && snapshot.journal.length === 0 && snapshot.applications.length === 0}; save();
     },
     async restored(settle: () => Promise<unknown>) {
+      const oldTicketConnectAt = Date.now();
+      const unexpiredAtConnect = oldTicketConnectAt < unusedOldTicket.expiresAtMs;
+      cases.oldTicket = {expiresAtMs: unusedOldTicket.expiresAtMs, connectAt: oldTicketConnectAt,
+        unexpiredAtConnect, classification: "NOT_OBSERVED", pass: false}; save();
+      expect(unexpiredAtConnect, "Old-ticket invalidation cannot be proved with an expired ticket.").toBe(true);
       const stale = await connect(input.allowedContext, unusedOldTicket, "unused-old-ticket");
       const oldTicketStatus = await stale.status;
-      cases.oldTicket = {status: oldTicketStatus, pass: oldTicketStatus === 404}; save();
+      const oldTicketResponseAt = Date.now(), unexpiredAtResponse = oldTicketResponseAt < unusedOldTicket.expiresAtMs;
+      cases.oldTicket = {status: oldTicketStatus, expiresAtMs: unusedOldTicket.expiresAtMs,
+        connectAt: oldTicketConnectAt, responseAt: oldTicketResponseAt, unexpiredAtConnect, unexpiredAtResponse,
+        classification: unexpiredAtResponse ? "OBSERVED" : "NOT_OBSERVED", pass: unexpiredAtResponse && oldTicketStatus === 404}; save();
       await stale.close();
       const replay = await connect(input.allowedContext, await ticket(input.allowedContext, "grant-1"), "accepted-history-only");
       await replay.sync(); expect(yDocToMarkdown(replay.doc)).toBe("Hello");
@@ -236,7 +250,8 @@ export async function prepareHostileRestoreProof(input: {
       await fresh.close();
       const verdict = ["oldGeneration", "oldTicket", "acceptedHistory", "freshControl"].every(key => (cases[key] as {pass: boolean}).pass) ? "PASS" : "BEHAVIOR_GAP";
       cases.verdict = verdict; save(); return {verdict, novelOfflineRequiresRootAnalysis: true,
-        staleClientQuarantineProven: false, evidence: join(root, "hostile-evidence.json")};
+        staleClientQuarantineProven: false, postInvalidationServerReadProven: false, commitRecheckProven: false,
+        evidence: join(root, "hostile-evidence.json")};
     },
     async close() {for (const ws of sockets) ws.terminate(); await old.close(); for (const doc of documents) doc.destroy();},
   };
