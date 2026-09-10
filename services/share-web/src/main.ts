@@ -48,6 +48,7 @@ const application = createShareWebApplication({
   namedLiveTickets: config.namedLiveGatewayLimits !== undefined,
   namedRecipientBrowserLimits: config.namedRecipientBrowserLimits,
   linkLive: config.linkLive,
+  publicEditRelease: config.publicEditRelease,
 });
 
 const server = serveFetchHandler({

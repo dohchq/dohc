@@ -3,6 +3,8 @@ import {shareAccessRank} from "@dohc/security-contract/share-selector";
 import {linkRetuneLabels} from "./useRelayShareLinkPane";
 
 it.each([
+  ["view", "edit", "Turn on editing", "Turning on editing…"],
+  ["comment", "edit", "Turn on editing", "Turning on editing…"],
   ["view", "comment", "Turn on comments", "Turning on comments…"],
   ["edit", "comment", "Use Comment access", "Changing access…"],
   ["comment", "comment", "Use Comment access", "Changing access…"],

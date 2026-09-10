@@ -1,3 +1,4 @@
+import {parsePublicEditRelease} from "@dohc/security-contract";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { tmpdir } from "node:os";
@@ -163,6 +164,7 @@ if (!testAuthSeam && secret.length < 32) {
   );
 }
 
+const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const namedLiveConfig = (() => {
   const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
@@ -287,6 +289,7 @@ const relayApplication = createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
+  publicEditRelease,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -436,6 +439,12 @@ ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
 };
+if (publicEditRelease) {
+  const mode = storage.getLiveHostControl()?.configuredMode;
+  if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? !serviceHost : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {
+    fatal("FATAL: Public Edit release requires link live routes and the configured service host or device delivery with owner admission.");
+  }
+}
 if (namedLiveConfig) {
   if (!serviceHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
   const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {
@@ -452,7 +461,7 @@ if (namedLiveConfig) {
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
-  if (linkLiveEnabled) {
+  if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,

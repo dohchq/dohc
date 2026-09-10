@@ -5628,3 +5628,52 @@ describe("relay link grants", () => {
     });
   });
 });
+
+describe("explicit public Edit release", () => {
+  const exchangeKey = "public-edit-test-relay-key-at-least-32";
+  const releaseOptions: HandlerOverrides = {
+    publicEditRelease: {version: 1}, relayExchangeKey: exchangeKey,
+    namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000},
+  };
+  const exchangeRequest = (secret: string) => request(null, "/sync/link-exchange", {
+    ...jsonBody({secret}), headers: {"content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey},
+  });
+
+  it("requires relay prerequisites for a release marker", async () => {
+    const storage = await newStorage();
+    expect(() => handler(storage, {publicEditRelease: {version: 1}})).toThrow(/Public Edit release requires/);
+  });
+
+  it("issues Edit only when released, then permits narrowing after release is removed", async () => {
+    const storage = await newStorage();
+    const enabled = handler(storage, releaseOptions);
+    await seedFileShare(enabled, "edit");
+    expect((await json(await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`)))).supportedLinkAccess).toEqual(["view", "comment", "edit"]);
+    const createdResponse = await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/share-existing/links`, jsonBody({access: "edit"})));
+    expect(createdResponse.status).toBe(200);
+    const created = await json(createdResponse);
+    const secret = linkSecret(created.url), grantId = String(created.grantId);
+    expect((await enabled(exchangeRequest(secret))).status).toBe(200);
+    const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined});
+    expect((await closed(exchangeRequest(secret))).status).not.toBe(200);
+    expect((await json(await closed(request(OWNER, `/sync/${WORKSPACE}/shares/links`)))).supportedLinkAccess).toEqual(["view", "comment"]);
+    const rotate = `/sync/shares/share-existing/links/${grantId}/rotate`;
+    const retune = `/sync/shares/share-existing/links/${grantId}/retune`;
+    const transition = {workspaceId: WORKSPACE, expectedDependentGrantIds: []};
+    expect((await closed(request(OWNER, rotate, jsonBody(transition)))).status).toBe(400);
+    expect((await enabled(request(OWNER, rotate, jsonBody(transition)))).status).toBe(200);
+    expect((await closed(request(OWNER, retune, jsonBody({...transition, access: "comment"})))).status).toBe(200);
+    expect(storage.getShareGrant(grantId)?.access).toBe("comment");
+    expect((await closed(request(OWNER, retune, jsonBody({...transition, access: "edit"})))).status).toBe(400);
+    expect((await enabled(request(OWNER, retune, jsonBody({...transition, access: "edit"})))).status).toBe(200);
+    expect((await closed(request(OWNER, "/sync/shares/share-existing/revoke", jsonBody({...transition, grantId})))).status).toBe(200);
+  });
+
+  it("refuses pinned Edit creation even with release enabled", async () => {
+    const storage = await newStorage(), enabled = handler(storage, releaseOptions);
+    await enabled(request(OWNER, "/sync/workspaces", jsonBody({workspaceId: WORKSPACE})));
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({versionId: "version-pinned", access: "edit"})))).status).toBe(400);
+    expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({paths: ["docs"], access: "edit"})))).status).toBe(200);
+  });
+});

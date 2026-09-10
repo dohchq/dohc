@@ -30,7 +30,7 @@ export function mintLinkHandoffCode(storage: StorageContext, input: {
         grant.status !== "active" ||
         grant.revokedAtMs !== null ||
         grant.generation !== code.generation ||
-        (grant.access !== "view" && grant.access !== "comment")
+        (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
       ) {
         return false;
       }
@@ -157,7 +157,7 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
           grant.principalKind !== "user" ||
           grant.status !== "active" ||
           grant.revokedAtMs !== null ||
-          (grant.access !== "view" && grant.access !== "comment")
+          (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
         ) {
           deleteCode();
           return { ok: false };
@@ -185,7 +185,7 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
         parent.status !== "active" ||
         parent.revokedAtMs !== null ||
         parent.generation !== code.generation ||
-        (parent.access !== "view" && parent.access !== "comment")
+        (parent.access !== "view" && parent.access !== "comment" && parent.access !== "edit")
       ) {
         return refuseAndConsume();
       }

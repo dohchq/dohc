@@ -186,6 +186,17 @@ describe("share handoff redemption coordinator", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("accepts server-authorized Edit handoff and settles the pending intent", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response(200, {
+      ok: true, shareId: "share-edit", grantId: "grant-edit", access: "edit",
+    }));
+    const h = await harness({credentials: CREDENTIALS_A, fetch: fetchImpl});
+    h.offer(CODE_A);
+    h.coordinator.accept("status-1");
+    await vi.waitFor(() => expect(h.coordinator.status()).toEqual({status: "done", statusId: "status-1", shareId: "share-edit"}));
+    expect(h.intent.pending()).toBeNull();
+  });
+
   it("accepts a Comment handoff and settles the pending intent", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(commentSuccess());
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
@@ -447,7 +458,7 @@ describe("share handoff redemption coordinator", () => {
             ok: true,
             shareId: "share-redeemed",
             grantId: "grant-redeemed",
-            access: "edit",
+            access: "invalid",
           }),
         ),
     ],

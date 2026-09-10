@@ -279,6 +279,7 @@ vi.mock("./bridge", () => ({
   bridge: () => ({
     ...bridgeMock,
     listRelayShareLinks: async (...args: unknown[]) => ({
+      supportedLinkAccess: ["view", "comment"],
       independentGrants: [],
       ...(await bridgeMock.listRelayShareLinks(...args)),
     }),
@@ -296,6 +297,7 @@ beforeEach(() => {
   bridgeMock.addRelayShareLink.mockResolvedValue(linkResult(LINK_URL));
   bridgeMock.listRelayShareLinks.mockResolvedValue({
     links: [],
+    supportedLinkAccess: ["view", "comment"],
     independentGrants: [],
   });
   bridgeMock.retuneRelayShareLink.mockResolvedValue({ outcome: "narrowed" });
@@ -1087,6 +1089,7 @@ describe("RelayShareDialog", () => {
       .mockImplementationOnce(async () =>
         ListRelayShareLinksResult.parse({
           links: firstRows,
+          supportedLinkAccess: ["view", "comment"],
           independentGrants: [],
           nextCursor: "tail-page",
         }),
@@ -1094,6 +1097,7 @@ describe("RelayShareDialog", () => {
       .mockImplementationOnce(async () =>
         ListRelayShareLinksResult.parse({
           links: [tail],
+          supportedLinkAccess: ["view", "comment"],
           independentGrants: [],
         }),
       )
@@ -1132,6 +1136,7 @@ describe("RelayShareDialog", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
         links: [],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: Array.from({ length: 1_001 }, (_, index) => ({
           shareId: "share-1",
           grantId: `grant-${index}`,
@@ -1842,6 +1847,7 @@ describe("RelayShareDialog", () => {
         }),
         damagedLink("damaged-active", { shareId: "share-damaged" }),
       ],
+      supportedLinkAccess: ["view", "comment"],
       independentGrants: [
         independentGrant("named-root", { shareId: "share-named" }),
         independentGrant("pending-root", {
@@ -1903,11 +1909,13 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [readableLink("link-first", { shareId: "share-paged" })],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [repeatedGrant],
         nextCursor: "page-2",
       })
       .mockResolvedValueOnce({
         links: [readableLink("link-second", { shareId: "share-paged" })],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [repeatedGrant],
       });
     const user = userEvent.setup();
@@ -1943,12 +1951,14 @@ describe("RelayShareDialog", () => {
     const secondLink = readableLink("link-second", { shareId: "share-second" });
     const independentPage = controllable<{
       links: LinkRow[];
+      supportedLinkAccess: ["view", "comment"];
       independentGrants: ReadableGrantedRow[];
       nextCursor: string;
     }>();
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [firstLink],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("independent-first", { shareId: "share-first" }),
         ],
@@ -1958,6 +1968,7 @@ describe("RelayShareDialog", () => {
       .mockReturnValueOnce(independentPage.promise)
       .mockResolvedValueOnce({
         links: [secondLink],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("independent-second", { shareId: "share-second" }),
         ],
@@ -1984,6 +1995,7 @@ describe("RelayShareDialog", () => {
     await act(async () => {
       independentPage.resolve({
         links: [firstLink],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("independent-first-tail", {
             shareId: "share-first",
@@ -2024,6 +2036,7 @@ describe("RelayShareDialog", () => {
           revokedAtMs: CREATED_MS + 1,
         }),
       ],
+      supportedLinkAccess: ["view", "comment"],
       independentGrants: [independentGrant("named-root")],
     };
     bridgeMock.listRelayShareLinks
@@ -4338,16 +4351,19 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [parentWithDependent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
       })
       .mockResolvedValueOnce({
         links: [parentWithoutDependent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("dependent-1", { shareId: "share-1" }),
         ],
       })
       .mockResolvedValueOnce({
         links: [parentWithoutDependent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
       });
     const user = userEvent.setup();
@@ -4425,10 +4441,12 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [staleParent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [independentGrant("stale-independent")],
       })
       .mockResolvedValueOnce({
         links: [currentParent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [independentGrant("current-independent")],
       });
     bridgeMock.promoteRelayShareGrant
@@ -4497,6 +4515,7 @@ describe("RelayShareDialog", () => {
       .mockRejectedValueOnce(new Error("private inventory failure"))
       .mockResolvedValueOnce({
         links: [readableLink("link-1", { shareId: "share-1" })],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [independentGrant("independent-1")],
       });
     const user = userEvent.setup();
@@ -4534,6 +4553,7 @@ describe("RelayShareDialog", () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [parentWithDependent],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("existing-1", { shareId: "share-1" }),
         ],
@@ -4541,6 +4561,7 @@ describe("RelayShareDialog", () => {
       .mockRejectedValueOnce(new Error("bounded refresh failure"))
       .mockResolvedValueOnce({
         links: [{ ...parentWithDependent, dependents: [] }],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("existing-1", { shareId: "share-1" }),
           independentGrant("dependent-1", { shareId: "share-1" }),
@@ -4589,6 +4610,7 @@ describe("RelayShareDialog", () => {
   it("ignores a bounded inventory failure from an old target", async () => {
     const stale = controllable<{
       links: LinkRow[];
+      supportedLinkAccess: ["view", "comment"];
       independentGrants: ReadableGrantedRow[];
     }>();
     bridgeMock.listRelayShareLinks
@@ -4598,6 +4620,7 @@ describe("RelayShareDialog", () => {
           shareId: "share-version",
           selector: { paths: [], versionId: "version-2" },
         })],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
       });
     const user = userEvent.setup();
@@ -4631,6 +4654,7 @@ describe("RelayShareDialog", () => {
   it("ignores an older bounded refresh failure after a replacement target request", async () => {
     const stale = controllable<{
       links: LinkRow[];
+      supportedLinkAccess: ["view", "comment"];
       independentGrants: ReadableGrantedRow[];
     }>();
     const parent = readableLink("parent-link", {
@@ -4644,10 +4668,11 @@ describe("RelayShareDialog", () => {
       selector: { paths: [], versionId: "version-2" },
     });
     bridgeMock.listRelayShareLinks
-      .mockResolvedValueOnce({ links: [parent], independentGrants: [] })
+      .mockResolvedValueOnce({ links: [parent], supportedLinkAccess: ["view", "comment"], independentGrants: [] })
       .mockReturnValueOnce(stale.promise)
       .mockResolvedValueOnce({
         links: [versionLink],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           independentGrant("version-root", { shareId: "share-version" }),
         ],
@@ -5364,6 +5389,7 @@ describe("RelayShareDialog", () => {
                 }),
               ]
             : [readableLink("parent-b", { shareId: "share-b" })],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants:
           workspaceId === "ws-a"
             ? []
@@ -5483,5 +5509,25 @@ describe("RelayShareDialog", () => {
     }
     expect(screen.getByRole("button", { name: "Create link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+});
+
+describe("advertised public Edit release", () => {
+  it("offers Edit only after authenticated inventory advertises it", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={{kind: "paths", paths: ["docs/plan.md"]}} onClose={() => {}} />);
+    await showLinkPane(user);
+    const choices = screen.getByRole("radiogroup", {name: "Link access"});
+    await user.click(await within(choices).findByRole("radio", {name: "Edit"}));
+    await user.click(screen.getByRole("button", {name: "Create link"}));
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({workspaceId: "ws-1", paths: ["docs/plan.md"], access: "edit"});
+  });
+  it("does not offer Edit for a pinned version even when advertised", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={{kind: "version", versionId: "version-7", versionName: "review"}} onClose={() => {}} />);
+    await showLinkPane(user);
+    expect(within(screen.getByRole("radiogroup", {name: "Link access"})).queryByRole("radio", {name: "Edit"})).toBeNull();
   });
 });

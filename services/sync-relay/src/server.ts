@@ -1,3 +1,4 @@
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
@@ -100,6 +101,7 @@ export interface CreateSyncRelayHandlerOptions {
   shareWebOrigin?: string;
   relayExchangeKey?: string;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
+  publicEditRelease?: PublicEditRelease;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkRedeemRateLimiter?: TokenBucketLimiter;
   linkReadRateLimiter?: TokenBucketLimiter;
@@ -158,6 +160,7 @@ export function createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
+  publicEditRelease: releaseInput,
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -184,6 +187,10 @@ export function createSyncRelayHandler({
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
 } {
+  const publicEditRelease = parsePublicEditRelease(releaseInput);
+  if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
+    throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
+  }
   if (namedBrowserSessionLimits && (!shareWebOrigin || !relayExchangeKey)) {
     throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
   }
@@ -347,6 +354,7 @@ export function createSyncRelayHandler({
     receivedShareSummary,
     independentGrantSummary,
     linkInventorySummary,
+    publicEditRelease,
   );
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
@@ -368,6 +376,7 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
+    publicEditRelease,
   );
 
   const requireLinkRead = (
@@ -467,6 +476,7 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
+    publicEditRelease,
   );
 
   const {
@@ -489,6 +499,7 @@ export function createSyncRelayHandler({
     linkRedeemRateLimiter,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
+    publicEditRelease,
   );
 
   const respondToLinkRead = createLinkReadRoutes(

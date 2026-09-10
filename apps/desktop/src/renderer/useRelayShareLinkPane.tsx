@@ -20,9 +20,10 @@ import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
-type LinkAccess = "view" | "comment";
+type LinkAccess = "view" | "comment" | "edit";
 
 export function linkRetuneLabels(widens: boolean, access: LinkAccess | undefined) {
+  if (access === "edit") return {action: "Turn on editing", pending: "Turning on editing…"};
   if (widens) return {action: "Turn on comments", pending: "Turning on comments…"};
   return access === "comment"
     ? {action: "Use Comment access", pending: "Changing access…"}
@@ -140,6 +141,7 @@ const LINK_ACCESS_OPTIONS: ReadonlyArray<{
 }> = [
   { value: "view", label: "View" },
   { value: "comment", label: "Comment" },
+  { value: "edit", label: "Edit" },
 ];
 
 function normalizedPathSet(paths: readonly string[]): string[] {
@@ -354,6 +356,7 @@ function DependentNames({ dependents }: { dependents: RelayShareLinkDependent[] 
 }
 
 function LinkAccessChoice(props: {
+  supported: readonly LinkAccess[];
   access: LinkAccess;
   ariaLabel: string;
   disabled: boolean;
@@ -365,7 +368,7 @@ function LinkAccessChoice(props: {
       aria-label={props.ariaLabel}
       className="flex rounded-lg border border-line bg-panel-2 p-0.5"
     >
-      {LINK_ACCESS_OPTIONS.map((option) => (
+      {LINK_ACCESS_OPTIONS.filter(option => props.supported.includes(option.value)).map((option) => (
         <button
           key={option.value}
           type="button"
@@ -400,6 +403,8 @@ export function useRelayShareLinkPane(props: {
   const [linkRequestBusy, setLinkRequestBusy] = useState<LinkRequestBusy | null>(
     null,
   );
+  const [supportedLinkAccess, setSupportedLinkAccess] = useState<readonly LinkAccess[]>(["view", "comment"]);
+  const availableLinkAccess = props.target.kind === "version" ? supportedLinkAccess.filter(access => access !== "edit") : supportedLinkAccess;
   const [linkAccess, setLinkAccess] = useState<LinkAccess>("view");
   const [addAccessByShareId, setAddAccessByShareId] = useState<
     Record<string, LinkAccess>
@@ -539,6 +544,7 @@ export function useRelayShareLinkPane(props: {
     setLinkBusy(false);
     setLinkRequestBusy(null);
     setLinkAccess("view");
+    setSupportedLinkAccess(["view", "comment"]);
     setAddAccessByShareId({});
     setLinkError(null);
     setMinted(null);
@@ -1256,6 +1262,7 @@ export function useRelayShareLinkPane(props: {
     setLinksError(null);
     try {
       const inventory: RelayShareLinkRow[] = [];
+      let advertisedAccess: readonly LinkAccess[] | undefined;
       const independentInventory = new Map<
         string,
         RelayShareLinkIndependentGrant
@@ -1286,6 +1293,8 @@ export function useRelayShareLinkPane(props: {
           ) {
             return;
           }
+          if (advertisedAccess && advertisedAccess.join() !== result.supportedLinkAccess.join()) throw new Error("dohc could not load consistent link permissions. Retry.");
+          advertisedAccess = result.supportedLinkAccess;
           if (independentGrantCursor === undefined) {
             inventory.push(...result.links);
             nextLinkCursor = result.nextCursor;
@@ -1313,6 +1322,9 @@ export function useRelayShareLinkPane(props: {
         seenLinkCursors.add(nextLinkCursor);
         linkCursor = nextLinkCursor;
       }
+      setSupportedLinkAccess(advertisedAccess!);
+      setLinkAccess(current => advertisedAccess!.includes(current) ? current : "view");
+      setAddAccessByShareId(current => Object.fromEntries(Object.entries(current).map(([id, access]) => [id, advertisedAccess!.includes(access) ? access : "view"])));
       setLinks(inventory);
       setIndependentGrants([...independentInventory.values()]);
       if (!options.preserveOwnerMutationError) {
@@ -1324,12 +1336,12 @@ export function useRelayShareLinkPane(props: {
       }
       setConfirmation((current) =>
         current !== null &&
-        !inventory.some(
+        ((current.kind === "retune" && !advertisedAccess!.includes(current.access)) || !inventory.some(
           (row) =>
             row.status === "active" &&
             row.shareId === current.shareId &&
             row.grantId === current.grantId,
-        )
+        ))
           ? null
           : current,
       );
@@ -1341,6 +1353,9 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setIndependentGrants([]);
+      setSupportedLinkAccess(["view", "comment"]);
+      setLinkAccess("view");
+      setAddAccessByShareId({});
       setLinksError(ipcErrorMessage(cause));
     } finally {
       if (
@@ -1398,21 +1413,14 @@ export function useRelayShareLinkPane(props: {
   }
 
   async function createLink() {
-    const payload: CreateRelayShareLinkPayload =
-      props.target.kind === "version"
-        ? {
-            workspaceId: props.workspaceId,
-            versionId: props.target.versionId,
-            access: linkAccess,
-          }
-        : {
-            workspaceId: props.workspaceId,
-            paths: props.target.paths,
-            access: linkAccess,
-          };
-    await mintLink({ kind: "create" }, () =>
-      bridge().createRelayShareLink(payload),
-    );
+    let payload: CreateRelayShareLinkPayload;
+    if (props.target.kind === "version") {
+      if (linkAccess === "edit") return;
+      payload = {workspaceId: props.workspaceId, versionId: props.target.versionId, access: linkAccess};
+    } else {
+      payload = {workspaceId: props.workspaceId, paths: props.target.paths, access: linkAccess};
+    }
+    await mintLink({ kind: "create" }, () => bridge().createRelayShareLink(payload));
   }
 
   async function addLink(shareId: string) {
@@ -1620,6 +1628,7 @@ export function useRelayShareLinkPane(props: {
         <div className="flex flex-col gap-1">
           <span className="text-[11px] font-medium text-subtle">Access</span>
           <LinkAccessChoice
+            supported={availableLinkAccess}
             access={linkAccess}
             ariaLabel="Link access"
             disabled={
@@ -1727,7 +1736,7 @@ export function useRelayShareLinkPane(props: {
                   const active = row.status === "active";
                   const canRetune =
                     !damaged &&
-                    (row.access === "view" || row.access === "comment");
+                    (row.access === "view" || row.access === "comment" || row.access === "edit");
                   return (
                     <article
                       key={row.grantId}
@@ -1758,7 +1767,7 @@ export function useRelayShareLinkPane(props: {
                             </p>
                           </div>
                           <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted">
-                            {row.access === "comment" ? "Comment" : "View"}
+                            {row.access === "edit" ? "Edit" : row.access === "comment" ? "Comment" : "View"}
                           </span>
                         </div>
                       )}
@@ -1770,12 +1779,12 @@ export function useRelayShareLinkPane(props: {
                               disabled={linkBusy || mutationBusy !== null}
                               onClick={() => openConfirmation("retune", row)}
                             >
-                              {row.access === "comment"
+                              {row.access === "edit" || availableLinkAccess.includes("edit") ? "Change access" : row.access === "comment"
                                 ? "Turn off comments"
                                 : "Turn on comments"}
                             </SecondaryButton>
                           ) : null}
-                          {!damaged ? (
+                          {!damaged && (row.access !== "edit" || (availableLinkAccess.includes("edit") && row.selector?.versionId === null)) ? (
                             <SecondaryButton
                               disabled={linkBusy || mutationBusy !== null}
                               onClick={() => openConfirmation("reset", row)}
@@ -2208,6 +2217,7 @@ export function useRelayShareLinkPane(props: {
                       Another link to the same share. Same files, same comments.
                     </p>
                     <LinkAccessChoice
+                      supported={group.rows.some(row => row.selector?.versionId !== null) ? availableLinkAccess.filter(access => access !== "edit") : availableLinkAccess}
                       access={addAccess}
                       ariaLabel="Access for another link"
                       disabled={
@@ -2246,11 +2256,16 @@ export function useRelayShareLinkPane(props: {
               data-testid="share-link-confirmation"
               className="flex flex-col gap-2 rounded-lg border border-line bg-panel-2 p-3"
             >
+              {confirmation.kind === "retune" ? <LinkAccessChoice
+                supported={(confirmationRow.selector?.versionId === null ? availableLinkAccess : availableLinkAccess.filter(access => access !== "edit")).filter(access => access !== confirmationRow.access)}
+                access={confirmation.access} ariaLabel="New link access" disabled={mutationBusy !== null}
+                onChange={access => setConfirmation({...confirmation, access})}
+              /> : null}
               <p className="m-0 text-xs leading-relaxed text-ink">
                 {confirmation.kind === "retune" ? (
                   confirmationWidens ? (
                     <>
-                      Turn on comments for this link? The current link stops working
+                      {confirmation.access === "edit" ? "Turn on editing for this link?" : "Turn on comments for this link?"} The current link stops working
                       right away, and dohc shows the new link once.
                       {confirmationRow.dependents.length > 0 ? (
                         <>

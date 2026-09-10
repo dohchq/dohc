@@ -1,3 +1,4 @@
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes } from "node:crypto";
@@ -65,6 +66,7 @@ type RefreshAttempt =
   | { status: "unavailable" };
 
 export interface CreateShareWebApplicationOptions {
+  publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
@@ -573,9 +575,10 @@ function profileCookie(discriminator: string, secret: string): string {
 function parsedRelaySession(
   value: unknown,
   nowMs: number,
+  release?: PublicEditRelease,
 ): { grantId: string; capabilityToken: string; expiresAtMs: number } | null {
   const relaySession = asRecord(value);
-  if (!relaySession) return null;
+  if (!relaySession || (relaySession.access === "edit" && !release)) return null;
   const grantId = relaySession.grantId;
   const capabilityToken = relaySession.capabilityToken;
   const expiresAtMs = relaySession.capabilityExpiresAtMs;
@@ -773,7 +776,10 @@ export function createShareWebApplication({
   namedLiveTickets,
   namedRecipientBrowserLimits,
   linkLive: linkLiveConfig,
+  publicEditRelease: releaseInput,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  const publicEditRelease = parsePublicEditRelease(releaseInput);
+  if (publicEditRelease && !linkLiveConfig) throw new TypeError("Public Edit release requires configured link live limits.");
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
     throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
   }
@@ -812,7 +818,7 @@ export function createShareWebApplication({
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
   if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
-  const linkLive = linkLiveConfig ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
+  const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
 
   function readBrowserSession(discriminator: string, cookies: Map<string, string>): {
@@ -897,6 +903,7 @@ export function createShareWebApplication({
           const refreshed = parsedRelaySession(
             await relayResponse.json(),
             nowMs(),
+            publicEditRelease,
           );
           if (!refreshed || refreshed.grantId !== authenticated.session.grantId) {
             return { status: "unavailable" };
@@ -1044,7 +1051,7 @@ export function createShareWebApplication({
           }),
         );
         if (relayResponse.status !== 200) return refused();
-        const exchanged = parsedRelaySession(await relayResponse.json(), nowMs());
+        const exchanged = parsedRelaySession(await relayResponse.json(), nowMs(), publicEditRelease);
         if (!exchanged) return refused();
         const discriminator = linkDiscriminator(exchanged.grantId);
         const token = newSessionToken();

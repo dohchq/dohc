@@ -46,6 +46,26 @@ viewer request, `share-web` returns a generic 503 without relay details or
 stale shared content. Restore the relay; the viewer can retry while its
 in-memory session remains valid.
 
+## Public Edit release
+
+Public Edit stays disabled unless both services receive `DOHC_PUBLIC_EDIT_RELEASE`
+as the exact JSON marker `{"version":1}`. Unknown versions and extra fields are rejected.
+Keep this variable unset until the deployment's calibration and required public proofs are admitted.
+The marker carries no budgets; existing explicit profiles still supply every limit.
+
+Share-web requires `DOHC_SHARE_WEB_LINK_LIVE_LIMITS`, the exact public HTTPS origin,
+and relay exchange configuration. The relay requires `DOHC_RELAY_LINK_LIVE=1`,
+complete named live/session/ticket profiles, and its configured document host.
+A service host must be configured and started. A device host also requires
+configured device delivery and owner admission. An absent or incompatible marker
+on either service prevents a successful public Edit exchange.
+
+Edit links cover existing live Markdown documents on the main version.
+Pinned versions cannot receive Edit links. The desktop obtains supported access
+levels from authenticated relay inventory; the relay revalidates mutations.
+Disabling release blocks Edit creation, widening, rotation, exchange, and renewal.
+Owners can still narrow or revoke an existing Edit link.
+
 ## Named browser invitations
 
 The owner can copy a browser invitation for direct named Edit access to live paths.

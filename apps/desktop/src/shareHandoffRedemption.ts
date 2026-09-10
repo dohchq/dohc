@@ -88,7 +88,7 @@ function redeemSuccess(value: unknown): RedeemSuccess | null {
     body.ok !== true ||
     !ordinaryId(body.shareId) ||
     !ordinaryId(body.grantId) ||
-    (body.access !== "view" && body.access !== "comment")
+    (body.access !== "view" && body.access !== "comment" && body.access !== "edit")
   ) {
     return null;
   }

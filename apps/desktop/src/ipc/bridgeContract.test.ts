@@ -248,6 +248,7 @@ describe("owner relay share link IPC contract", () => {
           credentialId: "must-not-cross",
         },
       ],
+      supportedLinkAccess: ["view", "comment"],
       independentGrants: [
         {
           shareId: "share-1",
@@ -260,6 +261,7 @@ describe("owner relay share link IPC contract", () => {
 
     expect(parsed).toEqual({
       links: [readable, damaged],
+      supportedLinkAccess: ["view", "comment"],
       independentGrants: [
         {
           shareId: "share-1",
@@ -297,12 +299,14 @@ describe("owner relay share link IPC contract", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
         links: Array.from({ length: 1_001 }, () => readable),
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
       }).success,
     ).toBe(false);
     expect(
       ListRelayShareLinksResult.safeParse({
         links: [],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
         nextCursor: "x".repeat(1_025),
       }).success,
@@ -310,6 +314,7 @@ describe("owner relay share link IPC contract", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
         links: [],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [],
         nextIndependentGrantCursor: "x".repeat(1_025),
       }).success,
@@ -317,6 +322,7 @@ describe("owner relay share link IPC contract", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
         links: [],
+        supportedLinkAccess: ["view", "comment"],
         independentGrants: [
           {
             shareId: "share-1",
@@ -330,7 +336,7 @@ describe("owner relay share link IPC contract", () => {
     ).toBe(false);
   });
 
-  it("requires View or Comment with exactly one file selector on create", () => {
+  it("requires an explicit access level and excludes Edit on pinned versions", () => {
     expect(
       CreateRelayShareLinkPayload.safeParse({
         workspaceId: "workspace-1",
@@ -354,7 +360,7 @@ describe("owner relay share link IPC contract", () => {
         versionId: "version-1",
         access: "view",
       },
-      { workspaceId: "workspace-1", paths: ["docs"], access: "edit" },
+      { workspaceId: "workspace-1", versionId: "version-1", access: "edit" },
       {
         workspaceId: "workspace-1",
         paths: ["docs"],
@@ -367,7 +373,7 @@ describe("owner relay share link IPC contract", () => {
   });
 
   it("adds a link only to one real share with an explicit public level", () => {
-    for (const access of ["view", "comment"] as const) {
+    for (const access of ["view", "comment", "edit"] as const) {
       const payload = {
         workspaceId: "workspace-1",
         shareId: "share-1",
@@ -377,7 +383,7 @@ describe("owner relay share link IPC contract", () => {
     }
     for (const payload of [
       { workspaceId: "workspace-1", shareId: "share-1" },
-      { workspaceId: "workspace-1", shareId: "share-1", access: "edit" },
+      { workspaceId: "workspace-1", shareId: "share-1", access: "invalid" },
       {
         workspaceId: "workspace-1",
         shareId: "share-1",
@@ -405,7 +411,7 @@ describe("owner relay share link IPC contract", () => {
     };
     expect(RetuneRelayShareLinkPayload.parse(payload)).toEqual(payload);
     for (const invalid of [
-      { ...payload, access: "edit" },
+      { ...payload, access: "invalid" },
       { ...payload, access: undefined },
       { ...payload, expectedDependentGrantIds: undefined },
       { ...payload, expectedDependentGrantIds: "dependent-1" },

@@ -72,7 +72,7 @@ type Setup = {
 
 async function setup(
   overrides: HandlerOverrides = {},
-  access: "view" | "comment" = "view",
+  access: "view" | "comment" | "edit" = "view",
 ): Promise<Setup> {
   const { storage, dbPath } = await newStorage();
   const now = { value: 10_000 };
@@ -1151,5 +1151,23 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database, String(secondLink.grantId))).toBe(1);
     database.prepare("DELETE FROM sync_relay_shares WHERE share_id = ?").run(SHARE_ID);
     expect(codeCount(database)).toBe(0);
+  });
+});
+
+describe("released Edit handoff", () => {
+  it("preserves Edit dependency authority and refuses mint/replay after release is removed", async () => {
+    const state = await setup({publicEditRelease: {version: 1},
+      namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000}}, "edit");
+    const handoff = await mint(state);
+    const response = await state.h(redeemRequest(RECIPIENT, handoff.code));
+    expect(response.status).toBe(200);
+    const redeemed = await json(response);
+    expect(redeemed.access).toBe("edit");
+    const dependent = state.storage.getShareGrant(String(redeemed.grantId));
+    expect(dependent?.parentGrantId).toBe(state.link.grantId);
+    expect(dependent?.access).toBe("edit");
+    const closed = handler(state.storage);
+    expect((await closed(handoffRequest(state.capability))).status).not.toBe(200);
+    expect((await closed(redeemRequest(RECIPIENT, handoff.code))).status).not.toBe(200);
   });
 });

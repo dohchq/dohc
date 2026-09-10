@@ -12,6 +12,12 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("requires the explicit link live profile before accepting a release marker", () => {
+    expect(loadShareWebConfig(accountEnvironment).publicEditRelease).toBeUndefined();
+    expect(() => loadShareWebConfig({...accountEnvironment, DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}'})).toThrow(/Public Edit release requires/);
+    expect(() => loadShareWebConfig({...accountEnvironment, DOHC_PUBLIC_EDIT_RELEASE: '{"version":2}'})).toThrow(/Public Edit release/);
+  });
+
   it("enables named bootstrap only with explicit complete transport limits and account/service configuration", () => {
     const limits = { maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000 };
     expect(loadShareWebConfig(accountEnvironment).namedBrowserSessionLimits).toBeUndefined();

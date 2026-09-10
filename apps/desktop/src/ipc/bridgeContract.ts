@@ -3910,7 +3910,7 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
-const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment"]);
+const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment", "edit"]);
 
 // The main process creates the share and its first link together. The
 // renderer must name the exact public level; there is no default at this
@@ -3929,7 +3929,7 @@ export const CreateRelayShareLinkPayload = z.union([
       workspaceId: WORKSPACE_ID,
       paths: z.never().optional(),
       versionId: z.string().min(1).max(128),
-      access: RELAY_SHARE_LINK_ACCESS,
+      access: z.enum(["view", "comment"]),
     })
     .strict(),
 ]);
@@ -4028,6 +4028,7 @@ export type RelayShareLinkIndependentGrant = z.infer<
 >;
 
 export const ListRelayShareLinksResult = z.object({
+  supportedLinkAccess: z.union([z.tuple([z.literal("view"), z.literal("comment")]), z.tuple([z.literal("view"), z.literal("comment"), z.literal("edit")])]),
   links: z.array(RelayShareLinkRow).max(1000),
   independentGrants: z.array(RelayShareLinkIndependentGrant).max(1000),
   nextCursor: RELAY_SHARE_LINK_CURSOR.optional(),

@@ -4354,3 +4354,39 @@ describe("share-web handoff adapter", () => {
     await generic(responses.at(-1)!, 404);
   });
 });
+
+describe("public Edit release isolation", () => {
+  it("does not create a browser session from an enabled relay when this viewer is closed", async () => {
+    const handle = createShareWebHandler({
+      relayUrl: "https://relay.example.test", publicHosts: new Set([HOST]),
+      fetchRelay: async () => Response.json({grantId: "grant-edit", access: "edit", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: Date.now() + 60_000}),
+    });
+    const result = await handle(request("/api/exchange", exchange(SECRET_ALPHA)));
+    expect(result.status).toBe(404);
+    expect(result.headers.get("set-cookie")).toBeNull();
+  });
+  it("rejects a marker without an explicit live profile", () => {
+    expect(() => createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: PUBLIC_RELAY_URL,
+      publicHosts: new Set([HOST]), publicEditRelease: {version: 1}})).toThrow(/Public Edit release requires/);
+  });
+});
+
+it("keeps Edit exchange closed when only the viewer release is enabled", async () => {
+  const editor = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
+    maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
+    maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
+    maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
+  let relayReleased = false;
+  const handle = createShareWebHandler({relayUrl: "https://relay.example.test", publicHosts: new Set([HOST]),
+    relayExchangeKey: HANDOFF_EXCHANGE_KEY, publicEditRelease: {version: 1},
+    linkLive: {publicOrigin: `https://${HOST}`, requests: {maxPendingRequests: 1, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000}, editor},
+    fetchRelay: async () => relayReleased
+      ? Response.json({grantId: "grant-edit", access: "edit", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: Date.now() + 60_000})
+      : new Response(null, {status: 404}),
+  });
+  const closed = await handle(request("/api/exchange", exchange(SECRET_ALPHA)));
+  expect(closed.status).toBe(404);
+  expect(closed.headers.get("set-cookie")).toBeNull();
+  relayReleased = true;
+  expect((await handle(request("/api/exchange", exchange(SECRET_ALPHA)))).status).toBe(200);
+});

@@ -1,3 +1,4 @@
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
@@ -5,6 +6,7 @@ import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 
 export interface ShareWebConfig {
+  publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
@@ -153,7 +155,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes) throw new Error("Link browser frames exceed gateway capacity.");
   }
 
+  const publicEditRelease = parsePublicEditRelease(env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE));
+  if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");
+
   return {
+    publicEditRelease,
     relayUrl: relayUrl.href,
     publicRelayUrl,
     relayExchangeKey,

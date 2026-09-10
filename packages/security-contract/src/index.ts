@@ -28,3 +28,4 @@ export {
   type ShareGrantRecord,
   type SharePrincipal,
 } from "./shareGrant";
+export {parsePublicEditRelease, type PublicEditRelease} from "./publicEditRelease.js";
