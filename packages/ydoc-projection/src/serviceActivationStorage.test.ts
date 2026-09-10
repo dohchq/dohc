@@ -82,8 +82,7 @@ it('activates a receiver projection derived from the ordinary Ydoc base and suff
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments').all()).toEqual([{moment_id:'original-moment'}])
   }finally{f.close()}
 })
-it('activates an ordinary text write folded into a Ydoc update before its file moment',()=>{
-  const f=fixture();try{
+function appendFoldedMoment(f:ReturnType<typeof fixture>){
     const source=f.capture.source
     f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'moment.append',?,3)")
       .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'folded-write-moment',path:'docs/a.md',operation:'write',
@@ -91,8 +90,21 @@ it('activates an ordinary text write folded into a Ydoc update before its file m
     f.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',4,'folded-write-moment','main','docs/a.md',?,'text',?,3)")
       .run(source.sourceDigest,source.sourceByteLength)
     Object.assign(source,{sourceMomentId:'folded-write-moment',committedCursor:4})
+}
+it('activates an ordinary text write folded into a Ydoc update before its file moment',()=>{
+  const f=fixture();try{
+    appendFoldedMoment(f)
     expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
-    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(source)
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+  }finally{f.close()}
+})
+it.each([['operation','delete'],['path','other.md'],['payloadAfterPath','other.md'],['payloadAfterContentKind','binary']] as const)
+('refuses a folded moment with replaced %s', (field,value)=>{
+  const f=fixture();try{
+    appendFoldedMoment(f)
+    f.raw.prepare('UPDATE sync_relay_log SET payload_json=json_set(payload_json,?,?) WHERE relay_seq=4').run('$.'.concat(field),value)
+    expect(f.prepare).toThrow('Ordinary activation history replaced the live document.')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{f.close()}
 })
 it('refuses an ordinary baseline as stale after a real workspace identity rotation',()=>{
@@ -115,12 +127,14 @@ it('activates an unedited ordinary Ydoc base without a suffix',()=>{
     expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
   }finally{f.close()}
 })
-it.each(['projection','coordinate','removed'] as const)('rejects a damaged retained ordinary baseline %s',field=>{
+it.each(['projection','coordinate','epoch','blob','removed'] as const)('rejects a damaged retained ordinary baseline %s',field=>{
   const f=fixture();try{
     f.prepare();const access=f.store.pending(f.document,host)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
     if(field==='projection')f.raw.prepare('UPDATE sync_relay_live_documents SET baseline_projected_sha256=?').run('b'.repeat(64))
     else if(field==='coordinate')f.raw.exec('UPDATE sync_relay_live_document_ordinary_bases SET base_origin_seq=99')
+    else if(field==='epoch')f.raw.exec("UPDATE sync_relay_live_document_ordinary_bases SET replication_epoch='tampered'")
+    else if(field==='blob')f.raw.prepare('UPDATE sync_relay_blobs SET content=? WHERE sha256=?').run(new Uint8Array(f.capture.baselineBytes.length),f.document.lineageClaimId)
     else f.raw.exec('DELETE FROM sync_relay_live_document_ordinary_bases')
     expect(()=>f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toThrow('damaged')
   }finally{f.close()}

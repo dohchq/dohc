@@ -32,7 +32,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
-  const selected=`FROM sync_relay_log WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
+  const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
     ORDER BY relay_seq LIMIT ?`;
   const params=[document.workspaceId,source.baseRelaySeq,source.committedCursor,document.mainVersionId,document.objectId,entryLimit+1];
@@ -44,20 +44,30 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
   let charged=baselineBytes.length;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
-  const rows=metadata.map(row=>{
+  const rows=metadata.flatMap(row=>{
     requireValue(integer(row.relay_seq)&&integer(row.origin_seq)&&typeof row.origin_id==="string"&&row.origin_id.length>0,"Ordinary activation coordinate is damaged.");
-    requireValue(row.op_kind==="ydoc.update","Ordinary activation history replaced the live document.");
     const stored=storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,row.relay_seq);
     requireValue(stored&&typeof stored.payload_json==="string","Ordinary activation history is unavailable.");
     const payload=JSON.parse(stored.payload_json) as Record<string,unknown>;
+    if(row.op_kind==="moment.append"){
+      requireValue(payload.versionId===document.mainVersionId&&payload.objectId===document.objectId&&
+        payload.path===source.currentPath&&payload.operation==="write"&&payload.payloadAfterPath===source.currentPath&&
+        payload.payloadAfterContentKind==="text"&&typeof payload.momentId==="string"&&payload.momentId.length>0&&
+        typeof payload.payloadAfterBlobSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.payloadAfterBlobSha256)&&
+        integer(payload.payloadAfterByteLength)&&payload.payloadAfterByteLength<=2_097_152,
+        "Ordinary activation history replaced the live document.");
+      return [];
+    }
+    requireValue(row.op_kind==="ydoc.update","Ordinary activation history replaced the live document.");
     requireValue(payload.versionId===document.mainVersionId&&payload.objectId===document.objectId&&payload.path===source.currentPath&&
       payload.contentKind==="richdoc"&&payload.lineageClaimId===document.lineageClaimId&&typeof payload.isBaseState==="boolean"&&
       typeof payload.updateBlobSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.updateBlobSha256),"Ordinary activation history differs from the captured lineage.");
     const blob=storage.db.prepare("SELECT byte_length,length(content) AS actual_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,payload.updateBlobSha256);
     requireValue(blob&&integer(blob.byte_length)&&blob.byte_length===blob.actual_length,"Ordinary activation bytes are unavailable.");
     charge(Number(blob.byte_length));
-    return {relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,payload,byteLength:Number(blob.byte_length)};
+    return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,payload,byteLength:Number(blob.byte_length)}];
   });
+  requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
   const first=rows[0]!;
   requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
     first.payload.isBaseState===true&&first.payload.updateBlobSha256===document.lineageClaimId,"Native activation base coordinate differs from ordinary history.");
@@ -82,7 +92,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
     "Native activation differs from the complete ordinary CRDT history.");
   const moment=storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
-    WHERE workspace_id=? AND object_id=? AND relay_seq<? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,source.baseRelaySeq);
+    WHERE workspace_id=? AND object_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,source.committedCursor);
   let momentMatches=moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&moment.path===source.currentPath&&
     moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   if(!momentMatches){
