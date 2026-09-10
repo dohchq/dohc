@@ -264,7 +264,7 @@ export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: Liv
     authorityIntegrity(ordinary.base_relay_seq===baselineSequence&&ordinary.current_path===binding.currentPath&&
       ordinary.projected_sha256===projectionDigest&&ordinary.projected_byte_length===projectionLength);
     const epoch=db.prepare("SELECT replication_epoch,stream_identity FROM sync_relay_workspaces WHERE workspace_id=?").get(document.workspaceId);
-    authorityIntegrity(epoch?.replication_epoch===ordinary.replication_epoch&&epoch.stream_identity===ordinary.stream_identity);
+    authorityIntegrity(epoch&&epoch.replication_epoch===ordinary.replication_epoch&&epoch.stream_identity===ordinary.stream_identity);
     const source=db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`)
       .get(document.workspaceId,baselineSequence,ordinary.base_origin_id,ordinary.base_origin_seq);
     authorityIntegrity(source&&typeof source.payload_json==="string");
