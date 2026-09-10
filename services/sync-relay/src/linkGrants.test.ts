@@ -5669,6 +5669,46 @@ describe("explicit public Edit release", () => {
     expect((await closed(request(OWNER, "/sync/shares/share-existing/revoke", jsonBody({...transition, grantId})))).status).toBe(200);
   });
 
+  it("renews Edit only while release and the capability generation remain current", async () => {
+    const storage = await newStorage();
+    const newLinkBearer = vi.fn(() => mintLinkBearer());
+    const enabled = handler(storage, {...releaseOptions, newLinkBearer});
+    await seedFileShare(enabled, "edit");
+    const createdResponse = await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/share-existing/links`, jsonBody({access: "edit"})));
+    expect(createdResponse.status).toBe(200);
+    const created = await json(createdResponse);
+    const exchangedResponse = await enabled(exchangeRequest(linkSecret(created.url)));
+    expect(exchangedResponse.status).toBe(200);
+    const exchanged = await json(exchangedResponse);
+    const renewal = (capability: unknown) => request(null, "/sync/link-refresh", {
+      method: "POST", headers: {authorization: `LinkCapability ${String(capability)}`, "x-dohc-relay-exchange-key": exchangeKey},
+    });
+    const renewedResponse = await enabled(renewal(exchanged.capabilityToken));
+    expect(renewedResponse.status).toBe(200);
+    const renewed = await json(renewedResponse);
+    expect(renewed).toMatchObject({access: "edit", generation: 1});
+    expect(renewed.capabilityToken).not.toBe(exchanged.capabilityToken);
+
+    const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined, newLinkBearer});
+    const mintedBeforeClosure = newLinkBearer.mock.calls.length;
+    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeClosure);
+
+    const rotatedResponse = await enabled(request(OWNER, `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
+      jsonBody({workspaceId: WORKSPACE, expectedDependentGrantIds: []})));
+    expect(rotatedResponse.status).toBe(200);
+    const rotated = await json(rotatedResponse);
+    const mintedBeforeStaleRenewal = newLinkBearer.mock.calls.length;
+    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeStaleRenewal);
+    const freshResponse = await enabled(exchangeRequest(linkSecret(rotated.url)));
+    expect(freshResponse.status).toBe(200);
+    const fresh = await json(freshResponse);
+    const currentResponse = await enabled(renewal(fresh.capabilityToken));
+    expect(currentResponse.status).toBe(200);
+    expect(await json(currentResponse)).toMatchObject({access: "edit", generation: 2});
+  });
+
   it("refuses pinned Edit creation even with release enabled", async () => {
     const storage = await newStorage(), enabled = handler(storage, releaseOptions);
     await enabled(request(OWNER, "/sync/workspaces", jsonBody({workspaceId: WORKSPACE})));

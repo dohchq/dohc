@@ -70,6 +70,7 @@ const capacity = JSON.parse(admissionBytes.toString()) as PublicProofAdmission;
 if (capacity.publicEditGateGranted !== true || !Number.isSafeInteger(capacity.admittedConcurrency) || capacity.admittedConcurrency < 2) {
   throw new Error("Public Edit release decision and at least two admitted sessions are required.");
 }
+const publicEditRelease = {version: 1} as const;
 const frames = capacity.frames, routeLimits = capacity.route, validationPolicy = capacity.validation;
 const workload = readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
 const transitions = readPublicTransitionWorkload(capacity.transitions, capacity.admittedConcurrency);
@@ -159,7 +160,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         operation: "write", metadata: {origin: "sync"}, beforePresent: "absent", path: "docs/other.md", payloadAfterPath: "docs/other.md", payloadAfterBlobSha256: evidence.projectedMarkdownSha256,
         payloadAfterContentKind: "text", payloadAfterByteLength: evidence.projectedMarkdownByteLength})}]});
     expect(storage.registerLiveDocumentBaseline({host: active.coordinate, evidence: outsideRegistration.evidence, baselineBytes: baseline, registeredAtMs: 3}).kind).toBe("registered");
-    const relayApp = createSyncRelayHandler({storage, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
+    const relayApp = createSyncRelayHandler({storage, publicEditRelease, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
       namedBrowserSessionLimits: capacity.namedSessions, resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
     let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
     const relayHttp = serveFetchHandler({handler: request => {
@@ -184,7 +185,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     closes.push(async () => routes.close());
     closes.push(async () => namedRoutes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push((new URL(request.url!, relayUrl).pathname === "/sync/live/link" ? routes : namedRoutes).handleUpgrade(request, socket, head));});
-    const application = createShareWebApplication({relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey,
+    const application = createShareWebApplication({publicEditRelease, relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey,
       fetchRelay: async request => {
         const bearer = request.headers.get("authorization")?.replace(/^(Bearer|LinkCapability) /, "");
         const profile = request.headers.get("x-dohc-link-profile-secret");

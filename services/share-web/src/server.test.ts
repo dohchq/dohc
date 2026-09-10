@@ -4390,3 +4390,32 @@ it("keeps Edit exchange closed when only the viewer release is enabled", async (
   relayReleased = true;
   expect((await handle(request("/api/exchange", exchange(SECRET_ALPHA)))).status).toBe(200);
 });
+
+it("does not install an Edit renewal when the viewer release is absent", async () => {
+  let now = 1_000;
+  const readCapabilities: string[] = [];
+  const handle = createShareWebHandler({relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+    nowMs: () => now, relayExchangeKey: HANDOFF_EXCHANGE_KEY,
+    fetchRelay: async relayRequest => {
+      const path = new URL(relayRequest.url).pathname;
+      if (path === "/sync/link-exchange") return Response.json({grantId: "grant-renewal", access: "view",
+        capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000});
+      if (path === "/sync/link-refresh") return Response.json({grantId: "grant-renewal", access: "edit",
+        capabilityToken: CAP_ALPHA_2, capabilityExpiresAtMs: now + 900_000});
+      readCapabilities.push(relayRequest.headers.get("authorization") ?? "");
+      return Response.json({ok: true, access: "view"});
+    },
+  });
+  const exchanged = await handle(request("/api/exchange", exchange(SECRET_ALPHA)));
+  expect(exchanged.status).toBe(200);
+  const body = await exchanged.json() as {session: string};
+  const headers = {cookie: cookiePair(exchanged), "x-dohc-link-session": body.session};
+  now = 601_001;
+  const nearExpiry = await handle(request("/api/view/meta", {headers}));
+  expect(nearExpiry.status).toBe(200);
+  expect(nearExpiry.headers.get("set-cookie")).toBeNull();
+  expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
+  now = 901_001;
+  expect((await handle(request("/api/view/meta", {headers}))).status).toBe(503);
+  expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
+});
