@@ -922,6 +922,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       );
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_page
         ON sync_relay_log(workspace_id, relay_seq);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_document_page
+        ON sync_relay_log(workspace_id, json_extract(payload_json, '$.versionId'),
+          json_extract(payload_json, '$.objectId'), relay_seq);
       -- MU-C4: findThreadCreateChannelWireId's LIKE pre-filter cannot use an
       -- index on payload_json, but this PARTIAL index confines the scan to a
       -- workspace's chat.thread.create rows (a tiny slice of a busy log) in
