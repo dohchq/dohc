@@ -82,6 +82,39 @@ it('activates a receiver projection derived from the ordinary Ydoc base and suff
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments').all()).toEqual([{moment_id:'original-moment'}])
   }finally{f.close()}
 })
+it('activates an ordinary text write folded into a Ydoc update before its file moment',()=>{
+  const f=fixture();try{
+    const source=f.capture.source
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'moment.append',?,3)")
+      .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'folded-write-moment',path:'docs/a.md',operation:'write',
+        payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:source.sourceDigest,payloadAfterByteLength:source.sourceByteLength}))
+    f.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',4,'folded-write-moment','main','docs/a.md',?,'text',?,3)")
+      .run(source.sourceDigest,source.sourceByteLength)
+    Object.assign(source,{sourceMomentId:'folded-write-moment',committedCursor:4})
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(source)
+  }finally{f.close()}
+})
+it('refuses an ordinary baseline as stale after a real workspace identity rotation',()=>{
+  const f=fixture();try{
+    f.prepare();const access=f.store.pending(f.document,host)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
+    expect(f.storage.rotateWorkspaceIdentity({workspaceId:'workspace',ownerUserId:'owner',replicationEpoch:'next-epoch',streamIdentity:'next-stream',rotatedAtMs:10})).toBe('rotated')
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual({kind:'refused',reason:'stale-document'})
+  }finally{f.close()}
+})
+it('activates an unedited ordinary Ydoc base without a suffix',()=>{
+  const f=fixture();try{
+    f.raw.exec('DELETE FROM sync_relay_log WHERE relay_seq=3')
+    const base=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes})
+    if(base.kind!=='accepted')throw new Error('Invalid base fixture')
+    f.capture.fullState=f.capture.baselineBytes
+    Object.assign(f.capture.source,{committedCursor:2,nativeHeadSequence:1,sourceMomentId:'original-moment',
+      sourceDigest:base.evidence.projectedMarkdownSha256,sourceByteLength:base.evidence.projectedMarkdownByteLength,
+      fullStateDigest:hash(f.capture.fullState),fullStateByteLength:f.capture.fullState.length})
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{f.close()}
+})
 it.each(['projection','coordinate','removed'] as const)('rejects a damaged retained ordinary baseline %s',field=>{
   const f=fixture();try{
     f.prepare();const access=f.store.pending(f.document,host)
