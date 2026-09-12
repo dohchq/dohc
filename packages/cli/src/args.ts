@@ -1,6 +1,7 @@
 import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
+import {OwnerAppResponsesRequest} from "./appResponses";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -10,6 +11,7 @@ interface ParsedCliBase {
 export type ParsedCliCommand = ParsedCliBase &
   (
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
+    | { verb: "bulkUndoAppResponses"; request: OwnerAppResponsesRequest }
     | { verb: "channels" }
     | { verb: "threads"; channel: string }
     | { verb: "inbox" }
@@ -336,6 +338,7 @@ export function parseCliArguments(
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
+      if(verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"bulkUndoAppResponses",request:OwnerAppResponsesRequest.parse(value)};
       return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
     } catch { fail("invalid app publication arguments"); }
   }

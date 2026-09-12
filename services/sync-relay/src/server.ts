@@ -1,6 +1,7 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
+import {readOwnerAppResponses,type OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type LinkAppCollectionRoute, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
@@ -125,6 +126,7 @@ type SyncRelayRoute =
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
+  | OwnerAppResponseRoute
   | OwnerRestoreRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
@@ -589,7 +591,7 @@ export function createSyncRelayHandler({
       ) {
         return await respondToLinkRead(request, route);
       }
-      if (route.route === "owner-app-publication") {
+      if (route.route === "owner-app-publication" || route.route === "owner-app-responses") {
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
         // Owner publication uses explicit desktop/agent credentials, never ambient browser cookies.
@@ -597,6 +599,7 @@ export function createSyncRelayHandler({
           headers: {authorization: authorization!}, signal: request.signal,
         }), route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
+        if(route.route==="owner-app-responses")return readOwnerAppResponses(request,route,actor.userId,storage);
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
@@ -830,6 +833,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
   if (parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "owner-app-publication", workspaceId, action: "publish"};
     const publicationId = parts[3];

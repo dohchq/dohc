@@ -970,6 +970,59 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("removes a renamed accepted response and preserves replacements on retry",async()=>{
+    const root=await createTestScratch("dohc-response-undo-");
+    const requests:Request[]=[];
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine(),requests);
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
+    await write(root,"responses/moved.md","response");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    const result=await engine.undoAcceptedAppResponse(selection);
+    expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
+    expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
+    const deletion=requests.findLast(request=>request.method==="versionedText.delete");
+    expect(deletion?.params).toMatchObject({path:"responses/moved.md",expectedObjectId:created.object.id,requestId:"undo-a"});
+    await engine.stop();
+    const reopened=capture(root,{store,rustEngineSessions:sessions});
+    // Another object now occupies the deleted path; retries cannot touch it.
+    await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/moved.md",text:"replacement",metadata:{origin:"api"}});
+    await write(root,"responses/moved.md","replacement");
+    const retry=await reopened.undoAcceptedAppResponse(selection);
+    expect(retry).toEqual({status:"deleted",momentId:result.momentId});
+    expect(await readFile(join(root,"responses/moved.md"),"utf8")).toBe("replacement");
+    expect(requests.filter(request=>request.method==="versionedText.delete")).toHaveLength(1);
+    await reopened.stop();
+  });
+
+  it("refuses response removal with forged public attribution or uncaptured disk edits",async()=>{
+    const root=await createTestScratch("dohc-response-conflict-");
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine());
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    await write(root,created.snapshot.path,"disk edit");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
+    expect(await readFile(join(root,created.snapshot.path),"utf8")).toBe("disk edit");
+    await engine.stop();
+  });
+
   it.each(["present", "absent"])("explains a shared live file restore refusal with the artifact %s", async artifact => {
     const root = await createTestScratch("dohc-live-restore-refusal-");
     let deletionAttempts = 0;

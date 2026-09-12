@@ -61,6 +61,7 @@ function buildCliRequest(
   } as const;
   switch (command.verb) {
     case "appPublication":
+    case "bulkUndoAppResponses":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "channels":
       return {

@@ -192,7 +192,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS,"expectedObjectId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
   },
@@ -1719,6 +1719,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, path);
+    if(params.expectedObjectId!==undefined && params.expectedObjectId!==null && before.objectId!==params.expectedObjectId)throw new Error("object-identity-mismatch");
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -2835,6 +2836,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataSummary: params.summary ?? null,
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
+      ...(params.expectedObjectId!=null?{expectedObjectId:params.expectedObjectId}:{}),
     });
   }
 

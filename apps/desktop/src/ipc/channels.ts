@@ -230,6 +230,7 @@ export const CHANNELS = {
   listRelayShareLinks: "desktop:list-relay-share-links",
   ownerRestore: "desktop:owner-restore",
   publishOwnerApp: "desktop:publish-owner-app",
+  bulkUndoAppResponses: "desktop:bulk-undo-app-responses",
   retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",

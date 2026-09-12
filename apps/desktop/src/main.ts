@@ -11,6 +11,7 @@ import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
@@ -3045,10 +3046,15 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 }
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
+let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
+  },
+  bulkUndoAppResponses:input=>{
+    if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
+    return ownerAppResponsesForCli(input);
   },
   findWorkspace,
   listWorkspaces,
@@ -4084,6 +4090,21 @@ function registerIpcHandlers(): void {
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
   ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  const ownerResponseDependencies={
+    registerHandler:(channel,handler)=>ipcMain.handle(channel,handler),assertTrustedSender,withRendererWorkspaceOperation,
+    remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
+    undoAcceptedResponse:async(workspace,input)=>{
+      await openWorkspaceActivity(workspace);
+      const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
+      if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
+      return capture.undoAcceptedAppResponse(input);
+    },
+  } satisfies Parameters<typeof registerOwnerAppResponsesIpc<WebContents,DesktopRendererWorkspaceOperation["workspace"],DesktopRendererWorkspaceOperation>>[0];
+  registerOwnerAppResponsesIpc(ownerResponseDependencies);
+  const cliOwnerResponses=createOwnerAppResponsesHandler<string,DesktopRendererWorkspaceOperation["workspace"],WorkspaceAuthorityOperation<RegistryEntry,DesktopWorkspaceAuthorityState>>({
+    ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
+  });
+  ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
 
   const {
     assertShareNotHeldElsewhere,

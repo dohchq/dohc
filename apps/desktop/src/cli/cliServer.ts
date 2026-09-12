@@ -174,6 +174,7 @@ export interface CliCollectionsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  bulkUndoAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
@@ -1560,6 +1561,10 @@ async function dispatch(
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
       return context.appPublication(request.args.request);
+    }
+    case "bulkUndoAppResponses": {
+      if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.bulkUndoAppResponses)throw new CliCommandError("Removing app responses requires the owning workspace.");
+      return context.bulkUndoAppResponses(request.args.request);
     }
     case "moments": {
       const includeFiles = request.args.includeFiles ?? false;
