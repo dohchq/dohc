@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
+import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -374,6 +375,8 @@ const bridge: DohcDesktopBridge = {
   },
   retuneRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
+  publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
+    await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>

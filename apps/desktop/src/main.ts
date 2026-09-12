@@ -10,6 +10,8 @@ import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
+import { registerOwnerAppPublicationIpc } from "./ipc/ownerAppPublicationIpc";
+import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -4040,6 +4042,41 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+  });
+
+  let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    flushCapture: async workspace => {
+      await openWorkspaceActivity(workspace);
+      const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+      if (!capture) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      await capture.flush();
+    },
+    withAdapter: withEngineAdapter,
+    compile: async (request, signal) => {
+      installedAppCompiler ??= createInstalledAppCompiler(pluginResourcesBasePath());
+      const compile = await installedAppCompiler;
+      signal.throwIfAborted();
+      return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
+        maxInputBytes: 192 * 1024 * 1024, maxOutputBytes: 48 * 1024 * 1024, maxErrorBytes: 64 * 1024 }, signal);
+    },
+    confirm: async (sender, detail) => {
+      const window = BrowserWindow.fromWebContents(sender);
+      if (!window || window.isDestroyed()) throw new Error("The app window closed before publication.");
+      const result = await dialog.showMessageBox(window, { type: "question", title: "Publish app", message: "Publish this captured app?",
+        detail, buttons: ["Cancel", "Publish app"], defaultId: 0, cancelId: 0, noLink: true });
+      return result.response === 1;
+    },
+    relayJson: relayShareJsonWithCredentials,
+    upload: async (credentials, workspaceId, sha256, bytes, signal) => {
+      const result = await relayShareJsonWithCredentials<{ workspaceId: string; sha256: string; byteLength: number }>(credentials,
+        `/sync/${encodeURIComponent(workspaceId)}/blobs/${sha256}`, { method: "PUT", signal, body: Uint8Array.from(bytes).buffer,
+          headers: { "content-type": "application/octet-stream" } });
+      if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
+    },
   });
 
   const {
