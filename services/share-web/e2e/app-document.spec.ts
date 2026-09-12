@@ -46,7 +46,7 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
       packageMap: { react: "deps/react/index.js", "react/jsx-runtime": "deps/react/jsx-runtime.js", "react-dom": "deps/react-dom/index.js",
         "react-dom/client": "deps/react-dom/client.js", scheduler: "deps/scheduler/index.js" },
       inputs: [...captured, input("main.tsx", `import {useState} from 'react';import {createRoot} from 'react-dom/client';import './style.css';
-        function Poll(){const [count,setCount]=useState(0);return <button style={{backgroundColor:'rgb(1, 2, 3)'}} onClick={()=>setCount(count+1)}>Votes: {count}</button>}
+        function Poll(){const [count,setCount]=useState(0);return <><img alt="Fixture" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII="/><button style={{backgroundColor:'rgb(1, 2, 3)'}} onClick={()=>setCount(count+1)}>Votes: {count}</button></>}
         createRoot(document.getElementById('root')!).render(<Poll/>);
         fetch('${origin}/external',{method:'POST',body:'allowed'}).then(r=>r.text()).then(value=>{document.body.dataset.network=value});`),
         input("style.css", "button { color: rgb(4, 5, 6) }")],
@@ -54,7 +54,7 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
     const doc = createAppDocument(build.files, { maxBundleBytes: 5_000_000, maxDocumentBytes: 10_000_000 });
     const parentScript = `const f=document.createElement('iframe');f.id='app';f.sandbox='allow-scripts';f.srcdoc=${JSON.stringify(doc.html).replaceAll("<", "\\u003c")};document.body.append(f);`;
     const parentHash = `'sha256-${createHash("sha256").update(parentScript).digest("base64")}'`;
-    parentCsp = `default-src 'none'; script-src ${parentHash} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http:; frame-src 'self'; base-uri 'none'; form-action 'none'`;
+    parentCsp = `default-src 'none'; script-src ${parentHash} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; img-src data: blob: http: https:; connect-src http:; frame-src 'self'; base-uri 'none'; form-action 'none'`;
     parentHtml = `<!doctype html><body><script>${parentScript}</script></body>`;
     await page.goto(origin);
     const app = page.frameLocator("#app");
@@ -64,6 +64,7 @@ test("approved React bundle runs under inherited CSP in an opaque child", async 
     await expect(app.getByRole("button")).toHaveCSS("color", "rgb(4, 5, 6)");
     await expect(app.getByRole("button")).toHaveCSS("background-color", "rgb(1, 2, 3)");
     await expect(app.locator("body")).toHaveAttribute("data-network", "received");
+    await expect.poll(() => app.getByRole("img").evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
     const child = page.frames().find(frame => frame.url() === "about:srcdoc")!;
     const blocked = await child.evaluate(async external => {
       const checks: Record<string, boolean> = {};

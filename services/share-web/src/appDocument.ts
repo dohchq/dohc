@@ -8,7 +8,12 @@ export interface AppDocumentFile {
   contentType: string;
 }
 
-/** This format is for an opaque sandboxed child, never the cookie-holding page. */
+/**
+ * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
+ * The parent CSP must include scriptSources and the child's permitted media and
+ * network schemes. Srcdoc inherits that policy; this meta policy only narrows it.
+ * This document contains no credentials and must not hold the launch session.
+ */
 export function createAppDocument(
   files: readonly AppDocumentFile[],
   limits: { maxBundleBytes: number; maxDocumentBytes: number },
