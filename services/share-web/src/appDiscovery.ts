@@ -14,7 +14,7 @@ export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: st
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url), query = url.searchParams;
     const viewer = new URL(options.viewerOrigin ?? request.url);
-    if (request.method !== "GET" || url.origin !== viewer.origin || request.headers.get("host") !== viewer.host ||
+    if (request.method !== "GET" || request.headers.get("host") !== viewer.host ||
         (request.headers.has("origin") && request.headers.get("origin") !== viewer.origin) ||
         (request.headers.has("sec-fetch-site") && request.headers.get("sec-fetch-site") !== "same-origin") ||
         [...query.keys()].some(key => key !== "session" && key !== "cursor") || query.getAll("session").length !== 1 || query.getAll("cursor").length > 1) return refuse();
