@@ -230,6 +230,7 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
       "Engine moment contains corrupt author provenance.",
     );
   }
+  if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -516,6 +517,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 }
 
 function adapterAuthor(author: MomentAuthor): AgentAuthor {
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public authorship can only arrive through relay replication.");
   return {
     kind: "agent",
     agentId: author.agentId,

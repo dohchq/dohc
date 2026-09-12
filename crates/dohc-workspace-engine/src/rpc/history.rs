@@ -177,6 +177,16 @@ fn parsed_moment_author(raw: &str) -> Value {
     let Some(object) = value.as_object() else {
         return corrupt();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("public") {
+        let valid = object.len() == 3
+            && ["principalId", "grantId"].iter().all(|key| {
+                object
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| !v.is_empty() && v.len() <= 500)
+            });
+        return if valid { value } else { corrupt() };
+    }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
     let nonempty = |key: &str| {
         object
@@ -203,6 +213,28 @@ fn parsed_moment_author(raw: &str) -> Value {
         author
     } else {
         corrupt()
+    }
+}
+
+#[cfg(test)]
+mod public_author_tests {
+    use super::parsed_moment_author;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
+        let author = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
+        assert_eq!(parsed_moment_author(&author.to_string()), author);
+        for malformed in [
+            json!({"kind":"public", "principalId":"holder"}),
+            json!({"kind":"public", "principalId":"", "grantId":"grant"}),
+            json!({"kind":"public", "principalId":"holder", "grantId":"grant", "agentId":"agent"}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
     }
 }
 

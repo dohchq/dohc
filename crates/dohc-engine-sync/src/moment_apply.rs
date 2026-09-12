@@ -76,13 +76,24 @@ pub(crate) struct Metadata {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MomentAuthor {
-    kind: String,
-    agent_id: String,
-    on_behalf_of: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_run_id: Option<String>,
+#[serde(tag = "kind")]
+enum MomentAuthor {
+    #[serde(rename = "agent")]
+    Agent {
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "onBehalfOf")]
+        on_behalf_of: String,
+        #[serde(rename = "agentRunId", skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
+    },
+    #[serde(rename = "public")]
+    Public {
+        #[serde(rename = "principalId")]
+        principal_id: String,
+        #[serde(rename = "grantId")]
+        grant_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +244,13 @@ pub fn apply_moment_envelope_detailed(
             })?;
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
+        if matches!(payload.author.as_ref(), Some(MomentAuthor::Public { .. }))
+            && !envelope.origin_id.starts_with("relay:collection-create:")
+        {
+            return Err(SyncError::InvalidInput {
+                reason: "public moment author requires a relay collection origin",
+            });
+        }
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
@@ -1004,11 +1022,22 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             .before_metadata
             .as_ref()
             .is_some_and(|metadata| !valid_replicated_origin(&metadata.origin))
-        || payload.author.as_ref().is_some_and(|author| {
-            author.kind != "agent"
-                || author.agent_id.is_empty()
-                || author.on_behalf_of.is_empty()
-                || author.agent_run_id.as_ref().is_some_and(String::is_empty)
+        || payload.author.as_ref().is_some_and(|author| match author {
+            MomentAuthor::Agent {
+                agent_id,
+                on_behalf_of,
+                agent_run_id,
+            } => {
+                agent_id.is_empty()
+                    || on_behalf_of.is_empty()
+                    || agent_run_id.as_ref().is_some_and(String::is_empty)
+            }
+            MomentAuthor::Public {
+                principal_id,
+                grant_id,
+            } => [principal_id, grant_id]
+                .iter()
+                .any(|v| v.is_empty() || v.len() > 500),
         })
     {
         return Err(SyncError::InvalidInput {

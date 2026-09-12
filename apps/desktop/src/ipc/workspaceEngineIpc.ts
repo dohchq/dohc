@@ -145,7 +145,7 @@ export function createWorkspaceEngineIpc<
     // stamps onBehalfOf "local" for the desktop's own user, which displays as
     // the cloud email (or "You" when signed out); any other onBehalfOf is
     // already a user-facing label and displays as-is.
-    function agentAuthorDisplayName(author: NonNullable<VersionedTextMomentSummary["author"]>): string {
+    function agentAuthorDisplayName(author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>): string {
       return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
     }
 

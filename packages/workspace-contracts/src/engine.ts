@@ -96,11 +96,10 @@ export interface ActorNeutralWriteMetadata {
 }
 
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
-// stays actor-neutral). Mirrors the agent variant of ChangeAuthor plus the
-// locally meaningful agent-run id (the .dohc/agent-runs.json record). Only
-// dohc-TRACKED agent runs stamp this; ordinary edits, reconciliation, and raw
-// external agent CLIs remain actor-neutral — an absent author is the honest
-// default, not a fallback.
+// stays actor-neutral). Tracked agent runs stamp the agent variant. Relay
+// collection creates stamp the public variant using a grant-scoped public
+// principal mapping, never an internal principal or account ID. Ordinary
+// edits, reconciliation, and external agent CLIs remain actor-neutral.
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
@@ -108,7 +107,13 @@ interface AgentMomentAuthor {
   agentRunId?: string;
 }
 
-export type MomentAuthor = AgentMomentAuthor;
+interface PublicMomentAuthor {
+  kind: "public";
+  principalId: string;
+  grantId: string;
+}
+
+export type MomentAuthor = AgentMomentAuthor | PublicMomentAuthor;
 type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {

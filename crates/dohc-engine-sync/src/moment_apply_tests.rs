@@ -48,6 +48,42 @@ fn text_sha(text: &str) -> String {
     hex_sha256(text.as_bytes())
 }
 
+#[test]
+fn public_create_author_survives_replay_and_payload_export() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["---\nanswer: Lisbon\n---\n"]);
+    let mut payload = absent_text_payload(
+        "accepted-create",
+        "response-object",
+        "poll/response.md",
+        "---\nanswer: Lisbon\n---\n",
+    );
+    let author = json!({"kind":"public", "principalId":"public-holder", "grantId":"grant"});
+    payload["author"] = author.clone();
+    let op = envelope("relay:collection-create:grant", 0, "ws", payload);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &op, &NoFaults).expect("accept"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    apply_moment_envelope(&mut store, &op, &NoFaults).expect("idempotent replay");
+    store
+        .write_with(&NoFaults, |tx| {
+            let count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id='accepted-create'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let (exported, _) =
+                crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
+            assert_eq!(exported["author"], author);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
     store
         .read_with(|tx| {

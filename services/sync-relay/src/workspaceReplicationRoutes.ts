@@ -1,7 +1,7 @@
 import { jsonResponse } from "@dohc/service-http";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
-import { assertChatAuthorship, parseLogOp } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
 import { MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -113,6 +113,7 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
+      assertClientLogProvenance(originId, input.ops);
       const ops = input.ops.map(parseLogOp);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,

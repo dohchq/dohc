@@ -468,14 +468,19 @@ const exportResultSchema = z
   })
   .strict();
 
-const rawMomentAuthorSchema = z
-  .object({
+const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
+  z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
     onBehalfOf: z.string().min(1),
     agentRunId: z.string().min(1).optional(),
-  })
-  .strict();
+  }).strict(),
+  z.object({
+    kind: z.literal("public"),
+    principalId: z.string().min(1),
+    grantId: z.string().min(1),
+  }).strict(),
+]);
 const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
 const rawMomentFileSchema = z
   .object({

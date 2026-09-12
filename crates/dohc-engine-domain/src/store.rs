@@ -1377,7 +1377,7 @@ pub(crate) fn validate_moment_metadata(
     let Some(author) = author.as_object() else {
         return Ok(());
     };
-    for field in ["agentId", "onBehalfOf", "agentRunId"] {
+    for field in ["agentId", "onBehalfOf", "agentRunId", "principalId", "grantId"] {
         let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
             continue;
         };

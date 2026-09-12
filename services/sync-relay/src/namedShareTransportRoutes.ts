@@ -3,7 +3,7 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
-import { assertChatAuthorship, parseLogOp } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
@@ -132,6 +132,7 @@ export function createNamedShareTransportRoutes(
       // Authorship runs before the filter and parseLogOp so neither admits nor
       // freezes a payload whose claimed author is missing or forged (MU-C0).
       assertChatAuthorship(input.ops, actor.userId);
+      assertClientLogProvenance(originId, input.ops);
       // Batch-aware channel scoping: a thread created earlier in this batch
       // is a valid target for later ops in the same batch (the composer's
       // thread.create + first message.append), but the log's earliest

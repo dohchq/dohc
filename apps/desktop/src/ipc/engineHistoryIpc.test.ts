@@ -104,6 +104,17 @@ function detailWith(
 }
 
 describe("engineMomentDetailForIpc per-side content kinds", () => {
+  it("preserves the public author without invoking the agent name resolver", () => {
+    const detail = detailWith({before: textSide("old"), after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.author = {kind: "public", principalId: "holder-2", grantId: "grant-1"};
+    const agentNamer = vi.fn(namer);
+    const record = engineMomentDetailForIpc(detail, agentNamer);
+    expect(record.publicAuthor).toEqual(detail.moment.author);
+    expect(record.agentAuthorName).toBeUndefined();
+    expect(agentNamer).not.toHaveBeenCalled();
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),
