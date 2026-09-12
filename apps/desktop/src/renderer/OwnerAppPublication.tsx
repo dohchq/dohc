@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
@@ -67,7 +67,16 @@ function PublicationDialog(props: {
   const [publications, setPublications] = useState<Publication[]>([]);
   const [pendingWithdraw, setPendingWithdraw] = useState<Publication | null>(null);
   const [publicationsLoading, setPublicationsLoading] = useState(true);
-  const [responsesBusy, setResponsesBusy] = useState(false);
+  const [responseRequests, setResponseRequests] = useState<ReadonlySet<string>>(new Set());
+  const responsesBusy = responseRequests.size > 0;
+  const responseBusyChanged = useCallback((grantId: string, active: boolean) => {
+    setResponseRequests(previous => {
+      if (previous.has(grantId) === active) return previous;
+      const next = new Set(previous);
+      if (active) next.add(grantId); else next.delete(grantId);
+      return next;
+    });
+  }, []);
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
   const alive = useRef(true);
@@ -144,7 +153,7 @@ function PublicationDialog(props: {
   }, [api, props.workspaceId, props.appRoot, publicationsReload]);
 
   const prepare = async () => {
-    if (busy || !selectedLink) return;
+    if (busy || responsesBusy || !selectedLink) return;
     const mine = ++request.current;
     setBusy("prepare"); setError(null); setNotice(null);
     try {
@@ -165,7 +174,7 @@ function PublicationDialog(props: {
   };
 
   const reviewReactivation = async (publication: Publication) => {
-    if (busy || publication.manifestUnavailable || publication.active) return;
+    if (busy || responsesBusy || publication.manifestUnavailable || publication.active) return;
     const mine = ++request.current;
     setBusy("prepare"); setBusyPublicationId(publication.publicationId); setError(null); setNotice(null);
     try {
@@ -186,7 +195,7 @@ function PublicationDialog(props: {
   };
 
   const approve = async () => {
-    if (busy || !prepared) return;
+    if (busy || responsesBusy || !prepared) return;
     const mine = ++request.current;
     setBusy("approve"); setError(null);
     try {
@@ -209,7 +218,7 @@ function PublicationDialog(props: {
   };
 
   const withdraw = async (publication: Publication) => {
-    if (busy) return;
+    if (busy || responsesBusy) return;
     const mine = ++request.current;
     setBusy("withdraw"); setBusyPublicationId(publication.publicationId); setError(null);
     try {
@@ -265,12 +274,12 @@ function PublicationDialog(props: {
             <div><dt>Source</dt><dd className="m-0 break-all">{prepared.sourceRevision}</dd></div>
             <div><dt>Publication</dt><dd data-testid="app-publication-digest" className="m-0 break-all">{prepared.candidateDigest}</dd></div></dl>
         </details>
-        <footer className="flex justify-end gap-2"><SecondaryButton disabled={!!busy} onClick={back}>Back</SecondaryButton>
-          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy} onClick={() => void approve()}>{busy === "approve" ? "Publishing…" : reactivating ? "Republish this revision" : "Publish this revision"}</PrimaryButton></footer>
+        <footer className="flex justify-end gap-2"><SecondaryButton disabled={!!busy || responsesBusy} onClick={back}>Back</SecondaryButton>
+          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy || responsesBusy} onClick={() => void approve()}>{busy === "approve" ? "Publishing…" : reactivating ? "Republish this revision" : "Publish this revision"}</PrimaryButton></footer>
       </> : <>
         <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Publications</h3>
-            <SecondaryButton disabled={publicationsLoading || !!busy} onClick={() => setPublicationsReload(value => value + 1)}>Reload publications</SecondaryButton></div>
+            <SecondaryButton disabled={publicationsLoading || !!busy || responsesBusy} onClick={() => setPublicationsReload(value => value + 1)}>Reload publications</SecondaryButton></div>
           {publicationsLoading ? <p role="status" className="mb-0 text-[12px] text-muted">Loading publications…</p> : publicationsError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
               <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
@@ -279,27 +288,27 @@ function PublicationDialog(props: {
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
                       <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}</div>
-                  {publication.active ? <SecondaryButton disabled={!!busy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
-                    publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
+                  {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
+                    publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
                 </li>)}
               </ul>}
         </div>
-        {!publicationsError ? [...new Set(publications.filter(publication => !publication.manifestUnavailable && publication.appRoot === props.appRoot).map(publication => publication.grantId))].map(grantId => <div key={grantId}>
+        {[...new Set(publications.filter(publication => !publication.manifestUnavailable && publication.appRoot === props.appRoot).map(publication => publication.grantId))].map(grantId => <div key={grantId}>
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Link {grantId}</p>
-          <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} onBusyChange={setResponsesBusy} />
-        </div>) : null}
+          <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
+        </div>)}
         <label className="text-[13px] text-ink">Share link
-          <select aria-label="Publication share link" disabled={loading || !!busy} value={selected} onChange={event => setSelected(event.target.value)}
+          <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
             className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
             <option value="">Choose a link</option>{links.map(link => <option key={link.grantId} value={link.grantId}>{linkLabel(link)}</option>)}
           </select></label>
         {loading ? <p role="status" className="m-0 text-[13px] text-muted">Loading links…</p> : loadError ? <div><p role="alert" className="text-[13px] text-danger">{loadError}</p><SecondaryButton onClick={() => setReload(value => value + 1)}>Reload links</SecondaryButton></div> : links.length === 0 ?
           <p className="m-0 text-[13px] text-muted">No active links include this app's source folder.</p> : null}
         {props.onShareSource ? <div className="flex items-center justify-between gap-3"><p className="m-0 text-[12px] text-muted">Create a link that includes this app's source files.</p>
-          <SecondaryButton disabled={!!busy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
+          <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
         <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>
-          <PrimaryButton disabled={!!busy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
+          <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
       </>}
       </section></Overlay>
       {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>

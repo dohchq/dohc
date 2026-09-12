@@ -272,4 +272,49 @@ describe("owner app publication", () => {
     expect(screen.getAllByRole("region", { name: "App responses" })).toHaveLength(1);
     expect(ownerAppResponses).not.toHaveBeenCalled();
   });
+
+  it("keeps concurrent removal results visible until every panel finishes", async () => {
+    const first = deferred<unknown>(); const second = deferred<unknown>();
+    const ownerAppResponses = vi.fn(async (request: { action: string; grantId: string }) => request.action === "list" ? {
+      action: "list", acceptances: [{kind: "accepted", acceptanceId: request.grantId, objectId: "object", momentId: "moment", publicPrincipalId: "person", versionId: "main", collectionPath: "trip/responses", path: `trip/responses/${request.grantId}.md`, acceptedAtMs: 1}], nextAcceptanceId: null,
+    } : request.grantId === "grant-1" ? first.promise : second.promise);
+    vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [1,2].map(index => ({ publicationId: String(index).repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: `grant-${index}`, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, manifestUnavailable: false })), nextCursor: null } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" onShareSource={() => undefined} />); await open();
+    for (const button of screen.getAllByRole("button", {name: "Load responses"})) { fireEvent.click(button); }
+    await screen.findByText("trip/responses/grant-2.md");
+    for (const button of screen.getAllByRole("button", {name: /Remove this holder.s responses/})) {
+      fireEvent.click(button); fireEvent.click(screen.getByRole("button", {name: "Remove responses"}));
+    }
+    const blocked = () => {
+      for (const name of ["Close publication", "Reload publications", "Prepare app", "Share app folder", "Cancel"]) expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.keyDown(document, {key:"Escape"}); expect(screen.getByRole("dialog")).toBeTruthy();
+    };
+    blocked();
+    await act(async () => first.resolve({action:"undo",items:[{acceptanceId:"grant-1",status:"deleted",momentId:"delete"}],nextCursor:null}));
+    blocked();
+    await act(async () => second.resolve({action:"undo",items:[{acceptanceId:"grant-2",status:"conflict"}],nextCursor:null}));
+    expect((screen.getByRole("button", {name:"Close publication"}) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.")).toBeTruthy();
+    expect(screen.getByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed.")).toBeTruthy();
+  });
+
+  it("allows closing while responses are loading", async () => {
+    const pending = deferred<unknown>();
+    vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses: vi.fn(() => pending.promise) });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ publicationId: "c".repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, manifestUnavailable: false }], nextCursor: null } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
+    fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
+    expect((screen.getByRole("button", { name: "Close publication" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => pending.resolve({ action: "list", acceptances: [], nextAcceptanceId: null }));
+  });
+
+  it("does not mount a response panel for an unknown damaged app", async () => {
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {kind:"listed",publications:[{publicationId:"c".repeat(64),authorityRevision:1,shareId:row.shareId,grantId:row.grantId,active:true,manifestUnavailable:true}],nextCursor:null} : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
+    await screen.findByText("Source details unavailable. This publication may belong to another app.");
+    expect(screen.queryByRole("region",{name:"App responses"})).toBeNull();
+  });
 });

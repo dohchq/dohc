@@ -20,7 +20,7 @@ it("shows response provenance and requires confirmation before removing a holder
   render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />);
   await load();
   expect(api.ownerAppResponses).toHaveBeenCalledWith({ action: "list", workspaceId: "workspace", grantId: "grant", limit: 100 });
-  const trigger = screen.getByRole("button", { name: "Remove this holder’s responses" });
+  const trigger = screen.getByRole("button", { name: /Remove this holder.s responses/ });
   trigger.focus(); fireEvent.click(trigger);
   expect(screen.getByRole("dialog").textContent).toContain("including responses outside this page");
   expect(api.ownerAppResponses).toHaveBeenCalledTimes(1);
@@ -33,7 +33,7 @@ it("retries an uncertain removal with the same identity and resumes the returned
   render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />);
   await load();
   api.ownerAppResponses.mockRejectedValueOnce(new Error("Connection ended."));
-  fireEvent.click(screen.getByRole("button", { name: "Remove this holder’s responses" }));
+  fireEvent.click(screen.getByRole("button", { name: /Remove this holder.s responses/ }));
   fireEvent.click(screen.getByRole("button", { name: "Remove responses" }));
   await screen.findByRole("alert");
   const first = api.ownerAppResponses.mock.calls[1][0];
@@ -68,4 +68,17 @@ it("reports a malformed result and offers a working reload", async () => {
   await screen.findByRole("alert");
   await load();
   expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("clears earlier outcome counts on reload and a new failed removal", async () => {
+  render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />); await load();
+  const remove = () => { fireEvent.click(screen.getByRole("button",{name:/Remove this holder.s responses/})); fireEvent.click(screen.getByRole("button",{name:"Remove responses"})); };
+  api.ownerAppResponses.mockResolvedValueOnce({action:"undo",items:[{acceptanceId:accepted.acceptanceId,status:"deleted"}],nextCursor:null});
+  remove(); await screen.findByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.");
+  fireEvent.click(screen.getByRole("button",{name:"Reload responses"}));
+  expect(screen.queryByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.")).toBeNull();
+  await screen.findByText(accepted.path);
+  api.ownerAppResponses.mockRejectedValueOnce(new Error("Connection ended.")); remove(); await screen.findByRole("alert");
+  expect(screen.queryByText("Restore removed files from workspace history.")).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Stop here"})); expect(screen.queryByRole("alert")).toBeNull();
 });
