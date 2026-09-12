@@ -2,7 +2,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 
-export interface AppPublicationLimits { maxFiles: number; maxMetadataBytes: number; maxBundleBytes: number }
+export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;\nexport const APP_PUBLICATION_MAX_DOCUMENT_BYTES = APP_PUBLICATION_MAX_BUNDLE_BYTES * 2 + 64 * 1024;\n\nexport interface AppPublicationLimits { maxFiles: number; maxMetadataBytes: number; maxBundleBytes: number }
 export interface AppPublicationFile { path: string; sha256: string; byteLength: number }
 export interface AppPublicationCandidate {
   versionId: string;

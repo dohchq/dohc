@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";\nimport { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { createAppDocument, type AppDocumentFile } from "./appDocument";
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
@@ -8,7 +8,7 @@ import type { LinkBrowserMaterial } from "./server";
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const PUBLICATION = /^[a-f0-9]{64}$/;
 const COOKIE = "__Host-dohc-app";
-const MAX_BUNDLE = 8 * 1024 * 1024, MAX_DOCUMENT = 16 * 1024 * 1024;
+const MAX_BUNDLE = APP_PUBLICATION_MAX_BUNDLE_BYTES, MAX_DOCUMENT = APP_PUBLICATION_MAX_DOCUMENT_BYTES;
 const MAX_LAUNCHES = 512, MAX_PENDING = 4, HANDOFF_MS = 30_000, SESSION_MS = 10 * 60_000;
 const headers = { "cache-control": "private, no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin" };
 const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers });
