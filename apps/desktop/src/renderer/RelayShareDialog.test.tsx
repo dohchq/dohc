@@ -5513,7 +5513,7 @@ describe("RelayShareDialog", () => {
 });
 
 describe("advertised public Edit release", () => {
-  it("names editing when an Edit link changes to View", async () => {
+  it.each(["View", "Comment"] as const)("names editing when an Edit link changes to %s", async access => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({links: [readableLink("edit-link", {access: "edit"})], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});
     const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={{kind: "paths", paths: ["docs/plan.md"]}} onClose={() => {}} />);
@@ -5521,9 +5521,11 @@ describe("advertised public Edit release", () => {
     const row = await screen.findByTestId("share-link-row-edit-link");
     await user.click(within(row).getByRole("button", {name: "Change access"}));
     const confirmation = screen.getByTestId("share-link-confirmation");
-    await user.click(within(confirmation).getByRole("radio", {name: "View"}));
-    expect(confirmation.querySelector("p")?.textContent).toBe("Turn off editing for this link? The same link keeps working, for viewing only.");
-    expect(within(confirmation).getByRole("button", {name: "Turn off editing"})).toBeTruthy();
+    await user.click(within(confirmation).getByRole("radio", {name: access}));
+    expect(confirmation.querySelector("p")?.textContent).toBe(access === "View"
+      ? "Turn off editing for this link? The same link keeps working, for viewing only."
+      : "Turn off editing for this link? The same link keeps working. Holders can view and comment.");
+    expect(within(confirmation).getByRole("button", {name: access === "View" ? "Turn off editing" : "Use Comment access"})).toBeTruthy();
   });
   it("offers Edit only after authenticated inventory advertises it", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({links: [], independentGrants: [], supportedLinkAccess: ["view", "comment", "edit"]});

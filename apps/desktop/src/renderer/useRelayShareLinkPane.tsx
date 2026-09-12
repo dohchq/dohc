@@ -2282,7 +2282,9 @@ export function useRelayShareLinkPane(props: {
                         ? confirmationRow.access === "edit"
                           ? "Turn off editing for this link? The same link keeps working, for viewing only."
                           : "Turn off comments for this link? The same link keeps working, for viewing only."
-                        : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
+                        : confirmationRow.access === "edit"
+                          ? "Turn off editing for this link? The same link keeps working. Holders can view and comment."
+                          : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
                       {narrowerDependents.length > 0 ? (
                         <>
                           {" "}These people drop to {confirmation.access === "comment" ? "Comment" : "view"} too:{" "}
