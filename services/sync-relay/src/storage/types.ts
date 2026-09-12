@@ -568,6 +568,7 @@ export interface SyncRelayStorage {
   authorizeLinkAppCollection(input:import("./publications").LinkAppPublicationInput):import("./publications").LinkAppPublicationAuthority;
   readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
+  listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
   reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
   authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;

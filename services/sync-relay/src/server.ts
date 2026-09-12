@@ -715,6 +715,7 @@ export function createSyncRelayHandler({
 function parseRoute(request: Request): SyncRelayRoute {
   const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
+    if (parts.length === 3) return {route: "link-app-publication"};
     const publicationId = parts[3];
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "link-app-publication", publicationId};

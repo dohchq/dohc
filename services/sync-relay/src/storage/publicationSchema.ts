@@ -28,5 +28,7 @@ export function initializeAppPublicationSchema(db: SqliteDb): void {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_publication_blobs_workspace
       ON sync_relay_app_publication_blobs(workspace_id, sha256);
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_publication_discovery
+      ON sync_relay_app_publications(workspace_id, grant_id, grant_generation, active, publication_id);
   `);
 }

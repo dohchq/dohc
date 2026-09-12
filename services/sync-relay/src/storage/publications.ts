@@ -201,8 +201,7 @@ export function reactivateAppPublication(storage: StorageContext, input: Reactiv
   });
 }
 
-function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput,
-  verified?: {candidate: AppPublicationCandidate; manifestHash: string}) {
+function currentLinkPublicationPrincipal(storage: StorageContext, input: Omit<LinkAppPublicationInput, "publicationId">) {
   const enrollment = readLinkEnrollment(storage, input, input.nowMs);
   if (!enrollment || enrollment.principal?.blockedAtMs != null) throw notFound();
   const session = storage.findLinkSessionByCapabilityHash(input.capabilityHash);
@@ -211,6 +210,12 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
   const authorized = authorizeLinkShareAction({storage, grantId: session.grantId, action: "read"});
   if (!authorized.ok || authorized.grant.generation !== session.generation ||
       !isPublicLinkAccess(authorized.grant.access, input.publicEditRelease)) throw notFound();
+  return {enrollment, session, authorized};
+}
+
+function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput,
+  verified?: {candidate: AppPublicationCandidate; manifestHash: string}) {
+  const {enrollment, session, authorized} = currentLinkPublicationPrincipal(storage, input);
   const lookup = {workspaceId: authorized.share.workspaceId, ownerUserId: authorized.share.granterUserId,
     publicationId: input.publicationId, limits: input.limits};
   const {state: publication, row} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
@@ -238,6 +243,27 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
     sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
   };
   return {result, workspaceId: authorized.share.workspaceId, candidate, manifestHash};
+}
+
+export interface ListLinkAppPublicationsInput extends Omit<LinkAppPublicationInput, "publicationId" | "expectedAuthorityRevision"> {cursor?: string}
+export function listLinkAppPublications(storage: StorageContext, input: ListLinkAppPublicationsInput) {
+  return storage.readTx(() => {
+    const {session, authorized} = currentLinkPublicationPrincipal(storage, input);
+    const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
+      WHERE workspace_id=? AND grant_id=? AND grant_generation=? AND active=1 AND publication_id>?
+      ORDER BY publication_id LIMIT 26`).all(authorized.share.workspaceId, session.grantId, session.generation, input.cursor ?? "");
+    const publications = rows.slice(0, 25).flatMap(row => {
+      try {
+        const {candidate, result} = currentLinkAppPublication(storage, {...input, publicationId: String(row.publication_id)});
+        const name = (candidate.appRoot.split("/").at(-1) ?? "App").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 128) || "App";
+        return [{publicationId: result.descriptor.publicationId, name}];
+      } catch (error) {
+        if (error instanceof RelayError && error.code === "not_found") return [];
+        throw error;
+      }
+    });
+    return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
+  });
 }
 
 /** Call within the caller's read or write transaction. */

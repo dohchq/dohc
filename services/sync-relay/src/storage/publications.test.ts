@@ -463,3 +463,30 @@ it("does not revive a cached launch guard when its publication is explicitly rea
   f.storage.reactivateAppPublication({...state, expectedAuthorityRevision: 2, limits});
   expect(() => guard(20)).toThrow();
 });
+
+it("discovers only currently authorized active apps in bounded pages", async () => {
+  const f = linkFixture(), ids = [f.published.publicationId];
+  for (let index=0;index<26;index++) {const input=request();input.candidate.sourceRevision=digest(`discovery-${index}`);ids.push(f.storage.publishAppPublication(input).publicationId);}
+  ids.sort();
+  const firstResponse = await f.http("/sync/link/app-publications");expect(firstResponse.status).toBe(200);
+  const first=await firstResponse.json();expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
+  expect(first.publications[0]).toEqual({publicationId:ids[0],name:"app"});
+  const last=await (await f.http(`/sync/link/app-publications?cursor=${first.nextCursor}`)).json();expect(last.publications).toHaveLength(2);expect(last.nextCursor).toBeNull();
+  expect((await f.http("/sync/link/app-publications?grantId=g")).status).toBe(400);
+  const held=await f.http("/sync/link/app-publications");
+  f.storage.withdrawAppPublication({workspaceId:"w",ownerUserId:"owner",publicationId:ids[0]!,expectedAuthorityRevision:1});
+  await expect(held.text()).rejects.toThrow();
+  const after=await (await f.http("/sync/link/app-publications")).json();expect(after.publications.some((row:{publicationId:string})=>row.publicationId===ids[0])).toBe(false);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:["app"],versionId:null}));
+  expect((await (await f.http("/sync/link/app-publications")).json()).publications).toEqual([]);
+});
+
+it("hides damaged discovery rows and refuses stale or blocked discovery principals", async () => {
+  const f=linkFixture();
+  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
+  expect(await (await f.http("/sync/link/app-publications")).json()).toEqual({publications:[],nextCursor:null});
+  f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('blocked','g',1,?,1,2,1)").run(hashLinkProfileSecret("P".repeat(43),"test-key"));
+  expect((await f.http("/sync/link/app-publications")).status).toBe(404);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
+  expect((await f.http("/sync/link/app-publications")).status).toBe(401);
+});
