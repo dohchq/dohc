@@ -72,36 +72,42 @@ impl EngineService {
         };
         let had_session = session.is_some();
         let workspace_id = open.workspace_id.clone();
-        let db_path = open.db_path.clone();
-        let activation_id = params.activation_id;
-        let (result, serial) = tokio::task::spawn_blocking(move || {
-            let result = (|| {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
-                let permitted: bool = store.read_with(|conn|conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources a WHERE a.activation_id=?1 AND a.relay_database_namespace=?2
-                     AND a.workspace_id=?3 AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
-                     AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted WHERE adopted.workspace_id=a.workspace_id
-                       AND adopted.main_version_id=a.version_id AND adopted.object_id=a.object_id))",
-                    rusqlite::params![activation_id,namespace,workspace_id,session.as_ref().map(|s|s.key.version_id.as_str()),
-                        session.as_ref().map(|s|s.key.object_id.as_str()),session.as_ref().and_then(|s|s.lineage_claim_id.as_deref())],
-                    |row|row.get(0))).map_err(|_|workspace_unavailable())?;
-                if !permitted { return Err(workspace_unavailable()); }
-                Ok(())
-            })();
-            (result, serial)
-        }).await.map_err(|_|workspace_unavailable())?;
-        result?;
+        let session_binding = session
+            .map(|session| {
+                let lineage = session.lineage_claim_id.ok_or_else(workspace_unavailable)?;
+                Ok::<_, WireError>((session.key, lineage))
+            })
+            .transpose()?;
+        let actor = open.actor.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let session_id = params.session_id;
+        let token = cancellation.token();
+        tokio::spawn(async move {
+            let _serial = serial;
+            actor
+                .release_imported_owner_activation(
+                    namespace,
+                    workspace_id,
+                    params.activation_id,
+                    session_binding,
+                    token,
+                )
+                .await
+                .map_err(map_runtime)?;
+            if had_session {
+                let removed = lock(&sessions)
+                    .remove(&session_id)
+                    .ok_or_else(workspace_unavailable)?;
+                drop(removed);
+            }
+            Ok::<_, WireError>(())
+        })
+        .await
+        .map_err(|_| workspace_unavailable())??;
         let current = self.open(Some(workspace))?;
         if !Arc::ptr_eq(&open, &current) || cancellation.token.is_cancelled() {
             return Err(workspace_unavailable());
         }
-        if had_session {
-            let removed = lock(&self.sessions)
-                .remove(&params.session_id)
-                .ok_or_else(workspace_unavailable)?;
-            drop(removed);
-        }
-        drop(serial);
         Ok(ServiceResponse {
             response: Response {
                 id: request.id,

@@ -35,6 +35,64 @@ pub struct ImportedOwnerActivation {
     pub restore_generation: Option<i64>,
 }
 
+pub fn release_imported_owner_activation(
+    store: &mut EngineStore,
+    namespace: &str,
+    workspace_id: &str,
+    activation_id: &str,
+    session: Option<(&DocKey, &str)>,
+    faults: &dyn FaultInjector,
+) -> Result<(), ApplicationError> {
+    let outcome = store.write_with(faults, |tx| {
+        let removed: Option<String> = tx
+            .query_row(
+                "DELETE FROM ydoc_owner_activation_sources AS a WHERE a.activation_id=?1
+             AND a.relay_database_namespace=?2 AND a.workspace_id=?3
+             AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
+             AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted
+                 WHERE adopted.workspace_id=a.workspace_id AND adopted.main_version_id=a.version_id
+                 AND adopted.object_id=a.object_id) RETURNING full_state_digest",
+                params![
+                    activation_id,
+                    namespace,
+                    workspace_id,
+                    session.map(|(key, _)| key.version_id.as_str()),
+                    session.map(|(key, _)| key.object_id.as_str()),
+                    session.map(|(_, lineage)| lineage)
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(write_sql)?;
+        if let Some(digest) = removed {
+            match tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [&digest]) {
+                Ok(_) => (),
+                Err(rusqlite::Error::SqliteFailure(error, message))
+                    if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+                        || (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                            && message.as_deref() == Some("FOREIGN KEY constraint failed")) =>
+                {
+                    ()
+                }
+                Err(error) => return Err(write_sql(error)),
+            }
+        } else {
+            let retained: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources WHERE activation_id=?1)",
+                [activation_id], |row| row.get(0),
+            ).map_err(read_sql)?;
+            if session.is_some() || retained {
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        Ok(())
+    })?;
+    match outcome {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn capture_imported_owner_activation(
     store: &mut EngineStore,

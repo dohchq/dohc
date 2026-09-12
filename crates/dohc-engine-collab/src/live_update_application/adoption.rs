@@ -42,17 +42,20 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
-            let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
-            VersionedTextStore::new(&mut store)
-                .ensure_main_version("workspace", "main", 0, &NoFaults)
-                .unwrap();
             let fixture: Value = serde_json::from_str(include_str!(
                 "../../tests/owner-source/owner-source-seed.json"
             ))
             .unwrap();
             let text = fixture["markdown"].as_str().unwrap().to_owned();
             let bytes: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+            Self::with_source(text, bytes)
+        }
+        fn with_source(text: String, bytes: Vec<u8>) -> Self {
+            let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
+            let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("workspace", "main", 0, &NoFaults)
+                .unwrap();
             VersionedTextStore::new(&mut store)
                 .write_text(
                     &WriteText {
@@ -1134,12 +1137,52 @@ type VerifiedAdoptionSource = (
     String,
     Option<super::activation::ImportedOwnerSource>,
 );
+type AdoptionSourceMetadata = (
+    String,
+    String,
+    i64,
+    Option<super::activation::ImportedOwnerSource>,
+);
+
 pub(super) fn read_adoption_source(
     conn: &Connection,
     namespace: &str,
     adoption_id: &str,
-    b: &LiveObjectBinding,
+    binding: &LiveObjectBinding,
 ) -> Result<Option<VerifiedAdoptionSource>, ApplicationError> {
+    let Some((moment, digest, length, imported)) =
+        read_adoption_source_metadata(conn, namespace, adoption_id, binding)?
+    else {
+        return Ok(None);
+    };
+    if let Some(source) = &imported {
+        let full =
+            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
+        if full.len() != source.full_state_byte_length
+            || hex_sha256(&full) != source.full_state_digest
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+    }
+    let text: String = conn
+        .query_row(
+            "SELECT text FROM blobs WHERE sha256=?1 AND byte_length=?2",
+            params![digest, length],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    if text.len() as i64 != length || hex_sha256(text.as_bytes()) != digest {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Some((moment, digest, length, text, imported)))
+}
+
+fn read_adoption_source_metadata(
+    conn: &Connection,
+    namespace: &str,
+    adoption_id: &str,
+    b: &LiveObjectBinding,
+) -> Result<Option<AdoptionSourceMetadata>, ApplicationError> {
     let imported: Option<String> = conn.query_row(
         "SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1 AND relay_database_namespace=?2
          AND workspace_id=?3 AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
@@ -1188,7 +1231,7 @@ pub(super) fn read_adoption_source(
         }
         let retained_length: i64 = conn
             .query_row(
-                "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1",
+                "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes)",
                 [&source.full_state_digest],
                 |row| row.get(0),
             )
@@ -1196,41 +1239,28 @@ pub(super) fn read_adoption_source(
         if retained_length != source.full_state_byte_length as i64 {
             return Err(ApplicationError::Corrupt);
         }
-        let full =
-            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
-        if full.len() != source.full_state_byte_length
-            || hex_sha256(&full) != source.full_state_digest
-        {
-            return Err(ApplicationError::Corrupt);
-        }
-        let text: Option<String> = conn.query_row("SELECT t.text FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+        let retained_text: Option<i64> = conn.query_row("SELECT t.byte_length FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4 AND m.moment_id=?5
             AND m.after_blob_sha256=?6 AND m.after_content_kind='text' AND t.byte_length=?7",
             params![b.workspace_id,b.main_version_id,b.object_id,source.current_path,source.source_moment_id,source.source_digest,source.source_byte_length],|r|r.get(0)).optional().map_err(read_sql)?;
-        let text = text.ok_or(ApplicationError::Corrupt)?;
-        if text.len() as i64 != source.source_byte_length
-            || hex_sha256(text.as_bytes()) != source.source_digest
-        {
-            return Err(ApplicationError::Corrupt);
-        }
+        retained_text.ok_or(ApplicationError::Corrupt)?;
         return Ok(Some((
             source.source_moment_id.clone(),
             source.source_digest.clone(),
             source.source_byte_length,
-            text,
             Some(source),
         )));
     }
-    let source: Option<(String,String,i64,String)> = conn.query_row(
-        "SELECT s.source_moment_id,s.source_blob_sha256,s.source_byte_length,t.text
+    let source: Option<(String,String,i64)> = conn.query_row(
+        "SELECT s.source_moment_id,s.source_blob_sha256,s.source_byte_length
          FROM ydoc_owner_base_sources s JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
          AND m.object_id=s.object_id AND m.path=s.path AND m.moment_id=s.source_moment_id
          AND m.after_blob_sha256=s.source_blob_sha256 AND m.after_content_kind='text'
          JOIN blobs t ON t.sha256=s.source_blob_sha256 AND t.byte_length=s.source_byte_length
          WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.lineage_claim_id=?4 AND s.path=?5",
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path],
-        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?;
-    Ok(source.map(|(moment, digest, length, text)| (moment, digest, length, text, None)))
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?;
+    Ok(source.map(|(moment, digest, length)| (moment, digest, length, None)))
 }
 
 /// Prove an existing owner's state without changing its domain history, base,
@@ -1526,8 +1556,8 @@ pub(super) fn read_origin(
     };
     let binding: LiveObjectBinding =
         serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
-    let Some((verified_moment, verified_digest, _, _, _)) =
-        read_adoption_source(conn, &held.namespace, &adoption_id, &binding)?
+    let Some((verified_moment, verified_digest, _, _)) =
+        read_adoption_source_metadata(conn, &held.namespace, &adoption_id, &binding)?
     else {
         return Err(ApplicationError::Corrupt);
     };

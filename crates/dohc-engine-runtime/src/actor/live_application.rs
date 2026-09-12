@@ -1356,6 +1356,33 @@ fn settle_audited(
 }
 
 impl ActorHandle {
+    pub async fn release_imported_owner_activation(
+        &self,
+        namespace: String,
+        workspace_id: String,
+        activation_id: String,
+        session: Option<(dohc_engine_collab::DocKey, String)>,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            dohc_engine_collab::live_update_application::release_imported_owner_activation(
+                store,
+                &namespace,
+                &workspace_id,
+                &activation_id,
+                session
+                    .as_ref()
+                    .map(|(key, lineage)| (key, lineage.as_str())),
+                &dohc_engine_storage::NoFaults,
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn capture_imported_owner_activation(
         &self,

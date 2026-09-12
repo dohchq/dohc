@@ -1,5 +1,8 @@
 fn imported_fixture() -> Fixture {
-    let mut fixture = Fixture::new();
+    imported_source_fixture(Fixture::new())
+}
+
+fn imported_source_fixture(mut fixture: Fixture) -> Fixture {
     let payload = serde_json::json!({
         "versionId":"main", "objectId":"object", "contentKind":"richdoc", "isBaseState":true,
         "lineageClaimId":fixture.binding.lineage_claim_id,
@@ -102,19 +105,17 @@ fn imported_activation_rejects_uncommitted_cursor_budget_and_changed_provenance(
                 .map_err(write_sql)
         })
         .unwrap();
-    assert!(
-        adopt_owner_committed(
-            &mut f.store,
-            &f.handle,
-            f.cut.clone(),
-            1_000_000,
-            10,
-            4,
-            &NoFaults,
-            |_, _, _, _| Ok(())
-        )
-        .is_err()
-    );
+    assert!(adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        10,
+        4,
+        &NoFaults,
+        |_, _, _, _| Ok(())
+    )
+    .is_err());
     assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
@@ -369,4 +370,182 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
     assert_eq!(resumed.source, captured.source);
     assert_eq!(resumed.full_state, captured.full_state);
     assert!(f.adopt().unwrap().adoption_replayed);
+}
+
+#[test]
+fn accepted_owner_origin_does_not_load_retained_document_bytes() {
+    use rusqlite::limits::Limit;
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(
+        ContentKind::Richdoc,
+        &"large retained source ".repeat(8_000),
+    )
+    .unwrap();
+    let text = doc.project(ContentKind::Richdoc).unwrap().content;
+    let mut f = imported_source_fixture(Fixture::with_source(text, doc.encode_full_state()));
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = captured.activation_id.clone();
+    f.adopt().unwrap();
+    f.store
+        .read_with(|conn| {
+            let old_limit = conn
+                .set_limit(Limit::SQLITE_LIMIT_LENGTH, 65_536)
+                .expect("set sqlite length limit");
+            let origin = read_origin(conn, &f.handle.registration.lock().unwrap());
+            let bytes = get_binary_blob(conn, &captured.source.full_state_digest);
+            conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, old_limit)
+                .expect("restore sqlite length limit");
+            assert!(bytes.is_err(), "the limit must reject a retained blob read");
+            assert!(origin.unwrap().is_some());
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn release_removes_only_the_matching_unadopted_activation_source() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "other",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
+    assert_eq!(
+        f.store
+            .table_row_count("ydoc_owner_activation_sources")
+            .unwrap(),
+        1
+    );
+    release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(
+        f.store
+            .table_row_count("ydoc_owner_activation_sources")
+            .unwrap(),
+        0
+    );
+    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+    release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        None,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
+}
+
+#[test]
+fn release_preserves_an_adopted_activation_source() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    f.cut.adoption_id = captured.activation_id.clone();
+    f.adopt().unwrap();
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
+    assert_eq!(
+        f.store
+            .table_row_count("ydoc_owner_activation_sources")
+            .unwrap(),
+        1
+    );
+    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_ok());
+}
+
+#[test]
+fn release_reclaims_only_an_unreferenced_captured_full_state() {
+    for retain_second_capture in [false, true] {
+        let mut f = imported_fixture();
+        let vector = f.doc.encode_state_vector();
+        f.doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "changed before capture")
+            .unwrap();
+        let delta = f.doc.diff(&vector).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                durable::record_update_in_tx(tx, &f.key, &delta, None, None, 4)
+            })
+            .unwrap();
+        VersionedTextStore::new(&mut f.store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "owner.md".into(),
+                    text: "changed before capture".into(),
+                    moment_id: "imported-edit".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let captured = capture_imported(&mut f, 1_000_000).unwrap();
+        let digest = &captured.source.full_state_digest;
+        assert_ne!(digest, &f.binding.lineage_claim_id);
+        assert_ne!(digest, &hex_sha256(&delta));
+        if retain_second_capture {
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE sync_relay_cursors SET cursor='10'", [])
+                        .map_err(write_sql)
+                })
+                .unwrap();
+            let second = capture_imported(&mut f, 1_000_000).unwrap();
+            assert_ne!(second.activation_id, captured.activation_id);
+            assert_eq!(&second.source.full_state_digest, digest);
+        }
+        release_imported_owner_activation(
+            &mut f.store,
+            "namespace",
+            "workspace",
+            &captured.activation_id,
+            Some((&f.key, &f.binding.lineage_claim_id)),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            f.store.get_binary_blob(digest).unwrap().is_some(),
+            retain_second_capture
+        );
+        assert!(f
+            .store
+            .get_binary_blob(&f.binding.lineage_claim_id)
+            .unwrap()
+            .is_some());
+    }
 }
