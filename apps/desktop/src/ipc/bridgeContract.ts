@@ -330,6 +330,16 @@ export type WorkspaceRegistryResult = z.infer<typeof WorkspaceRegistryResult>;
 
 export const DefaultWorkspaceRootResult = PATH_STRING;
 
+// Where a share opened as its own view goes when the person does not pick a
+// folder: a sibling of the default workspace root, named after the share.
+// The main process approves the path so the open can use it without a
+// dialog; the renderer never invents roots.
+export const DefaultShareRootPayload = z.object({
+  shareId: z.string().min(1).max(128),
+});
+export type DefaultShareRootPayload = z.infer<typeof DefaultShareRootPayload>;
+export const DefaultShareRootResult = PATH_STRING;
+
 export const CreateLocalWorkspacePayload = z.object({
   rootPath: PATH_STRING,
   kind: z.enum(["personal", "shared"]),
@@ -5899,6 +5909,7 @@ export interface DohcDesktopBridge {
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;
+  getDefaultShareRoot(payload: DefaultShareRootPayload): Promise<string>;
   createLocalWorkspace(
     payload: CreateLocalWorkspacePayload,
   ): Promise<WorkspaceSummary>;

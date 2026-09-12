@@ -26,6 +26,7 @@ const bridgeMock = {
   openSharedView: vi.fn(),
   mountShare: vi.fn(),
   pickWorkspaceRoot: vi.fn(),
+  getDefaultShareRoot: vi.fn(),
   createLocalWorkspace: vi.fn(),
   attachWorkspaceFolder: vi.fn(),
   createWorkspaceFile: vi.fn(),
@@ -114,6 +115,9 @@ beforeEach(() => {
   bridgeMock.retryShareHandoff.mockResolvedValue(undefined);
   bridgeMock.dismissShareHandoff.mockResolvedValue(undefined);
   bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/shared");
+  bridgeMock.getDefaultShareRoot.mockImplementation(
+    async ({ shareId }: { shareId: string }) => `/home/ice/dohc/shared/${shareId}`,
+  );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
   bridgeMock.mountShare.mockResolvedValue({
     workspace: { ...SHARED_VIEW, shareView: undefined },
@@ -345,7 +349,7 @@ describe("ShareHandoffSurface", () => {
     expect(await screen.findByTestId("open-share-start")).toBeTruthy();
   });
 
-  it("uses the exact ordinary received result and waits for first-run confirmation", async () => {
+  it("uses the exact ordinary received result and opens into its suggested folder", async () => {
     const user = userEvent.setup();
     const onOpened = vi.fn();
     bridgeMock.getRelayReceivedShare.mockResolvedValue({
@@ -382,14 +386,14 @@ describe("ShareHandoffSurface", () => {
       shareId: "share-exact",
     });
 
-    await user.click(screen.getByTestId("open-share-choose-folder"));
+    await screen.findByText("/home/ice/dohc/shared/share-exact");
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("open-share-start"));
 
     await waitFor(() =>
       expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
         shareCode: "ordinary-exact-share-code",
-        rootPath: "/home/ice/dohc/shared",
+        rootPath: "/home/ice/dohc/shared/share-exact",
       }),
     );
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();

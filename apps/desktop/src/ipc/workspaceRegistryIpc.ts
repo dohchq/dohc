@@ -10,6 +10,8 @@ import type {
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
+  DefaultShareRootPayload,
+  DefaultShareRootResult,
   DefaultWorkspaceRootResult,
   OpenWorkspaceRequestPayload,
   PickWorkspaceRootResult,
@@ -127,6 +129,21 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const root = defaultWorkspaceRoot(effectiveHome());
     approveRoot(root);
     return DefaultWorkspaceRootResult.parse(root);
+  });
+
+  // A share opened as its own view defaults to <default root>/shared/<id>.
+  // The id is already restricted to [a-z0-9-] by the share code parser, so
+  // it is a safe single segment. Approving the path here is what lets the
+  // renderer open the share without a folder dialog.
+  registerHandler(CHANNELS.getDefaultShareRoot, (event, payload) => {
+    assertTrustedSender(event);
+    const input = DefaultShareRootPayload.parse(payload);
+    if (!/^[a-z0-9][a-z0-9-]*$/u.test(input.shareId)) {
+      throw new Error("Invalid share id.");
+    }
+    const root = `${defaultWorkspaceRoot(effectiveHome())}/shared/${input.shareId}`;
+    approveRoot(root);
+    return DefaultShareRootResult.parse(root);
   });
 
   registerHandler(CHANNELS.createLocalWorkspace, async (event, payload) => {

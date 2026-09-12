@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { CHANNELS } from "./channels";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { type SyncStatusResult, type WorkspaceSummary } from "./bridgeContract";
 import {
   createWorkspaceRootApproval,
@@ -52,11 +53,22 @@ describe("registered workspace registry handlers", () => {
     const h = await registryHarness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.pickWorkspaceRoot, CHANNELS.getWorkspaceRegistry, CHANNELS.getDefaultWorkspaceRoot,
+      CHANNELS.getDefaultShareRoot,
       CHANNELS.createLocalWorkspace, CHANNELS.attachWorkspaceFolder,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     expect(h.pick).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
+  });
+
+  it("approves a default share root under the default workspace root", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const shareRoot = await h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "trip-2026" }) as string;
+    expect(shareRoot).toBe(`${root}/shared/trip-2026`);
+    expect(h.roots.usableRoot(shareRoot)).toBe(normalizeAbsolutePath(shareRoot));
+    await expect(h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "../escape" })).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "Upper" })).rejects.toThrow();
   });
 
   it("shares exact root approval with later consumers and refuses sibling spellings", async () => {

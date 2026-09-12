@@ -117,6 +117,8 @@ const bridge: DohcDesktopBridge = {
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>
     ipcRenderer.invoke(CHANNELS.getDefaultWorkspaceRoot),
+  getDefaultShareRoot: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getDefaultShareRoot, payload),
   createLocalWorkspace: (payload: CreateLocalWorkspacePayload) =>
     ipcRenderer.invoke(CHANNELS.createLocalWorkspace, payload),
   attachWorkspaceFolder: (payload) =>
