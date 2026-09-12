@@ -8676,7 +8676,7 @@ snapshots:
       exsolve: 1.0.8
       lightningcss: 1.33.0
       pathe: 2.0.3
-      picomatch: 4.0.5
+      picomatch: 4.0.7
       seroval: 1.5.4
       source-map: 0.7.6
       srvx: 0.11.15
@@ -10516,11 +10516,11 @@ snapshots:
 
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:
-      picomatch: 4.0.5
+      picomatch: 4.0.7
 
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
-      picomatch: 4.0.5
+      picomatch: 4.0.7
 
   fetchdts@0.1.7:
     optional: true
@@ -10985,7 +10985,7 @@ snapshots:
       jiti: 2.7.0
       oxc-parser: 0.147.0
       oxc-resolver: 11.24.2
-      picomatch: 4.0.5
+      picomatch: 4.0.7
       smol-toml: 1.8.0
       strip-json-comments: 5.0.3
       tinyglobby: 0.2.17

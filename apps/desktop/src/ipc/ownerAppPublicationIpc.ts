@@ -131,7 +131,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const row = rawResult as Record<string, unknown>;
         const owner = row.owner as Record<string, unknown> | undefined;
         if (!owner || owner.workspaceId !== input.workspaceId || owner.shareId !== entry.input.shareId || owner.grantId !== entry.input.grantId || owner.generation !== prepared.generation ||
-            JSON.stringify(row.candidate) !== JSON.stringify(candidate) || row.active !== true) throw new Error("The app publication changed. Review it again.");
+            JSON.stringify(row.candidate) !== JSON.stringify(candidate)) throw new Error("The app publication changed. Review it again.");
+        if (row.active !== true) throw new Error("This app is already unpublished. Review it from the publication list to republish it.");
         return finishPublication(row.publicationId, row.authorityRevision);
       }
       // A window holds one prepared bundle. Replacement releases its old bytes.
