@@ -127,6 +127,31 @@ export function publishAppPublication(storage: StorageContext, input: PublishApp
 export function readAppPublication(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
   return storage.readTx(() => stored(storage, input));
 }
+
+export interface ListAppPublicationsInput {
+  workspaceId: string;
+  ownerUserId: string;
+  limits: AppPublicationLimits;
+  cursor?: string;
+  appRoot?: string;
+}
+
+export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
+  return storage.readTx(() => {
+    if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw notFound();
+    const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
+      WHERE workspace_id=? AND owner_user_id=? AND publication_id>? ORDER BY publication_id LIMIT 26`)
+      .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
+    const publications = rows.slice(0, 25).flatMap(row => {
+      const publication = stored(storage, {...input, publicationId: String(row.publication_id)});
+      if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
+      return [{publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
+        shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
+        sourceRevision: publication.candidate.sourceRevision, active: publication.active}];
+    });
+    return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
+  });
+}
 export function withdrawAppPublication(storage: StorageContext, input: WithdrawAppPublicationInput): AppPublicationState {
   return storage.tx(() => {
     const {state: current} = header(storage,input.publicationId,input.workspaceId,input.ownerUserId);

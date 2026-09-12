@@ -5,6 +5,8 @@ import { ticketRecord } from "./liveTicketInputs";
 import { parseShareId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+import { validateUserWritePath } from "@dohc/workspace-core";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 
 export type OwnerAppPublicationRoute = {route: "owner-app-publication"; workspaceId: string} & (
   | {action: "publish"}
@@ -30,6 +32,17 @@ export function createOwnerAppPublicationRoutes(options: {
   return async (request: Request, route: OwnerAppPublicationRoute, ownerUserId: string) => {
     const {storage} = options;
     if (!limits || !storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
+    if (route.action === "publish" && request.method === "GET") {
+      const query = new URL(request.url).searchParams;
+      if ([...query.keys()].some(key => key !== "appRoot" && key !== "cursor") || query.getAll("appRoot").length > 1 || query.getAll("cursor").length > 1) throw badRequest("Invalid publication list query.");
+      const cursor = query.get("cursor") ?? undefined, appRoot = query.get("appRoot") ?? undefined;
+      if (cursor !== undefined && !/^[0-9a-f]{64}$/.test(cursor)) throw badRequest("Invalid publication cursor.");
+      if (appRoot !== undefined) {
+        const path = validateUserWritePath(appRoot);
+        if (!path.ok || path.normalized !== appRoot || classifyEngineFilePath(appRoot).kind !== "tracked") throw badRequest("Invalid app root.");
+      }
+      return response(storage.listAppPublications({workspaceId: route.workspaceId, ownerUserId, limits, cursor, appRoot}));
+    }
     if (request.method !== (route.action === "read" ? "GET" : "POST")) throw relayError("method_not_allowed");
     const lookup = "publicationId" in route ? {workspaceId: route.workspaceId, publicationId: route.publicationId, ownerUserId, limits} : null;
     if (route.action === "read") return response(storage.readAppPublication(lookup!));

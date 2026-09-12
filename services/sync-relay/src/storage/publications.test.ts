@@ -343,3 +343,27 @@ it("keeps profile blocks across new unbound sessions without enrolling anonymous
   expect((await f.http(f.path, {headers: {"x-dohc-link-profile-secret": "bad"}})).status).toBe(404);
   expect(count()).toBe(1);
 });
+
+it("recovers owner publications in bounded pages without leaking another owner or raw source inputs", async () => {
+  const f = httpFixture(), ids = [];
+  for (let index = 0; index < 27; index++) {
+    const input = request();input.candidate.sourceRevision = digest(String(index));
+    ids.push(f.storage.publishAppPublication(input).publicationId);
+  }
+  ids.sort();
+  const first = await (await f.http("w/app-publications?appRoot=app")).json();
+  expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
+  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app",
+    sourceRevision: expect.stringMatching(/^[0-9a-f]{64}$/), active: true});
+  const last = await (await f.http(`w/app-publications?appRoot=app&cursor=${first.nextCursor}`)).json();
+  expect(last.publications.map((p: {publicationId: string}) => p.publicationId)).toEqual(ids.slice(25));expect(last.nextCursor).toBeNull();
+  const empty = await (await f.http("w/app-publications?appRoot=other-app")).json();
+  expect(empty.publications).toEqual([]);expect(empty.nextCursor).toBe(ids[24]);
+  expect((await f.http("w/app-publications", undefined, "reader")).status).toBe(404);
+  expect((await f.http("other/app-publications")).status).toBe(404);
+  expect((await f.http("w/app-publications?cursor=bad")).status).toBe(400);
+  expect((await f.http("w/app-publications?appRoot=../private")).status).toBe(400);
+  expect((await f.http("w/app-publications?ownerUserId=owner")).status).toBe(400);
+  const withdrawal = await f.http(`w/app-publications/${ids[0]}/withdraw`, {expectedAuthorityRevision: 1});expect(withdrawal.status).toBe(200);
+  const after = await (await f.http("w/app-publications")).json();expect(after.publications[0]).toMatchObject({active: false, authorityRevision: 2});
+});
