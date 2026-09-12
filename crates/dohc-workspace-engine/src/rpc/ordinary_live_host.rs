@@ -48,7 +48,7 @@ impl OrdinaryLiveHostConfig {
 
 pub(crate) struct OrdinaryHost {
     pub service: std::sync::Weak<EngineService>,
-    pub owner_delivery_admission: Option<crate::live_application_ingress::SettlementAdmission>,
+    pub owner_delivery_admission: crate::live_application_ingress::SettlementAdmission,
     pub sync: Option<(
         dohc_engine_collab::live_update_application::AppliedSyncPolicy,
         crate::live_application_ingress::SettlementAdmission,
@@ -112,10 +112,16 @@ impl EngineService {
             config.max_applications_per_settlement,
             ingress.settlement_admission(config.max_applications_per_settlement)?,
         );
+        let owner_delivery_admission = ingress.owner_admission().map_err(|_| {
+            WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid ordinary owner delivery budget",
+            )
+        })?;
         let owner = ConnectionOwner::authenticated();
         let _ = service.ordinary_live_host.set(OrdinaryHost {
             service: Arc::downgrade(&service),
-            owner_delivery_admission: ingress.owner_admission().ok(),
+            owner_delivery_admission,
             max_registrations: config.max_registrations,
             max_adoption_bytes: config.max_adoption_bytes,
             max_adoption_events: config.max_adoption_events,
@@ -172,5 +178,52 @@ impl EngineService {
         )
         .await?;
         Ok(json!({"provisioned": true}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Owner admission charges fourteen maximum updates, bounded wire scratch,
+    // and this fixture's configured working reserve.
+    const OWNER_RESERVATION_BYTES: usize = 14 * dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+        + 3 * 643_576
+        + 2 * 262_144
+        + 1_000_000;
+
+    fn owner_config(aggregate_bytes: usize) -> OrdinaryLiveHostConfig {
+        serde_json::from_value(json!({
+            "ingress": {"aggregateBytes": aggregate_bytes, "applicationWorkingReserveBytes": 1_000_000,
+                "maxUploads": 2, "uploadDeadlineMs": 30_000},
+            "maxRegistrations": 2, "maxAdoptionBytes": 1_000_000, "maxAdoptionEvents": 100,
+            "maxApplicationsPerSettlement": 8,
+            "ownerOutbox": {"maxPendingBytes": 1_000_000, "maxPendingAgeMs": 100_000}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn owner_startup_refuses_budget_that_only_fits_base_ingress() {
+        let config = owner_config(OWNER_RESERVATION_BYTES - 1);
+        let base_ingress = config.ingress.validate().unwrap();
+        assert!(base_ingress.minimum_aggregate_bytes().unwrap() <= base_ingress.aggregate_bytes);
+        assert!(LiveApplicationIngress::new(Arc::new(EngineService::new()), base_ingress).is_ok());
+
+        let Err(error) = EngineService::ordinary_live_host(config) else {
+            panic!("owner startup accepted a budget that can never admit owner delivery");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "invalid ordinary owner delivery budget");
+    }
+
+    #[test]
+    fn owner_startup_accepts_budget_for_one_owner_reservation() {
+        let (service, _connection, _ingress) =
+            EngineService::ordinary_live_host(owner_config(OWNER_RESERVATION_BYTES)).unwrap();
+        let reservation = service.reserve_owner_delivery().unwrap();
+        assert!(service.reserve_owner_delivery().is_err());
+        drop(reservation);
+        assert!(service.reserve_owner_delivery().is_ok());
     }
 }

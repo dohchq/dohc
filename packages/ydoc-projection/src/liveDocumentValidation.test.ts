@@ -606,6 +606,8 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
     './restore-proof': './src/liveRestoreProof.ts',
+    './named-live-provider': './src/namedLiveProvider.ts',
+    './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
   })
 })
 

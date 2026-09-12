@@ -201,7 +201,7 @@ impl EngineService {
     pub(super) fn reserve_owner_delivery(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
         self.ordinary_live_host
             .get()
-            .and_then(|host| host.owner_delivery_admission.as_ref())
+            .map(|host| &host.owner_delivery_admission)
             .ok_or_else(|| WireError::new(ErrorCode::Overloaded, "owner delivery capacity"))?
             .reserve()
     }
