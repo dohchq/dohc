@@ -307,8 +307,14 @@ it("resumes a real configured service activation after a lost native adoption re
     const settled = await active.settle(document);
     const expected = yDocToMarkdown(provider.doc); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(expected);
     await vi.waitFor(() => {
-      const rows = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' ORDER BY relay_seq DESC").all("workspace");
-      expect(rows.some(row => JSON.parse(String(row.payload_json)).payloadAfterBlobSha256 === hash(Buffer.from(expected)))).toBe(true);
+      const rows = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='live.audit.settlement' ORDER BY relay_seq DESC").all("workspace");
+      expect(rows.some(row => {
+        const payload = JSON.parse(String(row.payload_json));
+        return payload.record?.binding?.workspaceId === document.workspaceId &&
+          payload.record?.binding?.mainVersionId === mainVersionId && payload.record?.binding?.objectId === objectId &&
+          payload.record?.binding?.lineageClaimId === lineageClaimId && payload.record?.terminalCursor === ack.journalCursor &&
+          payload.record?.markdownDigest === hash(Buffer.from(expected));
+      })).toBe(true);
     }, {timeout: 30000});
     for (let page = 0; page < 8; page++) {
       const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
