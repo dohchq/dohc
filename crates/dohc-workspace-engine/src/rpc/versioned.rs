@@ -159,6 +159,8 @@ struct VersionedTextDeleteParams {
     version_id: String,
     path: String,
     #[serde(default)]
+    expected_object_id: Option<String>,
+    #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
     summary: Option<String>,
@@ -654,7 +656,7 @@ impl EngineService {
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
         let result = open
             .actor
-            .versioned_text_delete(
+            .versioned_text_delete_expected_object(
                 DeleteTextFile {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -667,6 +669,7 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
+                params.expected_object_id,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),

@@ -22,9 +22,19 @@ impl<'a> VersionedTextStore<'a> {
         input: &DeleteTextFile,
         faults: &dyn FaultInjector,
     ) -> Result<DeleteResult, DomainError> {
-        let outcome = self
-            .store
-            .write_with(faults, |tx| delete_text_in_tx(tx, input))?;
+        self.delete_text_file_expected_object(input, None, faults)
+    }
+
+    /// Checks object identity in the same transaction as the delete.
+    pub fn delete_text_file_expected_object(
+        &mut self,
+        input: &DeleteTextFile,
+        expected_object_id: Option<&str>,
+        faults: &dyn FaultInjector,
+    ) -> Result<DeleteResult, DomainError> {
+        let outcome = self.store.write_with(faults, |tx| {
+            delete_text_in_tx_checked(tx, input, expected_object_id)
+        })?;
         committed(outcome)
     }
 
@@ -390,14 +400,26 @@ pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
 ) -> Result<DeleteResult, DomainError> {
+    delete_text_in_tx_checked(tx, input, None)
+}
+
+/// Checks object identity before changing the path or its history.
+pub fn delete_text_in_tx_checked(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+    expected_object_id: Option<&str>,
+) -> Result<DeleteResult, DomainError> {
     let normalized_input = normalized_delete_input(input)?;
+    if let Some(expected) = expected_object_id {
+        validate_identifier(expected, "expected_object_id")?;
+    }
     let input = &normalized_input;
     let ws = &input.workspace_id;
     let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation_id) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
-    let payload_hash = hash_fields(&[
+    let mut payload_fields = vec![
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
@@ -409,7 +431,11 @@ pub fn delete_text_in_tx(
         correlation_id,
         author_kind,
         author_json,
-    ]);
+    ];
+    if let Some(expected) = expected_object_id {
+        payload_fields.extend([b"expected-object".as_slice(), expected.as_bytes()]);
+    }
+    let payload_hash = hash_fields(&payload_fields);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -423,6 +449,11 @@ pub fn delete_text_in_tx(
     }
     let object_id = alias_object_id(tx, ws, &input.version_id, &input.path)?
         .ok_or(DomainError::FileNotFound)?;
+    if let Some(expected) = expected_object_id {
+        if object_id != expected {
+            return Err(DomainError::FileNotFound);
+        }
+    }
     let before =
         get_snapshot(tx, ws, &input.version_id, &object_id)?.ok_or(DomainError::FileNotFound)?;
     if moment_exists(tx, ws, &input.moment_id)? {

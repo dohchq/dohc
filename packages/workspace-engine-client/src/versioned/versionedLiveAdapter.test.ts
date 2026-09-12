@@ -1257,12 +1257,13 @@ describe("VersionedLiveAdapter", () => {
       },
       {
         method: VERSIONED_METHOD.textDelete,
-        metadata: { summary: "Delete note" },
+        metadata: { summary: "Delete note", expectedObjectId: "accepted-object" },
         mutate: () =>
         adapter.deleteTextFile({
           workspaceId: "workspace",
           versionId: "main",
           path: "notes/delete.md",
+          expectedObjectId: "accepted-object",
           metadata: { origin: "api", summary: "Delete note" },
         }),
       },

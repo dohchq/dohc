@@ -35,7 +35,7 @@ pub use capture_write::{
     validate_write_input, write_projected_text_in_tx, write_text_in_tx,
 };
 
-pub use delete_rename::{delete_text_in_tx, validate_delete_input};
+pub use delete_rename::{delete_text_in_tx, delete_text_in_tx_checked, validate_delete_input};
 
 pub use rollback::{
     binary_rollback_job_identity, decode_binary_rollback_job_identity,

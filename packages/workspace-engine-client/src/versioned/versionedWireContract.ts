@@ -119,6 +119,7 @@ type VersionedTextRenameParams = MutationMetadata & {
 type VersionedTextDeleteParams = MutationMetadata & {
   versionId: string;
   path: string;
+  expectedObjectId?: string;
 };
 
 type VersionedTextRollbackParams = Omit<MutationMetadata, "nowMs"> & {

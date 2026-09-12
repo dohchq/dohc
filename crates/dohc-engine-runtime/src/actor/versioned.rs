@@ -182,11 +182,33 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<DeleteResult, RuntimeError> {
+        self.versioned_text_delete_expected_object(
+            input,
+            None,
+            root_dir,
+            self_writes,
+            faults,
+            token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn versioned_text_delete_expected_object(
+        &self,
+        input: DeleteTextFile,
+        expected_object_id: Option<String>,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<DeleteResult, RuntimeError> {
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
                 versioned_text_delete_on_store(
                     store,
                     &input,
+                    expected_object_id.as_deref(),
                     &root_dir,
                     self_writes.as_ref(),
                     faults.as_ref(),
@@ -798,6 +820,7 @@ fn versioned_text_rename_on_store(
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
+    expected_object_id: Option<&str>,
     root_dir: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
@@ -807,8 +830,8 @@ fn versioned_text_delete_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result =
-            dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let result = dohc_engine_domain::delete_text_in_tx_checked(tx, input, expected_object_id)
+            .map_err(RuntimeError::from)?;
         let asset_jobs = if !result.deduped {
             delete_file_search_index(
                 tx,

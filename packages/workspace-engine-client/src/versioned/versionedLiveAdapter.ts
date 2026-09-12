@@ -982,6 +982,7 @@ export class VersionedLiveAdapter {
     workspaceId: string;
     versionId: string;
     path: string;
+    expectedObjectId?: string;
     metadata: AdapterWriteMetadata;
     author?: AgentAuthor | null;
     momentId?: string;
@@ -999,6 +1000,7 @@ export class VersionedLiveAdapter {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
         path: input.path,
+        ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
           ? { summary: input.metadata.summary }
