@@ -27,6 +27,7 @@ import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
+import { readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -165,6 +166,10 @@ if (!testAuthSeam && secret.length < 32) {
 }
 
 const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
+const appPublicationLimits = (() => {
+  try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
+  catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
+})();
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const namedLiveConfig = (() => {
   const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
@@ -290,6 +295,7 @@ const relayApplication = createSyncRelayHandler({
   relayExchangeKey,
   namedBrowserSessionLimits,
   publicEditRelease,
+  appPublicationLimits,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;

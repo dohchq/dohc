@@ -18,6 +18,21 @@ Production operators must set four values:
 
 `DOHC_SHARE_WEB_PORT` defaults to `1790`.
 
+## App publication storage
+
+Set `DOHC_RELAY_APP_PUBLICATIONS=1` on the relay to enable immutable app publications.
+Leave it unset or set it to `0` to keep these routes unavailable.
+Invalid values stop the relay before it opens storage.
+
+This enables authenticated owners to publish, list, inspect, and withdraw app builds.
+Link holders can read a publication within their current share grant.
+The setting does not enable public Edit or app collection writes.
+Browser launch needs the separate app-domain configuration below.
+
+Limits are shared with the desktop: 512 source files, 32 MiB per bundle,
+20 MiB per blob, and 256 KiB for the complete publication request.
+Withdrawal stops future authorized access. It cannot delete copies already received.
+
 ## Public origin and proxy
 
 Give the viewer one public HTTPS base origin, such as
