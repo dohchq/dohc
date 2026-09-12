@@ -304,7 +304,7 @@ it.each(["session", "expired", "grant", "generation", "owner", "selector", "vers
   expect((await f.http(f.blobPath)).status).toBe(["session", "expired", "grant", "generation", "owner"].includes(kind) ? 401 : 404);
 });
 
-it.each(["withdrawal", "expiry", "abort"])("stops a backpressured publication stream after %s", async kind => {
+it.each(["withdrawal", "expiry", "abort", "grant", "selector", "principal", "generation", "owner"])("stops a backpressured publication stream after %s", async kind => {
   const f = linkFixture({large: true}), controller = new AbortController();
   const response = await f.http(f.blobPath, {signal: controller.signal});
   expect(response.status).toBe(200);
@@ -313,7 +313,24 @@ it.each(["withdrawal", "expiry", "abort"])("stops a backpressured publication st
   if (kind === "withdrawal") f.storage.withdrawAppPublication({workspaceId: "w", publicationId: f.published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
   if (kind === "expiry") f.setTime(100);
   if (kind === "abort") controller.abort();
+  if (kind === "grant") f.storage.revokeShareGrant({shareId: "s", grantId: "g", revokedAtMs: 20});
+  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app"], versionId: null}));
+  if (kind === "principal") f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('blocked','g',1,?,1,20,1)").run(hashLinkProfileSecret("P".repeat(43), "test-key"));
+  if (kind === "generation") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
+  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='lost' WHERE workspace_id='w'").run();
   await expect(reader.read()).rejects.toThrow();
+});
+
+it("reuses the verified manifest without reading blobs again on later stream pulls", async () => {
+  const f = linkFixture({large: true}), response = await f.http(f.blobPath), reader = response.body!.getReader();
+  expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
+  const original = f.storage.getBlob;let blobReads = 0;
+  f.storage.getBlob = (...input) => {blobReads++;return original.apply(f.storage, input);};
+  try {
+    let total = 64 * 1024;
+    for (;;) {const next = await reader.read();if (next.done) break;total += next.value.byteLength;}
+    expect(total).toBe(140_000);expect(blobReads).toBe(0);
+  } finally {f.storage.getBlob = original;}
 });
 
 it("shares existing request and egress admission limits and refunds cancelled bytes", async () => {
@@ -390,26 +407,4 @@ it("keeps unexpected storage failures distinct from a damaged manifest", async (
   expect(() => f.storage.authorizeLinkAppPublication({publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
     profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20})).toThrow("test storage failure");
   f.storage.getBlob = original;
-});
-
-it("measures publication guard cost for review", () => {
-  const f = linkFixture(), input = request();
-  input.limits = {maxFiles: 1000, maxMetadataBytes: 250_000, maxBundleBytes: 4096};
-  for (let index = 0; index < 998; index++) input.candidate.inputs.push({path: `app/source-${String(index).padStart(4, "0")}.ts`, sha256: "0".repeat(64), byteLength: 0});
-  input.candidate.inputs.sort((a,b) => a.path < b.path ? -1 : 1);
-  input.candidate.sourceDigest = digest(JSON.stringify(["dohc-app-source-v2", {entry: input.candidate.entryPath, files: input.candidate.inputs, packages: []}]));
-  input.candidate.buildDigest = digest(JSON.stringify(["dohc-app-build-v1", {sourceDigest: input.candidate.sourceDigest, dependencyLockDigest: input.candidate.dependencyLockDigest, compiler: input.candidate.compilerIdentity, bundleDigest: input.candidate.bundleDigest}]));
-  const big = f.storage.publishAppPublication(input);
-  for (const [name, id, policy] of [["small", f.published.publicationId, limits], ["1000-inputs", big.publicationId, input.limits]] as const) {
-    const call = () => f.storage.authorizeLinkAppPublication({publicationId: id, capabilityHash: f.capabilityHash,
-      profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits: policy, nowMs: 20});
-    for (let index=0;index<10;index++) call();
-    const started=performance.now();for(let index=0;index<100;index++) call();
-    console.log(JSON.stringify({name, calls:100, totalMs:performance.now()-started, manifestBytes:JSON.stringify(name==="small"?f.published.candidate:big.candidate).length}));
-    const guard = f.storage.createLinkAppPublicationGuard({publicationId: id, capabilityHash: f.capabilityHash,
-      profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits: policy, nowMs: 20});
-    for(let index=0;index<10;index++) guard(20);
-    const cachedStarted=performance.now();for(let index=0;index<100;index++) guard(20);
-    console.log(JSON.stringify({name: name+"-cached", calls:100, totalMs:performance.now()-cachedStarted}));
-  }
 });
