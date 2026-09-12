@@ -9,16 +9,16 @@ export function initializeAppCollectionSchema(db: SqliteDb): void {
     ) STRICT;
     CREATE TABLE IF NOT EXISTS sync_relay_app_public_principals (
       workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-      grant_id TEXT NOT NULL REFERENCES sync_relay_share_grants(grant_id),
-      principal_id TEXT NOT NULL REFERENCES sync_relay_link_principals(principal_id),
+      grant_id TEXT NOT NULL REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
+      principal_id TEXT NOT NULL REFERENCES sync_relay_link_principals(principal_id) ON DELETE CASCADE,
       public_principal_id TEXT NOT NULL UNIQUE,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes > 0),
       PRIMARY KEY(grant_id,principal_id)
     ) STRICT;
     CREATE TABLE IF NOT EXISTS sync_relay_app_collection_receipts (
       workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-      grant_id TEXT NOT NULL REFERENCES sync_relay_share_grants(grant_id),
-      principal_id TEXT NOT NULL REFERENCES sync_relay_link_principals(principal_id),
+      grant_id TEXT NOT NULL REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
+      principal_id TEXT NOT NULL REFERENCES sync_relay_link_principals(principal_id) ON DELETE CASCADE,
       idempotency_key TEXT NOT NULL,
       payload_sha256 TEXT NOT NULL,
       receipt_json TEXT NOT NULL,

@@ -26,11 +26,6 @@ export function appendLogBatch(storage: StorageContext, input: {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
-    for (const op of input.ops) {
-      if (typeof op.recordedAtMs !== "number" || !Number.isSafeInteger(op.recordedAtMs)) {
-        throw new Error("recordedAtMs must be an integer in the safe wire range");
-      }
-    }
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
 
