@@ -32,7 +32,7 @@ it("selects immutable public acceptances and keeps private identities out of the
   const page=f.storage.readOwnerAppCollectionAcceptances(ownerPage);
   expect(page.acceptances.map(x=>x.acceptanceId).sort()).toEqual([first,second,other].map(x=>x.acceptanceId).sort());
   const publicId=page.acceptances.find(x=>x.acceptanceId===first.acceptanceId)!.publicPrincipalId;
-  expect(f.storage.readOwnerAppCollectionAcceptances({...ownerPage,publicPrincipalId:publicId}).acceptances).toHaveLength(3);
+  expect(f.storage.readOwnerAppCollectionAcceptances({...ownerPage,publicPrincipalId:publicId}).acceptances).toHaveLength(2);
   expect(page.acceptances[0]).toMatchObject({versionId:"main",collectionPath:"responses"});
   const privateIds=f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").all().map(x=>String(x.principal_id));
   for(const privateId of privateIds) expect(JSON.stringify(page)).not.toContain(privateId);

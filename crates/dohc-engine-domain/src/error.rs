@@ -58,6 +58,9 @@ pub enum DomainError {
     #[error("text file not found")]
     FileNotFound,
 
+    #[error("expected object is no longer at this path")]
+    ObjectIdentityMismatch,
+
     /// The path resolves to a live binary head, so a text-only read surface
     /// must not serve it. Fails closed rather than projecting the binary head as
     /// an empty text document (which would invite a silent overwrite). Distinct
@@ -220,6 +223,7 @@ impl DomainError {
             DomainError::DuplicateId => "duplicate-id",
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
+            DomainError::ObjectIdentityMismatch => "object-identity-mismatch",
             DomainError::BinaryHeadNotText => "binary-head-not-text",
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",

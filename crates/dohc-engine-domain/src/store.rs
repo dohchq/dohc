@@ -1311,6 +1311,7 @@ pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<()
                 "workspace_id" => "workspace_id must not be empty",
                 "moment_id" => "moment_id must not be empty",
                 "object_id" => "object_id must not be empty",
+                "expected_object_id" => "expected_object_id must not be empty",
                 _ => "version_id must not be empty",
             },
         });

@@ -77,7 +77,7 @@ fn expected_object_refuses_replaced_path_and_deletes_renamed_object() {
         .unwrap();
     assert!(matches!(
         files.delete_text_file_expected_object(&delete("response.md"), Some("accepted"), &NoFaults),
-        Err(DomainError::FileNotFound)
+        Err(DomainError::ObjectIdentityMismatch)
     ));
     assert_eq!(
         files

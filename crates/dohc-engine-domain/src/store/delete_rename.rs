@@ -26,6 +26,7 @@ impl<'a> VersionedTextStore<'a> {
     }
 
     /// Checks object identity in the same transaction as the delete.
+    /// Matching request replay returns retained history before inspecting the path.
     pub fn delete_text_file_expected_object(
         &mut self,
         input: &DeleteTextFile,
@@ -404,6 +405,9 @@ pub fn delete_text_in_tx(
 }
 
 /// Checks object identity before changing the path or its history.
+/// Validation and request replay precede the check. Changing or removing the
+/// expectation on replay refuses; matching replay cannot delete a replacement.
+/// The caller must roll back the enclosing transaction on error.
 pub fn delete_text_in_tx_checked(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
@@ -449,10 +453,10 @@ pub fn delete_text_in_tx_checked(
     }
     let object_id = alias_object_id(tx, ws, &input.version_id, &input.path)?
         .ok_or(DomainError::FileNotFound)?;
-    if let Some(expected) = expected_object_id {
-        if object_id != expected {
-            return Err(DomainError::FileNotFound);
-        }
+    if let Some(expected) = expected_object_id
+        && object_id != expected
+    {
+        return Err(DomainError::ObjectIdentityMismatch);
     }
     let before =
         get_snapshot(tx, ws, &input.version_id, &object_id)?.ok_or(DomainError::FileNotFound)?;

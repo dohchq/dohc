@@ -294,6 +294,7 @@ fn map_domain(error: DomainError) -> WireError {
             (InvalidParams, "duplicate-id")
         }
         DomainError::FileNotFound => (InvalidParams, "file-not-found"),
+        DomainError::ObjectIdentityMismatch => (InvalidParams, "object-identity-mismatch"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
         DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
         DomainError::VersionNotFound => (InvalidParams, "version-not-found"),
