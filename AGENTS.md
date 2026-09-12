@@ -91,6 +91,8 @@ Do not weaken authorization, ownership, isolation, or explicitly configured cont
 - Give every reversible state change a visible reverse path. Warn the user before an irreversible action runs.
 - Guard every asynchronous renderer response with a workspace/request token, abort signal, or equivalent before setting workspace-scoped UI state. A slow response for workspace A must never repaint workspace B.
 
+Within these boundaries, authors decide what their apps do and which web frameworks and external services they use. Authors are responsible for app behavior, including where an app sends data it receives.
+
 ## Work against the current design
 
 There are no users yet. Optimize for the best current design instead of preserving old internal contracts.
