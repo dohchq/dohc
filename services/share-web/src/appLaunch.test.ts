@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { createAppLaunchHandler } from "./appLaunch";
 import { parseAppLaunchConfig } from "./appLaunchConfig";
 const config={viewerOrigin:'https://viewer.example.com',appDomain:'example.net'},publicationId='a'.repeat(64);
-function fixture(){let now=1000000,revision=1,active=true;const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
-const handler=createAppLaunchHandler({config,relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);expect(r.headers.get('authorization')).toBe('LinkCapability server-capability');expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
+function fixture(hold:()=>Promise<void>=async()=>{}){let now=1000000,revision=1,active=true;const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
+const handler=createAppLaunchHandler({config,relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();expect(r.headers.get('authorization')).toBe('LinkCapability server-capability');expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
 const request=(url:string,body:string,headers:Record<string,string>={})=>new Request(url,{method:'POST',body,headers:{host:new URL(url).host,...headers}});
 const issue=()=>handler.handle(request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{origin:config.viewerOrigin,'content-type':'application/json',cookie:'viewer=session'}));
 const redeem=(launch:{action:string;handoff:string})=>handler.handle(request(launch.action,new URLSearchParams({handoff:launch.handoff}).toString(),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded'}));
@@ -19,3 +19,36 @@ it('rechecks revocation on document and status requests',async()=>{const f=fixtu
 it('requires proof cookie host and exact non-null origin',async()=>{const f=fixture(),app=await launch(f);for(const custom of [{origin:'null'},{'x-dohc-app-proof':''},{cookie:app.cookie+'; '+app.cookie},{origin:config.viewerOrigin},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await app.read('/document',custom)).status).toBe(404);});
 it('refuses cross-launch credentials',async()=>{const f=fixture(),first=await launch(f),second=await launch(f);expect(first.origin).not.toBe(second.origin);expect((await second.read('/document',{cookie:first.cookie,'x-dohc-app-proof':first.proof})).status).toBe(404);});
 it('expires handoffs and sessions',async()=>{const f=fixture(),handoff=await(await f.issue()).json();f.advance(30000);expect((await f.redeem(handoff)).status).toBe(404);const app=await launch(f);f.advance(600000);expect((await app.read()).status).toBe(404);});
+
+it('serves staged bytes once with fresh authority and one blob charge', async () => {
+  const f = fixture(), app = await launch(f);
+  expect((await app.read()).status).toBe(200);
+  expect((await app.read()).status).toBe(404);
+  expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
+});
+it('bounds pending stages and frees capacity on delivery', async () => {
+  const f = fixture(), first = await launch(f), second = await launch(f);
+  const handoff = await (await f.issue()).json();
+  expect((await f.redeem(handoff)).status).toBe(503);
+  expect((await first.read()).status).toBe(200);
+  expect((await f.redeem(handoff)).status).toBe(200);
+  expect((await second.read()).status).toBe(200);
+});
+it('does not let full build admission reject a valid status check', async () => {
+  let hold = async () => {};
+  const f = fixture(() => hold()), app = await launch(f);
+  let release!: () => void, admitted!: () => void, count = 0;
+  const barrier = new Promise<void>(resolve => {release = resolve;});
+  const allAdmitted = new Promise<void>(resolve => {admitted = resolve;});
+  hold = async () => {if (++count === 5) admitted();await barrier;};
+  const issues = Array.from({length: 4}, () => f.issue()), status = app.read('/status');
+  await allAdmitted;release();
+  expect((await status).status).toBe(204);await Promise.all(issues);
+});
+it('keeps transport failures distinct from revoked authority', async () => {
+  let fail = false;
+  const f = fixture(async () => {if (fail) throw Error('Relay unavailable');}), app = await launch(f);
+  fail = true;expect((await app.read('/status')).status).toBe(503);
+  fail = false;expect((await app.read('/status')).status).toBe(204);
+  f.revoke();expect((await app.read('/status')).status).toBe(404);
+});

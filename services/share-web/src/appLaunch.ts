@@ -13,6 +13,8 @@ const MAX_BUNDLE = APP_PUBLICATION_MAX_BUNDLE_BYTES, MAX_DOCUMENT = APP_PUBLICAT
 const MAX_LAUNCHES = 512, MAX_PENDING = 4, HANDOFF_MS = 30_000, SESSION_MS = 10 * 60_000;
 const headers = { "cache-control": "private, no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin" };
 const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers });
+const unavailable = () => new Response(null, {status: 503, headers});
+class RelayUnavailable extends Error {}
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
@@ -36,15 +38,18 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   const config = parseAppLaunchConfig(options.config), viewerHost = new URL(config.viewerOrigin).host;
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
   const stagedSlots = new Set<Launch>();
-  const rate = new TokenBucketLimiter(12, 0.2, 2048); let pending = 0, statusPending = 0;
-  const appHost = (host: string) => new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`).test(host);
+  const issueRate = new TokenBucketLimiter(12, 0.2, 2048), sessionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES); let pending = 0, statusPending = 0;
+  const hostPattern = new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`);
+  const appHost = (host: string) => hostPattern.test(host);
   async function relay(launch: Pick<Launch, "publicationId" | "capability" | "profileSecret">, suffix: string, signal: AbortSignal) {
-    return options.fetchRelay(new Request(new URL(`/sync/link/app-publications/${launch.publicationId}${suffix}`, options.relayUrl),
-      { headers: { authorization: `LinkCapability ${launch.capability}`, "x-dohc-link-profile-secret": launch.profileSecret }, signal, redirect: "manual" }));
+    try {return await options.fetchRelay(new Request(new URL(`/sync/link/app-publications/${launch.publicationId}${suffix}`, options.relayUrl),
+      { headers: { authorization: `LinkCapability ${launch.capability}`, "x-dohc-link-profile-secret": launch.profileSecret }, signal, redirect: "manual" }));}
+    catch {throw new RelayUnavailable();}
   }
   async function descriptor(launch: Pick<Launch, "publicationId" | "capability" | "profileSecret"> & { revision?: number }, signal: AbortSignal): Promise<Descriptor> {
     const response = await relay(launch, "", signal);
     try {
+      if (response.status === 429 || response.status >= 500) throw new RelayUnavailable();
       if (response.status !== 200 || response.redirected || response.headers.has("location")) throw new Error("Unavailable publication.");
       const value = await readBoundedJson(response, 4096, signal);
       if (!exact(value, "authorityRevision,files,publicationId") || value.publicationId !== launch.publicationId ||
@@ -65,7 +70,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     const current = await descriptor(launch, signal), files: AppDocumentFile[] = [];
     for (const file of current.files) {
       const response = await relay(launch, `/blobs/${file.sha256}?authorityRevision=${launch.revision}`, signal);
-      try { if (response.status !== 200 || response.redirected || response.headers.has("location") || response.headers.get("content-type") !== file.contentType) throw new Error("Unavailable bundle.");
+      try { if (response.status === 429 || response.status >= 500) throw new RelayUnavailable();
+        if (response.status !== 200 || response.redirected || response.headers.has("location") || !["text/javascript; charset=utf-8", "text/css; charset=utf-8"].includes(response.headers.get("content-type") ?? "")) throw new Error("Unavailable bundle.");
         files.push({ ...file, bytes: await boundedBytes(response, file.byteLength, signal) });
       } finally { await response.body?.cancel().catch(() => {}); }
     }
@@ -80,10 +86,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const url = new URL(request.url), host = request.headers.get("host") ?? ""; prune();
       const statusRequest = url.pathname === "/status" && appHost(host);
       if (request.method !== "POST" || url.search || request.signal.aborted) return refusal();
-      if (statusRequest ? statusPending >= 64 : pending >= MAX_PENDING) return new Response(null, {status: 503, headers});
+      if (statusRequest ? statusPending >= 64 : pending >= MAX_PENDING) return unavailable();
       const issue = host === viewerHost && url.pathname === "/api/apps/launch";
       if (!issue && !appHost(host)) return refusal();
-      if (!rate.allow(issue ? request.headers.get("x-dohc-share-web-client-ip") ?? "unknown" : host, now())) return refusal();
+      if (issue && !issueRate.allow(request.headers.get("x-dohc-share-web-client-ip") ?? "unknown", now())) return unavailable();
       if (statusRequest) statusPending++; else pending++; const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
       try {
         if (issue) {
@@ -102,7 +108,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
           const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
           const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
-          if (stagedSlots.size >= 2) return new Response(null, {status: 503, headers});
+          if (stagedSlots.size >= 2) return unavailable();
           stagedSlots.add(launch);
           // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
           delete launch.handoffHash;
@@ -121,6 +127,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         const cookies = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
         const cookie = cookies.length === 1 ? cookies[0]!.slice(COOKIE.length + 1) : "", proof = request.headers.get("x-dohc-app-proof") ?? "";
         if (!launch.cookieHash || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash || !TOKEN.test(proof) || hash(proof) !== launch.proofHash || request.headers.get("origin") !== launch.origin) return refusal();
+        if (!sessionRate.allow(host, now())) return unavailable();
         if (url.pathname === "/status") { await descriptor(launch, signal); return new Response(null, { status: 204, headers }); }
         if (url.pathname !== "/document") return refusal();
         const doc = launch.staged; launch.staged = undefined; stagedSlots.delete(launch);
@@ -128,7 +135,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         await descriptor(launch, signal); signal.throwIfAborted();
         if (launch.expires <= now()) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-      } catch { return refusal(); } finally { if (statusRequest) statusPending--; else pending--; }
+      } catch (error) { return error instanceof RelayUnavailable ? unavailable() : refusal(); } finally { if (statusRequest) statusPending--; else pending--; }
     }
   };
 }
