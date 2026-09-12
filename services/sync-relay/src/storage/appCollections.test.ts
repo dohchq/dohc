@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fork } from "node:child_process";
+import { fork, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
@@ -17,7 +17,11 @@ import type { AcceptAppCollectionInput } from "./appCollections";
 const hash = (value:string|Uint8Array) => createHash("sha256").update(value).digest("hex");
 const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
 const cleanups:(()=>void)[]=[];
-afterEach(()=>{for(const close of cleanups.splice(0).reverse()) close();});
+const children=new Map<ChildProcess,Promise<void>>();
+afterEach(async()=>{
+  for(const [child,exited] of children){if(child.exitCode===null && child.signalCode===null) child.kill();await exited;children.delete(child);}
+  for(const close of cleanups.splice(0).reverse()) close();
+});
 const schemaText = "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n  secret:\n    type: text\n";
 const capability:AppCollectionCapability = {kind:"collection-create",collectionPath:"responses",schemaSha256:hash(schemaText),allowedFields:["destination","name"],requiredFields:["destination"],readFields:["destination","name"]};
 const script = Buffer.from("document.body.textContent='Trip poll'");
@@ -139,22 +143,35 @@ it("does not activate a public response route",async()=>{
 async function writer(path:string) {
   const loader=pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
   const child=fork(fileURLToPath(new URL("../testing/appCollectionWriter.ts",import.meta.url)),[path],{execArgv:["--import",loader],stdio:["ignore","ignore","pipe","ipc"]});
+  children.set(child,new Promise(resolve=>child.once("close",()=>resolve())));
   let errors="";child.stderr!.on("data",data=>{errors+=data.toString();});
-  await new Promise<void>((resolve,reject)=>{child.once("message",()=>resolve());child.once("error",reject);child.once("exit",code=>{if(code)reject(new Error(errors));});});
+  await new Promise<void>((resolve,reject)=>{
+    const deadline=setTimeout(()=>reject(new Error("Collection writer did not become ready within 40 seconds.")),40_000);
+    child.once("message",()=>{clearTimeout(deadline);resolve();});
+    child.once("error",error=>{clearTimeout(deadline);reject(error);});
+    child.once("exit",()=>{clearTimeout(deadline);reject(new Error(errors||"Collection writer exited before readiness."));});
+  });
   return {child,send(input:AcceptAppCollectionInput){return new Promise<any>((resolve,reject)=>{child.once("message",resolve);child.once("error",reject);child.send(input);});}};
 }
+describe("independent SQLite writers",()=>{
+let f:ReturnType<typeof fixture>,a:Awaited<ReturnType<typeof writer>>,b:Awaited<ReturnType<typeof writer>>;
+beforeEach(async()=>{f=fixture();[a,b]=await Promise.all([writer(f.path),writer(f.path)]);},45_000);
 it("serializes concurrent retry acceptance on independent SQLite connections",async()=>{
-  const f=fixture(),a=await writer(f.path),b=await writer(f.path);
   const [first,second]=await Promise.all([a.send(f.input),b.send(f.input)]);
   expect(first.kind).toBe("accepted");expect(second).toEqual(first);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
 });
 it("refuses a worker request prepared before owner withdrawal",async()=>{
-  const f=fixture(),pending=await writer(f.path);
   f.storage.withdrawAppPublication({...f.owner,expectedAuthorityRevision:2});
-  const result=await pending.send(f.input);expect(result.kind).toBe("refused");
+  const result=await a.send(f.input);expect(result.kind).toBe("refused");
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+it("makes conflicting concurrent payloads produce one receipt and one refusal",async()=>{
+  const outcomes=await Promise.all([a.send(f.input),b.send({...f.input,fields:{destination:"Manila"}})]);
+  expect(outcomes.map(result=>result.kind).sort()).toEqual(["accepted","refused"]);
+  expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
+});
 });
 
 it("rolls back the blob, enrollment, public mapping and receipt when log append fails",()=>{
@@ -165,13 +182,6 @@ it("rolls back the blob, enrollment, public mapping and receipt when log append 
   expect(Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes)).toBe(usage);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
   f.raw.exec("DROP TRIGGER reject_collection_log");expect(f.accept().kind).toBe("accepted");
-});
-
-it("makes conflicting concurrent payloads produce one receipt and one refusal",async()=>{
-  const f=fixture(),a=await writer(f.path),b=await writer(f.path);
-  const outcomes=await Promise.all([a.send(f.input),b.send({...f.input,fields:{destination:"Manila"}})]);
-  expect(outcomes.map(result=>result.kind).sort()).toEqual(["accepted","refused"]);
-  expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
 });
 
 it("maps the same profile to unrelated public identities across grants",()=>{
