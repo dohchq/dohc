@@ -277,6 +277,41 @@ function httpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
   const body={authorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Ice"}};
   return {...f,handler,path,headers,body,request,setTime(value:number){now=value;}};
 }
+
+it.each([
+  {access:"view",released:false,status:200},
+  {access:"comment",released:false,status:200},
+  {access:"edit",released:false,status:404},
+  {access:"view",released:true,status:200},
+  {access:"comment",released:true,status:200},
+  {access:"edit",released:true,status:200},
+])("keeps collection acceptance at $access independent of document Edit permission (release=$released)",({access,released,status})=>{
+  const f=fixture();f.input.publicEditRelease=released?{version:1}:undefined;
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='g'").run(access);
+  let actual: number; try { f.accept(); actual=200; } catch { actual=404; } expect(actual).toBe(status);
+  if(status===200){
+    const receipt=f.accept();expect(receipt.kind).toBe("accepted");
+    expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
+    f.storage.revokeShareGrant({shareId:"s",grantId:"g",revokedAtMs:21});
+    expect(()=>f.accept({idempotencyKey:"after-revoke"})).toThrow();
+    expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
+  }else expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+
+it("accepts concurrent independent principals through one link with separate retry receipts",async()=>{
+  const f=httpFixture(),token="B".repeat(43),other={headers:{authorization:`LinkCapability ${token}`,"x-dohc-link-profile-secret":"Q".repeat(43)}};
+  f.storage.mintLinkSession({session:{sessionId:"second-reader",capabilityHash:hashLinkBearer(token,"collection-test-key"),grantId:"g",generation:1,mintedAtMs:2,expiresAtMs:10000}});
+  const bodies=[f.body,{...f.body,fields:{destination:"Manila",name:"Friend"}}];
+  const replies=await Promise.all([f.request("POST",bodies[0]),f.request("POST",bodies[1],"",other)]);
+  expect(replies.map(reply=>reply.status)).toEqual([200,200]);
+  const receipts=await Promise.all(replies.map(reply=>reply.json()));expect(receipts[0].acceptanceId).not.toBe(receipts[1].acceptanceId);
+  expect(f.raw.prepare("SELECT COUNT(DISTINCT principal_id) AS n FROM sync_relay_app_collection_receipts WHERE grant_id='g'").get()!.n).toBe(2);
+  expect(f.raw.prepare("SELECT COUNT(DISTINCT public_principal_id) AS n FROM sync_relay_app_public_principals WHERE grant_id='g'").get()!.n).toBe(2);
+  const retries=await Promise.all([f.request("POST",bodies[0]),f.request("POST",bodies[1],"",other)]);
+  expect(await Promise.all(retries.map(reply=>reply.json()))).toEqual(receipts);
+  const page=await f.request();expect((await page.json()).records.map((record:{fields:{destination:string}})=>record.fields.destination).sort()).toEqual(["Manila","Tokyo"]);
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(1);
+});
 it("uses the same authenticated HTTP read and create contract for an agent and browser broker",async()=>{
   const f=httpFixture();
   const created=await f.request("POST",f.body);expect(created.status).toBe(200);const receipt=await created.json();expect(receipt.kind).toBe("accepted");
