@@ -105,7 +105,7 @@ describe("owner app publication", () => {
       return { publicationId: "a".repeat(64), authorityRevision: 2,
         capability: kind === "null" ? null : { ...prepared.capabilities[0], readFields: [] } };
     });
-    await expect(h.approve(prepared)).rejects.toThrow("The app is published. dohc could not confirm its collection access. Prepare it again to retry, or unpublish it.");
+    await expect(h.approve(prepared)).rejects.toThrow("The app is published.");
     expect(h.relay.mock.calls.filter(call => call[1].endsWith("/app-publications"))).toHaveLength(1);
     h.relay.mockImplementation(original);
     expect(await h.approve(await h.prepare())).toMatchObject({ kind: "published", authorityRevision: 2 });
@@ -136,6 +136,34 @@ describe("owner app publication", () => {
     expect(body.candidate.inputs.find((row: {path: string}) => row.path === "app/index.js").sha256).toBe(hash("document.body.textContent='trip';"));
     await expect(h.approve(prepared)).rejects.toThrow("expired");
     expect(await h.invoke({ action: "withdraw", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 1 })).toMatchObject({ kind: "withdrawn", authorityRevision: 2 });
+  });
+
+  it("revokes collection access with the current authority revision", async () => {
+    const h = withCollection(harness());
+    const result = await h.invoke({ action: "revokeCollection", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 7 });
+    expect(result).toEqual({ kind: "collectionRevoked", publicationId: "a".repeat(64), authorityRevision: 8 });
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 7, capability: null });
+  });
+  it.each(["abort", "conflict", "retired"])("preserves %s during collection approval", async kind => {
+    const h = withCollection(harness()), prepared = await h.prepare();
+    const original = h.relay.getMockImplementation()!;
+    h.relay.mockImplementation(async (...args) => {
+      if (!args[1].endsWith("/collection-approval")) return original(...args);
+      if (kind === "abort") { h.controller.abort(); throw h.controller.signal.reason; }
+      if (kind === "retired") h.retire();
+      throw new Error("Publication authority changed.");
+    });
+    if (kind === "abort") await expect(h.approve(prepared)).rejects.toMatchObject({ name: "AbortError" });
+    else await expect(h.approve(prepared)).rejects.toThrow(kind === "retired" ? "retired" : "Publication authority changed.");
+  });
+  it.each(["wrong-id", "wrong-revision", "not-revoked", "stale", "retired"])("does not confirm %s revocation", async kind => {
+    const h = harness();
+    h.relay.mockImplementationOnce(async () => {
+      if (kind === "stale") throw new Error("Publication authority changed.");
+      if (kind === "retired") h.retire();
+      return { publicationId: (kind === "wrong-id" ? "b" : "a").repeat(64), authorityRevision: kind === "wrong-revision" ? 7 : 8, capability: kind === "not-revoked" ? collection : null };
+    });
+    await expect(h.invoke({action:"revokeCollection",workspaceId:"w",publicationId:"a".repeat(64),expectedAuthorityRevision:7})).rejects.toThrow();
   });
   it("refuses approval of a different digest before upload", async () => {
     const h = harness(), prepared = await h.prepare();
@@ -261,9 +289,9 @@ describe("owner app publication", () => {
     h.relay.mockResolvedValueOnce({ publications: [], nextCursor: cursor });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [], nextCursor: cursor });
     expect(h.requests).toEqual([]);
-    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true, manifestUnavailable: false }], nextCursor: null });
+    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true, collectionCapability: null, manifestUnavailable: false }], nextCursor: null });
     await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app", cursor })).rejects.toThrow("another app");
-    const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, manifestUnavailable: true };
+    const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, manifestUnavailable: true };
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
   });

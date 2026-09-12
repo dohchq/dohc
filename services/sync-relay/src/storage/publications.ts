@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -141,7 +141,7 @@ export interface ListAppPublicationsInput {
   appRoot?: string;
 }
 export type AppPublicationListRow = {
-  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean;
+  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; collectionCapability: AppCollectionCapability | null;
 } & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
 
 export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
@@ -152,17 +152,19 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
       .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
     const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>(row => {
       const publicationId = String(row.publication_id);
+      const approval = storage.db.prepare("SELECT capability_json FROM sync_relay_app_collection_approvals WHERE publication_id=? AND workspace_id=? AND active=1").get(publicationId, input.workspaceId);
+      const collectionCapability = approval ? parseAppCollectionCapability(JSON.parse(String(approval.capability_json))) : null;
       try {
         const publication = stored(storage, {...input, publicationId});
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
         return [{publicationId, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
           shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
-          sourceRevision: publication.candidate.sourceRevision, active: publication.active}];
+          sourceRevision: publication.candidate.sourceRevision, active: publication.active, collectionCapability}];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
         const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
         return [{publicationId, authorityRevision: state.authorityRevision, manifestUnavailable: true,
-          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active}];
+          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, collectionCapability}];
       }
     });
     return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};

@@ -60,12 +60,13 @@ function PublicationDialog(props: {
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [reactivating, setReactivating] = useState(false);
   const [preparedLink, setPreparedLink] = useState("");
-  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | null>(null);
   const [busyPublicationId, setBusyPublicationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [publications, setPublications] = useState<Publication[]>([]);
   const [pendingWithdraw, setPendingWithdraw] = useState<Publication | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<Publication | null>(null);
   const [publicationsLoading, setPublicationsLoading] = useState(true);
   const [responseRequests, setResponseRequests] = useState<ReadonlySet<string>>(new Set());
   const responsesBusy = responseRequests.size > 0;
@@ -85,7 +86,7 @@ function PublicationDialog(props: {
   const heading = useRef<HTMLHeadingElement>(null);
   const api = useRef(bridge()).current;
   const selectedLink = links.find(link => link.grantId === selected);
-  const committing = busy === "approve" || busy === "withdraw" || responsesBusy;
+  const committing = busy === "approve" || busy === "withdraw" || busy === "revokeCollection" || responsesBusy;
 
   useEffect(() => { heading.current?.focus(); }, [prepared]);
 
@@ -230,12 +231,29 @@ function PublicationDialog(props: {
     } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not unpublish the app. Try again.")); setPublicationsReload(value => value + 1); } }
     finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
+  const revokeCollection = async (publication: Publication) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("revokeCollection"); setBusyPublicationId(publication.publicationId); setError(null);
+    try {
+      const result = await api.publishOwnerApp({ action: "revokeCollection", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "collectionRevoked" || result.publicationId !== publication.publicationId || result.authorityRevision !== publication.authorityRevision + 1) throw new Error("dohc could not confirm collection access was revoked. Reload the publications.");
+      setPublicationsReload(value => value + 1);
+      setNotice("App collection access revoked. Prepare the app again to review and restore access.");
+    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not revoke collection access. Try again.")); setPublicationsReload(value => value + 1); } }
+    finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
+  };
 
   const back = () => {
     cancel(candidate.current); candidate.current = null; setPrepared(null); setError(null);
   };
   const closeWithdrawal = () => {
     setPendingWithdraw(null);
+    heading.current?.focus();
+  };
+  const closeRevocation = () => {
+    setPendingRevoke(null);
     heading.current?.focus();
   };
 
@@ -247,6 +265,7 @@ function PublicationDialog(props: {
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
       </header>
       <p className="m-0 break-all font-mono text-[12px] text-muted">{props.appRoot}</p>
+      {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
       {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
       {error ? <p role="alert" className="m-0 text-[13px] text-danger">{error}</p> : null}
       {prepared ? <>
@@ -287,9 +306,19 @@ function PublicationDialog(props: {
                   <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {publication.active ? "Published" : "Unpublished"}</p>
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
-                      <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}</div>
-                  {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
-                    publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
+                      <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}
+                    {publication.collectionCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved collection access</summary>
+                      <p className="mb-0 break-all font-mono">{publication.collectionCapability.collectionPath}</p>
+                      <p className="mb-0 break-words">Create: {publication.collectionCapability.allowedFields.join(", ")}</p>
+                      <p className="mb-0 break-words">Required: {publication.collectionCapability.requiredFields.join(", ") || "None"}</p>
+                      <p className="mb-0 break-words">Read: {publication.collectionCapability.readFields.join(", ") || "None"}</p>
+                    </details> : <p className="mb-0 mt-1">No collection access</p>}
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    {publication.collectionCapability ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Revoke collection access ${publication.publicationId}`} onClick={() => setPendingRevoke(publication)}>{busy === "revokeCollection" && busyPublicationId === publication.publicationId ? "Revoking…" : "Revoke collection access"}</SecondaryButton> : null}
+                    {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
+                      publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
+                  </div>
                 </li>)}
               </ul>}
         </div>
@@ -311,6 +340,14 @@ function PublicationDialog(props: {
           <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
       </>}
       </section></Overlay>
+      {pendingRevoke ? <ConfirmDialog testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>
+        <p className="mt-3 mb-0 text-[13px] text-muted">The app stays published. It can no longer read the collection or accept responses through dohc.</p>
+        <p className="mt-2 mb-0 text-[13px] text-muted">Saved responses stay in your workspace. Copies already received cannot be removed.</p>
+        <p className="mt-2 mb-0 text-[13px] text-muted">Prepare the app again to review and restore access.</p>
+        <p className="mt-2 mb-0 text-[13px] text-muted">To reduce access, revoke it first. Change the app's data request, then prepare and review a new publication.</p>
+        {pendingRevoke.manifestUnavailable ? <p className="mt-2 mb-0 text-[13px] text-warning">Source details are unavailable. This publication may belong to another app.</p> : null}
+        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingRevoke.publicationId}</p>
+      </ConfirmDialog> : null}
       {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
         <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
         <p className="mt-2 mb-0 text-[13px] text-muted">{pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>

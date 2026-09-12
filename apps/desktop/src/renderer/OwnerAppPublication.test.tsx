@@ -13,6 +13,7 @@ const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
   sourcePaths: ["trip/main.tsx", "trip/style.css"], capabilities: [], externalNetwork: true,
 };
 const published: Extract<OwnerAppPublicationResult, { kind: "published" }> = { kind: "published", publicationId: "c".repeat(64), authorityRevision: 1 };
+const approvedCollection = {kind:"collection-create" as const,collectionPath:"trip/responses",schemaSha256:"a".repeat(64),allowedFields:["destination"],requiredFields:["destination"],readFields:["destination"]};
 const row: ListRelayShareLinksResult["links"][number] = {
   shareId: "share-trip", grantId: "grant-trip", generation: 1, status: "active", createdAtMs: 1,
   revokedAtMs: null, lastUsedAtMs: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
@@ -67,6 +68,39 @@ describe("owner app publication", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" }));
+  });
+  it("confirms revocation, sends the displayed revision, and keeps the app published", async () => {
+    let revision = 7;
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "list") return {kind:"listed",publications:[{publicationId:published.publicationId,authorityRevision:revision,shareId:row.shareId,grantId:row.grantId,active:true,collectionCapability: revision === 7 ? approvedCollection : null, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}],nextCursor:null};
+      if (request.action === "revokeCollection") { revision++; return {kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:revision}; }
+      return answer(request);
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
+    fireEvent.click(screen.getByRole("button",{name:`Revoke collection access ${published.publicationId}`}));
+    expect(api.publishOwnerApp.mock.calls.some(([input])=>input.action==="revokeCollection")).toBe(false);
+    expect(screen.getByText("Saved responses stay in your workspace. Copies already received cannot be removed.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"Revoke access"}));
+    await screen.findByText("App collection access revoked. Prepare the app again to review and restore access.");
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({action:"revokeCollection",workspaceId:"ws-trip",publicationId:published.publicationId,expectedAuthorityRevision:7});
+    expect(screen.getByRole("button",{name:`Unpublish ${published.publicationId}`})).toBeTruthy();
+    expect(screen.queryByRole("button",{name:`Revoke collection access ${published.publicationId}`})).toBeNull();
+    expect(screen.getByText("No collection access")).toBeTruthy();
+  });
+  it("does not show a late revocation result in another workspace", async () => {
+    const pending = deferred<OwnerAppPublicationResult>();
+    api.publishOwnerApp.mockImplementation(async request => {
+      if(request.action==="list") return {kind:"listed",publications:request.workspaceId==="ws-trip"?[{publicationId:published.publicationId,authorityRevision:7,shareId:row.shareId,grantId:row.grantId,active:true,collectionCapability: approvedCollection, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}]:[],nextCursor:null};
+      if(request.action==="revokeCollection") return pending.promise;
+      return answer(request);
+    });
+    const view=render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);await open();
+    fireEvent.click(screen.getByRole("button",{name:`Revoke collection access ${published.publicationId}`}));
+    fireEvent.click(screen.getByRole("button",{name:"Revoke access"}));
+    expect((screen.getByRole("button",{name:"Close publication"}) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<OwnerAppPublication workspaceId="ws-other" appRoot="other" />);await open();
+    await act(async()=>pending.resolve({kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:8}));
+    expect(screen.queryByText("App collection access revoked. Prepare the app again to review and restore access.")).toBeNull();
   });
 
   it("discards and cancels preparation arriving after the dialog closes", async () => {
@@ -141,7 +175,7 @@ describe("owner app publication", () => {
   it("retrieves publications after reopening and withdraws the current authority revision", async () => {
     let active = true;
     api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "list") return { kind: "listed", publications: active ? [{ ...published, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, authorityRevision: 7 }] : [], nextCursor: null };
+      if (request.action === "list") return { kind: "listed", publications: active ? [{ ...published, collectionCapability: null, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, authorityRevision: 7 }] : [], nextCursor: null };
       if (request.action === "withdraw") active = false;
       return answer(request);
     });
@@ -162,7 +196,7 @@ describe("owner app publication", () => {
     api.publishOwnerApp.mockImplementation(async request => {
       if (request.action !== "list") return answer(request);
       if (!request.cursor) return { kind: "listed", publications: [], nextCursor: "d".repeat(64) };
-      return { kind: "listed", publications: [{ ...published, manifestUnavailable: false, appRoot: "trip", sourceRevision: prepared.sourceRevision, shareId: row.shareId, grantId: row.grantId, active: false }], nextCursor: null };
+      return { kind: "listed", publications: [{ ...published, collectionCapability: null, manifestUnavailable: false, appRoot: "trip", sourceRevision: prepared.sourceRevision, shareId: row.shareId, grantId: row.grantId, active: false }], nextCursor: null };
     });
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
@@ -186,7 +220,7 @@ describe("owner app publication", () => {
 
   it("can unpublish a damaged manifest without inventing its source or app", async () => {
     api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {
-      kind: "listed", publications: [{ publicationId: published.publicationId, authorityRevision: 9, shareId: row.shareId, grantId: row.grantId, active: true, manifestUnavailable: true }], nextCursor: null,
+      kind: "listed", publications: [{ publicationId: published.publicationId, authorityRevision: 9, shareId: row.shareId, grantId: row.grantId, active: true, collectionCapability: null, manifestUnavailable: true }], nextCursor: null,
     } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
@@ -201,7 +235,7 @@ describe("owner app publication", () => {
   it("reviews a stored revision before explicitly republishing after withdrawal", async () => {
     let active = true;
     api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "list") return { kind: "listed", publications: [{ ...published, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active, authorityRevision: active ? 7 : 8, manifestUnavailable: false }], nextCursor: null };
+      if (request.action === "list") return { kind: "listed", publications: [{ ...published, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active, authorityRevision: active ? 7 : 8, collectionCapability: null, manifestUnavailable: false }], nextCursor: null };
       if (request.action === "withdraw") active = false;
       if (request.action === "approve") active = true;
       return answer(request);
@@ -222,7 +256,7 @@ describe("owner app publication", () => {
   });
 
   it("cancels withdrawal confirmation without mutation", async () => {
-    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ ...published, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true }], nextCursor: null } : answer(request));
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ ...published, collectionCapability: null, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true }], nextCursor: null } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
     await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
@@ -264,7 +298,7 @@ describe("owner app publication", () => {
     const ownerAppResponses = vi.fn();
     vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses });
     api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {
-      kind: "listed", publications: ["c", "d"].map((value, index) => ({ publicationId: value.repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: index === 0, manifestUnavailable: false })), nextCursor: null,
+      kind: "listed", publications: ["c", "d"].map((value, index) => ({ publicationId: value.repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: index === 0, collectionCapability: null, manifestUnavailable: false })), nextCursor: null,
     } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
@@ -279,7 +313,7 @@ describe("owner app publication", () => {
       action: "list", acceptances: [{kind: "accepted", acceptanceId: request.grantId, objectId: "object", momentId: "moment", publicPrincipalId: "person", versionId: "main", collectionPath: "trip/responses", path: `trip/responses/${request.grantId}.md`, acceptedAtMs: 1}], nextAcceptanceId: null,
     } : request.grantId === "grant-1" ? first.promise : second.promise);
     vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses });
-    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [1,2].map(index => ({ publicationId: String(index).repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: `grant-${index}`, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, manifestUnavailable: false })), nextCursor: null } : answer(request));
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [1,2].map(index => ({ publicationId: String(index).repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: `grant-${index}`, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, collectionCapability: null, manifestUnavailable: false })), nextCursor: null } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" onShareSource={() => undefined} />); await open();
     for (const button of screen.getAllByRole("button", {name: "Load responses"})) { fireEvent.click(button); }
     await screen.findByText("trip/responses/grant-2.md");
@@ -302,7 +336,7 @@ describe("owner app publication", () => {
   it("allows closing while responses are loading", async () => {
     const pending = deferred<unknown>();
     vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses: vi.fn(() => pending.promise) });
-    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ publicationId: "c".repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, manifestUnavailable: false }], nextCursor: null } : answer(request));
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ publicationId: "c".repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, collectionCapability: null, manifestUnavailable: false }], nextCursor: null } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
     fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
     expect((screen.getByRole("button", { name: "Close publication" }) as HTMLButtonElement).disabled).toBe(false);
@@ -312,7 +346,7 @@ describe("owner app publication", () => {
   });
 
   it("does not mount a response panel for an unknown damaged app", async () => {
-    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {kind:"listed",publications:[{publicationId:"c".repeat(64),authorityRevision:1,shareId:row.shareId,grantId:row.grantId,active:true,manifestUnavailable:true}],nextCursor:null} : answer(request));
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {kind:"listed",publications:[{publicationId:"c".repeat(64),authorityRevision:1,shareId:row.shareId,grantId:row.grantId,active:true,collectionCapability: null, manifestUnavailable: true}],nextCursor:null} : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
     await screen.findByText("Source details unavailable. This publication may belong to another app.");
     expect(screen.queryByRole("region",{name:"App responses"})).toBeNull();

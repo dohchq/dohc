@@ -89,6 +89,15 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (!row || row.publicationId !== input.publicationId || row.owner?.workspaceId !== input.workspaceId || row.active !== false) throw new Error("dohc could not confirm that this publication ended.");
         return OwnerAppPublicationResult.parse({ kind: "withdrawn", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
       }
+      if (input.action === "revokeCollection") {
+        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+          `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${input.publicationId}/collection-approval`,
+          { method: "POST", signal: operation.signal, body: JSON.stringify({ expectedAuthorityRevision: input.expectedAuthorityRevision, capability: null }) }));
+        const row = raw as { publicationId?: unknown; authorityRevision?: unknown; capability?: unknown } | null;
+        if (!row || row.publicationId !== input.publicationId || row.capability !== null || row.authorityRevision !== input.expectedAuthorityRevision + 1) throw new Error("dohc could not confirm collection access was revoked.");
+        operation.signal.throwIfAborted();
+        return OwnerAppPublicationResult.parse({ kind: "collectionRevoked", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
+      }
       if (input.action !== "prepare") {
         const entry = pending.get(input.approvalId);
         if (!entry || entry.callerKey !== callerKey || entry.scope !== (operation.scope ?? callerKey) || entry.signal !== operation.signal || entry.input.workspaceId !== input.workspaceId || entry.generation !== remote.credentialGeneration) throw new Error("This app preparation expired. Prepare the app again.");
@@ -113,8 +122,12 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           if (!approval || approval.publicationId !== published.publicationId || approval.authorityRevision !== published.authorityRevision + 1 ||
               JSON.stringify(parseAppCollectionCapability(approval.capability)) !== JSON.stringify(capability)) throw new Error("Collection approval changed.");
           return OwnerAppPublicationResult.parse({ kind: "published", publicationId: published.publicationId, authorityRevision: approval.authorityRevision });
-          } catch {
-            throw new Error("The app is published. dohc could not confirm its collection access. Prepare it again to retry, or unpublish it.");
+          } catch (error) {
+            operation.signal.throwIfAborted();
+            session.assertCurrent();
+            if (error instanceof Error && error.name === "AbortError") throw error;
+            const detail = error instanceof Error ? error.message : "Collection access could not be confirmed.";
+            throw new Error(`The app is published. ${detail} Reload the publications before trying again.`);
           }
         };
         if (entry.reactivation) {

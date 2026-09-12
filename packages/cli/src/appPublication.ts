@@ -7,7 +7,7 @@ export const OwnerAppCollectionCapability = z.unknown().transform((value, contex
   try { return parseAppCollectionCapability(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid collection capability." }); return z.NEVER; }
 });
-const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean() };
+const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), collectionCapability: OwnerAppCollectionCapability.nullable() };
 export const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
@@ -18,6 +18,7 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("approve"), workspaceId: id, approvalId: z.string().uuid(), candidateDigest: hash }).strict(),
   z.object({ action: z.literal("cancel"), workspaceId: id, approvalId: z.string().uuid() }).strict(),
   z.object({ action: z.literal("withdraw"), workspaceId: id, publicationId: hash, expectedAuthorityRevision: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal("revokeCollection"), workspaceId: id, publicationId: hash, expectedAuthorityRevision: z.number().int().positive() }).strict(),
   z.object({ action: z.literal("reviewReactivation"), workspaceId: id, publicationId: hash }).strict(),
 ]);
 export type OwnerAppPublicationRequest = z.infer<typeof OwnerAppPublicationRequest>;
@@ -30,5 +31,6 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cancelled") }).strict(),
   z.object({ kind: z.literal("published"), publicationId: z.string().regex(/^[a-f0-9]{64}$/), authorityRevision: z.number().int().positive() }).strict(),
   z.object({ kind: z.literal("withdrawn"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("collectionRevoked"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
 ]);
 export type OwnerAppPublicationResult = z.infer<typeof OwnerAppPublicationResult>;

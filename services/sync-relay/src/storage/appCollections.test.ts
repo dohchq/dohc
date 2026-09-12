@@ -432,13 +432,17 @@ function ownerHttpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
 
 it("lets the authenticated owner narrow and revoke the published capability with revision CAS",async()=>{
   const f=ownerHttpFixture(),narrowed={...capability,allowedFields:["destination"],readFields:["destination"]};
+  const list = () => f.storage.listAppPublications({workspaceId:"w",ownerUserId:"owner",limits}).publications[0];
+  expect(list()?.collectionCapability).toEqual(capability);
   const approval=await f.approve({expectedAuthorityRevision:2,capability:narrowed});expect(approval.status).toBe(200);
   expect(await approval.json()).toEqual({publicationId:f.input.publicationId,authorityRevision:3,capability:narrowed});
+  expect(list()).toMatchObject({authorityRevision:3,collectionCapability:narrowed});
   expect((await f.request("POST",f.body)).status).toBe(404);
   const vote=await f.request("POST",{...f.body,authorityRevision:3,fields:{destination:"Tokyo"}});expect(vote.status).toBe(200);await vote.body!.cancel();
   expect((await f.approve({expectedAuthorityRevision:2,capability:null})).status).toBe(409);
   const revoked=await f.approve({expectedAuthorityRevision:3,capability:null});expect(revoked.status).toBe(200);
   expect(await revoked.json()).toEqual({publicationId:f.input.publicationId,authorityRevision:4,capability:null});
+  expect(list()).toMatchObject({authorityRevision:4,collectionCapability:null});
   expect((await f.request("GET",undefined,"?authorityRevision=4")).status).toBe(404);
 });
 
