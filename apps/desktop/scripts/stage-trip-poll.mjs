@@ -12,7 +12,7 @@ export async function stageTripPoll(workspaceRoot) {
   const react = dirname(require.resolve("react/package.json"));
   const dom = dirname(require.resolve("react-dom/package.json"));
   const scheduler = dirname(createRequire(join(dom, "package.json")).resolve("scheduler/package.json"));
-  const sources = ["main.tsx", "Poll.tsx", "broker.ts", "style.css"];
+  const sources = ["main.tsx", "Poll.tsx", "broker.ts", "style.css", "style.d.ts"];
   const dependencies = [
     [react, "react", "index.js"], [react, "react", "cjs/react.production.js"],
     [react, "react", "jsx-runtime.js"], [react, "react", "cjs/react-jsx-runtime.production.js"],

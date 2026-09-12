@@ -21,6 +21,8 @@ Collection responses require the owner's approval and an enabled collection serv
 
 `Retry response` sends the same key and fields after an uncertain save.
 Keep the page open until the save is confirmed. Reloading loses this pending key.
+`Discard pending response` unlocks the form but does not delete a response that was already saved.
+Check shared responses before sending another. Quota refusals stop submission until the owner restores capacity and you reopen the poll.
 `Refresh` reads other people's responses. `Show more responses` loads the next page.
 
 The example does not enforce one vote per person. Names are optional, and

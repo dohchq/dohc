@@ -38,3 +38,36 @@ it("reports unavailable access and recovers on refresh without inventing saved s
   await screen.findByText("No responses yet. Send yours above.");
   await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
 });
+it("stops sending when the poll reaches its quota", async () => {
+  const create = vi.fn<CollectionClient["create"]>().mockRejectedValue(new CollectionError(413));
+  render(<Poll client={{list: async () => empty, create}} />);
+  await screen.findByText("No responses yet. Send yours above.");
+  fireEvent.click(screen.getByRole("button", {name: "Send response"}));
+  await screen.findByText("This poll cannot accept more responses. Ask its owner for help.");
+  const send = screen.getByRole("button", {name: "Send response"}) as HTMLButtonElement;
+  expect(send.disabled).toBe(true); fireEvent.click(send);
+  expect(create).toHaveBeenCalledTimes(1);
+});
+it("does not retry conflicting requests and lets respondents discard their pending response", async () => {
+  const create = vi.fn<CollectionClient["create"]>().mockRejectedValueOnce(new CollectionError(409)).mockResolvedValue(receipt);
+  render(<Poll client={{list: async () => empty, create}} />);
+  await screen.findByText("No responses yet. Send yours above.");
+  fireEvent.click(screen.getByRole("button", {name: "Send response"}));
+  await screen.findByText("This response cannot be retried because the poll or its saved response changed. Ask its owner for help.");
+  expect((screen.getByRole("button", {name: "Retry response"}) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", {name: "Discard pending response"}));
+  expect((screen.getByLabelText("Destination") as HTMLSelectElement).closest("fieldset")?.disabled).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name: "Send response"}));
+  await screen.findByText("Response saved.");
+  expect(create.mock.calls[1]![0].idempotencyKey).not.toEqual(create.mock.calls[0]![0].idempotencyKey);
+});
+it("retains the pending key across rate-limited retries", async () => {
+  const create = vi.fn<CollectionClient["create"]>().mockRejectedValueOnce(new CollectionError(429)).mockResolvedValue(receipt);
+  render(<Poll client={{list: async () => empty, create}} />);
+  await screen.findByText("No responses yet. Send yours above.");
+  fireEvent.click(screen.getByRole("button", {name: "Send response"}));
+  await screen.findByText("Too many requests. Wait before retrying this response.");
+  fireEvent.click(screen.getByRole("button", {name: "Retry response"}));
+  await screen.findByText("Response saved.");
+  expect(create.mock.calls[1]![0]).toEqual(create.mock.calls[0]![0]);
+});
