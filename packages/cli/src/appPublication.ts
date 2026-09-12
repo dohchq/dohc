@@ -13,6 +13,7 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("approve"), workspaceId: id, approvalId: z.string().uuid(), candidateDigest: hash }).strict(),
   z.object({ action: z.literal("cancel"), workspaceId: id, approvalId: z.string().uuid() }).strict(),
   z.object({ action: z.literal("withdraw"), workspaceId: id, publicationId: hash, expectedAuthorityRevision: z.number().int().positive() }).strict(),
+  z.object({ action: z.literal("reviewReactivation"), workspaceId: id, publicationId: hash }).strict(),
 ]);
 export type OwnerAppPublicationRequest = z.infer<typeof OwnerAppPublicationRequest>;
 export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
