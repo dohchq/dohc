@@ -5,6 +5,7 @@ import { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
+import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
@@ -282,6 +283,10 @@ function PublicationDialog(props: {
                 </li>)}
               </ul>}
         </div>
+        {!publicationsLoading && !publicationsError ? [...new Set(publications.map(publication => publication.grantId))].map(grantId => <div key={grantId}>
+          <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Link {grantId}</p>
+          <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} />
+        </div>) : null}
         <label className="text-[13px] text-ink">Share link
           <select aria-label="Publication share link" disabled={loading || !!busy} value={selected} onChange={event => setSelected(event.target.value)}
             className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
