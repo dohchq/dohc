@@ -93,6 +93,7 @@ import type { HostControlSnapshot, HostMode, HostTransitionGeneration } from "@d
 import * as hostControlStorage from "./storage/hostControl";
 import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
+import * as publicationStorage from "./storage/publications";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as sharesStorage from "./storage/shares";
@@ -480,6 +481,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+  }
+
+  publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
+    return publicationStorage.publishAppPublication(this, input);
+  }
+
+  readAppPublication(input: publicationStorage.ReadAppPublicationInput) {
+    return publicationStorage.readAppPublication(this, input);
+  }
+
+  withdrawAppPublication(input: publicationStorage.WithdrawAppPublicationInput) {
+    return publicationStorage.withdrawAppPublication(this, input);
   }
 
   putBlob(input: {

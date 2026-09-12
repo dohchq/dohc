@@ -1,4 +1,6 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
@@ -65,6 +67,7 @@ export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareR
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
 export interface CreateSyncRelayHandlerOptions {
+  appPublicationLimits?: AppPublicationLimits;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -116,6 +119,7 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | OwnerAppPublicationRoute
   | OwnerRestoreRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
@@ -143,6 +147,7 @@ type SyncRelayRoute =
 const MAX_LINK_CURRENT_FILES = 5_000;
 
 export function createSyncRelayHandler({
+  appPublicationLimits,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -522,6 +527,7 @@ export function createSyncRelayHandler({
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
+  const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, nowMs});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -571,6 +577,16 @@ export function createSyncRelayHandler({
         route.route === "link-blob"
       ) {
         return await respondToLinkRead(request, route);
+      }
+      if (route.route === "owner-app-publication") {
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        // Owner publication uses explicit desktop/agent credentials, never ambient browser cookies.
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
@@ -791,6 +807,14 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if (parts[2] === "app-publications") {
+    if (parts.length === 3) return {route: "owner-app-publication", workspaceId, action: "publish"};
+    const publicationId = parts[3];
+    if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
+    if (parts.length === 4) return {route: "owner-app-publication", workspaceId, publicationId, action: "read"};
+    if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
+    throw notFound();
+  }
   if (parts[2] === "live-restores") {
     if (parts.length === 3) return {route: "owner-restore", workspaceId, action: "begin"};
     if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options")) return {route: "owner-restore", workspaceId, action: parts[3]};

@@ -52,6 +52,7 @@ export async function collectUnreferencedBlobs(
     // never be accepted, so the granter's only honest answer would be
     // "decline". A settled proposal stops protecting its blobs: an accepted
     // one has them in the log, and a declined one never will.
+    // Immutable publications retain their manifest and bundle pins after withdrawal.
     const cutoff = options.nowMs - storage.options.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
     // and aged past the grace window.
@@ -74,6 +75,10 @@ export async function collectUnreferencedBlobs(
              WHERE p.workspace_id = b.workspace_id
                AND p.state = 'open'
                AND o.after_blob_sha256 = b.sha256
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM sync_relay_app_publication_blobs p
+             WHERE p.workspace_id = b.workspace_id AND p.sha256 = b.sha256
            )
          ORDER BY b.sha256`,
       )
@@ -99,6 +104,10 @@ export async function collectUnreferencedBlobs(
            FROM sync_relay_share_proposal_ops o
            JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
            WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM sync_relay_app_publication_blobs p
+           WHERE p.workspace_id = sync_relay_blobs.workspace_id AND p.sha256 = sync_relay_blobs.sha256
          )`,
     );
     const CHUNK = 200;

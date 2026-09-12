@@ -560,6 +560,9 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
+  readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
+  withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
   readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
