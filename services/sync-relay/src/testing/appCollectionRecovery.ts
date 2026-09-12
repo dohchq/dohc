@@ -134,6 +134,11 @@ if (phase === "prepare") {
       assert.equal(hash(blob.text), blob.sha256);
       storage.putBlob({workspaceId: "w", sha256: blob.sha256, content: Buffer.from(blob.text), createdAtMs: 30});
     }
+    for (const blob of native.binaryBlobs) {
+      const content = Buffer.from(blob.bytesBase64, "base64");
+      assert.equal(hash(content), blob.sha256);
+      storage.putBlob({workspaceId: "w", sha256: blob.sha256, content, createdAtMs: 30});
+    }
     storage.appendLogBatch({workspaceId: "w", originId: "owner-device", ops: native.ops});
     const moments = native.ops.filter((op: {opKind: string}) => op.opKind === "moment.append")
       .map((op: {payloadJson: string}) => JSON.parse(op.payloadJson))
@@ -150,7 +155,7 @@ if (phase === "prepare") {
     assert.deepEqual(inventory(storage as StorageContext), beforeRetry);
     const records = storage.readAppCollection({...f.input, limit: 10}).records;
     assert.equal(records.length, phase === "owner-deleted" ? 0 : 1);
-    save(`${phase}-verified.json`, {nativeJournalApplied: true, retryPreserved: true, visibleRecords: records.length});
+    save(`${phase}-verified.json`, {visibleRecords: records.length});
   } finally {storage.close();}
 } else {
   throw new Error("Expected prepare or verify recovery phase.");

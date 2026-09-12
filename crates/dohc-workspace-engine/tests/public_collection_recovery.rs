@@ -195,10 +195,15 @@ fn paired_public_collection_backup_preserves_acceptance_and_refuses_stale_relay(
 }
 
 fn export_owner_journal(db: &Path, root: &Path, phase: &str, delete: &Value, request_id: &str) {
-    let store = EngineStore::open(db, 40).expect("read native outgoing journal");
+    let store = EngineStore::open_read_only(db).expect("read native outgoing journal");
     let ops = list_replication_ops(&store, "w", "owner-device", -1, 100)
         .expect("export native replication page");
     assert!(!ops.is_empty() && ops.len() < 100);
+    let binary_shas = ops
+        .iter()
+        .filter(|op| op.op_kind == "ydoc.update")
+        .filter_map(|op| op.payload.get("updateBlobSha256").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
     let ops: Vec<Value> = ops
         .iter()
         .map(|op| {
@@ -211,8 +216,7 @@ fn export_owner_journal(db: &Path, root: &Path, phase: &str, delete: &Value, req
         .collect();
     let blobs = store
         .read_with(|conn| {
-            let mut statement =
-                conn.prepare("SELECT sha256,text FROM blobs WHERE text IS NOT NULL")?;
+            let mut statement = conn.prepare("SELECT sha256,text FROM blobs")?;
             statement
                 .query_map([], |row| {
                     Ok(json!({
@@ -222,10 +226,19 @@ fn export_owner_journal(db: &Path, root: &Path, phase: &str, delete: &Value, req
                 .collect::<Result<Vec<Value>, rusqlite::Error>>()
         })
         .expect("native text blobs");
+    let binary_blobs = binary_shas.into_iter()
+        .map(|sha| {
+            let bytes = store
+                .get_binary_blob(sha)
+                .expect("read native Y.Doc blob")
+                .expect("native Y.Doc blob exists");
+            json!({"sha256": sha, "bytesBase64": base64::engine::general_purpose::STANDARD.encode(bytes)})
+        })
+        .collect::<Vec<_>>();
     std::fs::write(
         root.join(format!("{phase}.json")),
         serde_json::to_vec(&json!({
-            "ops": ops, "blobs": blobs, "deleteMomentId": delete["moment"]["momentId"],
+        "ops": ops, "blobs": blobs, "binaryBlobs": binary_blobs, "deleteMomentId": delete["moment"]["momentId"],
             "requestId": request_id,
         }))
         .expect("serialize outgoing native journal"),
@@ -238,8 +251,7 @@ fn export_owner_journal(db: &Path, root: &Path, phase: &str, delete: &Value, req
     .expect("relay undo verdict JSON");
     assert_eq!(
         verdict,
-        json!({"nativeJournalApplied": true, "retryPreserved": true,
-        "visibleRecords": if phase == "owner-deleted" { 0 } else { 1 }})
+        json!({"visibleRecords": if phase == "owner-deleted" { 0 } else { 1 }})
     );
 }
 
