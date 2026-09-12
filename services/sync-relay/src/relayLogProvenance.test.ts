@@ -20,12 +20,13 @@ describe("client log provenance", () => {
     await claimWorkspace(handler, "owner", "workspace");
     const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
     for (const [user, url] of [["owner", "/sync/workspace/log"], ["recipient", `/sync/shares/${share}/log`]]) {
-      for (const body of [
-        {originId: `${COLLECTION_CREATE_ORIGIN_PREFIX}grant`, ops: []},
-        {originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {author: {kind: "public", principalId: "forged", grantId: "grant"}}}]},
-      ]) {
+      for (const [body, status, code] of [
+        [{originId: `${COLLECTION_CREATE_ORIGIN_PREFIX}grant`, ops: []},400,"bad_request"],
+        [{originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {author: {kind: "public", principalId: "forged", grantId: "grant"}}}]},403,"authorship_mismatch"],
+      ] as const) {
         const response = await handler(request(user!, url!, jsonBody(body)));
-        expect(response.status).toBeGreaterThanOrEqual(400);
+        expect(response.status).toBe(status);
+        expect(await response.json()).toMatchObject({code});
       }
     }
     expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100})).toEqual({rows: [], nextCursor: 0, hasMore: false});

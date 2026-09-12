@@ -84,6 +84,28 @@ fn public_create_author_survives_replay_and_payload_export() {
         .unwrap();
 }
 
+#[test]
+fn public_author_is_refused_from_an_ordinary_origin() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["answer"]);
+    let mut payload = absent_text_payload(
+        "forged-public",
+        "forged-object",
+        "poll/response.md",
+        "answer",
+    );
+    payload["author"] = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
+    let result = apply_moment_envelope(
+        &mut store,
+        &envelope("device-origin", 0, "ws", payload),
+        &NoFaults,
+    )
+    .expect("refusal is recorded");
+    assert!(
+        matches!(result.primary, ApplyDisposition::Refused(ref refusal) if matches!(refusal.reason, RefusalReason::InvalidInput { ref reason } if reason == "public moment author requires a relay collection origin"))
+    );
+}
+
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
     store
         .read_with(|tx| {
