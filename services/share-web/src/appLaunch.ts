@@ -109,7 +109,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         }
         const launch = launches.get(host); if (!launch) return refusal();
         if (url.pathname === "/bootstrap") {
-          if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
+          const origin = request.headers.get("origin");
+          // The viewer's no-referrer policy makes cross-site form POSTs use Origin: null.
+          if ((origin !== config.viewerOrigin && origin !== "null") || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
           const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
           const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
           if (stagedSlots.size >= 2) {

@@ -14,6 +14,22 @@ it('requires separate registrable domains including private PSL suffixes',()=>{e
 it('requires viewer cookies and exact origin',async()=>{const f=fixture();for(const custom of [{origin:'null',cookie:'viewer=session'},{origin:config.viewerOrigin,cookie:'bad'}] as Array<Record<string,string>>)expect((await f.handler.handle(f.request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{...custom,'content-type':'application/json'}))).status).toBe(404);expect(f.requests).toHaveLength(0);});
 it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts allow-forms'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
 it('atomically consumes concurrent handoffs once',async()=>{const f=fixture(),handoff=await(await f.issue()).json();expect((await Promise.all([f.redeem(handoff),f.redeem(handoff)])).map(r=>r.status).sort()).toEqual([200,404]);});
+it('accepts a valid one-use handoff from the viewer no-referrer form origin',async()=>{
+  const f=fixture(),handoff=await(await f.issue()).json();
+  const redeem=()=>f.handler.handle(f.request(handoff.action,new URLSearchParams({handoff:handoff.handoff}).toString(),{origin:'null','content-type':'application/x-www-form-urlencoded'}));
+  expect((await redeem()).status).toBe(200);expect((await redeem()).status).toBe(404);
+});
+it('refuses hostile null-origin handoffs, unrelated origins, and missing Origin',async()=>{
+  const f=fixture(),handoff=await(await f.issue()).json();
+  const redeem=(body:string,headers:Record<string,string>={origin:'null'},action=handoff.action)=>f.handler.handle(f.request(action,body,{'content-type':'application/x-www-form-urlencoded',...headers}));
+  const body=new URLSearchParams({handoff:handoff.handoff}).toString();
+  for(const bad of ['',new URLSearchParams({handoff:'Z'.repeat(43)}).toString(),body+'&extra=yes'])expect((await redeem(bad)).status).toBe(404);
+  for(const headers of [{origin:'https://unrelated.example.org'},{}] as Array<Record<string,string>>)expect((await redeem(body,headers)).status).toBe(404);
+  const other=await(await f.issue()).json();expect((await redeem(body,{origin:'null'},other.action)).status).toBe(404);
+  expect((await redeem(body)).status).toBe(200);
+  const expired=await(await f.issue()).json();f.advance(30000);
+  expect((await redeem(new URLSearchParams({handoff:expired.handoff}).toString(),{origin:'null'},expired.action)).status).toBe(404);
+});
 it('rechecks revoked and narrowed authority at redemption',async()=>{for(const change of ['revoke','narrow']as const){const f=fixture(),handoff=await(await f.issue()).json();f[change]();expect((await f.redeem(handoff)).status).toBe(404);}});
 it('rechecks revocation on document and status requests',async()=>{const f=fixture(),app=await launch(f);f.revoke();expect((await app.read()).status).toBe(404);expect((await app.read('/status')).status).toBe(404);});
 it('requires proof cookie host and exact non-null origin',async()=>{const f=fixture(),app=await launch(f);for(const custom of [{origin:'null'},{'x-dohc-app-proof':''},{cookie:app.cookie+'; '+app.cookie},{origin:config.viewerOrigin},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await app.read('/document',custom)).status).toBe(404);});
