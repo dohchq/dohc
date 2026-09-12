@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
-import { createSyncRelayHandler } from "../server";
+import { createSyncRelayHandler,type CreateSyncRelayHandlerOptions } from "../server";
+import {hashLinkBearer,hashLinkProfileSecret,LinkEgressRateLimiter} from "../linkSecurity";
+import {TokenBucketLimiter} from "@dohc/service-http";
 import type { StorageContext } from "./context";
 import type { AcceptAppCollectionInput } from "./appCollections";
 
@@ -261,4 +263,145 @@ it.each(["binary","non-utf8"])("skips validly stored %s folder content and reach
   }
   const first=f.storage.readAppCollection({...f.input,limit:1});expect(first).toEqual({records:[],nextPath:"responses/000-note.md"});
   expect(f.storage.readAppCollection({...f.input,limit:1,afterPath:first.nextPath!}).records[0].path).toBe(receipt.path);
+});
+
+function httpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
+  const f=fixture(),token="A".repeat(43),profile="P".repeat(43),key="collection-test-key";
+  f.input.capabilityHash=hashLinkBearer(token,key);f.input.profileTokenHash=hashLinkProfileSecret(profile,key);
+  f.raw.prepare("UPDATE sync_relay_link_sessions SET capability_hash=?").run(f.input.capabilityHash);
+  let now=20;
+  const handler=createSyncRelayHandler({storage:f.storage,appPublicationLimits:limits,appCollectionPolicy:{maxCreatesPerGrant:100},linkKey:key,nowMs:()=>now,resolveActor:()=>{throw new Error("Collection routes must not resolve an account.");},...options});
+  const path=`/sync/link/app-publications/${f.input.publicationId}/collection`;
+  const headers={authorization:`LinkCapability ${token}`,"x-dohc-link-profile-secret":profile};
+  const request=(method="GET",body?:unknown,query=method==="GET"?"?authorityRevision=2":"",extra:RequestInit={})=>handler(new Request(`https://relay${path}${query}`,{method,...extra,headers:{...headers,...(method==="POST"?{"content-type":"application/json"}:{}),...Object.fromEntries(new Headers(extra.headers))},...(body===undefined?{}:{body:JSON.stringify(body)})}));
+  const body={authorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Ice"}};
+  return {...f,handler,path,headers,body,request,setTime(value:number){now=value;}};
+}
+it("uses the same authenticated HTTP read and create contract for an agent and browser broker",async()=>{
+  const f=httpFixture();
+  const created=await f.request("POST",f.body);expect(created.status).toBe(200);const receipt=await created.json();expect(receipt.kind).toBe("accepted");
+  const replay=await f.request("POST",f.body,"",{headers:{origin:"https://trusted-app.example"}});expect(await replay.json()).toEqual(receipt);
+  const page=await f.request();expect(page.status).toBe(200);expect(page.headers.get("cache-control")).toBe("private, no-store");expect(page.headers.get("access-control-allow-origin")).toBeNull();
+  expect(await page.json()).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Ice"}}],nextPath:null});
+  expect((await f.request("POST",{...f.body,fields:{destination:"Manila"}})).status).toBe(409);
+});
+it("keeps collection HTTP off by default and rejects ambient or forged authority",async()=>{
+  const off=httpFixture({appCollectionPolicy:undefined});expect((await off.request()).status).toBe(404);
+  const f=httpFixture();
+  for(const headers of [{cookie:"owner"},{authorization:"Bearer owner"},{"x-dohc-link-profile-secret":"bad"}] as Record<string,string>[])expect((await f.request("POST",f.body,"",{headers})).status).toBe(headers.authorization?401:404);
+  expect((await f.request("PUT",f.body)).status).toBe(405);
+  for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"},{...f.body,authorityRevision:1},{...f.body,fields:{destination:null}}])expect((await f.request("POST",body)).status).toBe(body.authorityRevision===1?404:400);
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+it.each(["?authorityRevision=2&limit=1&limit=2","?authorityRevision=2&afterPath=a&afterPath=b","?authorityRevision=2&ownerUserId=owner","?authorityRevision=02","?authorityRevision=2&limit=101","?authorityRevision=2&afterPath=../private"])("rejects malformed collection query %s",async query=>{
+  const f=httpFixture();expect((await f.request("GET",undefined,query)).status).toBe(400);
+});
+it("cancels an oversized upload before accepting or enrolling",async()=>{
+  const f=httpFixture();let cancelled=false;
+  const stream=new ReadableStream<Uint8Array>({pull(controller){controller.enqueue(new Uint8Array(16_385));},cancel(){cancelled=true;}});
+  const response=await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers:{...f.headers,"content-type":"application/json"},body:stream,duplex:"half"} as RequestInit));
+  expect(response.status).toBe(413);expect(cancelled).toBe(true);expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+function deferredBody() {
+  let controller!:ReadableStreamDefaultController<Uint8Array>,reading!:()=>void;
+  const ready=new Promise<void>(resolve=>{reading=resolve;}),stream=new ReadableStream<Uint8Array>({start(value){controller=value;}}),getReader=stream.getReader.bind(stream);
+  stream.getReader=(()=>{const reader=getReader();reading();return reader;}) as typeof stream.getReader;
+  return {stream,ready,send(body:unknown){controller.enqueue(Buffer.from(JSON.stringify(body)));controller.close();}};
+}
+it.each(["withdraw","approval","generation","selector","schema","expired","blocked"])("rechecks %s after a response upload yields",async kind=>{
+  const f=httpFixture();if(kind==="blocked")f.accept({idempotencyKey:"first"});
+  const body=deferredBody(),before=f.storage.maxOriginSeq("w","relay:collection-create:g");
+  const pending=f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers:{...f.headers,"content-type":"application/json"},body:body.stream,duplex:"half"} as RequestInit));
+  await body.ready;
+  if(kind==="withdraw")f.storage.withdrawAppPublication({...f.owner,expectedAuthorityRevision:2});
+  if(kind==="approval")f.storage.approveAppCollection({...f.owner,expectedAuthorityRevision:2,capability:null});
+  if(kind==="generation")f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
+  if(kind==="selector")f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:["app"],versionId:null}));
+  if(kind==="schema")f.write("responses/collection.yaml",schemaText+"name: changed\n");
+  if(kind==="expired")f.setTime(10000);
+  if(kind==="blocked")f.raw.prepare("UPDATE sync_relay_link_principals SET blocked_at_ms=21").run();
+  body.send(f.body);expect((await pending).status).toBe(404);expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(before);
+});
+it("admits request rate and response capacity before the write and releases cancelled capacity",async()=>{
+  const rate=httpFixture({linkReadRateLimiter:new TokenBucketLimiter(1,0.001,100)});const first=await rate.request();await first.body!.cancel();expect((await rate.request("POST",rate.body)).status).toBe(429);expect(rate.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(72*1024,0.001,100)});
+  const held=await f.request();expect(held.status).toBe(200);expect((await f.request("POST",f.body)).status).toBe(429);
+  await held.body!.cancel();const accepted=await f.request("POST",f.body);expect(accepted.status).toBe(200);await accepted.body!.cancel();
+});
+it("withdrawal after HTTP acceptance invalidates the retained response stream",async()=>{
+  const f=httpFixture(),response=await f.request("POST",f.body);expect(response.status).toBe(200);
+  f.storage.withdrawAppPublication({...f.owner,expectedAuthorityRevision:2});await expect(response.text()).rejects.toThrow();
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
+});
+
+it("serializes concurrent HTTP retries into one accepted workspace moment",async()=>{
+  const f=httpFixture();
+  const replies=await Promise.all([f.request("POST",f.body),f.request("POST",f.body)]);
+  expect(replies.map(reply=>reply.status)).toEqual([200,200]);
+  const receipts=await Promise.all(replies.map(reply=>reply.json()));expect(receipts[0]).toEqual(receipts[1]);
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
+});
+
+it("cancels an interrupted body without accepting and refunds its egress reservation",async()=>{
+  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(72*1024,0.001,100)}),body=deferredBody(),abort=new AbortController();
+  const pending=f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers:{...f.headers,"content-type":"application/json"},body:body.stream,signal:abort.signal,duplex:"half"} as RequestInit));
+  await body.ready;abort.abort();await pending;
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+  const next=await f.request("POST",f.body);expect(next.status).toBe(200);await next.body!.cancel();
+});
+
+it("requires both credentials and exact JSON transport before accepting",async()=>{
+  const f=httpFixture();
+  for(const name of ["authorization","x-dohc-link-profile-secret"]){
+    const headers=new Headers({...f.headers,"content-type":"application/json"});headers.delete(name);
+    expect((await f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers,body:JSON.stringify(f.body)}))).status).toBe(name==="authorization"?401:404);
+  }
+  expect((await f.request("POST",f.body,"",{headers:{"content-type":"text/plain"}})).status).toBe(400);
+  expect((await f.request("POST",f.body,"?authorityRevision=2")).status).toBe(400);
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+});
+
+function ownerHttpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
+  const f=httpFixture({resolveActor:()=>({workspaceId:"w",userId:"owner"}),...options});
+  const url=`https://relay/sync/w/app-publications/${f.input.publicationId}/collection-approval`;
+  const approve=(body:unknown,extra:RequestInit={})=>f.handler(new Request(url,{method:"POST",...extra,headers:{authorization:"Bearer owner","content-type":"application/json",...Object.fromEntries(new Headers(extra.headers))},body:JSON.stringify(body)}));
+  return {...f,url,approve};
+}
+
+it("lets the authenticated owner narrow and revoke the published capability with revision CAS",async()=>{
+  const f=ownerHttpFixture(),narrowed={...capability,allowedFields:["destination"],readFields:["destination"]};
+  const approval=await f.approve({expectedAuthorityRevision:2,capability:narrowed});expect(approval.status).toBe(200);
+  expect(await approval.json()).toEqual({publicationId:f.input.publicationId,authorityRevision:3,capability:narrowed});
+  expect((await f.request("POST",f.body)).status).toBe(404);
+  const vote=await f.request("POST",{...f.body,authorityRevision:3,fields:{destination:"Tokyo"}});expect(vote.status).toBe(200);await vote.body!.cancel();
+  expect((await f.approve({expectedAuthorityRevision:2,capability:null})).status).toBe(409);
+  const revoked=await f.approve({expectedAuthorityRevision:3,capability:null});expect(revoked.status).toBe(200);
+  expect(await revoked.json()).toEqual({publicationId:f.input.publicationId,authorityRevision:4,capability:null});
+  expect((await f.request("GET",undefined,"?authorityRevision=4")).status).toBe(404);
+});
+
+it("refuses owner approval without explicit owner authority or the disabled feature policy",async()=>{
+  const input={expectedAuthorityRevision:2,capability};
+  const off=ownerHttpFixture({appCollectionPolicy:undefined});expect((await off.approve(input)).status).toBe(404);
+  const other=ownerHttpFixture({resolveActor:()=>({workspaceId:"w",userId:"other"})});expect((await other.approve(input)).status).toBe(404);
+  const scope=ownerHttpFixture({resolveActor:()=>({workspaceId:"other",userId:"owner"})});expect((await scope.approve(input)).status).toBe(404);
+  const f=ownerHttpFixture();
+  for(const headers of [{cookie:"session=owner"},{authorization:"LinkCapability forged"},{authorization:""}] as Record<string,string>[])expect((await f.approve(input,{headers})).status).toBe(404);
+  expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
+});
+
+it("refuses forged fields, widening and stale schema in owner approval",async()=>{
+  const f=ownerHttpFixture();
+  for(const body of [{expectedAuthorityRevision:2,capability,ownerUserId:"owner"},{expectedAuthorityRevision:2,capability:{...capability,readFields:["secret"]}},{expectedAuthorityRevision:0,capability},{expectedAuthorityRevision:2}])expect((await f.approve(body)).status).toBe(400);
+  f.write("responses/collection.yaml",schemaText+"description: changed\n");
+  expect((await f.approve({expectedAuthorityRevision:2,capability})).status).toBe(404);
+  expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
+});
+
+it("rechecks owner authority after an approval upload yields",async()=>{
+  const f=ownerHttpFixture(),body=deferredBody();
+  const pending=f.handler(new Request(f.url,{method:"POST",headers:{authorization:"Bearer owner","content-type":"application/json"},body:body.stream,duplex:"half"} as RequestInit));
+  await body.ready;f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id='w'").run();
+  body.send({expectedAuthorityRevision:2,capability:null});expect((await pending).status).toBe(404);
+  expect(f.raw.prepare("SELECT authority_revision FROM sync_relay_app_publications").get()!.authority_revision).toBe(2);
 });

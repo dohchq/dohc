@@ -9,15 +9,14 @@ import { requireLinkAppPublication, type LinkAppPublicationInput, type ReadAppPu
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { assertWorkspaceQuota } from "./workspaces";
 import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBytes, linkWriteRefusal, readLinkEnrollment } from "./linkEnrollment";
+import type {AppCollectionReceipt,AppCollectionPage} from "@dohc/security-contract/app-publication";
+export type {AppCollectionReceipt,AppCollectionPage} from "@dohc/security-contract/app-publication";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const MAX_SCHEMA_BYTES = 65_536;
 const MAX_RECORD_BYTES = 16_384;
 export interface AppCollectionAcceptancePolicy { maxCreatesPerGrant: number }
-export interface AppCollectionReceipt {
-  kind: "accepted"; acceptanceId: string; objectId: string; path: string; momentId: string; acceptedAtMs: number;
-}
 export interface ApproveAppCollectionInput extends ReadAppPublicationInput {
   expectedAuthorityRevision: number;
   capability: unknown | null;
@@ -110,7 +109,7 @@ function fields(value: unknown, capability: AppCollectionCapability, schema: Col
   if (bytes(result) > MAX_RECORD_BYTES / 2) throw badRequest("Collection response is too large.");
   return result;
 }
-/** No public route calls this until adoption, moderation, and restore gates pass. */
+/** The caller must opt into collection acceptance; public activation remains gated. */
 export function acceptAppCollection(storage: StorageContext, input: AcceptAppCollectionInput, policy: AppCollectionAcceptancePolicy): AppCollectionReceipt {
   if (!Number.isSafeInteger(policy.maxCreatesPerGrant) || policy.maxCreatesPerGrant < 1) throw new Error("Invalid collection acceptance quota.");
   if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.idempotencyKey)) throw badRequest("Invalid collection idempotency key.");
@@ -164,9 +163,8 @@ export interface ReadAppCollectionInput extends LinkAppPublicationInput {
   afterPath?: string;
   limit: number;
 }
-export interface AppCollectionPage {
-  records: {path:string;recordId:string|null;fields:Record<string,unknown>}[];
-  nextPath:string|null;
+export function authorizeLinkAppCollection(storage: StorageContext,input:LinkAppPublicationInput) {
+  return storage.readTx(()=>approved(storage,input).result);
 }
 /** Reads the current workspace projection, so owner edits and deletions take effect. */
 export function readAppCollection(storage: StorageContext, input: ReadAppCollectionInput): AppCollectionPage {

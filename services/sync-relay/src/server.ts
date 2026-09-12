@@ -2,6 +2,7 @@ import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-con
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
 import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
+import { createLinkAppCollectionRoutes, type LinkAppCollectionRoute, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
@@ -69,6 +70,7 @@ export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
 export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
+  appCollectionPolicy?: AppCollectionPolicy;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -121,6 +123,7 @@ export interface CreateSyncRelayHandlerOptions {
 
 type SyncRelayRoute =
   | LinkAppPublicationRoute
+  | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
   | OwnerRestoreRoute
   | { route: "link-exchange" }
@@ -150,6 +153,7 @@ const MAX_LINK_CURRENT_FILES = 5_000;
 
 export function createSyncRelayHandler({
   appPublicationLimits,
+  appCollectionPolicy,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -529,10 +533,12 @@ export function createSyncRelayHandler({
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
-  const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, nowMs});
+  const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
+  const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
+    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes}});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -594,6 +600,7 @@ export function createSyncRelayHandler({
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
+      if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -708,6 +715,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     const publicationId = parts[3];
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "link-app-publication", publicationId};
+    if (parts.length === 5 && parts[4] === "collection") return {route: "link-app-collection", publicationId};
     if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
       return {route: "link-app-publication", publicationId, sha256: parts[5]};
     }
@@ -829,6 +837,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 4) return {route: "owner-app-publication", workspaceId, publicationId, action: "read"};
     if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
     if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
+    if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     throw notFound();
   }
   if (parts[2] === "live-restores") {

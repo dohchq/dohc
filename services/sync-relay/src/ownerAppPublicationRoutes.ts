@@ -1,5 +1,5 @@
 import { readBoundedJson } from "@dohc/service-http";
-import { parseAppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { badRequest, notFound, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import { parseShareId } from "./requestInputs";
@@ -10,7 +10,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 
 export type OwnerAppPublicationRoute = {route: "owner-app-publication"; workspaceId: string} & (
   | {action: "publish"}
-  | {action: "read" | "withdraw" | "reactivate"; publicationId: string}
+  | {action: "read" | "withdraw" | "reactivate" | "collection-approval"; publicationId: string}
 );
 
 function response(value: unknown) {
@@ -23,7 +23,7 @@ function record(value: unknown, fields: string[]) {
 }
 
 export function createOwnerAppPublicationRoutes(options: {
-  storage: SyncRelayStorage; limits?: AppPublicationLimits; nowMs(): number;
+  storage: SyncRelayStorage; limits?: AppPublicationLimits; collectionsEnabled?: boolean; nowMs(): number;
 }) {
   const limits = options.limits && {...options.limits};
   if (limits && [limits.maxFiles, limits.maxMetadataBytes, limits.maxBundleBytes].some(value => !Number.isSafeInteger(value) || value < 1)) {
@@ -43,9 +43,11 @@ export function createOwnerAppPublicationRoutes(options: {
       }
       return response(storage.listAppPublications({workspaceId: route.workspaceId, ownerUserId, limits, cursor, appRoot}));
     }
+    if (route.action === "collection-approval" && !options.collectionsEnabled) throw notFound();
     if (request.method !== (route.action === "read" ? "GET" : "POST")) throw relayError("method_not_allowed");
     const lookup = "publicationId" in route ? {workspaceId: route.workspaceId, publicationId: route.publicationId, ownerUserId, limits} : null;
     if (route.action === "read") return response(storage.readAppPublication(lookup!));
+    if (route.action === "collection-approval" && new URL(request.url).search) throw badRequest("Collection approval does not accept a query.");
     if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Publication requests require application/json.");
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
     let raw: unknown;
@@ -57,9 +59,15 @@ export function createOwnerAppPublicationRoutes(options: {
     }
     signal.throwIfAborted();
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
-    if (route.action === "withdraw" || route.action === "reactivate") {
-      const input = record(raw, ["expectedAuthorityRevision"]);
+    if (route.action === "withdraw" || route.action === "reactivate" || route.action === "collection-approval") {
+      const input = record(raw, route.action === "collection-approval" ? ["expectedAuthorityRevision", "capability"] : ["expectedAuthorityRevision"]);
       if (!Number.isSafeInteger(input.expectedAuthorityRevision) || Number(input.expectedAuthorityRevision) < 1) throw badRequest("Invalid publication authority revision.");
+      if (route.action === "collection-approval") {
+        let capability;
+        try {capability = input.capability === null ? null : parseAppCollectionCapability(input.capability);}
+        catch {throw badRequest("Invalid collection capability.");}
+        return response(storage.approveAppCollection({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision), capability}));
+      }
       return response(route.action === "withdraw"
         ? storage.withdrawAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)})
         : storage.reactivateAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)}));

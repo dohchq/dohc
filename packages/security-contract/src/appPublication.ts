@@ -3,6 +3,8 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
+  type AppCollectionCreateRequest,type AppCollectionReadRequest,type AppCollectionReceipt,type AppCollectionPage} from "./appCollection";
 
 /** Publication transport ceilings shared by desktop, relay, and browser launch. */
 export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
