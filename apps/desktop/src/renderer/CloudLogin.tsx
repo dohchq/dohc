@@ -57,6 +57,9 @@ export function CloudLogin(props: {
   // Nested inside another elevated card (join/open-shared signed-out gates):
   // drop this panel's own frame so cards never stack elevation.
   embedded?: boolean;
+  // The host already names dohc Drive (a step title, a section header):
+  // drop this panel's own heading so the name is not said twice.
+  untitled?: boolean;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
@@ -356,10 +359,12 @@ export function CloudLogin(props: {
           : "dohc-elevated w-105 max-w-[80vw] rounded-xl border border-line bg-panel p-5"
       }
     >
-      <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <Cloud size={14} aria-hidden className="text-subtle" />
-        dohc Drive
-      </h2>
+      {props.untitled ? null : (
+        <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
+          <Cloud size={14} aria-hidden className="text-subtle" />
+          dohc Drive
+        </h2>
+      )}
 
       {phase.kind === "loading" ? (
         <p className="mb-0 mt-2 text-xs text-subtle">Checking connection…</p>
@@ -466,8 +471,7 @@ export function CloudLogin(props: {
                   Self-hosted server
                 </p>
                 <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
-                  Enter the server and sync relay origins from your administrator.
-                  Origins cannot include paths, queries, fragments, or sign-in details.
+                  Ask your administrator for both origins. No paths or sign-in details.
                 </p>
                 <label className="mt-3 block text-[11px] font-medium text-subtle">
                   Cloud server URL
