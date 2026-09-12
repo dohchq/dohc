@@ -40,8 +40,12 @@ $cert.Dispose();$rsa.Dispose()`;
   const address=server.address();if(!address||typeof address==="string")throw Error("No address");
   const browser=await chromium.launch({headless:true,ignoreDefaultArgs:["--disable-features=ThirdPartyStoragePartitioning"],args:[`--ignore-certificate-errors-spki-list=${spki}`,`--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port},MAP external.example.org 127.0.0.1:${address.port}`,"--no-proxy-server"]});
   try{
-    const context=await browser.newContext(),page=await context.newPage();await page.goto(viewer);await page.getByRole("button",{name:"Open app"}).click();
+    const context=await browser.newContext(),opener=await context.newPage();await opener.goto(viewer);
+    const opened=context.waitForEvent('page');await opener.evaluate(()=>window.open('/','shared-app-test'));const page=await opened;
+    await page.waitForLoadState();expect(await page.evaluate(()=>window.opener!==null)).toBe(true);
+    await page.getByRole("button",{name:"Open app"}).click();
     await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
+    expect(await page.evaluate(()=>window.opener)).toBeNull();
     const child=page.frameLocator("iframe");await expect(child.locator("#root")).toHaveText("App loaded");await expect(child.locator("body")).toHaveAttribute("data-external","received");
     expect(await page.evaluate(()=>document.cookie)).toBe("");
     const frame=page.frames().find(f=>f.url()==="about:srcdoc")!;
@@ -53,11 +57,27 @@ $cert.Dispose();$rsa.Dispose()`;
     const denied=await frame.evaluate(async()=>{const call=(window as unknown as {collectionCall(body:unknown):Promise<unknown>}).collectionCall;return Promise.all([call({op:'fetch',url:'https://viewer.example.com/private'}),call({op:'collection.list',limit:10,authorityRevision:2}),call({op:'collection.create',idempotencyKey:'oversized',fields:{destination:'X'.repeat(17000)}})]);});
     expect(denied).toEqual([{id:'q4',ok:false,status:400},{id:'q5',ok:false,status:400},{id:'q6',ok:false,status:413}]);
     const checks=await frame.evaluate(async origin=>{
-      const blocked:Record<string,boolean>={};for(const[name,fn]of Object.entries({parent:()=>parent.document,cookie:()=>document.cookie,storage:()=>localStorage.length})){try{fn();blocked[name]=false;}catch{blocked[name]=true;}}
+      const blocked:Record<string,boolean>={};for(const[name,fn]of Object.entries({parent:()=>parent.document,cookie:()=>document.cookie,storage:()=>localStorage.length,sessionStorage:()=>sessionStorage.length,indexedDB:()=>indexedDB.open('app-escape'),top:()=>{top!.location.href='https://external.example.org/top-escape';}})){try{fn();blocked[name]=false;}catch{blocked[name]=true;}}
+      try{await navigator.serviceWorker.register(origin+'/worker.js');blocked.serviceWorker=false;}catch{blocked.serviceWorker=true;}
+      try{await caches.open('app-escape');blocked.cacheStorage=false;}catch{blocked.cacheStorage=true;}
+      blocked.popup=window.open('https://external.example.org/popup-escape')===null;
+      blocked.opener=window.opener===null;
       try{await fetch(origin+"/document",{method:"POST",credentials:"include"});}catch{}
       return blocked;
     },new URL(page.url()).origin);
-    expect(checks).toEqual({parent:true,cookie:true,storage:true});
+    expect(checks).toEqual({parent:true,cookie:true,storage:true,sessionStorage:true,indexedDB:true,top:true,serviceWorker:true,cacheStorage:true,popup:true,opener:true});
+    await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
+    expect(events.some(event=>event.path==='/worker.js')).toBe(false);
+    const collectionRequests=events.filter(event=>event.path==='/collection').length;
+    await page.evaluate(()=>{const sibling=document.createElement('iframe');sibling.id='attacker';sibling.sandbox='allow-scripts';sibling.srcdoc='<!doctype html><p>Sibling app</p>';document.body.append(sibling);});
+    await expect(page.frameLocator('#attacker').locator('p')).toHaveText('Sibling app');
+    const sibling=page.frames().find(candidate=>candidate!==frame&&candidate.url()==='about:srcdoc')!;
+    const forged=frame.evaluate(()=>new Promise(resolve=>{const current=(window as unknown as {collectionCall:unknown}).collectionCall;addEventListener('message',event=>{if(event.data?.kind==='dohc-app-channel'&&event.source!==parent)resolve({foreignSource:true,retainedChannel:(window as unknown as {collectionCall:unknown}).collectionCall===current});});}));
+    const parentReceived=page.evaluate(()=>new Promise<void>(resolve=>addEventListener('message',event=>{if(event.data?.id==='forged-create')resolve();},{once:true})));
+    await sibling.evaluate(()=>{const channel=new MessageChannel();parent.frames[0]!.postMessage({kind:'dohc-app-channel',version:1},'*',[channel.port2]);parent.postMessage({id:'forged-create',op:'collection.create',idempotencyKey:'sibling-forgery',fields:{destination:'Private'}},'*');channel.port1.close();});
+    expect(await forged).toEqual({foreignSource:true,retainedChannel:true});await parentReceived;
+    expect(events.filter(event=>event.path==='/collection')).toHaveLength(collectionRequests);
+    await page.locator('#attacker').evaluate(element=>element.remove());
     await expect.poll(()=>events.some(e=>e.path==="/document"&&e.origin==="null"&&e.status===404)).toBe(true);
     expect(events.some(e=>e.path==="/document"&&e.status===200&&e.cookie)).toBe(true);
     const refusedProof = await page.evaluate(async () => Promise.all([undefined, "Z".repeat(43)].map(async proof => {
