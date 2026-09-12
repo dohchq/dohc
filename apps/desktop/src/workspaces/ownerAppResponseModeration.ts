@@ -37,6 +37,8 @@ export async function bulkUndoAppResponses(input: BulkUndoAppResponsesInput, dep
     if (!id(accepted.acceptanceId) || seen.has(accepted.acceptanceId) ||
         (input.publicPrincipalId!==undefined && accepted.publicPrincipalId!==input.publicPrincipalId)) throw new Error("The response selection changed. Refresh and try again.");
     seen.add(accepted.acceptanceId);
+  }
+  for(const accepted of page.acceptances) {
     dependencies.assertCurrent();
     const requestId=`app-response-undo:${createHash("sha256").update(JSON.stringify([input.workspaceId,input.grantId,operationId,accepted.acceptanceId])).digest("hex")}`;
     try {
@@ -48,5 +50,6 @@ export async function bulkUndoAppResponses(input: BulkUndoAppResponsesInput, dep
     }
     dependencies.assertCurrent();
   }
+  // The cursor advances the selection; retry failed items on this page with the same operationId.
   return {items,nextCursor:page.nextAcceptanceId};
 }

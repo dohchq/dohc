@@ -5232,8 +5232,13 @@ export function createWorkspaceEngineCapture(
             creation.operation!=="write" || creation.syncRecordOnly || creation.payload.before!==null ||
             creation.path!==input.path || creation.path!==`${input.collectionPath}/${input.acceptanceId}.md` ||
             creation.author?.kind!=="public" || creation.author.principalId!==input.publicPrincipalId || creation.author.grantId!==input.grantId) return {status:"conflict" as const};
-        const page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
-        const previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
+        let page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
+        const lastKnownPath=page.moments[0]?.path??input.path;
+        let previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
+        while(!previous && page.nextBeforeMomentOrder!==null) {
+          page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100,beforeMomentOrder:page.nextBeforeMomentOrder});
+          previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
+        }
         const files=await listTextFileMetadata(engine,versionId);
         const current=files.find(file=>file.objectId===input.objectId);
         // A completed retry must never remove an object the owner restored later.
@@ -5248,8 +5253,12 @@ export function createWorkspaceEngineCapture(
           } else if(disk.kind!=="absent")return {status:"conflict" as const};
           return {status:"deleted" as const,momentId:previous.id};
         }
-        if(!current)return {status:"already-absent" as const,...(previous?{momentId:previous.id}:{})};
-        if(page.nextBeforeMomentOrder!==null)return {status:"conflict" as const};
+        if(!current) {
+          for(const path of new Set([input.path,lastKnownPath])) {
+            if(!files.some(file=>file.path===path) && (await readDiskTextState(rootPath,path)).kind!=="absent")return {status:"conflict" as const};
+          }
+          return {status:"already-absent" as const};
+        }
         if(!current.path.startsWith(input.collectionPath+"/") || current.path.slice(input.collectionPath.length+1).includes("/")) return {status:"conflict" as const};
         const policy=await readPolicyForTask(),path=current.path;
         const disk=await readDiskTextState(rootPath,path);
