@@ -378,7 +378,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect((await postJson(enabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
     const path = `/sync/${WORKSPACE_ID}/app-publications`;
     expect((await fetch(`${enabled}${path}`, {headers: authHeaders()})).status).toBe(200);
-    expect((await fetch(`${enabled}${path}`)).status).toBe(401);
+    expect((await fetch(`${enabled}${path}`)).status).toBe(404);
     expect((await fetch(`${enabled}${path}`, {headers: {authorization: "Bearer test:other-owner"}})).status).toBe(404);
     const shareResponse = await postJson(enabled, `/sync/${WORKSPACE_ID}/shares`, {recipientUserId: "recipient", paths: ["app"], access: "view"});
     expect(shareResponse.status).toBe(200);
