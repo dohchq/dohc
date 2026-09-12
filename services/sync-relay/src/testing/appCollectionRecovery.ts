@@ -97,7 +97,9 @@ if (phase === "prepare") {
     assert.equal(envelopes.length, 2);
     assert.equal(envelopes[1].payload.momentId, receipt.momentId);
     await snapshot("accepted.sqlite");
-    save("fixture.json", {input, receipt, envelopes, inventory: inventory(context), continuity: continuity()});
+    const ownerSelection = storage.readOwnerAppCollectionAcceptances({workspaceId: "w", ownerUserId: "owner", grantId: "g", limit: 100});
+    assert.equal(ownerSelection.acceptances.length, 1);
+    save("fixture.json", {input, receipt, envelopes, ownerSelection, inventory: inventory(context), continuity: continuity()});
   } finally {storage.close();}
 } else if (phase === "verify") {
   const f = json("fixture.json"), native = json("native-restored.json");
@@ -123,6 +125,33 @@ if (phase === "prepare") {
   assert.equal(hash(readFileSync(relayPath)), staleBytes);
   assert.deepEqual(continuity(), f.continuity);
   save("verified.json", {pairedRestored: true, divergentRelayRefused: true, continuityUnchanged: true});
+} else if (phase === "owner-deleted" || phase === "owner-restored") {
+  const f = json("fixture.json"), native = json(`${phase}.json`);
+  const {storage} = openRelayDeployment(configPath);
+  try {
+    // These are the engine's actual journal coordinates and payloads, including Y.Doc updates.
+    for (const blob of native.blobs) {
+      assert.equal(hash(blob.text), blob.sha256);
+      storage.putBlob({workspaceId: "w", sha256: blob.sha256, content: Buffer.from(blob.text), createdAtMs: 30});
+    }
+    storage.appendLogBatch({workspaceId: "w", originId: "owner-device", ops: native.ops});
+    const moments = native.ops.filter((op: {opKind: string}) => op.opKind === "moment.append")
+      .map((op: {payloadJson: string}) => JSON.parse(op.payloadJson))
+      .filter((moment: {objectId: string}) => moment.objectId === f.receipt.objectId);
+    assert.ok(moments.some((moment: {operation: string; metadata: {origin: string}}) =>
+      moment.operation === "write" && moment.metadata.origin === "local-file"), "native adoption entered relay");
+    const deletion = moments.find((moment: {operation: string}) => moment.operation === "delete");
+    assert.equal(deletion.momentId, native.deleteMomentId);
+    assert.equal(deletion.metadata.correlationId, native.requestId);
+    assert.deepEqual(storage.readOwnerAppCollectionAcceptances({workspaceId: "w", ownerUserId: "owner", grantId: "g", limit: 100}), f.ownerSelection);
+    const beforeRetry = inventory(storage as StorageContext);
+    assert.deepEqual(storage.acceptAppCollection(f.input, {maxCreatesPerGrant: 1}), f.receipt);
+    assert.throws(() => storage.acceptAppCollection({...f.input, idempotencyKey: "new"}, {maxCreatesPerGrant: 1}), /quota/);
+    assert.deepEqual(inventory(storage as StorageContext), beforeRetry);
+    const records = storage.readAppCollection({...f.input, limit: 10}).records;
+    assert.equal(records.length, phase === "owner-deleted" ? 0 : 1);
+    save(`${phase}-verified.json`, {nativeJournalApplied: true, retryPreserved: true, visibleRecords: records.length});
+  } finally {storage.close();}
 } else {
   throw new Error("Expected prepare or verify recovery phase.");
 }
