@@ -1,3 +1,4 @@
+import { OpenSharedApp } from "./OpenSharedApp";
 import {
   Component,
   lazy,
@@ -482,7 +483,7 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
     }
-    history.replaceState(null, "", `/s/${body.session}`);
+    history.replaceState(null, "", `/s/${body.session}${location.search}`);
     return body.session;
   }
   if (location.hash) scrubFragment();
@@ -1242,6 +1243,7 @@ export function App() {
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
+      {new URLSearchParams(location.search).has("app") && <OpenSharedApp key={state.session} session={state.session} publicationId={new URLSearchParams(location.search).get("app") ?? ""} />}
       <Freshness
         lastSettledAtMs={state.meta.lastSettledAtMs}
         lastSettledKnown={state.meta.lastSettledKnown}

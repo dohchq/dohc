@@ -38,6 +38,7 @@ try {
 }
 
 const application = createShareWebApplication({
+  appLaunch: config.appLaunch,
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,

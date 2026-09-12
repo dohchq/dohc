@@ -1,3 +1,5 @@
+import { createAppLaunchHandler } from "./appLaunch";
+import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -66,6 +68,7 @@ type RefreshAttempt =
   | { status: "unavailable" };
 
 export interface CreateShareWebApplicationOptions {
+  appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
@@ -777,6 +780,7 @@ export function createShareWebApplication({
   namedRecipientBrowserLimits,
   linkLive: linkLiveConfig,
   publicEditRelease: releaseInput,
+  appLaunch: appLaunchConfig,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   if (publicEditRelease && !linkLiveConfig) throw new TypeError("Public Edit release requires configured link live limits.");
@@ -850,7 +854,7 @@ export function createShareWebApplication({
     try {
       const bytes = await readFile(join(viewerAssetsDir, relative));
       return response(bodyBuffer(bytes), {
-        headers: { "content-type": contentTypeForAsset(relative) },
+        headers: { "content-type": contentTypeForAsset(relative), ...(appLaunchConfig ? {"content-security-policy": SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`)} : {}) },
       });
     } catch {
       return refused();
@@ -990,7 +994,9 @@ export function createShareWebApplication({
     }
   }
 
+  const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
   const handle = async (request: Request): Promise<Response> => {
+    if (appLaunch?.matches(request)) return appLaunch.handle(request);
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
 

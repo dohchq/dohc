@@ -1,3 +1,4 @@
+import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
@@ -6,6 +7,7 @@ import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 
 export interface ShareWebConfig {
+  appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
@@ -159,6 +161,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");
 
   return {
+    appLaunch: env.DOHC_SHARE_WEB_APP_DOMAIN ? parseAppLaunchConfig({viewerOrigin: required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), appDomain: env.DOHC_SHARE_WEB_APP_DOMAIN}) : undefined,
     publicEditRelease,
     relayUrl: relayUrl.href,
     publicRelayUrl,
