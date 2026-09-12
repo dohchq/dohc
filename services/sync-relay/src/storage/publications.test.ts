@@ -11,6 +11,8 @@ import type { StorageContext } from "./context";
 import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { MAX_PAYLOAD_JSON_BYTES } from "../wireLimits";
+import { hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
+import { TokenBucketLimiter } from "@dohc/service-http";
 
 const limits = { maxFiles: 10, maxMetadataBytes: 16_384, maxBundleBytes: 4096 };
 const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -82,6 +84,21 @@ it("stores complete bytes atomically, persists withdrawal, and retains immutable
   await f.storage.collectUnreferencedBlobs("w", {nowMs: 1000});
   expect(f.storage.getBlob("w", digest(script))).toEqual(script);
   f.restart();expect(f.storage.readAppPublication(read)).toEqual({...withdrawn, candidate: published.candidate});
+});
+
+it("authorizes link publication descriptors from the server session and exact bundle membership", () => {
+  const f = fixture();
+  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL, principal_email=NULL WHERE grant_id='g'").run();
+  const published = f.storage.publishAppPublication(request());
+  const token = "A".repeat(43), key = "test-key";
+  f.storage.mintLinkSession({session: {sessionId: "session", capabilityHash: hashLinkBearer(token, key), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 100}, guard: () => undefined});
+  const descriptor = f.storage.authorizeLinkAppPublication({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits});
+  expect(descriptor.descriptor.files.map(file => file.path)).toEqual(["bundle.css", "bundle.js"]);
+  expect(descriptor.descriptor).not.toHaveProperty("owner");
+  expect(() => f.storage.readLinkAppPublicationBlob({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: "f".repeat(64)})).toThrow();
+  expect(f.storage.readLinkAppPublicationBlob({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits, expectedAuthorityRevision: 1, sha256: digest(script)}).bytes).toEqual(script);
+  f.storage.withdrawAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  expect(() => f.storage.authorizeLinkAppPublication({publicationId: published.publicationId, capabilityHash: hashLinkBearer(token, key), profileTokenHash: "profile", nowMs: 3, limits})).toThrow();
 });
 
 it.each(["owner", "workspace", "generation", "grant", "version", "selector", "revoked"])("rechecks %s authority before committing", kind => {
@@ -216,4 +233,113 @@ it("never falls back to ambient cookies for owner publication authentication", a
   }
   expect(authCalls).toBe(0);
   expect((await f.handler(new Request("http://relay/sync/w/app-publications", {method: "POST", headers: {authorization: "Bearer owner", "content-type": "text/plain"}, body: JSON.stringify(f.body)}))).status).toBe(400);
+});
+
+function linkFixture(options: {large?: boolean; egress?: LinkEgressRateLimiter; limiter?: TokenBucketLimiter} = {}) {
+  const f = fixture();
+  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='g'").run();
+  const input = request();
+  if (options.large) {
+    const bytes = Buffer.from("a".repeat(140_000));
+    input.limits = {...limits, maxBundleBytes: 200_000};
+    const file = input.candidate.files.find(file => file.path === "bundle.js")!;
+    file.sha256 = digest(bytes);file.byteLength = bytes.byteLength;
+    input.blobs = [{sha256: file.sha256, bytes}, {sha256: digest(style), bytes: style}];
+    input.candidate.bundleDigest = digest(JSON.stringify(["dohc-app-bundle-v1", input.candidate.files]));
+    input.candidate.buildDigest = digest(JSON.stringify(["dohc-app-build-v1", {sourceDigest: input.candidate.sourceDigest, dependencyLockDigest: input.candidate.dependencyLockDigest,
+      compiler: input.candidate.compilerIdentity, bundleDigest: input.candidate.bundleDigest}]));
+  }
+  const published = f.storage.publishAppPublication(input);
+  const token = "A".repeat(43), key = "test-key", capabilityHash = hashLinkBearer(token, key);
+  f.storage.mintLinkSession({session: {sessionId: "session", capabilityHash, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 100}});
+  let now = 20;
+  const handler = createSyncRelayHandler({storage: f.storage, appPublicationLimits: input.limits, nowMs: () => now,
+    linkKey: key, linkGrantEgressRateLimiter: options.egress, linkReadRateLimiter: options.limiter,
+    resolveActor: () => {throw new Error("App reads must not resolve an account.");}});
+  const path = `/sync/link/app-publications/${published.publicationId}`;
+  const blobPath = `${path}/blobs/${input.candidate.files.find(file => file.path === "bundle.js")!.sha256}?authorityRevision=1`;
+  const http = (suffix = path, init: RequestInit = {}) => handler(new Request(`https://relay${suffix}`, {
+    ...init, headers: {authorization: `LinkCapability ${token}`, "x-dohc-link-profile-secret": "P".repeat(43), ...Object.fromEntries(new Headers(init.headers))},
+  }));
+  return {...f, published, path, blobPath, http, input, capabilityHash, setTime(value: number) {now = value;}};
+}
+
+it("serves only public bundle descriptors and verified bytes through the existing link contract", async () => {
+  const f = linkFixture(), response = await f.http();
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(await response.json()).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, files: f.published.candidate.files});
+  expect(await (await f.http(f.blobPath)).text()).toBe(script.toString());
+  expect((await f.http(f.blobPath.replace("authorityRevision=1", "authorityRevision=2"))).status).toBe(404);
+  expect((await f.http(f.blobPath.split("?")[0])).status).toBe(400);
+  expect((await f.http(`${f.path}?authorityRevision=1&authorityRevision=1`)).status).toBe(400);
+  expect((await f.http(`${f.path}?principalId=owner`)).status).toBe(400);
+  expect((await f.http(f.path, {headers: {cookie: "ambient"}})).status).toBe(404);
+  expect((await f.http(f.path, {headers: {authorization: "Bearer owner"}})).status).toBe(401);
+  const manifest = f.raw.prepare("SELECT manifest_sha256 FROM sync_relay_app_publications").get()!.manifest_sha256;
+  expect((await f.http(`${f.path}/blobs/${manifest}?authorityRevision=1`)).status).toBe(404);
+});
+
+it.each(["session", "expired", "grant", "generation", "owner", "selector", "version", "withdrawn", "principal", "other-grant", "corrupt-length", "corrupt-hash"])("refuses recipient publication reads after %s changes", async kind => {
+  const f = linkFixture();
+  if (kind === "session") f.raw.prepare("DELETE FROM sync_relay_link_sessions").run();
+  if (kind === "expired") f.setTime(100);
+  if (kind === "grant") f.storage.revokeShareGrant({shareId: "s", grantId: "g", revokedAtMs: 20});
+  if (kind === "generation") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
+  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='lost' WHERE workspace_id='w'").run();
+  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app"], versionId: null}));
+  if (kind === "version") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app", "shared"], versionId: "fork"}));
+  if (kind === "withdrawn") f.storage.withdrawAppPublication({workspaceId: "w", publicationId: f.published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  if (kind === "principal") {
+    f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('p','g',1,'profile',1,2,1)").run();
+    f.raw.prepare("UPDATE sync_relay_link_sessions SET principal_id='p'").run();
+  }
+  if (kind === "other-grant") {
+    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'different',share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id='g'").run();
+    f.raw.prepare("UPDATE sync_relay_app_publications SET grant_id='different'").run();
+  }
+  if (kind === "corrupt-length") f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=?").run(digest(script));
+  if (kind === "corrupt-hash") f.raw.prepare("UPDATE sync_relay_blobs SET content=? WHERE sha256=?").run(Buffer.alloc(script.byteLength), digest(script));
+  expect((await f.http(f.blobPath)).status).toBe(["session", "expired", "grant", "generation", "owner"].includes(kind) ? 401 : 404);
+});
+
+it.each(["withdrawal", "expiry", "abort"])("stops a backpressured publication stream after %s", async kind => {
+  const f = linkFixture({large: true}), controller = new AbortController();
+  const response = await f.http(f.blobPath, {signal: controller.signal});
+  expect(response.status).toBe(200);
+  const reader = response.body!.getReader();
+  expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
+  if (kind === "withdrawal") f.storage.withdrawAppPublication({workspaceId: "w", publicationId: f.published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  if (kind === "expiry") f.setTime(100);
+  if (kind === "abort") controller.abort();
+  await expect(reader.read()).rejects.toThrow();
+});
+
+it("shares existing request and egress admission limits and refunds cancelled bytes", async () => {
+  const rate = linkFixture({limiter: new TokenBucketLimiter(1, 1, 100)});
+  await (await rate.http()).body!.cancel();
+  expect((await rate.http()).status).toBe(429);
+  const capacity = 140_000, egress = new LinkEgressRateLimiter(capacity, 1, 100);
+  const f = linkFixture({large: true, egress});
+  const first = await f.http(f.blobPath);expect(first.status).toBe(200);
+  expect((await f.http(f.blobPath)).status).toBe(429);
+  await first.body!.cancel();
+  const retry = await f.http(f.blobPath);expect(retry.status).toBe(200);await retry.body!.cancel();
+});
+
+it("keeps profile blocks across new unbound sessions without enrolling anonymous readers", async () => {
+  const f = linkFixture();
+  const count = () => f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_link_principals").get()!.n;
+  await (await f.http()).body!.cancel();expect(count()).toBe(0);
+  const hash = hashLinkProfileSecret("P".repeat(43), "test-key");
+  f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('profile-principal','g',1,?,1,2,1)").run(hash);
+  expect(f.storage.findLinkSessionByCapabilityHash(f.capabilityHash)?.principalId).toBeNull();
+  expect((await f.http()).status).toBe(404);
+  f.raw.prepare("UPDATE sync_relay_link_principals SET blocked_at_ms=NULL").run();
+  const current = await f.http();expect(current.status).toBe(200);await current.body!.cancel();
+  f.raw.prepare("UPDATE sync_relay_link_sessions SET principal_id='profile-principal'").run();
+  expect((await f.http(f.path, {headers: {"x-dohc-link-profile-secret": "Q".repeat(43)}})).status).toBe(404);
+  expect((await f.http(f.path, {headers: {"x-dohc-link-profile-secret": "bad"}})).status).toBe(404);
+  expect(count()).toBe(1);
 });

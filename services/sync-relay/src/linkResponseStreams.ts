@@ -65,6 +65,7 @@ export function createLinkResponseStreams(nowMs: () => number) {
     releaseRetainedBytes: () => void,
     settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
     headers: Record<string, string>,
+    options?: {guard(): void; signal: AbortSignal},
   ): Response => {
     let offset = 0;
     let active = true;
@@ -72,10 +73,12 @@ export function createLinkResponseStreams(nowMs: () => number) {
     const release = (): void => {
       if (!active) return;
       active = false;
+      options?.signal.removeEventListener("abort", abort);
       unregister();
       releaseRetainedBytes();
       settleEgress(offset, nowMs());
     };
+    let abort = (): void => undefined;
     const body = new ReadableStream<Uint8Array>(
       {
         start(controller) {
@@ -88,9 +91,17 @@ export function createLinkResponseStreams(nowMs: () => number) {
             },
           };
           unregister = registerLinkStream(grantId, stream);
+          abort = stream.terminate;
+          options?.signal.addEventListener("abort", abort, {once: true});
+          if (options?.signal.aborted) abort();
         },
         pull(controller) {
           if (!active) return;
+          try {options?.guard();} catch (error) {
+            release();
+            controller.error(error);
+            return;
+          }
           if (offset >= bytes.byteLength) {
             release();
             controller.close();

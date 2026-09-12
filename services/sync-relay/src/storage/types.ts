@@ -563,6 +563,8 @@ export interface SyncRelayStorage {
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
+  authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
+  readLinkAppPublicationBlob(input: import("./publications").LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}): import("./publications").LinkAppPublicationAuthority & {file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number]; bytes: Uint8Array};
   readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;

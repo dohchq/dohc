@@ -4,6 +4,10 @@ import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionI
 import { notFound, badRequest, relayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
+import type { PublicEditRelease } from "@dohc/security-contract";
+import { authorizeLinkShareAction } from "../shareAuthorization";
+import { isPublicLinkAccess } from "../linkSecurity";
+import { readLinkEnrollment } from "./linkEnrollment";
 
 export interface PublicationOwner { workspaceId: string; shareId: string; grantId: string; generation: number; ownerUserId: string }
 export interface PublishAppPublicationInput extends PublicationOwner {
@@ -19,6 +23,30 @@ export interface AppPublicationRow {
 export type AppPublicationState = Omit<AppPublicationRow, "candidate">;
 export interface ReadAppPublicationInput { workspaceId: string; publicationId: string; ownerUserId: string; limits: AppPublicationLimits }
 export interface WithdrawAppPublicationInput extends Omit<ReadAppPublicationInput, "limits"> { expectedAuthorityRevision: number }
+export interface LinkAppPublicationInput {
+  publicationId: string;
+  // Derived from an authenticated link session. Never accepted from a request body.
+  capabilityHash: string;
+  profileTokenHash: string;
+  nowMs: number;
+  limits: AppPublicationLimits;
+  expectedAuthorityRevision?: number;
+  publicEditRelease?: PublicEditRelease;
+}
+export interface LinkAppPublicationDescriptor {
+  publicationId: string;
+  authorityRevision: number;
+  files: AppPublicationCandidate["files"];
+}
+export interface LinkAppPublicationAuthority {
+  descriptor: LinkAppPublicationDescriptor;
+  shareId: string;
+  grantId: string;
+  generation: number;
+  sessionId: string;
+  principalId: string | null;
+  expiresAtMs: number;
+}
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
 function validateBuildIdentity(candidate: AppPublicationCandidate): void {
@@ -109,5 +137,53 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict","Publication authority is exhausted.");
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     return {...current,active:false,authorityRevision:current.authorityRevision+1};
+  });
+}
+
+/** Call within the caller's read or write transaction. */
+export function requireLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput) {
+  const enrollment = readLinkEnrollment(storage, input, input.nowMs);
+  if (!enrollment || enrollment.principal?.blockedAtMs != null) throw notFound();
+  const session = storage.findLinkSessionByCapabilityHash(input.capabilityHash);
+  if (!session || session.capabilityHash !== input.capabilityHash || !Number.isSafeInteger(input.nowMs) ||
+      input.nowMs < 0 || session.expiresAtMs <= input.nowMs) throw notFound();
+  const authorized = authorizeLinkShareAction({storage, grantId: session.grantId, action: "read"});
+  if (!authorized.ok || authorized.grant.generation !== session.generation ||
+      !isPublicLinkAccess(authorized.grant.access, input.publicEditRelease)) throw notFound();
+  const lookup = {workspaceId: authorized.share.workspaceId, ownerUserId: authorized.share.granterUserId,
+    publicationId: input.publicationId, limits: input.limits};
+  const {state: publication} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
+  if (!publication.active || publication.owner.shareId !== authorized.share.shareId ||
+      publication.owner.grantId !== authorized.grant.grantId || publication.owner.generation !== authorized.grant.generation ||
+      !Number.isSafeInteger(publication.authorityRevision) || publication.authorityRevision < 1 ||
+      (input.expectedAuthorityRevision !== undefined && input.expectedAuthorityRevision !== publication.authorityRevision)) throw notFound();
+  const {candidate} = stored(storage, lookup);
+  authority(storage, publication.owner, candidate);
+  const manifestHash = sha(JSON.stringify(candidate));
+  if (sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !== publication.publicationId) throw notFound();
+  const result: LinkAppPublicationAuthority = {
+    descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
+      files: candidate.files},
+    shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
+    sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
+  };
+  return {result, workspaceId: authorized.share.workspaceId, candidate};
+}
+
+/** Shared by launch admission and protected reads; all standing comes from current server state. */
+export function authorizeLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput): LinkAppPublicationAuthority {
+  return storage.readTx(() => requireLinkAppPublication(storage, input).result);
+}
+
+export function readLinkAppPublicationBlob(storage: StorageContext, input: LinkAppPublicationInput & {
+  sha256: string; expectedAuthorityRevision: number;
+}) {
+  return storage.readTx(() => {
+    const {result, workspaceId} = requireLinkAppPublication(storage, input);
+    const file = result.descriptor.files.find(file => file.sha256 === input.sha256);
+    if (!file) throw notFound();
+    const bytes = storage.getBlob(workspaceId, file.sha256);
+    if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256) throw notFound();
+    return {...result, file, bytes};
   });
 }

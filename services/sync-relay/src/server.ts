@@ -1,6 +1,7 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
+import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
@@ -119,6 +120,7 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | LinkAppPublicationRoute
   | OwnerAppPublicationRoute
   | OwnerRestoreRoute
   | { route: "link-exchange" }
@@ -528,6 +530,9 @@ export function createSyncRelayHandler({
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, nowMs});
+  const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
+    requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
+    egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -588,6 +593,7 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
+      if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -698,6 +704,15 @@ export function createSyncRelayHandler({
 
 function parseRoute(request: Request): SyncRelayRoute {
   const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
+    const publicationId = parts[3];
+    if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
+    if (parts.length === 4) return {route: "link-app-publication", publicationId};
+    if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
+      return {route: "link-app-publication", publicationId, sha256: parts[5]};
+    }
+    throw notFound();
+  }
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange") {
     return { route: "link-exchange" };
   }
