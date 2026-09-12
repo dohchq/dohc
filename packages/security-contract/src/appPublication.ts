@@ -6,6 +6,7 @@ export { parseAppCollectionCapability, type AppCollectionCapability } from "./ap
 
 /** Publication transport ceilings shared by desktop, relay, and browser launch. */
 export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
+export const APP_PUBLICATION_MAX_FILES = 512;
 export const APP_PUBLICATION_MAX_BLOB_BYTES = 20 * 1024 * 1024;
 export const APP_PUBLICATION_MAX_REQUEST_BYTES = 256 * 1024;
 export const APP_PUBLICATION_MAX_METADATA_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
@@ -103,7 +104,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     const contentType = file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8";
     if (file.contentType !== contentType || outputs.has(file.path)) throw new Error("Invalid publication bundle type or duplicate.");
     outputs.add(file.path);const byteLength = size(file.byteLength);total += byteLength;
-    if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes) throw new Error("Publication bundle bound exceeded.");
+    if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes || byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Publication bundle bound exceeded.");
     return { path: file.path, sha256: hash(file.sha256), byteLength, contentType };
   }).sort((a, b) => compare(a.path, b.path));
   if (!outputs.has("bundle.js")) throw new Error("Publication script is missing.");

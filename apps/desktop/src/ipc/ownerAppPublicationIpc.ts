@@ -1,12 +1,12 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { RelayShareLinkListResponse } from "./bridgeContract";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./ownerAppPublicationContract";
-import { prepareOwnerAppPublication } from "../workspaces/ownerAppPublication";
+import { prepareOwnerAppPublication, APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -27,7 +27,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
-    callerKey: string; scope: string; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void }>();
+    callerKey: string; scope: string; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void;
+    reactivation?: { publicationId: string; authorityRevision: number } }>();
   const preparing = new Map<string, symbol>();
   const clearExpired = () => {
     for (const entry of pending.values()) if (entry.signal.aborted || Date.now() - entry.createdAt > 10 * 60_000) entry.clear();
@@ -42,6 +43,33 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
       clearExpired();
+      const remember = (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }) => {
+        session.assertCurrent(); operation.signal.throwIfAborted();
+        for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();
+        if (pending.size >= 8) throw new Error("Too many apps await publication. Cancel another preparation and try again.");
+        const candidate = prepared.candidate;
+        const approvalId = randomUUID(), candidateDigest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
+        const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
+        const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
+        pending.set(approvalId, { prepared, input: selection, candidateDigest, callerKey, signal: operation.signal,
+          scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear, reactivation });
+        operation.signal.addEventListener("abort", clear, { once: true });
+        return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
+          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: [], externalNetwork: true });
+      };
+      if (input.action === "reviewReactivation") {
+        if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
+        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+          `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${input.publicationId}`, { signal: operation.signal }));
+        const row = raw as { publicationId?: string; candidate?: unknown; active?: boolean; authorityRevision?: number;
+          owner?: { workspaceId?: string; ownerUserId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
+        if (!row || row.publicationId !== input.publicationId || row.active !== false || row.owner?.workspaceId !== input.workspaceId || row.owner.ownerUserId !== remote.credentials.userId ||
+            !Number.isSafeInteger(row.authorityRevision) || row.authorityRevision! < 1 || !Number.isSafeInteger(row.owner.generation) || row.owner.generation! < 1) throw new Error("This app publication cannot be republished. Refresh the publication list.");
+        const candidate = parseAppPublicationCandidate(row.candidate, APP_PUBLICATION_LIMITS);
+        const selection = OwnerAppPublicationRequest.parse({ action: "prepare", workspaceId: input.workspaceId, appRoot: candidate.appRoot, shareId: row.owner.shareId, grantId: row.owner.grantId });
+        if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
+        return remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! });
+      }
       if (input.action === "list") {
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
         const query = new URLSearchParams({ appRoot: input.appRoot });
@@ -72,6 +100,14 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         // Consume before the first upload so duplicate approvals cannot race.
         entry.clear();
         const { prepared } = entry, { candidate } = prepared;
+        if (entry.reactivation) {
+          const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+            `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${entry.reactivation!.publicationId}/reactivate`, { method: "POST", signal: operation.signal,
+              body: JSON.stringify({ expectedAuthorityRevision: entry.reactivation!.authorityRevision }) }));
+          const row = raw as { publicationId?: string; active?: boolean; authorityRevision?: number; owner?: { workspaceId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
+          if (!row || row.publicationId !== entry.reactivation.publicationId || row.active !== true || row.owner?.workspaceId !== input.workspaceId || row.owner.shareId !== entry.input.shareId || row.owner.grantId !== entry.input.grantId || row.owner.generation !== prepared.generation) throw new Error("dohc could not confirm that this app was republished. Refresh the publication list.");
+          return OwnerAppPublicationResult.parse({ kind: "published", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
+        }
         for (const file of prepared.files) {
           await session.run(() => dependencies.upload(remote.credentials, input.workspaceId, file.sha256, file.bytes, operation.signal));
         }
@@ -116,19 +152,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const { candidate } = prepared;
       assertPreparing();
-      const approvalId = randomUUID(), candidateDigest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const publishEnvelopeBytes = Buffer.byteLength(JSON.stringify({ shareId: input.shareId, grantId: input.grantId, expectedGrantGeneration: prepared.generation, candidate }), "utf8");
       if (publishEnvelopeBytes > APP_PUBLICATION_MAX_REQUEST_BYTES || prepared.files.some(file => file.byteLength > APP_PUBLICATION_MAX_BLOB_BYTES)) {
         throw new Error("This app exceeds the supported publication size. Choose a smaller build.");
       }
-      const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
-      const expiry = setTimeout(clear, 10 * 60_000);
-      expiry.unref();
-      pending.set(approvalId, { prepared, input, candidateDigest, callerKey, signal: operation.signal,
-        scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear });
-      operation.signal.addEventListener("abort", clear, { once: true });
-      return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
-        versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: [], externalNetwork: true });
+      return remember(prepared, input);
       } finally {
         if (preparing.get(callerKey) === preparation) preparing.delete(callerKey);
       }

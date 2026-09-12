@@ -82,6 +82,31 @@ describe("owner app publication", () => {
     await h.invoke({ action: "cancel", workspaceId: "w", approvalId: prepared.approvalId });
     await expect(h.approve(prepared)).rejects.toThrow("expired");
   });
+  it("reviews immutable withdrawn bytes before an explicit revision-checked republish", async () => {
+    const h = harness(), first = await h.prepare(); await h.approve(first);
+    const body = JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body));
+    const owner = { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 };
+    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate: body.candidate, owner, active: false, authorityRevision: 2 });
+    const reviewed = await h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) });
+    if (reviewed.kind !== "prepared") throw new Error("Expected reviewed publication.");
+    expect(reviewed.candidateDigest).toBe(first.candidateDigest);
+    await expect(h.approve(reviewed, "b".repeat(64))).rejects.toThrow("candidate changed");
+    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), owner, active: true, authorityRevision: 3 });
+    expect(await h.approve(reviewed)).toMatchObject({ kind: "published", authorityRevision: 3 });
+    expect(h.relay.mock.calls.at(-1)![1]).toMatch(/\/reactivate$/);
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 2 });
+    expect(h.upload).toHaveBeenCalledOnce();
+  });
+  it("refuses an individual bundle above the relay blob cap before approval", async () => {
+    const h = harness();
+    h.compile.mockImplementationOnce(async request => {
+      const built = await compileClosedApp(request);
+      built.files[0]!.byteLength = 20 * 1024 * 1024 + 1;
+      return built;
+    });
+    await expect(h.prepare()).rejects.toThrow("bundle bound");
+    expect(h.upload).not.toHaveBeenCalled();
+  });
   it("refuses source declarations that change before final capture", async () => {
     const h = harness();
     h.setBeforeCapture(count => { if (count === 2) h.source.set("app/app.publish.json", Buffer.from("{}")); });
