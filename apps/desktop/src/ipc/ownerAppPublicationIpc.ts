@@ -1,5 +1,5 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES } from "@dohc/security-contract/app-publication";
+import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -118,7 +118,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       assertPreparing();
       const approvalId = randomUUID(), candidateDigest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const publishEnvelopeBytes = Buffer.byteLength(JSON.stringify({ shareId: input.shareId, grantId: input.grantId, expectedGrantGeneration: prepared.generation, candidate }), "utf8");
-      if (publishEnvelopeBytes > APP_PUBLICATION_MAX_METADATA_BYTES || prepared.files.some(file => file.byteLength > APP_PUBLICATION_MAX_BUNDLE_BYTES)) {
+      if (publishEnvelopeBytes > APP_PUBLICATION_MAX_REQUEST_BYTES || prepared.files.some(file => file.byteLength > APP_PUBLICATION_MAX_BLOB_BYTES)) {
         throw new Error("This app exceeds the supported publication size. Choose a smaller build.");
       }
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };

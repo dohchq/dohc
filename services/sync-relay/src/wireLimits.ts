@@ -1,4 +1,5 @@
-export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
+import { APP_PUBLICATION_MAX_REQUEST_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
+export const MAX_PAYLOAD_JSON_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
 export const MAX_SHARE_ID_CHARS = 128;
 export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 export const MAX_LOG_PAGE_SIZE = 500;
@@ -16,7 +17,7 @@ export const MAX_LOG_PAGE_SIZE = 500;
 // could never reach a peer. Keep this at or above the engine's
 // MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
 // compares the two, so check both when widening either.
-export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
+export const MAX_BLOB_BYTES = APP_PUBLICATION_MAX_BLOB_BYTES;
 export const MAX_ORIGIN_ID_CHARS = 256;
 
 // One PAGE of the continuous replication lane, for the two log routes. It is
