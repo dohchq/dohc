@@ -26,12 +26,11 @@ it('serves staged bytes once with fresh authority and one blob charge', async ()
   expect((await app.read()).status).toBe(404);
   expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
 });
-it('bounds pending stages and frees capacity on delivery', async () => {
+it('evicts oldest ready stage instead of letting idle clients monopolize capacity', async () => {
   const f = fixture(), first = await launch(f), second = await launch(f);
   const handoff = await (await f.issue()).json();
-  expect((await f.redeem(handoff)).status).toBe(503);
-  expect((await first.read()).status).toBe(200);
   expect((await f.redeem(handoff)).status).toBe(200);
+  expect((await first.read()).status).toBe(404);
   expect((await second.read()).status).toBe(200);
 });
 it('does not let full build admission reject a valid status check', async () => {
@@ -51,4 +50,20 @@ it('keeps transport failures distinct from revoked authority', async () => {
   fail = true;expect((await app.read('/status')).status).toBe(503);
   fail = false;expect((await app.read('/status')).status).toBe(204);
   f.revoke();expect((await app.read('/status')).status).toBe(404);
+});
+
+it('retains staged bytes through transient authorization checks but only delivers once', async () => {
+  let fail = false;
+  const f = fixture(async () => {if (fail) throw Error('Temporary relay failure');}), app = await launch(f);
+  fail = true;expect((await app.read()).status).toBe(503);
+  fail = false;expect((await app.read()).status).toBe(200);
+  expect((await app.read()).status).toBe(404);
+  expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
+});
+it('preserves staged bytes after invalid proof and expires abandoned stages', async () => {
+  const f = fixture(), app = await launch(f);
+  expect((await app.read('/document', {'x-dohc-app-proof': 'Z'.repeat(43)})).status).toBe(404);
+  expect((await app.read()).status).toBe(200);
+  const expired = await launch(f);f.advance(30000);
+  expect((await expired.read()).status).toBe(404);
 });

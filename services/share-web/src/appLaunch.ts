@@ -108,7 +108,11 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
           const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
           const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
-          if (stagedSlots.size >= 2) return unavailable();
+          if (stagedSlots.size >= 2) {
+            const oldestReady = [...stagedSlots].find(value => value.staged !== undefined);
+            if (!oldestReady) return unavailable();
+            oldestReady.staged = undefined; stagedSlots.delete(oldestReady);
+          }
           stagedSlots.add(launch);
           // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
           delete launch.handoffHash;
@@ -118,7 +122,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           launch.staged = doc; launch.stagedExpires = now() + HANDOFF_MS;
           if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
           const cookie = token(), proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); launch.expires = now() + SESSION_MS;
-          const script = `(()=>{const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts';frame.style='border:0;width:100%;height:100vh';const stop=()=>{stopped=true;frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});call('/document').then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});addEventListener('pagehide',stop,{once:true});})();`;
+          const script = `(()=>{const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts';frame.style='border:0;width:100%;height:100vh';const stop=()=>{stopped=true;frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});addEventListener('pagehide',stop,{once:true});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
           return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shared app</title></head><body style="margin:0"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`,
@@ -130,9 +134,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!sessionRate.allow(host, now())) return unavailable();
         if (url.pathname === "/status") { await descriptor(launch, signal); return new Response(null, { status: 204, headers }); }
         if (url.pathname !== "/document") return refusal();
+        await descriptor(launch, signal); signal.throwIfAborted();
         const doc = launch.staged; launch.staged = undefined; stagedSlots.delete(launch);
         if (!doc) return refusal();
-        await descriptor(launch, signal); signal.throwIfAborted();
         if (launch.expires <= now()) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
       } catch (error) { return error instanceof RelayUnavailable ? unavailable() : refusal(); } finally { if (statusRequest) statusPending--; else pending--; }
