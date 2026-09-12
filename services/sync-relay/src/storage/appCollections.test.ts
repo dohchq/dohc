@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
@@ -136,7 +137,8 @@ it("does not activate a public response route",async()=>{
 });
 
 async function writer(path:string) {
-  const child=fork(fileURLToPath(new URL("../testing/appCollectionWriter.ts",import.meta.url)),[path],{execArgv:["--import","tsx/esm"],stdio:["ignore","ignore","pipe","ipc"]});
+  const loader=pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
+  const child=fork(fileURLToPath(new URL("../testing/appCollectionWriter.ts",import.meta.url)),[path],{execArgv:["--import",loader],stdio:["ignore","ignore","pipe","ipc"]});
   let errors="";child.stderr!.on("data",data=>{errors+=data.toString();});
   await new Promise<void>((resolve,reject)=>{child.once("message",()=>resolve());child.once("error",reject);child.once("exit",code=>{if(code)reject(new Error(errors));});});
   return {child,send(input:AcceptAppCollectionInput){return new Promise<any>((resolve,reject)=>{child.once("message",resolve);child.once("error",reject);child.send(input);});}};
