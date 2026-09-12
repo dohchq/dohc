@@ -132,4 +132,12 @@ describe("owner app publication", () => {
     await expect(h.prepare()).rejects.toThrow("original workspace");
     expect(h.requests).toEqual([]); expect(h.flush).not.toHaveBeenCalled();
   });
+  it("preserves an empty list page with a continuation and refuses another app's rows", async () => {
+    const h = harness(), cursor = "c".repeat(64);
+    h.relay.mockResolvedValueOnce({ publications: [], nextCursor: cursor });
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [], nextCursor: cursor });
+    expect(h.requests).toEqual([]);
+    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true }], nextCursor: null });
+    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app", cursor })).rejects.toThrow("another app");
+  });
 });

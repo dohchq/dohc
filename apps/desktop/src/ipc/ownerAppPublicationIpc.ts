@@ -1,5 +1,7 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
+import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { isSharedWithMePath } from "@dohc/workspace-core";
 import { CHANNELS } from "./channels";
 import { RelayShareLinkListResponse } from "./bridgeContract";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./ownerAppPublicationContract";
@@ -40,6 +42,17 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
       clearExpired();
+      if (input.action === "list") {
+        if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
+        const query = new URLSearchParams({ appRoot: input.appRoot });
+        if (input.cursor) query.set("cursor", input.cursor);
+        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+          `/sync/${encodeURIComponent(input.workspaceId)}/app-publications?${query}`, { signal: operation.signal }));
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("dohc could not read app publications.");
+        const result = OwnerAppPublicationResult.parse({ ...raw, kind: "listed" });
+        if (result.kind !== "listed" || result.publications.some(row => row.appRoot !== input.appRoot)) throw new Error("The publication list belongs to another app.");
+        return result;
+      }
       if (input.action === "withdraw") {
         const raw = await session.run(() => dependencies.relayJson(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${input.publicationId}/withdraw`,
