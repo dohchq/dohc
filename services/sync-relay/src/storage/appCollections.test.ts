@@ -6,7 +6,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
@@ -19,6 +19,7 @@ const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
 const cleanups:(()=>void)[]=[];
 const children=new Map<ChildProcess,Promise<void>>();
 afterEach(async()=>{
+  vi.restoreAllMocks();
   for(const [child,exited] of children){if(child.exitCode===null && child.signalCode===null) child.kill();await exited;children.delete(child);}
   for(const close of cleanups.splice(0).reverse()) close();
 });
@@ -215,7 +216,37 @@ it("charges approval bytes and refunds narrowing without refilling create quota"
   expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(3);
 });
 
-it("refuses an oversized projected response before loading its content",()=>{
+it("skips an oversized projected response before loading its content",()=>{
   const f=fixture(),receipt=f.accept();f.write(receipt.path,"---\nname: "+"a".repeat(20_000)+"\ndestination: Tokyo\n---\n",receipt.objectId);
+  expect(f.storage.readAppCollection({...f.input,limit:10})).toEqual({records:[],nextPath:null});
+});
+
+it("paginates past notes and invalid records while retaining valid responses",()=>{
+  const f=fixture();f.write("responses/000-note.md","# Notes");f.write("responses/001-invalid.md","---\ndestination: Mars\n---\n");const receipt=f.accept();
+  const first=f.storage.readAppCollection({...f.input,limit:1});expect(first).toEqual({records:[],nextPath:"responses/000-note.md"});
+  const second=f.storage.readAppCollection({...f.input,limit:1,afterPath:first.nextPath!});expect(second).toEqual({records:[],nextPath:"responses/001-invalid.md"});
+  const third=f.storage.readAppCollection({...f.input,limit:1,afterPath:second.nextPath!});expect(third.records[0].path).toBe(receipt.path);expect(third.nextPath).toBeNull();
+});
+
+it("reads Unicode collection roots without scanning outside their index range",()=>{
+  const f=fixture(),unicode={...capability,collectionPath:"responses📊"};
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:["app","responses","responses📊"],versionId:null}));
+  f.write("responses📊/collection.yaml",schemaText);
+  const source=candidate();source.capabilities=[unicode];
+  const publication=f.storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g",generation:1,ownerUserId:"owner",candidate:source,blobs:[],limits,nowMs:20});
+  f.storage.approveAppCollection({...f.owner,publicationId:publication.publicationId,expectedAuthorityRevision:1,capability:unicode});
+  const input={...f.input,publicationId:publication.publicationId};const receipt=f.storage.acceptAppCollection(input,{maxCreatesPerGrant:5});
+  expect(f.storage.readAppCollection({...input,limit:10}).records[0].path).toBe(receipt.path);
+  const prepare=vi.spyOn(f.raw,"prepare");f.storage.readAppCollection({...input,limit:10});
+  const sql=prepare.mock.calls.map(call=>String(call[0])).find(sql=>sql.includes("FROM sync_relay_current_files file LEFT JOIN"))!;
+  prepare.mockRestore();
+  const plan=f.raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all("w","main","","responses📊/","responses📊0","responses📊/",11);
+  expect(plan.map(row=>row.detail).join("\n")).toMatch(/path>\? AND path<\?/);
+});
+
+it("refuses corrupt in-bound record blobs instead of treating corruption as a skipped note",()=>{
+  const f=fixture(),receipt=f.accept();
+  const row=f.raw.prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE path=?").get(receipt.path)!;
+  f.raw.prepare("UPDATE sync_relay_blobs SET content=zeroblob(byte_length) WHERE sha256=?").run(row.blob_sha256);
   expect(()=>f.storage.readAppCollection({...f.input,limit:10})).toThrow(/not found/i);
 });

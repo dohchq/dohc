@@ -40,7 +40,6 @@ function schema(storage: StorageContext, workspaceId: string, versionId: string,
     .get(workspaceId, versionId, `${capability.collectionPath}/collection.yaml`);
   if (!row || row.blob_sha256 !== capability.schemaSha256 || row.content_kind !== "text") throw notFound();
   const blob = boundedBlob(storage,workspaceId,capability.schemaSha256,MAX_SCHEMA_BYTES);
-  if (!blob || blob.byteLength > MAX_SCHEMA_BYTES || sha(blob) !== capability.schemaSha256) throw notFound();
   const parsed = parseCollectionSchema(new TextDecoder("utf-8", {fatal: true}).decode(blob));
   if (parsed.status !== "valid" || [...capability.allowedFields, ...capability.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw badRequest("Collection schema does not match approval.");
   return parsed.schema;
@@ -69,7 +68,6 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
       const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
       if (row.active !== 1 || !share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId || !grant || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
       const manifest = boundedBlob(storage,input.workspaceId,String(row.manifest_sha256),input.limits.maxMetadataBytes);
-      if (!manifest || manifest.byteLength > input.limits.maxMetadataBytes || sha(manifest) !== row.manifest_sha256) throw notFound();
       const candidate = parseAppPublicationCandidate(JSON.parse(Buffer.from(manifest).toString("utf8")),input.limits);
       const requested = candidate.capabilities?.[0] && parseAppCollectionCapability(candidate.capabilities[0]);
       if (!requested || !narrows(requested, capability)) throw badRequest("Collection approval exceeds the publication request.");
@@ -176,27 +174,30 @@ export function readAppCollection(storage: StorageContext, input: ReadAppCollect
   return storage.readTx(() => {
     const authority = approved(storage,input), prefix = `${authority.capability.collectionPath}/`;
     if (!authority.capability.readFields.length) throw notFound();
-    const rows = storage.db.prepare(`SELECT path,blob_sha256,content_kind FROM sync_relay_current_files
-      WHERE workspace_id=? AND version_id=? AND path>? AND substr(path,1,?)=? AND instr(substr(path,?),'/')=0
-      AND path LIKE '%.md' ORDER BY path LIMIT ?`)
-      .all(authority.workspaceId,authority.candidate.versionId,input.afterPath ?? "",prefix.length,prefix,prefix.length+1,input.limit+1);
+    const rows = storage.db.prepare(`SELECT file.path,file.blob_sha256,file.content_kind,blob.byte_length,length(blob.content) AS actual
+      FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs blob ON blob.workspace_id=file.workspace_id AND blob.sha256=file.blob_sha256
+      WHERE file.workspace_id=? AND file.version_id=? AND file.path>? AND file.path>=? AND file.path<?
+      AND instr(substr(file.path,length(?)+1),'/')=0 AND file.path LIKE '%.md' ORDER BY file.path LIMIT ?`)
+      .all(authority.workspaceId,authority.candidate.versionId,input.afterPath ?? "",prefix,`${authority.capability.collectionPath}0`,prefix,input.limit+1);
     const records: AppCollectionPage["records"] = [];
-    let pageBytes = 0;
+    let pageBytes = 0, scannedPath: string|null = null;
     for (const row of rows.slice(0,input.limit)) {
+      if (row.byte_length === null || row.byte_length !== row.actual || row.content_kind !== "text") throw notFound();
+      if (Number(row.byte_length) > MAX_RECORD_BYTES) {scannedPath=String(row.path);continue;}
       const blob = boundedBlob(storage,authority.workspaceId,String(row.blob_sha256),MAX_RECORD_BYTES);
-      if (!blob || blob.byteLength > MAX_RECORD_BYTES || row.content_kind !== "text" || sha(blob) !== row.blob_sha256) throw notFound();
       const value = parseCollectionRecordFields(new TextDecoder("utf-8",{fatal:true}).decode(blob));
-      if (!value) throw notFound();
+      if (!value) {scannedPath=String(row.path);continue;}
       const selected = Object.fromEntries(authority.capability.readFields.filter(name => Object.hasOwn(value,name)).map(name => [name,value[name]]));
-      for (const [name,value] of Object.entries(selected)) {
+      if (Object.keys(selected).length === 0) {scannedPath=String(row.path);continue;}
+      if (Object.entries(selected).some(([name,value]) => {
         const field = authority.schema.fields.find(field => field.name === name)!;
-        if (validateFieldValue(field,value).status !== "valid") throw notFound();
-      }
+        return validateFieldValue(field,value).status !== "valid";
+      })) {scannedPath=String(row.path);continue;}
       const record = {path:String(row.path),recordId:typeof value.id === "string" && isRecordId(value.id) ? value.id : null,fields:selected};
       const size = bytes(record);
-      if (pageBytes + size > 65_536 && records.length) return {records,nextPath:records.at(-1)!.path};
-      pageBytes += size;records.push(record);
+      if (pageBytes + size > 65_536 && records.length) return {records,nextPath:scannedPath};
+      pageBytes += size;records.push(record);scannedPath=record.path;
     }
-    return {records,nextPath:rows.length > input.limit ? records.at(-1)?.path ?? null : null};
+    return {records,nextPath:rows.length > input.limit ? scannedPath : null};
   });
 }
