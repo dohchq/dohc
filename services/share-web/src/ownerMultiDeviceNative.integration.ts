@@ -157,7 +157,8 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const binding = current.binding;
     const nativeConfigPath = join(root, "ordinary-owner.json");
     writeFileSync(nativeConfigPath, JSON.stringify({
-      ingress: {aggregateBytes: 400000000, applicationWorkingReserveBytes: 1000000, maxUploads: 4, uploadDeadlineMs: 30000},
+      // Owner delivery and provider refresh each reserve about 297 MB in this fixture.
+      ingress: {aggregateBytes: 700000000, applicationWorkingReserveBytes: 1000000, maxUploads: 4, uploadDeadlineMs: 30000},
       maxRegistrations: 8, maxAdoptionBytes: 1000000, maxAdoptionEvents: 100, maxApplicationsPerSettlement: 8,
       ownerOutbox: {maxPendingBytes: 1000000, maxPendingAgeMs: 600000},
       sync: {policy: {maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000}, workingReserveBytes: 4000000},
