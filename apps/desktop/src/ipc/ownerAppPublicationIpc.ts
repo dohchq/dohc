@@ -73,6 +73,7 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
         return OwnerAppPublicationResult.parse({ kind: "published", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
       }
       // A window holds one prepared bundle. Replacement releases its old bytes.
+      if (preparing.has(event.sender.id)) throw new Error("This window is already preparing an app. Wait for it to finish.");
       for (const entry of pending.values()) if (entry.senderId === event.sender.id) entry.clear();
       if (pending.size + preparing.size >= 8) throw new Error("Too many apps await publication. Cancel another preparation and try again.");
       const preparation = Symbol("app preparation");

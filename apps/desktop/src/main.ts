@@ -899,7 +899,7 @@ async function relayShareJsonWithCredentials<T>(
     throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
   }
   const headers = new Headers(init?.headers);
-  if (init?.body) headers.set("content-type", "application/json");
+  if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
   const response = await relayShareFetch(
     `${normalizeServerUrl(credentials.relayUrl)}${path}`,

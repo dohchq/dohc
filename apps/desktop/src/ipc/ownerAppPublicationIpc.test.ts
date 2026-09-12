@@ -113,6 +113,20 @@ describe("owner app publication", () => {
     await expect(h.approve(prepared)).rejects.toThrow("upload failed");
     expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
   });
+  it("refuses overlapping preparation in one window", async () => {
+    const h = harness();
+    let release!: () => void;
+    let entered!: () => void;
+    const compiling = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    h.compile.mockImplementationOnce(async request => { entered(); await blocked; return compileClosedApp(request); });
+    const first = h.prepare();
+    await compiling;
+    await expect(h.prepare()).rejects.toThrow("already preparing");
+    release();
+    const prepared = await first;
+    await h.invoke({ action: "cancel", workspaceId: "w", approvalId: prepared.approvalId });
+  });
   it("rejects received shares before credentials, capture, or compilation", async () => {
     const h = harness(); h.workspace.shareView = { shareId: "received" };
     await expect(h.prepare()).rejects.toThrow("original workspace");
