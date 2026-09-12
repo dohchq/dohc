@@ -228,19 +228,13 @@ export function JoinSyncedWorkspace(props: {
               <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
             ) : (
               <>
-                <p className="m-0 text-xs text-muted">
-                  The workspace belongs to your dohc Drive account. Sign in first, then paste the code from your other machine.
-                </p>
+                <p className="sr-only">Sign in first, then paste the code from your other machine.</p>
                 <CloudLogin onConnected={checkSession} embedded untitled />
               </>
             )}
           </Step>
 
           <Step number={2} title="Paste the code from your other machine" state={codeState}>
-            <p className="m-0 text-xs text-muted">
-              On the other machine, open Settings → dohc Drive and copy the code under
-              "Add this workspace on another machine".
-            </p>
             <input
               data-testid="join-sync-code"
               aria-label="Workspace code"

@@ -429,8 +429,7 @@ export function CloudLogin(props: {
                   data-testid="cloud-managed-unconfigured"
                   className="mb-0 mt-2 text-xs leading-relaxed text-muted"
                 >
-                  dohc Drive isn't configured in this build. You can still connect
-                  to a self-hosted server.
+                  dohc Drive isn't configured in this build. Enter your own server.
                 </p>
               ) : null}
               {managedCloudStatus === "invalid" ? (
@@ -467,14 +466,8 @@ export function CloudLogin(props: {
                   void connect();
                 }}
               >
-                <p className="mb-0 mt-3 text-[11px] font-semibold text-ink">
-                  Self-hosted server
-                </p>
-                <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
-                  Ask your administrator for both origins. No paths or sign-in details.
-                </p>
                 <label className="mt-3 block text-[11px] font-medium text-subtle">
-                  Cloud server URL
+                  Server
                   <input
                     ref={serverUrlInput}
                     spellCheck={false}
@@ -499,7 +492,7 @@ export function CloudLogin(props: {
                   />
                 </label>
                 <label className="mt-2 block text-[11px] font-medium text-subtle">
-                  Sync relay URL
+                  Sync relay
                   <input
                     ref={relayUrlInput}
                     spellCheck={false}
