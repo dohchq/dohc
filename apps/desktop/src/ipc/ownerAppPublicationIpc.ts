@@ -1,5 +1,5 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -55,7 +55,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear, reactivation });
         operation.signal.addEventListener("abort", clear, { once: true });
         return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
-          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: [], externalNetwork: true });
+          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: candidate.capabilities, externalNetwork: true });
       };
       if (input.action === "reviewReactivation") {
         if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
@@ -100,13 +100,26 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         // Consume before the first upload so duplicate approvals cannot race.
         entry.clear();
         const { prepared } = entry, { candidate } = prepared;
+        const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
+          const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
+          if (published.kind !== "published") throw new Error("Invalid publication result.");
+          const capability = candidate.capabilities[0];
+          if (!capability) return published;
+          const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+            `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/collection-approval`,
+            { method: "POST", signal: operation.signal, body: JSON.stringify({ expectedAuthorityRevision: published.authorityRevision, capability }) }));
+          const approval = raw as { publicationId?: unknown; authorityRevision?: unknown; capability?: unknown } | null;
+          if (!approval || approval.publicationId !== published.publicationId || approval.authorityRevision !== published.authorityRevision + 1 ||
+              JSON.stringify(parseAppCollectionCapability(approval.capability)) !== JSON.stringify(capability)) throw new Error("dohc could not confirm the app's collection access.");
+          return OwnerAppPublicationResult.parse({ kind: "published", publicationId: published.publicationId, authorityRevision: approval.authorityRevision });
+        };
         if (entry.reactivation) {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
             `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${entry.reactivation!.publicationId}/reactivate`, { method: "POST", signal: operation.signal,
               body: JSON.stringify({ expectedAuthorityRevision: entry.reactivation!.authorityRevision }) }));
           const row = raw as { publicationId?: string; active?: boolean; authorityRevision?: number; owner?: { workspaceId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
           if (!row || row.publicationId !== entry.reactivation.publicationId || row.active !== true || row.owner?.workspaceId !== input.workspaceId || row.owner.shareId !== entry.input.shareId || row.owner.grantId !== entry.input.grantId || row.owner.generation !== prepared.generation) throw new Error("dohc could not confirm that this app was republished. Refresh the publication list.");
-          return OwnerAppPublicationResult.parse({ kind: "published", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
+          return finishPublication(row.publicationId, row.authorityRevision);
         }
         for (const file of prepared.files) {
           await session.run(() => dependencies.upload(remote.credentials, input.workspaceId, file.sha256, file.bytes, operation.signal));
@@ -119,7 +132,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const owner = row.owner as Record<string, unknown> | undefined;
         if (!owner || owner.workspaceId !== input.workspaceId || owner.shareId !== entry.input.shareId || owner.grantId !== entry.input.grantId || owner.generation !== prepared.generation ||
             JSON.stringify(row.candidate) !== JSON.stringify(candidate) || row.active !== true) throw new Error("The app publication changed. Review it again.");
-        return OwnerAppPublicationResult.parse({ kind: "published", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
+        return finishPublication(row.publicationId, row.authorityRevision);
       }
       // A window holds one prepared bundle. Replacement releases its old bytes.
       if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");

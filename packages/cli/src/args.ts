@@ -332,7 +332,7 @@ export function parseCliArguments(
   const [family, verb, ...tokens] = global.tokens;
   if (family === "app") {
     const [json, ...rest] = tokens;
-    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw> '<JSON>'");
+    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|reviewReactivation> '<JSON>'");
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");

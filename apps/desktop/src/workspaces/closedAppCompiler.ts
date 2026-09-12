@@ -112,7 +112,7 @@ export async function compileClosedApp(request: ClosedAppBuildRequest): Promise<
   }
   for (const file of request.inputs) {
     const path = canonicalPath(file.path);
-    loaderFor(path);
+    if (posix.basename(path) !== "collection.yaml") loaderFor(path);
     if (inputs.has(path) || !(file.bytes instanceof Uint8Array) || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error("Invalid app input inventory.");
     inputBytes += file.bytes.byteLength + Buffer.byteLength(path);
     if (inputBytes > maxInputBytes) throw new Error("App input byte bound exceeded.");

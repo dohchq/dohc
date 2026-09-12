@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "zod": "^4.4.3"
   },

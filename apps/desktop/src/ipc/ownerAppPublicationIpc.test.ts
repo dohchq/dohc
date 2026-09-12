@@ -44,6 +44,7 @@ function harness() {
     if (path.endsWith("/shares/links")) return { ok: true, supportedLinkAccess: ["view", "comment"], links: [grant], independentGrants: [] };
     if (path.endsWith("/withdraw")) return { publicationId, active: false, authorityRevision: 2, owner: { workspaceId: "w" } };
     const body = JSON.parse(String(init!.body));
+    if (path.endsWith("/collection-approval")) return { publicationId, authorityRevision: body.expectedAuthorityRevision + 1, capability: body.capability };
     if (body.expectedGrantGeneration !== grant.generation) throw new Error("grant conflict");
     return { publicationId, candidate: body.candidate, active: true, authorityRevision: 1, owner: {
       workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
@@ -62,7 +63,53 @@ function harness() {
     switchRenderer() { rendererGeneration++; }, switchCredential() { credentialGeneration++; } };
 }
 
+const collection = { kind: "collection-create", collectionPath: "app/responses", allowedFields: ["name", "destination"], requiredFields: ["destination"], readFields: ["name", "destination"] };
+const collectionSchema = "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
+function withCollection(h: ReturnType<typeof harness>, declaration = collection) {
+  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {}, collection: declaration })));
+  h.source.set(`${declaration.collectionPath}/collection.yaml`, Buffer.from(collectionSchema));
+  return h;
+}
+
 describe("owner app publication", () => {
+  it("captures and reviews the exact selected collection before granting access", async () => {
+    const h = withCollection(harness());
+    const prepared = await h.prepare();
+    const capability = { ...collection, schemaSha256: hash(collectionSchema), allowedFields: ["destination", "name"], readFields: ["destination", "name"] };
+    expect(prepared.capabilities).toEqual([capability]);
+    expect(prepared.sourcePaths).toContain("app/responses/collection.yaml");
+    expect(h.compile.mock.calls[0]![0].inputs.map(file => file.path)).toEqual(prepared.sourcePaths);
+    expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
+    expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 2 });
+    const publishBody = JSON.parse(String(h.relay.mock.calls.at(-2)![2]!.body));
+    expect(publishBody.candidate.capabilities).toEqual([capability]);
+    expect(publishBody.candidate.inputs.find((file: { path: string }) => file.path.endsWith("collection.yaml")).sha256).toBe(hash(collectionSchema));
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 1, capability });
+  });
+  it.each(["outside", "malformed", "missing-field", "oversized"])("refuses %s collection schema before compiling", async kind => {
+    const h = withCollection(harness(), kind === "outside" ? { ...collection, collectionPath: "private/responses" } : collection);
+    if (kind === "malformed") h.source.set("app/responses/collection.yaml", Buffer.from("fields: ["));
+    if (kind === "missing-field") h.source.set("app/responses/collection.yaml", Buffer.from("fields:\n  name:\n    type: text\n"));
+    if (kind === "oversized") h.source.set("app/responses/collection.yaml", Buffer.alloc(65_537, 32));
+    await expect(h.prepare()).rejects.toThrow();
+    expect(h.compile).not.toHaveBeenCalled();
+    expect(h.upload).not.toHaveBeenCalled();
+    if (kind === "outside") expect(h.requests.filter(method => method === "versionedText.captureSources")).toHaveLength(1);
+  });
+  it("preserves the full collection capability when reviewing and approving reactivation", async () => {
+    const h = withCollection(harness()), prepared = await h.prepare();
+    await h.approve(prepared);
+    const { candidate } = JSON.parse(String(h.relay.mock.calls.at(-2)![2]!.body));
+    const owner = { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 };
+    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate, owner, active: false, authorityRevision: 3 });
+    const reviewed = await h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) });
+    if (reviewed.kind !== "prepared") throw new Error("Expected reviewed publication.");
+    expect(reviewed.capabilities).toEqual(prepared.capabilities);
+    expect(reviewed.candidateDigest).toBe(prepared.candidateDigest);
+    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), owner, active: true, authorityRevision: 4 });
+    expect(await h.approve(reviewed)).toMatchObject({ kind: "published", authorityRevision: 5 });
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 4, capability: prepared.capabilities[0] });
+  });
   it("prepares exact sources without upload, then approves the displayed digest and supports withdrawal", async () => {
     const h = harness(), prepared = await h.prepare();
     expect(prepared).toMatchObject({ externalNetwork: true, capabilities: [], sourcePaths: ["app/app.publish.json", "app/index.js"] });

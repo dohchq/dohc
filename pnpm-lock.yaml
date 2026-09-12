@@ -397,6 +397,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts
@@ -10517,7 +10520,7 @@ snapshots:
 
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
-      picomatch: 4.0.7
+      picomatch: 4.0.5
 
   fetchdts@0.1.7:
     optional: true
@@ -10982,7 +10985,7 @@ snapshots:
       jiti: 2.7.0
       oxc-parser: 0.147.0
       oxc-resolver: 11.24.2
-      picomatch: 4.0.7
+      picomatch: 4.0.5
       smol-toml: 1.8.0
       strip-json-comments: 5.0.3
       tinyglobby: 0.2.17

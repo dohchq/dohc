@@ -6,14 +6,6 @@ export { parseAppCollectionCapability, type AppCollectionCapability } from "./ap
 export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
   type AppCollectionCreateRequest,type AppCollectionReadRequest,type AppCollectionReceipt,type AppCollectionPage} from "./appCollection";
 
-/** Publication transport ceilings shared by desktop, relay, and browser launch. */
-export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
-export const APP_PUBLICATION_MAX_FILES = 512;
-export const APP_PUBLICATION_MAX_BLOB_BYTES = 20 * 1024 * 1024;
-export const APP_PUBLICATION_MAX_REQUEST_BYTES = 256 * 1024;
-export const APP_PUBLICATION_MAX_METADATA_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
-export const APP_PUBLICATION_MAX_DOCUMENT_BYTES = APP_PUBLICATION_MAX_BUNDLE_BYTES * 6 + 64 * 1024;
-
 export interface AppPublicationLimits { maxFiles: number; maxMetadataBytes: number; maxBundleBytes: number }
 export interface AppPublicationFile { path: string; sha256: string; byteLength: number }
 export interface AppPublicationCandidate {
