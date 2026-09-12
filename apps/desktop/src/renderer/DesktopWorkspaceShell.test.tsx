@@ -966,6 +966,11 @@ describe("workspace switch performance timeline", () => {
 });
 
 describe("direct message workspace picker", () => {
+  beforeAll(async () => {
+    // Module loading is setup; keep the deadline for the rendered behavior.
+    await import("./workbench/ChatsView");
+  }, 30_000);
+
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
