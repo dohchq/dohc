@@ -1563,7 +1563,7 @@ async function dispatch(
       return context.appPublication(request.args.request);
     }
     case "ownerAppResponses": {
-      if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("Removing app responses requires the owning workspace.");
+      if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");
       return context.ownerAppResponses(request.args.request);
     }
     case "moments": {

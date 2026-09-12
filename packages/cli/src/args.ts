@@ -340,7 +340,7 @@ export function parseCliArguments(
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
       if(verb==="responses" || verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"ownerAppResponses",request:OwnerAppResponsesRequest.parse({...value,action:verb==="responses"?"list":"undo"})};
       return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
-    } catch { fail("invalid app publication arguments"); }
+    } catch { fail(verb === "responses" || verb === "undo-responses" ? "invalid app response arguments" : "invalid app publication arguments"); }
   }
   if (family !== "chat") fail("usage: dohc chat <verb>");
   const actor: CliActor = global.actorFlag || env.DOHC_CHAT_ACTOR === "agent" ? "agent" : "human";

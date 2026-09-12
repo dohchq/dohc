@@ -16,7 +16,7 @@ export function createOwnerAppResponsesHandler<Caller,Workspace extends {workspa
     const input=OwnerAppResponsesRequest.parse(raw);
     return deps.withWorkspaceOperation(caller,input.workspaceId,async operation=>{
       operation.assertCurrent();
-      if(shareViewIsPresent(operation.workspace.shareView))throw new Error("Open the original workspace to remove app responses.");
+      if(shareViewIsPresent(operation.workspace.shareView))throw new Error("Open the original workspace to manage app responses.");
       const remote=await deps.remoteForWorkspace(operation.workspace);
       const session=credentialScopedOperation({assertCurrent:()=>{operation.signal.throwIfAborted();operation.assertCurrent();},capturedGeneration:remote.credentialGeneration,currentGeneration:deps.currentCredentialGeneration});
       const readAcceptances=async(selection: {limit:number;publicPrincipalId?:string;afterAcceptanceId?:string})=>{
