@@ -293,8 +293,17 @@ it("keeps collection HTTP off by default and rejects ambient or forged authority
   for(const body of [{...f.body,principalId:"owner"},{...f.body,workspaceId:"w"},{...f.body,authorityRevision:1},{...f.body,fields:{destination:null}}])expect((await f.request("POST",body)).status).toBe(body.authorityRevision===1?404:400);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
-it.each(["?authorityRevision=2&limit=1&limit=2","?authorityRevision=2&afterPath=a&afterPath=b","?authorityRevision=2&ownerUserId=owner","?authorityRevision=02","?authorityRevision=2&limit=101","?authorityRevision=2&afterPath=../private"])("rejects malformed collection query %s",async query=>{
+it.each(["?authorityRevision=2&limit=1&limit=2","?authorityRevision=2&afterPath=a&afterPath=b","?authorityRevision=2&ownerUserId=owner","?authorityRevision=02","?authorityRevision=2&limit=101","?authorityRevision=2&afterPath=%00"])("rejects malformed collection query %s",async query=>{
   const f=httpFixture();expect((await f.request("GET",undefined,query)).status).toBe(400);
+});
+
+it.each(["responses/100%20.md","responses/100 café.md"])("round trips the projected cursor %s",async path=>{
+  const f=httpFixture();f.write(path,"# Note");const receipt=f.accept();
+  const first=await f.request("GET",undefined,"?authorityRevision=2&limit=1");expect(first.status).toBe(200);
+  expect(await first.json()).toEqual({records:[],nextPath:path});
+  const query=new URLSearchParams({authorityRevision:"2",limit:"1",afterPath:path});
+  const second=await f.request("GET",undefined,`?${query}`);expect(second.status).toBe(200);
+  expect((await second.json()).records[0].path).toBe(receipt.path);
 });
 it("cancels an oversized upload before accepting or enrolling",async()=>{
   const f=httpFixture();let cancelled=false;
