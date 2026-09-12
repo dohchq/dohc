@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
   CHATS_METHOD,
   WORKSPACE_METHOD,
@@ -46,6 +47,7 @@ type CliAuthorityState = {
 };
 
 interface DesktopCliServerDependencies<State extends CliAuthorityState> {
+  ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
@@ -165,6 +167,7 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
       );
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) => dependencies.ownerAppPublication!(request) } : {}),
       rootPath: workspace.rootPath,
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,

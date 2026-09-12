@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 
 export const CLI_PROTOCOL_VERSION = 2;
 export const CLI_JSON_SCHEMA_VERSION = 1;
@@ -245,6 +246,7 @@ const collectionCreateRecordArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
@@ -739,6 +741,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
 ]);
 
 const cliResultSchemas = {
+  appPublication: OwnerAppPublicationResult,
   channels: channelsResultSchema,
   threads: threadsResultSchema,
   inbox: inboxResultSchema,

@@ -1,8 +1,8 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
+import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { CHANNELS } from "./channels";
 import { RelayShareLinkListResponse } from "./bridgeContract";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./ownerAppPublicationContract";
 import { prepareOwnerAppPublication } from "../workspaces/ownerAppPublication";
@@ -11,12 +11,11 @@ import { credentialScopedOperation } from "../workspaces/credentialScopedOperati
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 
-export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
-  workspace: Workspace; signal: AbortSignal; session: { generation: number }; assertCurrent(): void;
+export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
+  workspace: Workspace; signal: AbortSignal; scope?: string; assertCurrent(): void;
 }>(dependencies: {
-  registerHandler(channel: string, handler: (event: { sender: Sender }, payload: unknown) => unknown): void;
-  assertTrustedSender(event: { sender: Sender }): void;
-  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, message: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
+  callerKey(caller: Caller): string;
+  withWorkspaceOperation<Result>(caller: Caller, workspaceId: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
   remoteForWorkspace(workspace: Workspace): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
   flushCapture(workspace: Workspace): Promise<void>;
@@ -27,15 +26,15 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
-    senderId: number; rendererGeneration: number; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void }>();
-  const preparing = new Map<number, symbol>();
+    callerKey: string; scope: string; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void }>();
+  const preparing = new Map<string, symbol>();
   const clearExpired = () => {
     for (const entry of pending.values()) if (entry.signal.aborted || Date.now() - entry.createdAt > 10 * 60_000) entry.clear();
   };
-  dependencies.registerHandler(CHANNELS.publishOwnerApp, async (event, raw) => {
-    dependencies.assertTrustedSender(event);
+  return async (caller: Caller, raw: unknown) => {
     const input = OwnerAppPublicationRequest.parse(raw);
-    return dependencies.withRendererWorkspaceOperation(event.sender, input.workspaceId, "Publishing stopped because this window changed workspaces.", async operation => {
+    const callerKey = dependencies.callerKey(caller);
+    return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Only the original workspace can publish this app.");
       const remote = await dependencies.remoteForWorkspace(operation.workspace);
@@ -63,7 +62,7 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
       }
       if (input.action !== "prepare") {
         const entry = pending.get(input.approvalId);
-        if (!entry || entry.senderId !== event.sender.id || entry.rendererGeneration !== operation.session.generation || entry.signal !== operation.signal || entry.input.workspaceId !== input.workspaceId || entry.generation !== remote.credentialGeneration) throw new Error("This app preparation expired. Prepare the app again.");
+        if (!entry || entry.callerKey !== callerKey || entry.scope !== (operation.scope ?? callerKey) || entry.signal !== operation.signal || entry.input.workspaceId !== input.workspaceId || entry.generation !== remote.credentialGeneration) throw new Error("This app preparation expired. Prepare the app again.");
         if (input.action === "cancel") {
           entry.clear();
           return OwnerAppPublicationResult.parse({ kind: "cancelled" });
@@ -86,14 +85,14 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
         return OwnerAppPublicationResult.parse({ kind: "published", publicationId: row.publicationId, authorityRevision: row.authorityRevision });
       }
       // A window holds one prepared bundle. Replacement releases its old bytes.
-      if (preparing.has(event.sender.id)) throw new Error("This window is already preparing an app. Wait for it to finish.");
-      for (const entry of pending.values()) if (entry.senderId === event.sender.id) entry.clear();
+      if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
+      for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();
       if (pending.size + preparing.size >= 8) throw new Error("Too many apps await publication. Cancel another preparation and try again.");
       const preparation = Symbol("app preparation");
-      preparing.set(event.sender.id, preparation);
+      preparing.set(callerKey, preparation);
       const assertPreparing = () => {
         session.assertCurrent();
-        if (preparing.get(event.sender.id) !== preparation) throw new Error("A newer app preparation replaced this one.");
+        if (preparing.get(callerKey) !== preparation) throw new Error("A newer app preparation replaced this one.");
       };
       try {
       let grant;
@@ -120,14 +119,33 @@ export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Wo
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
       const expiry = setTimeout(clear, 10 * 60_000);
       expiry.unref();
-      pending.set(approvalId, { prepared, input, candidateDigest, senderId: event.sender.id, signal: operation.signal,
-        rendererGeneration: operation.session.generation, generation: remote.credentialGeneration, createdAt: Date.now(), clear });
+      pending.set(approvalId, { prepared, input, candidateDigest, callerKey, signal: operation.signal,
+        scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear });
       operation.signal.addEventListener("abort", clear, { once: true });
       return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
         versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities: [], externalNetwork: true });
       } finally {
-        if (preparing.get(event.sender.id) === preparation) preparing.delete(event.sender.id);
+        if (preparing.get(callerKey) === preparation) preparing.delete(callerKey);
       }
     });
+  };
+}
+
+/** Electron renderer adapter. Agents call createOwnerAppPublicationHandler directly. */
+export function registerOwnerAppPublicationIpc<Sender extends { id: number }, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
+  workspace: Workspace; signal: AbortSignal; session: { generation: number }; assertCurrent(): void;
+}>(dependencies: Omit<Parameters<typeof createOwnerAppPublicationHandler<Sender, Workspace, Operation>>[0], "callerKey" | "withWorkspaceOperation"> & {
+  registerHandler(channel: string, handler: (event: { sender: Sender }, payload: unknown) => unknown): void;
+  assertTrustedSender(event: { sender: Sender }): void;
+  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, message: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
+}): void {
+  const handler = createOwnerAppPublicationHandler<Sender, Workspace, Operation & { scope: string }>({
+    callerKey: (sender: Sender) => String(sender.id),
+    withWorkspaceOperation: (sender, workspaceId, work) => dependencies.withRendererWorkspaceOperation(sender, workspaceId, "Publishing stopped because this window changed workspaces.", async operation => work({ ...operation, scope: `${operation.session.generation}` })),
+    ...dependencies,
+  });
+  dependencies.registerHandler(CHANNELS.publishOwnerApp, async (event: { sender: Sender }, raw: unknown) => {
+    dependencies.assertTrustedSender(event);
+    return handler(event.sender, raw);
   });
 }

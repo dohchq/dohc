@@ -76,6 +76,7 @@ import {
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
+import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -173,6 +174,7 @@ export interface CliCollectionsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
@@ -1555,6 +1557,10 @@ async function dispatch(
   options: CliServerOptions,
 ): Promise<unknown> {
   switch (request.verb) {
+    case "appPublication": {
+      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
+      return context.appPublication(request.args.request);
+    }
     case "moments": {
       const includeFiles = request.args.includeFiles ?? false;
       const sinceMs = request.args.sinceMs;

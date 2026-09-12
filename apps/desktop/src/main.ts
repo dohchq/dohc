@@ -10,7 +10,8 @@ import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
-import { registerOwnerAppPublicationIpc } from "./ipc/ownerAppPublicationIpc";
+import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
@@ -3043,7 +3044,12 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
+let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  ownerAppPublication: input => {
+    if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
+    return ownerAppPublicationForCli(input);
+  },
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -4045,7 +4051,7 @@ function registerIpcHandlers(): void {
   });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
-  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+  const ownerPublicationDependencies = {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
@@ -4070,7 +4076,14 @@ function registerIpcHandlers(): void {
           headers: { "content-type": "application/octet-stream" } });
       if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
     },
+  } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
+  registerOwnerAppPublicationIpc(ownerPublicationDependencies);
+  const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
+    ...ownerPublicationDependencies,
+    callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
+    withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
+  ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
 
   const {
     assertShareNotHeldElsewhere,
