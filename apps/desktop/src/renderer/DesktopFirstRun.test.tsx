@@ -67,17 +67,40 @@ describe("first run", () => {
 
   it("suggests ~/dohc as the workspace location", async () => {
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    expect(await screen.findByText("/home/ice/dohc")).toBeTruthy();
+    expect(await screen.findByText("/home/ice/dohc/")).toBeTruthy();
+    expect(screen.getByLabelText("Folder name")).toHaveProperty("value", "personal");
+  });
+
+  it("creates the folder under the name the user typed", async () => {
+    const user = userEvent.setup();
+    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    const name = await screen.findByLabelText("Folder name");
+    await user.clear(name);
+    await user.type(name, "research{Enter}");
+    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: "/home/ice/dohc/research" }),
+    );
+  });
+
+  it("refuses an empty or nested folder name", async () => {
+    const user = userEvent.setup();
+    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    const name = await screen.findByLabelText("Folder name");
+    const create = screen.getByRole("button", { name: /create workspace/i });
+    await user.clear(name);
+    expect(create).toHaveProperty("disabled", true);
+    await user.type(name, "a/b");
+    expect(create).toHaveProperty("disabled", true);
   });
 
   it("lets the user choose another folder", async () => {
     const user = userEvent.setup();
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
     await user.click(
-      await screen.findByRole("button", { name: /choose.*folder/i }),
+      await screen.findByRole("button", { name: "Change location" }),
     );
     expect(bridge.pickWorkspaceRoot).toHaveBeenCalledOnce();
-    expect(await screen.findByText("/home/ice/projects/research")).toBeTruthy();
+    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
   });
 
   it("creates a personal workspace and hands it to the shell", async () => {
@@ -123,43 +146,18 @@ describe("first run", () => {
 
   it("never requires login and never renders auth fields", async () => {
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    await screen.findByText("/home/ice/dohc");
+    await screen.findByText("/home/ice/dohc/");
     expect(screen.queryByLabelText(/email|password/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /sign in|log in|sign up/i }))
       .toBeNull();
   });
 
-  it("mentions cloud sync as optional, not as a gate", async () => {
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    await screen.findByText("/home/ice/dohc");
-    const mention = screen.getByText(/cloud sync is optional/i);
-    expect(mention).toBeTruthy();
-  });
-
-  it("offers Enable dohc Cloud sync without forcing it", async () => {
-    const user = userEvent.setup();
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    await screen.findByText("/home/ice/dohc");
-    const offer = screen.getByRole("button", {
-      name: /enable dohc cloud sync/i,
-    });
-    await user.click(offer);
-    // The offer is truthful — it explains, never gates or asks for auth.
-    expect(
-      screen.getByText(/stays fully functional locally/i),
-    ).toBeTruthy();
-    expect(screen.queryByLabelText(/email|password/i)).toBeNull();
-    expect(
-      screen.getByRole("button", { name: /create workspace/i }),
-    ).toBeTruthy();
-  });
-
   it("offers joining a synced workspace, gated on sign-in", async () => {
     const user = userEvent.setup();
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    await screen.findByText("/home/ice/dohc");
+    await screen.findByText("/home/ice/dohc/");
     await user.click(
-      screen.getByRole("button", { name: /join a synced workspace/i }),
+      screen.getByTestId("first-run-join-synced"),
     );
     expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
     // No session yet: the panel asks for sign-in before showing the code
@@ -177,7 +175,7 @@ describe("first run", () => {
 
   it("reads like a desktop app, not a marketing page", async () => {
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
-    await screen.findByText("/home/ice/dohc");
+    await screen.findByText("/home/ice/dohc/");
     // No marketing tropes: pricing, testimonials, feature grids, sign-up CTAs.
     expect(
       screen.queryByText(/get started free|pricing|testimonial|trusted by/i),
