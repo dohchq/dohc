@@ -154,3 +154,32 @@ it("refuses a worker request prepared before owner withdrawal",async()=>{
   const result=await pending.send(f.input);expect(result.kind).toBe("refused");
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
 });
+
+it("rolls back the blob, enrollment, public mapping and receipt when log append fails",()=>{
+  const f=fixture(),usage=Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
+  f.raw.exec("CREATE TRIGGER reject_collection_log BEFORE INSERT ON sync_relay_log WHEN NEW.origin_id LIKE 'relay:collection-create:%' BEGIN SELECT RAISE(ABORT,'injected log failure'); END;");
+  expect(()=>f.accept()).toThrow(/injected/);
+  for(const table of ["sync_relay_app_collection_receipts","sync_relay_app_public_principals","sync_relay_link_principals"])expect(f.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0);
+  expect(Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes)).toBe(usage);
+  expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
+  f.raw.exec("DROP TRIGGER reject_collection_log");expect(f.accept().kind).toBe("accepted");
+});
+
+it("makes conflicting concurrent payloads produce one receipt and one refusal",async()=>{
+  const f=fixture(),a=await writer(f.path),b=await writer(f.path);
+  const outcomes=await Promise.all([a.send(f.input),b.send({...f.input,fields:{destination:"Manila"}})]);
+  expect(outcomes.map(result=>result.kind).sort()).toEqual(["accepted","refused"]);
+  expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
+});
+
+it("maps the same profile to unrelated public identities across grants",()=>{
+  const f=fixture();f.accept();
+  f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'g2',share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id='g'").run();
+  const publication=f.storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g2",generation:1,ownerUserId:"owner",candidate:candidate(),blobs:[],limits,nowMs:25});
+  f.storage.approveAppCollection({...f.owner,publicationId:publication.publicationId,expectedAuthorityRevision:1,capability});
+  f.storage.mintLinkSession({session:{sessionId:"session2",capabilityHash:"second-session",grantId:"g2",generation:1,mintedAtMs:2,expiresAtMs:10000}});
+  f.accept({publicationId:publication.publicationId,capabilityHash:"second-session"});
+  const mappings=f.raw.prepare("SELECT public_principal_id,principal_id FROM sync_relay_app_public_principals ORDER BY grant_id").all();
+  expect(mappings).toHaveLength(2);expect(mappings[0].public_principal_id).not.toBe(mappings[1].public_principal_id);
+  expect(mappings[0].principal_id).not.toBe(mappings[1].principal_id);
+});

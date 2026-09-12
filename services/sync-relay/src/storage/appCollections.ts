@@ -69,9 +69,10 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
       containment(storage,share.shareId,grant.grantId,candidate.versionId,capability);
       schema(storage,input.workspaceId,candidate.versionId,capability);
     }
-    storage.db.prepare(`INSERT INTO sync_relay_app_collection_approvals(publication_id,capability_json,active) VALUES(?,?,?)
-      ON CONFLICT(publication_id) DO UPDATE SET capability_json=excluded.capability_json,active=excluded.active`)
-      .run(input.publicationId, JSON.stringify(capability), capability ? 1 : 0);
+    const capabilityJson = JSON.stringify(capability);
+    storage.db.prepare(`INSERT INTO sync_relay_app_collection_approvals(publication_id,capability_json,active,storage_bytes) VALUES(?,?,?,?)
+      ON CONFLICT(publication_id) DO UPDATE SET capability_json=excluded.capability_json,active=excluded.active,storage_bytes=excluded.storage_bytes`)
+      .run(input.publicationId, capabilityJson, capability ? 1 : 0, Buffer.byteLength(capabilityJson));
     storage.db.prepare("UPDATE sync_relay_app_publications SET authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     return {publicationId: input.publicationId, authorityRevision: revision + 1, capability};
   });
@@ -89,7 +90,7 @@ function approved(storage: StorageContext, input: LinkAppPublicationInput) {
 function fields(value: unknown, capability: AppCollectionCapability, schema: CollectionSchema) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 32) throw badRequest("Invalid collection response.");
   const record = value as Record<string, unknown>, entries = Object.entries(record).sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0);
-  if (capability.requiredFields.some(name => !Object.hasOwn(record,name))) throw badRequest("Required collection field is missing.");
+  if (capability.requiredFields.some(name => !Object.hasOwn(record,name) || record[name] == null)) throw badRequest("Required collection field is missing.");
   for (const [name, value] of entries) {
     const field = schema.fields.find(field => field.name === name);
     if (!capability.allowedFields.includes(name) || !field || validateFieldValue(field,value).status !== "valid") throw badRequest("Invalid collection response field.");
