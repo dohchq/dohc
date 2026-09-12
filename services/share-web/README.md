@@ -317,10 +317,10 @@ Do not share cookies or cached responses across app hosts. The proxy must preser
 `Set-Cookie`, `Cache-Control`, `Content-Security-Policy`, and origin isolation headers.
 Restarting share-web ends app sessions; recipients reopen the share link to launch again.
 
-## Development
-
 Phase 4 must define and test reverse-proxy WebSocket timeouts before browser
 live editing ships.
+
+## Development
 
 Set `DOHC_SHARE_WEB_DEV=1` only with `NODE_ENV=development` or
 `NODE_ENV=test`. Production startup fails when the viewer build is missing.
