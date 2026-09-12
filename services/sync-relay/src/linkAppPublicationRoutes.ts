@@ -49,7 +49,9 @@ export function createLinkAppPublicationRoutes(options: {
     if (route.sha256 && (!file || file.byteLength > MAX_BLOB_BYTES)) throw notFound();
     const metadata = file ? null : new TextEncoder().encode(JSON.stringify(admitted.descriptor));
     const byteLength = file?.byteLength ?? metadata!.byteLength;
-    const releaseBytes = options.streams.admitLinkBlobBytes(admitted.grantId, byteLength);
+    const retainedByteLength = byteLength + limits.maxMetadataBytes;
+    if (!Number.isSafeInteger(retainedByteLength)) throw relayError("link_read_rate_limited");
+    const releaseBytes = options.streams.admitLinkBlobBytes(admitted.grantId, retainedByteLength);
     if (!releaseBytes) throw relayError("link_read_rate_limited");
     const settleEgress = options.egress.reserve(admitted.grantId, byteLength, options.nowMs());
     if (!settleEgress) {releaseBytes();throw relayError("link_read_rate_limited");}

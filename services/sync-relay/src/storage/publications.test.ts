@@ -235,10 +235,11 @@ it("never falls back to ambient cookies for owner publication authentication", a
   expect((await f.handler(new Request("http://relay/sync/w/app-publications", {method: "POST", headers: {authorization: "Bearer owner", "content-type": "text/plain"}, body: JSON.stringify(f.body)}))).status).toBe(400);
 });
 
-function linkFixture(options: {large?: boolean; egress?: LinkEgressRateLimiter; limiter?: TokenBucketLimiter} = {}) {
+function linkFixture(options: {large?: boolean; maxMetadataBytes?: number; egress?: LinkEgressRateLimiter; limiter?: TokenBucketLimiter} = {}) {
   const f = fixture();
   f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='g'").run();
   const input = request();
+  if (options.maxMetadataBytes !== undefined) input.limits = {...input.limits, maxMetadataBytes: options.maxMetadataBytes};
   if (options.large) {
     const bytes = Buffer.from("a".repeat(140_000));
     input.limits = {...limits, maxBundleBytes: 200_000};
@@ -343,6 +344,20 @@ it("shares existing request and egress admission limits and refunds cancelled by
   expect((await f.http(f.blobPath)).status).toBe(429);
   await first.body!.cancel();
   const retry = await f.http(f.blobPath);expect(retry.status).toBe(200);await retry.body!.cancel();
+});
+
+it("charges retained manifest metadata for tiny bundles and refunds it on cancel and completion", async () => {
+  const egress = new LinkEgressRateLimiter(2 * script.byteLength, 1, 100);
+  const reservations: number[] = [], reserve = egress.reserve.bind(egress);
+  egress.reserve = (grant, bytes, now) => {reservations.push(bytes);return reserve(grant, bytes, now);};
+  const f = linkFixture({maxMetadataBytes: 40 * 1024 * 1024, egress});
+  const held = await f.http(f.blobPath);expect(held.status).toBe(200);
+  expect((await f.http(f.blobPath)).status).toBe(429);
+  await held.body!.cancel();
+  const completed = await f.http(f.blobPath);expect(completed.status).toBe(200);
+  expect(await completed.text()).toBe(script.toString());
+  const after = await f.http(f.blobPath);expect(after.status).toBe(200);await after.body!.cancel();
+  expect(reservations).toEqual([script.byteLength, script.byteLength, script.byteLength]);
 });
 
 it("keeps profile blocks across new unbound sessions without enrolling anonymous readers", async () => {
