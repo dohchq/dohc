@@ -423,3 +423,43 @@ it("keeps unexpected storage failures distinct from a damaged manifest", async (
     profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20})).toThrow("test storage failure");
   f.storage.getBlob = original;
 });
+
+it("reactivates only through explicit owner approval with the displayed authority revision", async () => {
+  const f = httpFixture();await f.upload();
+  const original = await (await f.http("w/app-publications", f.body)).json();
+  const path = `w/app-publications/${original.publicationId}`;
+  expect((await f.http(`${path}/withdraw`, {expectedAuthorityRevision: 1})).status).toBe(200);
+  const retry = await (await f.http("w/app-publications", f.body)).json();
+  expect(retry).toMatchObject({active: false, authorityRevision: 2});
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2}, "reader")).status).toBe(404);
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 1})).status).toBe(409);
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2, active: true})).status).toBe(400);
+  const approved = await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2});expect(approved.status).toBe(200);
+  expect(await approved.json()).toMatchObject({publicationId: original.publicationId, active: true, authorityRevision: 3});
+  expect((await f.http(`${path}/reactivate`, {expectedAuthorityRevision: 2})).status).toBe(409);
+  expect((await (await f.http(path)).json()).candidate).toEqual(original.candidate);
+  expect(f.storage.getBlob("w", digest(script))).toEqual(script);
+});
+
+it.each(["owner", "generation", "grant", "selector", "manifest", "bundle"])("refuses reactivation after %s changes without advancing authority", kind => {
+  const f = fixture(), published = f.storage.publishAppPublication(request());
+  f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: published.publicationId, expectedAuthorityRevision: 1});
+  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='lost' WHERE workspace_id='w'").run();
+  if (kind === "generation") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run();
+  if (kind === "grant") f.storage.revokeShareGrant({shareId: "s", grantId: "g", revokedAtMs: 20});
+  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app"], versionId: null}));
+  if (kind === "manifest") f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
+  if (kind === "bundle") f.raw.prepare("UPDATE sync_relay_blobs SET content=? WHERE sha256=?").run(Buffer.alloc(script.byteLength), digest(script));
+  expect(() => f.storage.reactivateAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: published.publicationId, expectedAuthorityRevision: 2, limits})).toThrow();
+  expect(f.raw.prepare("SELECT active,authority_revision FROM sync_relay_app_publications").get()).toMatchObject({active: 0, authority_revision: 2});
+});
+
+it("does not revive a cached launch guard when its publication is explicitly reapproved", () => {
+  const f = linkFixture();
+  const guard = f.storage.createLinkAppPublicationGuard({publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
+    profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20});
+  const state = {publicationId: f.published.publicationId, workspaceId: "w", ownerUserId: "owner"};
+  f.storage.withdrawAppPublication({...state, expectedAuthorityRevision: 1});
+  f.storage.reactivateAppPublication({...state, expectedAuthorityRevision: 2, limits});
+  expect(() => guard(20)).toThrow();
+});
