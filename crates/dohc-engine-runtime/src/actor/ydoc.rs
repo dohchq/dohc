@@ -755,6 +755,7 @@ impl ActorHandle {
                 None,
                 None,
                 restore_generation,
+                SettlementKind::Document,
             )
         })
         .await
@@ -2024,6 +2025,12 @@ fn settled_collection_record_id_mismatch(
         .map_err(RuntimeError::from)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettlementKind {
+    Document,
+    CollectionAdoption,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ydoc_settle_on_store(
     store: &mut EngineStore,
@@ -2044,6 +2051,7 @@ pub(super) fn ydoc_settle_on_store(
     root_guard: Option<&dyn WorkspaceRootGuard>,
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     restore_generation: Option<i64>,
+    kind: SettlementKind,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -2490,7 +2498,11 @@ pub(super) fn ydoc_settle_on_store(
                 path: Cow::Borrowed(path),
                 text: Cow::Owned(projected_text),
                 moment_id: &moment_id,
-                metadata_origin: "ydoc",
+                metadata_origin: if kind == SettlementKind::CollectionAdoption {
+                    "api"
+                } else {
+                    "ydoc"
+                },
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -2511,6 +2523,14 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
+        if kind == SettlementKind::CollectionAdoption {
+            journal_moment_outbound_in_tx(
+                tx,
+                &key.workspace_id,
+                &result.moment.moment_id,
+                result.deduped,
+            )?;
+        }
         // The settle marker commits atomically with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the

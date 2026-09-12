@@ -3676,11 +3676,20 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
             .collect::<Vec<_>>()
     };
     let before_retry = outgoing();
+    assert_eq!(
+        before_retry.len(),
+        1,
+        "adoption must publish exactly one ordinary file moment"
+    );
     let adoption = before_retry
         .iter()
         .find(|op| op["payloadAfterBlobSha256"] == hex_sha256(settled.as_bytes()))
         .expect("owner adoption must enter the outgoing replication journal");
     assert_eq!(adoption["objectId"], OBJECT);
+    assert_eq!(
+        adoption["metadata"]["origin"], "api",
+        "the adoption must use a valid ordinary replication origin"
+    );
     assert_eq!(
         adoption["payloadAfterBlobSha256"],
         hex_sha256(settled.as_bytes())
