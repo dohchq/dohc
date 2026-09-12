@@ -141,19 +141,23 @@ export interface ListAppPublicationsInput {
   appRoot?: string;
 }
 export type AppPublicationListRow = {
-  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; collectionCapability: AppCollectionCapability | null;
+  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null;
 } & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
 
 export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
   return storage.readTx(() => {
     if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw notFound();
-    const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
-      WHERE workspace_id=? AND owner_user_id=? AND publication_id>? ORDER BY publication_id LIMIT 26`)
+    const rows = storage.db.prepare(`SELECT p.publication_id,a.capability_json FROM sync_relay_app_publications p
+      LEFT JOIN sync_relay_app_collection_approvals a ON a.publication_id=p.publication_id AND a.workspace_id=p.workspace_id AND a.active=1
+      WHERE p.workspace_id=? AND p.owner_user_id=? AND p.publication_id>? ORDER BY p.publication_id LIMIT 26`)
       .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
     const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>(row => {
       const publicationId = String(row.publication_id);
-      const approval = storage.db.prepare("SELECT capability_json FROM sync_relay_app_collection_approvals WHERE publication_id=? AND workspace_id=? AND active=1").get(publicationId, input.workspaceId);
-      const collectionCapability = approval ? parseAppCollectionCapability(JSON.parse(String(approval.capability_json))) : null;
+      let collectionCapability: AppPublicationListRow["collectionCapability"] = null;
+      if (row.capability_json !== null) {
+        try { collectionCapability = parseAppCollectionCapability(JSON.parse(String(row.capability_json))); }
+        catch { collectionCapability = "unavailable"; }
+      }
       try {
         const publication = stored(storage, {...input, publicationId});
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];

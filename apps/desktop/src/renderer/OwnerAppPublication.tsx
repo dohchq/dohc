@@ -241,7 +241,7 @@ function PublicationDialog(props: {
       if (result.kind !== "collectionRevoked" || result.publicationId !== publication.publicationId || result.authorityRevision !== publication.authorityRevision + 1) throw new Error("dohc could not confirm collection access was revoked. Reload the publications.");
       setPublicationsReload(value => value + 1);
       setNotice("App collection access revoked. Prepare the app again to review and restore access.");
-    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not revoke collection access. Try again.")); setPublicationsReload(value => value + 1); } }
+    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not confirm revocation. Reload the publications to check current access.")); setPublicationsReload(value => value + 1); } }
     finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
 
@@ -307,7 +307,7 @@ function PublicationDialog(props: {
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
                       <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}
-                    {publication.collectionCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved collection access</summary>
+                    {publication.collectionCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Collection access details unavailable. You can still revoke access.</p> : publication.collectionCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved collection access</summary>
                       <p className="mb-0 break-all font-mono">{publication.collectionCapability.collectionPath}</p>
                       <p className="mb-0 break-words">Create: {publication.collectionCapability.allowedFields.join(", ")}</p>
                       <p className="mb-0 break-words">Required: {publication.collectionCapability.requiredFields.join(", ") || "None"}</p>

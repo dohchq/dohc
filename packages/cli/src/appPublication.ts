@@ -7,7 +7,7 @@ export const OwnerAppCollectionCapability = z.unknown().transform((value, contex
   try { return parseAppCollectionCapability(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid collection capability." }); return z.NEVER; }
 });
-const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), collectionCapability: OwnerAppCollectionCapability.nullable() };
+const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable() };
 export const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),

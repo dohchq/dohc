@@ -69,10 +69,10 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish app" }));
   });
-  it("confirms revocation, sends the displayed revision, and keeps the app published", async () => {
+  it.each([approvedCollection, "unavailable" as const])("confirms revocation of %s, sends the displayed revision, and keeps the app published", async currentCapability => {
     let revision = 7;
     api.publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "list") return {kind:"listed",publications:[{publicationId:published.publicationId,authorityRevision:revision,shareId:row.shareId,grantId:row.grantId,active:true,collectionCapability: revision === 7 ? approvedCollection : null, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}],nextCursor:null};
+      if (request.action === "list") return {kind:"listed",publications:[{publicationId:published.publicationId,authorityRevision:revision,shareId:row.shareId,grantId:row.grantId,active:true,collectionCapability: revision === 7 ? currentCapability : null, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}],nextCursor:null};
       if (request.action === "revokeCollection") { revision++; return {kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:revision}; }
       return answer(request);
     });

@@ -457,6 +457,14 @@ it("refuses owner approval without explicit owner authority or the disabled feat
   for(const headers of [{cookie:"session=owner"},{authorization:"LinkCapability forged"},{authorization:""}] as Record<string,string>[])expect((await f.approve(input,{headers})).status).toBe(404);
   expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
 });
+it("keeps a damaged active approval revocable",async()=>{
+  const f=ownerHttpFixture({appCollectionPolicy:undefined});
+  f.raw.prepare("UPDATE sync_relay_app_collection_approvals SET capability_json='broken' WHERE publication_id=?").run(f.input.publicationId);
+  const list=()=>f.storage.listAppPublications({workspaceId:"w",ownerUserId:"owner",limits}).publications[0];
+  expect(list()).toMatchObject({publicationId:f.input.publicationId,authorityRevision:2,collectionCapability:"unavailable",manifestUnavailable:false});
+  expect((await f.approve({expectedAuthorityRevision:2,capability:null})).status).toBe(200);
+  expect(list()).toMatchObject({authorityRevision:3,collectionCapability:null});
+});
 
 it("refuses forged fields, widening and stale schema in owner approval",async()=>{
   const f=ownerHttpFixture();
