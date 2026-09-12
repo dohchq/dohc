@@ -410,6 +410,8 @@ it("lets the authenticated owner narrow and revoke the published capability with
 it("refuses owner approval without explicit owner authority or the disabled feature policy",async()=>{
   const input={expectedAuthorityRevision:2,capability};
   const off=ownerHttpFixture({appCollectionPolicy:undefined});expect((await off.approve(input)).status).toBe(404);
+  const revoked=await off.approve({expectedAuthorityRevision:2,capability:null});expect(revoked.status).toBe(200);
+  expect(await revoked.json()).toEqual({publicationId:off.input.publicationId,authorityRevision:3,capability:null});
   const other=ownerHttpFixture({resolveActor:()=>({workspaceId:"w",userId:"other"})});expect((await other.approve(input)).status).toBe(404);
   const scope=ownerHttpFixture({resolveActor:()=>({workspaceId:"other",userId:"owner"})});expect((await scope.approve(input)).status).toBe(404);
   const f=ownerHttpFixture();

@@ -136,6 +136,7 @@ async function spawnRunningRelay(
       DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
       DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
       DOHC_RELAY_APP_PUBLICATIONS: undefined,
+      DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: undefined,
       DOHC_PUBLIC_EDIT_RELEASE: undefined,
       NODE_ENV: "test",
       SYNC_RELAY_TEST_AUTH: "1",
@@ -368,13 +369,13 @@ async function settleWithin<T>(
 }
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
-  it("wires immutable app publication routes only after deployment opt-in", async () => {
+  it.each([undefined, "0", "2"])("wires app publication and collection approval opt-ins with quota %s", async (quota) => {
     const root = await tempRoot("app-publication-config");
     const disabled = await spawnRelay(join(root, "disabled.sqlite"));
     expect((await postJson(disabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
     expect((await fetch(`${disabled}/sync/${WORKSPACE_ID}/app-publications`, {headers: authHeaders()})).status).toBe(404);
 
-    const enabled = await spawnRelay(join(root, "enabled.sqlite"), {DOHC_RELAY_APP_PUBLICATIONS: "1"});
+    const enabled = await spawnRelay(join(root, "enabled.sqlite"), {DOHC_RELAY_APP_PUBLICATIONS: "1", DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: quota});
     expect((await postJson(enabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
     const path = `/sync/${WORKSPACE_ID}/app-publications`;
     expect((await fetch(`${enabled}${path}`, {headers: authHeaders()})).status).toBe(200);
@@ -401,14 +402,26 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       expectedGrantGeneration: share.generation, candidate});
     expect(publishedResponse.status, await publishedResponse.clone().text()).toBe(200);
     const published = await publishedResponse.json() as {publicationId: string; authorityRevision: number};
+    const approvalPath = `${path}/${published.publicationId}/collection-approval`;
+    expect((await postJson(enabled, approvalPath, {
+      expectedAuthorityRevision: published.authorityRevision, capability: {},
+    })).status).toBe(quota === "2" ? 400 : 404);
+    const approval = await postJson(enabled, approvalPath, {
+      expectedAuthorityRevision: published.authorityRevision, capability: null,
+    });
+    expect(approval.status).toBe(200);
+    const approved = await approval.json() as {authorityRevision: number; capability: null};
+    expect(approved.capability).toBeNull();
+    expect(approved.authorityRevision).toBe(published.authorityRevision + 1);
+    published.authorityRevision = approved.authorityRevision;
     const read = await fetch(`${enabled}${path}/${published.publicationId}`, {headers: authHeaders()});
     expect(read.status).toBe(200);
     expect((await read.json() as {active: boolean}).active).toBe(true);
     expect((await postJson(enabled, `${path}/${published.publicationId}/withdraw`, {expectedAuthorityRevision: published.authorityRevision})).status).toBe(200);
     const withdrawn = await fetch(`${enabled}${path}/${published.publicationId}`, {headers: authHeaders()});
     expect((await withdrawn.json() as {active: boolean}).active).toBe(false);
-    // Publication opt-in does not expose collection writes or public Edit.
-    expect((await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}})).status).toBe(404);
+    // Deployment opt-in alone grants neither collection authority nor public Edit.
+    expect((await postJson(enabled, `/sync/link/app-publications/${published.publicationId}/collection`, {fields: {destination: "Tokyo"}})).status).toBe(quota === "2" ? 401 : 404);
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
   });
 
@@ -912,6 +925,18 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  it.each([
+    {quota: "nope", reason: "DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT must be 0 or a positive safe integer."},
+    {quota: "2", reason: "App collections require DOHC_RELAY_APP_PUBLICATIONS=1."},
+  ])("refuses invalid collection configuration before opening storage: $quota", async ({quota, reason}) => {
+    const dbPath = join(await tempRoot("invalid-app-collection"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_RELAY_APP_PUBLICATIONS: "0",
+      DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: quota});
+    expect(code).toBe(1);
+    expect(stderr).toContain(`FATAL: ${reason}`);
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
   it("refuses invalid app publication opt-in before opening storage", async () => {
     const dbPath = join(await tempRoot("invalid-app-publication"), "relay.sqlite");
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",

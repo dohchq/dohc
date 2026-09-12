@@ -27,7 +27,7 @@ import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
-import { readAppPublicationConfig } from "./appPublicationConfig";
+import { readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -170,6 +170,13 @@ const appPublicationLimits = (() => {
   try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
   catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
 })();
+const appCollectionPolicy = (() => {
+  try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
+})();
+if (appCollectionPolicy && !appPublicationLimits) {
+  fatal("FATAL: App collections require DOHC_RELAY_APP_PUBLICATIONS=1.");
+}
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const namedLiveConfig = (() => {
   const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
@@ -296,6 +303,7 @@ const relayApplication = createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
+  appCollectionPolicy,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
