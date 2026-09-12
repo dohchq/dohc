@@ -12,7 +12,8 @@ test("staging refuses an unpinned executable without running it", async t => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const nodeExecutable = join(root, "node.exe"); await writeFile(nodeExecutable, "not Node");
   await assert.rejects(stageAppCompiler({ platform: "win32", arch: "x64", nodeExecutable, destination: join(root, "staged") }), /official Node/);
-  await assert.rejects(stageAppCompiler({ platform: "win32", arch: "arm64" }), /Windows x64/);
+  assert.deepEqual(await stageAppCompiler({ platform: "win32", arch: "arm64" }), { supported: false });
+  await assert.rejects(requireAppCompiler(root, "win32", "arm64"), /Windows x64/);
   await assert.rejects(requireAppCompiler(root, "win32", "x64"), /ENOENT/);
 });
 
@@ -53,6 +54,8 @@ test("build Node version does not control the pinned runtime and downloads remai
     assert.equal(url, "https://nodejs.org/dist/v24.16.0/win-x64/node.exe"); return new Response("wrong binary");
   } }), /checksum/);
   await assert.rejects(readPinnedCompilerNode({ currentNodeExecutable, fetchNode: async () => new Response("", { headers: { "content-length": String(129 * 1024 * 1024) } }) }), /size bound/);
+  // Other platforms exercise refusal paths without downloading a Windows binary.
+  if (process.platform !== "win32" || process.arch !== "x64") return;
   const pinned = await readPinnedCompilerNode();
   const stagedNodePath = join(root, "pinned-node.exe"); await writeFile(stagedNodePath, pinned);
   const reused = await readPinnedCompilerNode({ stagedNodePath, currentNodeExecutable, fetchNode: () => { throw new Error("must reuse staged Node"); } });

@@ -67,8 +67,7 @@ export async function readPinnedCompilerNode(options = {}) {
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
-  if (platform !== "win32") return { supported: false };
-  if (arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
+  if (platform !== "win32" || arch !== "x64") return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
   const node = await readPinnedCompilerNode({ nodeExecutable: options.nodeExecutable, stagedNodePath: join(destination, "node.exe") });
