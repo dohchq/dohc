@@ -1,14 +1,9 @@
-import {z} from "zod";
-import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
+import {OwnerAppResponsePage,OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import {bulkUndoAppResponses,type AppResponseUndoSelection,type AppResponseUndoResult} from "../workspaces/ownerAppResponseModeration";
 import {credentialScopedOperation} from "../workspaces/credentialScopedOperation";
 import {shareViewIsPresent} from "../workspaces/shareViewMarker";
 import type {CloudCredentials} from "../workspaces/cloudCredentialStore";
 import {CHANNELS} from "./channels";
-
-const id=z.string().min(1).max(512);
-const acceptance=z.object({kind:z.literal("accepted"),acceptanceId:id,objectId:id,momentId:id,publicPrincipalId:id,versionId:id,collectionPath:z.string().min(1).max(4096),path:z.string().min(1).max(4096),acceptedAtMs:z.number().int().nonnegative()}).strict();
-const pageSchema=z.object({acceptances:z.array(acceptance).max(100),nextAcceptanceId:id.nullable()}).strict();
 
 export function createOwnerAppResponsesHandler<Caller,Workspace extends {workspaceId:string;shareView?:unknown},Operation extends {workspace:Workspace;signal:AbortSignal;assertCurrent():void}>(deps:{
   withWorkspaceOperation<T>(caller:Caller,workspaceId:string,work:(operation:Operation)=>Promise<T>):Promise<T>;
@@ -24,17 +19,21 @@ export function createOwnerAppResponsesHandler<Caller,Workspace extends {workspa
       if(shareViewIsPresent(operation.workspace.shareView))throw new Error("Open the original workspace to remove app responses.");
       const remote=await deps.remoteForWorkspace(operation.workspace);
       const session=credentialScopedOperation({assertCurrent:()=>{operation.signal.throwIfAborted();operation.assertCurrent();},capturedGeneration:remote.credentialGeneration,currentGeneration:deps.currentCredentialGeneration});
-      const result=await bulkUndoAppResponses(input,{assertCurrent:session.assertCurrent,
-        readAcceptances:async selection=>{
+      const readAcceptances=async(selection: {limit:number;publicPrincipalId?:string;afterAcceptanceId?:string})=>{
           const query=new URLSearchParams({limit:String(selection.limit)});
           if(selection.publicPrincipalId)query.set("publicPrincipalId",selection.publicPrincipalId);
           if(selection.afterAcceptanceId)query.set("afterAcceptanceId",selection.afterAcceptanceId);
           const rawPage=await session.run(()=>deps.relayJson(remote.credentials,`/sync/${encodeURIComponent(input.workspaceId)}/app-responses/${encodeURIComponent(input.grantId)}?${query}`,{signal:operation.signal}));
-          return pageSchema.parse(rawPage);
-        },
+          const page=OwnerAppResponsePage.parse(rawPage);
+          if(page.acceptances.length>selection.limit || page.acceptances.some(row=>selection.publicPrincipalId!==undefined && row.publicPrincipalId!==selection.publicPrincipalId))throw new Error("The response selection changed. Refresh and try again.");
+          return page;
+      };
+      if(input.action==="list")return OwnerAppResponsesResult.parse({action:"list",...await readAcceptances(input)});
+      const result=await bulkUndoAppResponses(input,{assertCurrent:session.assertCurrent,
+        readAcceptances,
         undoAcceptedResponse:selection=>session.run(()=>deps.undoAcceptedResponse(operation.workspace,selection)),
       });
-      return OwnerAppResponsesResult.parse(result);
+      return OwnerAppResponsesResult.parse({action:"undo",...result});
     });
   };
 }
@@ -45,5 +44,5 @@ export function registerOwnerAppResponsesIpc<Sender,Workspace extends {workspace
   withRendererWorkspaceOperation<T>(sender:Sender,workspaceId:string,message:string,work:(operation:Operation)=>Promise<T>):Promise<T>;
 }) {
   const handler=createOwnerAppResponsesHandler<Sender,Workspace,Operation>({...deps,withWorkspaceOperation:(sender,workspaceId,work)=>deps.withRendererWorkspaceOperation(sender,workspaceId,"Removing responses stopped because this window changed workspaces.",work)});
-  deps.registerHandler(CHANNELS.bulkUndoAppResponses,(event,raw)=>{deps.assertTrustedSender(event);return handler(event.sender,raw);});
+  deps.registerHandler(CHANNELS.ownerAppResponses,(event,raw)=>{deps.assertTrustedSender(event);return handler(event.sender,raw);});
 }

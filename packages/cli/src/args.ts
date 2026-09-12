@@ -11,7 +11,7 @@ interface ParsedCliBase {
 export type ParsedCliCommand = ParsedCliBase &
   (
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
-    | { verb: "bulkUndoAppResponses"; request: OwnerAppResponsesRequest }
+    | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
     | { verb: "channels" }
     | { verb: "threads"; channel: string }
     | { verb: "inbox" }
@@ -334,11 +334,11 @@ export function parseCliArguments(
   const [family, verb, ...tokens] = global.tokens;
   if (family === "app") {
     const [json, ...rest] = tokens;
-    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|reviewReactivation> '<JSON>'");
+    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|reviewReactivation|responses> '<JSON>'");
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
-      if(verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"bulkUndoAppResponses",request:OwnerAppResponsesRequest.parse(value)};
+      if(verb==="responses" || verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"ownerAppResponses",request:OwnerAppResponsesRequest.parse({...value,action:verb==="responses"?"list":"undo"})};
       return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
     } catch { fail("invalid app publication arguments"); }
   }

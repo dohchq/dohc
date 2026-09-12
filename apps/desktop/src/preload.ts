@@ -378,7 +378,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
-  bulkUndoAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.bulkUndoAppResponses,OwnerAppResponsesRequest.parse(payload))),
+  ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>

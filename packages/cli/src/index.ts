@@ -61,7 +61,7 @@ function buildCliRequest(
   } as const;
   switch (command.verb) {
     case "appPublication":
-    case "bulkUndoAppResponses":
+    case "ownerAppResponses":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "channels":
       return {
@@ -183,7 +183,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       ((value: CliRequestWithoutToken) =>
         sendCliRequest(value, {
           ...options.client,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "appPublication" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          timeoutMs: options.client?.timeoutMs ?? (command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
           env,
         }));
     const rawResult = await send(request);

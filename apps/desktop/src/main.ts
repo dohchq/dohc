@@ -3052,7 +3052,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
   },
-  bulkUndoAppResponses:input=>{
+  ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
     return ownerAppResponsesForCli(input);
   },

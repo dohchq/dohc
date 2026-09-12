@@ -248,7 +248,7 @@ const collectionCreateRecordArgsSchema = z
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("bulkUndoAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
@@ -749,7 +749,7 @@ const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
 
 const cliResultSchemas = {
   appPublication: OwnerAppPublicationResult,
-  bulkUndoAppResponses: OwnerAppResponsesResult,
+  ownerAppResponses: OwnerAppResponsesResult,
   channels: channelsResultSchema,
   threads: threadsResultSchema,
   inbox: inboxResultSchema,

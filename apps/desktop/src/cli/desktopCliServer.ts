@@ -47,7 +47,7 @@ type CliAuthorityState = {
 };
 
 interface DesktopCliServerDependencies<State extends CliAuthorityState> {
-  bulkUndoAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
+  ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   listWorkspaces(): RegistryEntry[];
@@ -166,17 +166,17 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(await collectionEditContextFor(operation)),
       );
-    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.bulkUndoAppResponses)
+    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.ownerAppResponses)
       ? await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;
       }) : undefined;
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.bulkUndoAppResponses ? {bulkUndoAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
+      ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
           if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment?.aborted)throw new Error("The response workspace attachment changed.");
-          return dependencies.bulkUndoAppResponses!(request);
+          return dependencies.ownerAppResponses!(request);
         })}:{}),
       ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
