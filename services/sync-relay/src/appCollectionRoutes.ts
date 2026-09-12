@@ -1,5 +1,5 @@
 import {readBoundedJson,type TokenBucketLimiter} from "@dohc/service-http";
-import {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,type AppPublicationLimits} from "@dohc/security-contract/app-publication";
+import {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_RESPONSE_BYTES,type AppPublicationLimits} from "@dohc/security-contract/app-publication";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import {hashLinkProfileSecret,type ValidatedLinkCapability,type LinkEgressRateLimiter} from "./linkSecurity";
 import {LINK_SECRET_PATTERN} from "@dohc/security-contract/wire-patterns";
@@ -9,8 +9,7 @@ import type {createLinkResponseStreams} from "./linkResponseStreams";
 
 export type LinkAppCollectionRoute={route:"link-app-collection";publicationId:string};
 export interface AppCollectionPolicy {maxCreatesPerGrant:number}
-// The storage page caps record JSON at 64 KiB; allow its cursor and envelope too.
-const RESPONSE_BYTES=72*1024;
+const RESPONSE_BYTES=APP_COLLECTION_RESPONSE_BYTES;
 const BODY_DEADLINE_MS=30_000;
 export function createLinkAppCollectionRoutes(options:{
   storage:SyncRelayStorage;limits?:AppPublicationLimits;policy?:AppCollectionPolicy;

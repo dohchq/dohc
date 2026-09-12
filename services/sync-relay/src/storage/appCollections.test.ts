@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, APP_COLLECTION_RESPONSE_BYTES, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
 import { createSyncRelayHandler,type CreateSyncRelayHandlerOptions } from "../server";
@@ -305,6 +305,14 @@ it.each(["responses/100%20.md","responses/100 café.md"])("round trips the proje
   const second=await f.request("GET",undefined,`?${query}`);expect(second.status).toBe(200);
   expect((await second.json()).records[0].path).toBe(receipt.path);
 });
+
+it("skips oversized synced filenames and returns a usable continuation",async()=>{
+  const f=httpFixture();f.write(`responses/000-${"a".repeat(8200)}.md`,"# Oversized name");f.write("responses/001-note.md","# Note");const receipt=f.accept();
+  const first=await f.request("GET",undefined,"?authorityRevision=2&limit=1");expect(first.status).toBe(200);
+  expect(await first.json()).toEqual({records:[],nextPath:"responses/001-note.md"});
+  const second=await f.request("GET",undefined,"?authorityRevision=2&limit=1&afterPath=responses%2F001-note.md");expect(second.status).toBe(200);
+  expect((await second.json()).records[0].path).toBe(receipt.path);
+});
 it("cancels an oversized upload before accepting or enrolling",async()=>{
   const f=httpFixture();let cancelled=false;
   const stream=new ReadableStream<Uint8Array>({pull(controller){controller.enqueue(new Uint8Array(16_385));},cancel(){cancelled=true;}});
@@ -333,7 +341,7 @@ it.each(["withdraw","approval","generation","selector","schema","expired","block
 });
 it("admits request rate and response capacity before the write and releases cancelled capacity",async()=>{
   const rate=httpFixture({linkReadRateLimiter:new TokenBucketLimiter(1,0.001,100)});const first=await rate.request();await first.body!.cancel();expect((await rate.request("POST",rate.body)).status).toBe(429);expect(rate.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);
-  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(72*1024,0.001,100)});
+  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(APP_COLLECTION_RESPONSE_BYTES,0.001,100)});
   const held=await f.request();expect(held.status).toBe(200);expect((await f.request("POST",f.body)).status).toBe(429);
   await held.body!.cancel();const accepted=await f.request("POST",f.body);expect(accepted.status).toBe(200);await accepted.body!.cancel();
 });
@@ -352,7 +360,7 @@ it("serializes concurrent HTTP retries into one accepted workspace moment",async
 });
 
 it("cancels an interrupted body without accepting and refunds its egress reservation",async()=>{
-  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(72*1024,0.001,100)}),body=deferredBody(),abort=new AbortController();
+  const f=httpFixture({linkGrantEgressRateLimiter:new LinkEgressRateLimiter(APP_COLLECTION_RESPONSE_BYTES,0.001,100)}),body=deferredBody(),abort=new AbortController();
   const pending=f.handler(new Request(`https://relay${f.path}`,{method:"POST",headers:{...f.headers,"content-type":"application/json"},body:body.stream,signal:abort.signal,duplex:"half"} as RequestInit));
   await body.ready;abort.abort();await pending;
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(-1);

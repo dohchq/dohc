@@ -14,6 +14,10 @@ export const APP_COLLECTION_SERVER_FIELDS = ["id", "created_at", "created_by", "
 const reserved = new Set<string>(APP_COLLECTION_SERVER_FIELDS);
 export const APP_COLLECTION_REQUEST_BYTES = 16_384;
 export const APP_COLLECTION_FIELDS_BYTES = 8_192;
+export const APP_COLLECTION_CURSOR_BYTES = 8_192;
+export const APP_COLLECTION_PAGE_BYTES = 65_536;
+// JSON can escape each cursor byte to six bytes, plus the page envelope.
+export const APP_COLLECTION_RESPONSE_BYTES = APP_COLLECTION_PAGE_BYTES + APP_COLLECTION_CURSOR_BYTES * 6 + 1_024;
 export interface AppCollectionCreateRequest {authorityRevision:number;idempotencyKey:string;fields:Record<string,unknown>}
 export interface AppCollectionReadRequest {authorityRevision:number;limit:number;afterPath?:string}
 export interface AppCollectionReceipt {kind:"accepted";acceptanceId:string;objectId:string;path:string;momentId:string;acceptedAtMs:number}
@@ -37,7 +41,7 @@ export function parseAppCollectionReadQuery(query:URLSearchParams):AppCollection
   if (!Number.isSafeInteger(limit)||limit>100) throw new Error("Invalid collection page limit.");
   if (afterPath !== null) {
     const path=validateUserWritePath(afterPath);
-    if (!afterPath || afterPath.length>2048 || !path.ok || path.normalized!==afterPath) throw new Error("Invalid collection page cursor.");
+    if (!afterPath || new TextEncoder().encode(afterPath).byteLength>APP_COLLECTION_CURSOR_BYTES || !path.ok || path.normalized!==afterPath) throw new Error("Invalid collection page cursor.");
   }
   return {authorityRevision,limit,...(afterPath===null?{}:{afterPath})};
 }

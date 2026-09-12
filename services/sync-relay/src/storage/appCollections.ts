@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, APP_COLLECTION_PAGE_BYTES, APP_COLLECTION_FIELDS_BYTES, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { isRecordId, parseCollectionRecordFields, parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
@@ -106,7 +106,7 @@ function fields(value: unknown, capability: AppCollectionCapability, schema: Col
     if (!(valid(value) || (Array.isArray(value) && value.every(valid)))) throw badRequest("Invalid collection response value.");
   }
   const result = Object.fromEntries(entries);
-  if (bytes(result) > MAX_RECORD_BYTES / 2) throw badRequest("Collection response is too large.");
+  if (bytes(result) > APP_COLLECTION_FIELDS_BYTES) throw badRequest("Collection response is too large.");
   return result;
 }
 /** The caller must opt into collection acceptance; public activation remains gated. */
@@ -168,14 +168,14 @@ export function authorizeLinkAppCollection(storage: StorageContext,input:LinkApp
 }
 /** Reads the current workspace projection, so owner edits and deletions take effect. */
 export function readAppCollection(storage: StorageContext, input: ReadAppCollectionInput): AppCollectionPage {
-  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100 || (input.afterPath !== undefined && (typeof input.afterPath !== "string" || input.afterPath.length > 2048))) throw badRequest("Invalid collection page.");
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100 || (input.afterPath !== undefined && (typeof input.afterPath !== "string" || Buffer.byteLength(input.afterPath) > APP_COLLECTION_CURSOR_BYTES))) throw badRequest("Invalid collection page.");
   return storage.readTx(() => {
     const authority = approved(storage,input), prefix = `${authority.capability.collectionPath}/`;
     if (!authority.capability.readFields.length) throw notFound();
     const rows = storage.db.prepare(`SELECT file.path,file.blob_sha256,file.content_kind,blob.byte_length,length(blob.content) AS actual
       FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs blob ON blob.workspace_id=file.workspace_id AND blob.sha256=file.blob_sha256
       WHERE file.workspace_id=? AND file.version_id=? AND file.path>? AND file.path>=? AND file.path<?
-      AND instr(substr(file.path,length(?)+1),'/')=0 AND file.path LIKE '%.md' ORDER BY file.path LIMIT ?`)
+      AND length(CAST(file.path AS BLOB))<=${APP_COLLECTION_CURSOR_BYTES} AND instr(substr(file.path,length(?)+1),'/')=0 AND file.path LIKE '%.md' ORDER BY file.path LIMIT ?`)
       .all(authority.workspaceId,authority.candidate.versionId,input.afterPath ?? "",prefix,`${authority.capability.collectionPath}0`,prefix,input.limit+1);
     const records: AppCollectionPage["records"] = [];
     let pageBytes = 0, scannedPath: string|null = null;
@@ -195,7 +195,8 @@ export function readAppCollection(storage: StorageContext, input: ReadAppCollect
       })) {scannedPath=String(row.path);continue;}
       const record = {path:String(row.path),recordId:typeof value.id === "string" && isRecordId(value.id) ? value.id : null,fields:selected};
       const size = bytes(record);
-      if (pageBytes + size > 65_536 && records.length) return {records,nextPath:scannedPath};
+      if (size > APP_COLLECTION_PAGE_BYTES) {scannedPath=record.path;continue;}
+      if (pageBytes + size > APP_COLLECTION_PAGE_BYTES && records.length) return {records,nextPath:scannedPath};
       pageBytes += size;records.push(record);scannedPath=record.path;
     }
     return {records,nextPath:rows.length > input.limit ? scannedPath : null};
