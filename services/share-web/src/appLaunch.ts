@@ -85,7 +85,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (!exact(body, "discriminator,publicationId") || typeof body.discriminator !== "string" || !isSessionDiscriminator(body.discriminator) || typeof body.publicationId !== "string" || !PUBLICATION.test(body.publicationId)) return refusal();
           const material = await options.resolveMaterial(body.discriminator, request.headers.get("cookie"), signal); if (!material.ok) return refusal();
           const current = await descriptor({ publicationId: body.publicationId, capability: material.capabilityToken, profileSecret: material.profileSecret }, signal);
-          signal.throwIfAborted(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
+          signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
           launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, capability: material.capabilityToken, profileSecret: material.profileSecret,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
           return Response.json({ action: `https://${launchHost}/bootstrap`, handoff }, { headers: { ...headers, ...(material.setCookie ? { "set-cookie": material.setCookie } : {}) } });

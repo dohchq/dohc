@@ -853,8 +853,8 @@ export function createShareWebApplication({
     if (relative.includes("..") || relative.includes("\\")) return refused();
     try {
       const bytes = await readFile(join(viewerAssetsDir, relative));
-      return response(bodyBuffer(bytes), {
-        headers: { "content-type": contentTypeForAsset(relative), ...(appLaunchConfig ? {"content-security-policy": SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`)} : {}) },
+      const result = response(bodyBuffer(bytes), {
+        headers: { "content-type": contentTypeForAsset(relative) },
       });
     } catch {
       return refused();
@@ -994,6 +994,7 @@ export function createShareWebApplication({
     }
   }
 
+  if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host)) throw new TypeError("App viewer origin must be an exact configured public Host.");
   const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
   const handle = async (request: Request): Promise<Response> => {
     if (appLaunch?.matches(request)) return appLaunch.handle(request);
