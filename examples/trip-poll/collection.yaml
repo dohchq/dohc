@@ -1,0 +1,6 @@
+fields:
+  name:
+    type: text
+  destination:
+    type: select
+    options: [Tokyo, Manila]
