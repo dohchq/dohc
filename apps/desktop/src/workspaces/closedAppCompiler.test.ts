@@ -13,6 +13,14 @@ const bounds = { maxInputFiles: 8, maxInputBytes: 100_000, maxOutputBytes: 100_0
 afterEach(() => vi.unstubAllEnvs());
 
 describe("closed app compiler", () => {
+  it("binds a collection schema as captured metadata without allowing it as code", async () => {
+    const schema = file("responses/collection.yaml", "fields: {}\n");
+    const result = await compileClosedApp({ entryPath: "main.js", bounds,
+      inputs: [file("main.js", "document.body.textContent = 'poll';"), schema] });
+    expect(result.dependencyLock.map(input => input.path)).toEqual(["main.js"]);
+    await expect(compileClosedApp({ entryPath: "main.js", bounds,
+      inputs: [file("main.js", "import './responses/collection.yaml';"), schema] })).rejects.toThrow();
+  });
   it("bundles ordinary React TSX, createRoot, hooks, CSS and an asset from captured dependencies", async () => {
     const require = createRequire(import.meta.url);
     const reactRoot = dirname(require.resolve("react/package.json"));
