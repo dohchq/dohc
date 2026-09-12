@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
-import type { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
+import { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
@@ -11,6 +11,12 @@ import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
 type ActiveLink = RelayShareLinkRow & { selector: NonNullable<RelayShareLinkRow["selector"]> };
+
+function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
+  const checked = OwnerAppPublicationResult.safeParse(result);
+  if (!checked.success || checked.data.kind !== "prepared") throw new Error("dohc could not verify this app's data access. Prepare the app again.");
+  return checked.data;
+}
 
 type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void };
 
@@ -147,11 +153,12 @@ function PublicationDialog(props: {
         throw new Error("dohc could not prepare this app. Try again.");
       }
       candidate.current = result;
-      setPrepared(result);
+      const verified = verifiedPrepared(result);
+      setPrepared(verified);
       setReactivating(false);
       setPreparedLink(linkLabel(selectedLink));
     } catch (error) {
-      if (alive.current && mine === request.current) setError(ipcErrorMessage(error, "dohc could not prepare this app. Try again."));
+      if (alive.current && mine === request.current) { cancel(candidate.current); candidate.current = null; setError(ipcErrorMessage(error, "dohc could not prepare this app. Try again.")); }
     } finally { if (alive.current && mine === request.current) setBusy(null); }
   };
 
@@ -167,11 +174,12 @@ function PublicationDialog(props: {
         throw new Error("dohc could not load this publication. Reload the publications.");
       }
       candidate.current = result;
-      setPrepared(result);
+      const verified = verifiedPrepared(result);
+      setPrepared(verified);
       setReactivating(true);
       setPreparedLink(`Link ${publication.grantId}`);
     } catch (error) {
-      if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not load this publication. Reload the publications.")); setPublicationsReload(value => value + 1); }
+      if (alive.current && mine === request.current) { cancel(candidate.current); candidate.current = null; setError(ipcErrorMessage(error, "dohc could not load this publication. Reload the publications.")); setPublicationsReload(value => value + 1); }
     } finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
 
@@ -186,7 +194,7 @@ function PublicationDialog(props: {
       candidate.current = null;
       setPublicationsReload(value => value + 1);
       setPrepared(null);
-      setNotice("App published on the selected link.");
+      setNotice(reactivating ? "App republished." : "App published on the selected link.");
     } catch (error) {
       if (alive.current && mine === request.current) {
         cancel(prepared);
@@ -215,8 +223,12 @@ function PublicationDialog(props: {
   const back = () => {
     cancel(candidate.current); candidate.current = null; setPrepared(null); setError(null);
   };
+  const closeWithdrawal = () => {
+    setPendingWithdraw(null);
+    heading.current?.focus();
+  };
 
-  return <Overlay onClose={committing ? undefined : props.onClose}>
+  return <><Overlay onClose={committing ? undefined : props.onClose}>
     <section role="dialog" aria-modal="true" aria-labelledby="app-publication-title" data-testid="app-publication-dialog"
       className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(560px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5">
       <header className="flex items-center gap-2">
@@ -234,7 +246,15 @@ function PublicationDialog(props: {
             {prepared.sourcePaths.map(path => <li key={path} className="break-all">{path}</li>)}
           </ul>
         </div>
-        <div className="space-y-1 text-[13px] text-muted"><p className="m-0"><strong className="font-medium text-ink">Workspace data access:</strong> None</p>
+        <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
+            <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
+            <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
+              <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
+              <div><dt className="inline font-medium text-ink">Fields it can read: </dt><dd className="m-0 inline break-words font-mono">{capability.readFields.join(", ") || "None"}</dd></div></dl>
+            <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
+            <details className="text-[12px]"><summary className="cursor-pointer">Collection schema revision</summary><p className="break-all font-mono">{capability.schemaSha256}</p></details>
+          </div>)}
           <p className="m-0">The app can use external services and send them data it receives.</p>
           <p className="m-0">Unpublishing stops new access through dohc. It cannot remove copies sent elsewhere.</p>
         </div>
@@ -275,11 +295,11 @@ function PublicationDialog(props: {
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>
           <PrimaryButton disabled={!!busy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
       </>}
-      </section>
-      {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={() => setPendingWithdraw(null)} onConfirm={() => { const value = pendingWithdraw; setPendingWithdraw(null); void withdraw(value); }}>
+      </section></Overlay>
+      {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
         <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
         <p className="mt-2 mb-0 text-[13px] text-muted">{pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
         <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
       </ConfirmDialog> : null}
-  </Overlay>;
+  </>;
 }

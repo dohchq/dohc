@@ -217,7 +217,7 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(false);
     expect(screen.getByTestId("app-publication-digest").textContent).toBe(prepared.candidateDigest);
     await userEvent.setup().click(screen.getByRole("button", { name: "Republish this revision" }));
-    await screen.findByText("App published on the selected link.");
+    await screen.findByText("App republished.");
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
   });
 
@@ -228,6 +228,35 @@ describe("owner app publication", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
     await userEvent.setup().click(screen.getByTestId("app-publication-withdraw-cancel"));
     expect(screen.queryByTestId("app-publication-withdraw-confirm")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Publish app" }));
     expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list")).toBe(true);
+  });
+
+  it("shows the fixed collection capability before approving the unchanged digest", async () => {
+    const capability = { kind: "collection-create" as const, collectionPath: "trip/responses", schemaSha256: "d".repeat(64), allowedFields: ["name", "place"], requiredFields: ["place"], readFields: ["place"] };
+    api.publishOwnerApp.mockImplementation(request => request.action === "prepare" ? Promise.resolve({ ...prepared, capabilities: [capability] }) : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await review();
+    const scope = screen.getByTestId("app-publication-capability");
+    expect(scope.textContent).toContain("Create records only in trip/responses");
+    expect(scope.textContent).toContain("Fields it can create: name, place");
+    expect(scope.textContent).toContain("Required fields: place");
+    expect(scope.textContent).toContain("Fields it can read: place");
+    expect(scope.textContent).toContain(capability.schemaSha256);
+    expect(scope.textContent).toContain("cannot change or delete existing records");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
+  });
+
+  it.each([undefined, [{ kind: "collection-create", collectionPath: "trip/responses" }]])("refuses malformed or missing capabilities: %j", async capabilities => {
+    api.publishOwnerApp.mockImplementation(request => request.action === "prepare" ? Promise.resolve({ ...prepared, capabilities } as unknown as OwnerAppPublicationResult) : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByText("dohc could not verify this app's data access. Prepare the app again.");
+    expect(screen.queryByRole("button", { name: "Publish this revision" })).toBeNull();
+    expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(false);
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
   });
 });
