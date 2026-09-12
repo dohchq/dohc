@@ -95,6 +95,7 @@ import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
+import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as sharesStorage from "./storage/shares";
@@ -498,6 +499,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   readAppCollection(input: appCollectionStorage.ReadAppCollectionInput) {
     return appCollectionStorage.readAppCollection(this,input);
+  }
+
+  readOwnerAppCollectionAcceptances(input: appCollectionModeration.OwnerAppCollectionAcceptancesInput) {
+    return appCollectionModeration.readOwnerAppCollectionAcceptances(this,input);
   }
 
   readAppPublication(input: publicationStorage.ReadAppPublicationInput) {
