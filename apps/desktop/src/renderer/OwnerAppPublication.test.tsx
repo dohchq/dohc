@@ -259,4 +259,17 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(false);
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
   });
+
+  it("mounts one lazy response panel per grant across multiple publications", async () => {
+    const ownerAppResponses = vi.fn();
+    vi.stubGlobal("dohcDesktop", { ...api, ownerAppResponses });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {
+      kind: "listed", publications: ["c", "d"].map((value, index) => ({ publicationId: value.repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: index === 0, manifestUnavailable: false })), nextCursor: null,
+    } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await screen.findByRole("region", { name: "App responses" });
+    expect(screen.getAllByRole("region", { name: "App responses" })).toHaveLength(1);
+    expect(ownerAppResponses).not.toHaveBeenCalled();
+  });
 });
