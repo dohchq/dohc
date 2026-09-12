@@ -1,6 +1,8 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
+import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 
 export const APP_PUBLICATION_MAX_BUNDLE_BYTES = 32 * 1024 * 1024;
 export const APP_PUBLICATION_MAX_DOCUMENT_BYTES = APP_PUBLICATION_MAX_BUNDLE_BYTES * 6 + 64 * 1024;
@@ -21,7 +23,7 @@ export interface AppPublicationCandidate {
   inputs: AppPublicationFile[];
   dependencies: string[];
   files: Array<AppPublicationFile & { contentType: string }>;
-  capabilities: [];
+  capabilities: AppCollectionCapability[];
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
@@ -47,7 +49,7 @@ function path(value: unknown, max: number): string {
   if (!checked.ok || checked.normalized !== raw || classifyEngineFilePath(raw).kind !== "tracked") throw new Error("Invalid publication source path.");
   return raw;
 }
-/** Fixed compiled bundles with no data capabilities. Other capability models are not admitted here. */
+/** Fixed compiled bundles with at most one bounded create-only collection. */
 export function parseAppPublicationCandidate(value: unknown, limits: AppPublicationLimits): AppPublicationCandidate {
   if (!limits || typeof limits !== "object" ||
       !Number.isSafeInteger(limits.maxFiles) || limits.maxFiles < 1 ||
@@ -60,7 +62,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
       row.inputs.length > limits.maxMetadataBytes ||
       !Array.isArray(row.dependencies) || row.dependencies.length < 1 || row.dependencies.length > row.inputs.length ||
       !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 2 ||
-      !Array.isArray(row.capabilities) || row.capabilities.length !== 0) throw new Error("Unsupported publication inventory or capabilities.");
+      !Array.isArray(row.capabilities) || row.capabilities.length > 1) throw new Error("Unsupported publication inventory or capabilities.");
   let remainingTextBytes = limits.maxMetadataBytes;
   const readText = (value: unknown): string => {
     const result = text(value, remainingTextBytes);
@@ -107,7 +109,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     sourceRevision: hash(row.sourceRevision), sourceDigest: hash(row.sourceDigest),
     dependencyLockDigest: hash(row.dependencyLockDigest), bundleDigest: hash(row.bundleDigest), buildDigest: hash(row.buildDigest),
     compilerIdentity: { recipe: readText(compiler.recipe), version: readText(compiler.version), binarySha256: hash(compiler.binarySha256) },
-    inputs, dependencies, files, capabilities: [],
+    inputs, dependencies, files, capabilities: row.capabilities.map(parseAppCollectionCapability),
   };
   if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes) throw new Error("Publication metadata bound exceeded.");
   return candidate;
