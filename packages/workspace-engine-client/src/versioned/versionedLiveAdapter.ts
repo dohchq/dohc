@@ -529,7 +529,7 @@ export class VersionedLiveAdapter {
       if (
         error instanceof DaemonRefusalError &&
         error.wireCode === "INVALID_PARAMS" &&
-        error.message === "file-not-found" || error.message === "object-identity-mismatch"
+        error.message === "file-not-found"
       ) {
         return null;
       }
@@ -594,7 +594,7 @@ export class VersionedLiveAdapter {
       if (
         error instanceof DaemonRefusalError &&
         error.wireCode === "INVALID_PARAMS" &&
-        error.message === "file-not-found" || error.message === "object-identity-mismatch"
+        error.message === "file-not-found"
       ) {
         return null;
       }
