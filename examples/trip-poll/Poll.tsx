@@ -3,7 +3,7 @@ import { CollectionError, type CollectionClient, type Fields, type Page } from "
 
 type Submission = { idempotencyKey: string; fields: Fields };
 export function Poll({ client }: { client: CollectionClient }) {
-  const [rows, setRows] = useState<Page["records"]>([]);
+  const [rows, setRows] = React.useState<Page["records"]>([]);
   const [nextPath, setNextPath] = useState<string | null>(null);
   const [name, setName] = useState(""), [destination, setDestination] = useState("Tokyo");
   const [loading, setLoading] = useState(true), [saving, setSaving] = useState(false);
@@ -26,9 +26,8 @@ export function Poll({ client }: { client: CollectionClient }) {
   };
   useEffect(() => {
     alive.current = true;
-    const connected = () => { void load(); };
-    window.addEventListener("trip-poll-connected", connected); void load();
-    return () => { alive.current = false; generation.current++; window.removeEventListener("trip-poll-connected", connected); };
+    void load();
+    return () => { alive.current = false; generation.current++; };
   }, [client]);
   const send = async (submission: Submission) => {
     if (busy.current) return;

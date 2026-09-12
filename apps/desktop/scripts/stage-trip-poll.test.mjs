@@ -19,6 +19,6 @@ test("stages a captured React app that the production compiler can build", async
     bounds: {maxInputFiles: 512, maxInputBytes: 128 * 1024 * 1024, maxOutputBytes: 32 * 1024 * 1024}});
   assert.deepEqual(result.files.map(file => file.path), ["bundle.css", "bundle.js"]);
   assert.match(Buffer.from(result.files[1].bytes).toString(), /collection\.create/);
-  assert.equal(declaration.collection.collectionPath, "responses");
+  assert.equal(declaration.collection.collectionPath, "trip-poll/responses");
   assert.match(await readFile(join(root, "trip-poll/responses/collection.yaml"), "utf8"), /options: \[Tokyo, Manila\]/);
 });

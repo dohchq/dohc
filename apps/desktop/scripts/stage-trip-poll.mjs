@@ -31,10 +31,10 @@ export async function stageTripPoll(workspaceRoot) {
   await mkdir(workspaceRoot, { recursive: true });
   await mkdir(appRoot); // Refuse a concurrent creator instead of overwriting work.
   for (const [path, bytes] of files) { await mkdir(dirname(join(appRoot, path)), { recursive: true }); await writeFile(join(appRoot, path), bytes); }
-  const inputs = [...sources, ...dependencies.map(([, name, path]) => `deps/${name}/${path}`)];
-  const packageMap = { react: "deps/react/index.js", "react/jsx-runtime": "deps/react/jsx-runtime.js",
-    "react-dom": "deps/react-dom/index.js", "react-dom/client": "deps/react-dom/client.js", scheduler: "deps/scheduler/index.js" };
-  const declaration = { entryPath: "main.tsx", inputs, packageMap, collection: {kind: "collection-create", collectionPath: "responses",
+  const inputs = [...sources, ...dependencies.map(([, name, path]) => `deps/${name}/${path}`)].map(path => `trip-poll/${path}`);
+  const packageMap = { react: "trip-poll/deps/react/index.js", "react/jsx-runtime": "trip-poll/deps/react/jsx-runtime.js",
+    "react-dom": "trip-poll/deps/react-dom/index.js", "react-dom/client": "trip-poll/deps/react-dom/client.js", scheduler: "trip-poll/deps/scheduler/index.js" };
+  const declaration = { entryPath: "trip-poll/main.tsx", inputs, packageMap, collection: {kind: "collection-create", collectionPath: "trip-poll/responses",
     allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields: ["destination", "name"]} };
   await writeFile(join(appRoot, "app.publish.json"), JSON.stringify(declaration, null, 2) + "\n");
   return { appRoot, declaration };

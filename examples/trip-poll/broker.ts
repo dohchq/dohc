@@ -28,7 +28,6 @@ export function connectCollection(): CollectionClient & { close(): void } {
     };
     port.start();
     for (const item of pending.values()) port.postMessage(item.message);
-    window.dispatchEvent(new Event("trip-poll-connected"));
   };
   window.addEventListener("message", receiveChannel);
   function request(op: string, input: object): Promise<unknown> {
