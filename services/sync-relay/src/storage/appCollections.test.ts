@@ -313,6 +313,16 @@ it("skips oversized synced filenames and returns a usable continuation",async()=
   const second=await f.request("GET",undefined,"?authorityRevision=2&limit=1&afterPath=responses%2F001-note.md");expect(second.status).toBe(200);
   expect((await second.json()).records[0].path).toBe(receipt.path);
 });
+
+it("streams a full page within its declared byte budget and resumes the remainder",async()=>{
+  const f=httpFixture();
+  for(let index=0;index<12;index++)f.accept({idempotencyKey:`large-${index}`,fields:{destination:"Tokyo",name:"a".repeat(7000)}});
+  const first=await f.request("GET",undefined,"?authorityRevision=2&limit=100");expect(first.status).toBe(200);
+  const bytes=new Uint8Array(await first.arrayBuffer());expect(bytes.byteLength).toBe(Number(first.headers.get("content-length")));expect(bytes.byteLength).toBeLessThanOrEqual(APP_COLLECTION_RESPONSE_BYTES);
+  const page=JSON.parse(Buffer.from(bytes).toString());expect(page.records.length).toBeGreaterThan(1);expect(page.records.length).toBeLessThan(12);expect(page.nextPath).not.toBeNull();
+  const next=await f.request("GET",undefined,`?${new URLSearchParams({authorityRevision:"2",limit:"100",afterPath:page.nextPath})}`);expect(next.status).toBe(200);
+  const rest=await next.json();expect(page.records.length+rest.records.length).toBe(12);expect(rest.nextPath).toBeNull();
+});
 it("cancels an oversized upload before accepting or enrolling",async()=>{
   const f=httpFixture();let cancelled=false;
   const stream=new ReadableStream<Uint8Array>({pull(controller){controller.enqueue(new Uint8Array(16_385));},cancel(){cancelled=true;}});
