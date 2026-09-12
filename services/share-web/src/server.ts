@@ -856,6 +856,8 @@ export function createShareWebApplication({
       const result = response(bodyBuffer(bytes), {
         headers: { "content-type": contentTypeForAsset(relative) },
       });
+      if (relative === "index.html" && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
+      return result;
     } catch {
       return refused();
     }
