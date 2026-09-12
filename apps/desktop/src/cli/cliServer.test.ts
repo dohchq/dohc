@@ -478,6 +478,20 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
+  it("routes app publication through the authenticated owning workspace without renderer access", async () => {
+    let accepted: unknown;
+    context.appPublication = async request => { accepted = request; return { kind: "cancelled" }; };
+    const request = { action: "cancel" as const, workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" };
+    expect(await invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request })).toEqual({ kind: "cancelled" });
+    expect(accepted).toEqual(request);
+    accepted = undefined;
+    await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
+    expect(accepted).toBeUndefined();
+    context.readOnly = true;
+    await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
+    expect(accepted).toBeUndefined();
+  });
+
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
     if (process.platform !== "win32") ctx.skip();
     if (!server) ctx.skip();
