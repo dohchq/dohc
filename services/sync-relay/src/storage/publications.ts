@@ -23,6 +23,7 @@ export interface AppPublicationRow {
 export type AppPublicationState = Omit<AppPublicationRow, "candidate">;
 export interface ReadAppPublicationInput { workspaceId: string; publicationId: string; ownerUserId: string; limits: AppPublicationLimits }
 export interface WithdrawAppPublicationInput extends Omit<ReadAppPublicationInput, "limits"> { expectedAuthorityRevision: number }
+export interface ReactivateAppPublicationInput extends ReadAppPublicationInput { expectedAuthorityRevision: number }
 export interface LinkAppPublicationInput {
   publicationId: string;
   // Derived from an authenticated link session. Never accepted from a request body.
@@ -177,6 +178,26 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict","Publication authority is exhausted.");
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     return {...current,active:false,authorityRevision:current.authorityRevision+1};
+  });
+}
+
+export function reactivateAppPublication(storage: StorageContext, input: ReactivateAppPublicationInput): AppPublicationState {
+  return storage.tx(() => {
+    const {state: current} = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
+    if (current.authorityRevision !== input.expectedAuthorityRevision) throw relayError("conflict", "Publication authority changed.");
+    const candidate = stored(storage, input).candidate;
+    authority(storage, current.owner, candidate);
+    validateBuildIdentity(candidate);
+    const manifestHash = sha(JSON.stringify(candidate));
+    if (sha(JSON.stringify(["dohc-app-publication-v1", current.owner, manifestHash])) !== current.publicationId) throw badRequest("Publication identity mismatch.");
+    for (const file of candidate.files) {
+      const bytes = storage.getBlob(current.owner.workspaceId, file.sha256);
+      if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256) throw badRequest("Publication bundle is unavailable.");
+    }
+    if (current.active) return current;
+    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
+    storage.db.prepare("UPDATE sync_relay_app_publications SET active=1,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
+    return {...current, active: true, authorityRevision: current.authorityRevision + 1};
   });
 }
 

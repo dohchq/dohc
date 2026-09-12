@@ -10,7 +10,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 
 export type OwnerAppPublicationRoute = {route: "owner-app-publication"; workspaceId: string} & (
   | {action: "publish"}
-  | {action: "read" | "withdraw"; publicationId: string}
+  | {action: "read" | "withdraw" | "reactivate"; publicationId: string}
 );
 
 function response(value: unknown) {
@@ -57,10 +57,12 @@ export function createOwnerAppPublicationRoutes(options: {
     }
     signal.throwIfAborted();
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
-    if (route.action === "withdraw") {
+    if (route.action === "withdraw" || route.action === "reactivate") {
       const input = record(raw, ["expectedAuthorityRevision"]);
       if (!Number.isSafeInteger(input.expectedAuthorityRevision) || Number(input.expectedAuthorityRevision) < 1) throw badRequest("Invalid publication authority revision.");
-      return response(storage.withdrawAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)}));
+      return response(route.action === "withdraw"
+        ? storage.withdrawAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)})
+        : storage.reactivateAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)}));
     }
     const input = record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"]);
     if (typeof input.shareId !== "string" || typeof input.grantId !== "string") throw badRequest("Invalid publication share or grant.");

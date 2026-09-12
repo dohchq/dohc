@@ -828,6 +828,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "owner-app-publication", workspaceId, publicationId, action: "read"};
     if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
+    if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
     throw notFound();
   }
   if (parts[2] === "live-restores") {

@@ -512,6 +512,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return publicationStorage.withdrawAppPublication(this, input);
   }
 
+  reactivateAppPublication(input: publicationStorage.ReactivateAppPublicationInput) {
+    return publicationStorage.reactivateAppPublication(this, input);
+  }
+
   authorizeLinkAppPublication(input: publicationStorage.LinkAppPublicationInput) {
     return publicationStorage.authorizeLinkAppPublication(this, input);
   }
