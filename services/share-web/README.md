@@ -28,6 +28,10 @@ This enables authenticated owners to publish, list, inspect, and withdraw app bu
 Link holders can read a publication within their current share grant when the
 relay also has `DOHC_RELAY_LINK_KEY` configured.
 The setting does not enable public Edit or app collection writes.
+For app collection responses, also set `DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT`
+on the relay to a positive integer. This limits accepted creates over each grant's lifetime.
+Leave it unset or set it to `0` to disable collection access. Owners must approve each app's collection capability.
+Disabling collection access still lets owners revoke an existing approval.
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
 `DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
 registrable domain. App launch stays off when the app domain is unset. Setting
