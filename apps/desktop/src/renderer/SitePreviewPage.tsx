@@ -23,6 +23,7 @@ import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
+import { OwnerAppPublication } from "./OwnerAppPublication";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 const NO_SHARE_OUTPUT_MESSAGE =
@@ -587,6 +588,10 @@ export function SitePreviewPage(props: {
             >
               <Share2 size={13} aria-hidden />
             </IconButton>
+          ) : null}
+          {!props.sharedView && site?.authority.kind === "workspace" ? (
+            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot}
+              onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
           {modes.length > 0 ? (
             <details className="group relative">
