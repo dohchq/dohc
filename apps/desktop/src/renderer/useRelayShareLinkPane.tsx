@@ -22,9 +22,10 @@ import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
 type LinkAccess = "view" | "comment" | "edit";
 
-export function linkRetuneLabels(widens: boolean, access: LinkAccess | undefined) {
+export function linkRetuneLabels(widens: boolean, access: LinkAccess | undefined, previous: string | undefined) {
   if (access === "edit") return {action: "Turn on editing", pending: "Turning on editing…"};
   if (widens) return {action: "Turn on comments", pending: "Turning on comments…"};
+  if (access === "view" && previous === "edit") return {action: "Turn off editing", pending: "Turning off editing…"};
   return access === "comment"
     ? {action: "Use Comment access", pending: "Changing access…"}
     : {action: "Turn off comments", pending: "Turning off comments…"};
@@ -511,7 +512,7 @@ export function useRelayShareLinkPane(props: {
   const confirmationWidens =
     confirmation?.kind === "retune" && confirmationRow !== null &&
     shareAccessRank(confirmation.access) > shareAccessRank(confirmationRow.access);
-  const retuneLabels = linkRetuneLabels(confirmationWidens, confirmation?.kind === "retune" ? confirmation.access : undefined);
+  const retuneLabels = linkRetuneLabels(confirmationWidens, confirmation?.kind === "retune" ? confirmation.access : undefined, confirmationRow?.access);
   const confirmationActionLabel =
     confirmation?.kind === "reset"
       ? "Reset link"
@@ -2278,7 +2279,9 @@ export function useRelayShareLinkPane(props: {
                   ) : (
                     <>
                       {confirmation.access === "view"
-                        ? "Turn off comments for this link? The same link keeps working, for viewing only."
+                        ? confirmationRow.access === "edit"
+                          ? "Turn off editing for this link? The same link keeps working, for viewing only."
+                          : "Turn off comments for this link? The same link keeps working, for viewing only."
                         : "Use Comment access for this link? The same link keeps working. Holders can view and comment."}
                       {narrowerDependents.length > 0 ? (
                         <>

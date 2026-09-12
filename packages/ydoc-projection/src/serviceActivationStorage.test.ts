@@ -112,6 +112,45 @@ it('activates a folded main moment when a later branch moment exists for the sam
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source.sourceMomentId).toBe('folded-write-moment')
   }finally{f.close()}
 })
+it.each(['digest','length'] as const)('refuses an older Ydoc source when a later main file moment has a divergent %s',field=>{
+  const f=fixture();try{
+    const oldMoment=f.capture.source.sourceMomentId
+    appendFoldedMoment(f)
+    f.capture.source.sourceMomentId=oldMoment
+    const digest=field==='digest'?'b'.repeat(64):f.capture.source.sourceDigest
+    const length=f.capture.source.sourceByteLength+(field==='length'?1:0)
+    f.raw.prepare("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.payloadAfterBlobSha256',?,'$.payloadAfterByteLength',?) WHERE relay_seq=4").run(digest,length)
+    f.raw.prepare('UPDATE sync_relay_object_moments SET blob_sha256=?,byte_length=? WHERE relay_seq=4').run(digest,length)
+    expect(()=>f.prepare()).toThrow('later ordinary file moment')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{f.close()}
+})
+it('permits a later folded file echo of the same Ydoc projection',()=>{
+  const f=fixture();try{
+    const oldMoment=f.capture.source.sourceMomentId
+    appendFoldedMoment(f)
+    f.capture.source.sourceMomentId=oldMoment
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{f.close()}
+})
+it('permits a newer Ydoc projection after an older folded file moment',()=>{
+  const f=fixture(),doc=new Y.Doc();try{
+    appendFoldedMoment(f)
+    Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc)
+    doc.getMap('frontmatter').set('newer','projection')
+    const suffix=Y.encodeStateAsUpdate(doc,before),fullState=Y.encodeStateAsUpdate(doc)
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',4,'ydoc.update',?,4)")
+      .run(JSON.stringify({versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}))
+    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(suffix),suffix.length,suffix)
+    const validation=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:fullState})
+    if(validation.kind!=='accepted')throw new Error('Invalid updated fixture')
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{committedCursor:5,nativeHeadSequence:3,
+      sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin','4'].join('\0')))}`,
+      sourceDigest:validation.evidence.projectedMarkdownSha256,sourceByteLength:validation.evidence.projectedMarkdownByteLength,
+      fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{doc.destroy();f.close()}
+})
 it.each([['operation','delete'],['path','other.md'],['payloadAfterPath','other.md'],['payloadAfterContentKind','binary']] as const)
 ('refuses a folded moment with replaced %s', (field,value)=>{
   const f=fixture();try{

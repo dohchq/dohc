@@ -91,13 +91,16 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
     "Native activation differs from the complete ordinary CRDT history.");
-  const moment=storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
+  const moment=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   let momentMatches=moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&moment.path===source.currentPath&&
     moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   if(!momentMatches){
     const index=rows.findIndex(row=>source.sourceMomentId===`moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`);
     requireValue(index>=0,"Native activation source moment is not an ordinary history coordinate.");
+    requireValue(!moment || Number(moment.relay_seq)<=rows[index]!.relay_seq ||
+      (moment.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength),
+      "Ordinary activation found a later ordinary file moment with a divergent projection.");
     const prefix=index===0?baseline:normalize(updates.slice(1,index),updates[index]!);
     momentMatches=prefix.projectedMarkdownSha256===source.sourceDigest&&prefix.projectedMarkdownByteLength===source.sourceByteLength;
   }
