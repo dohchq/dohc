@@ -10,8 +10,8 @@ export async function createInstalledAppCompiler(resourcesRoot: string) {
   if (process.platform !== "win32" || process.arch !== "x64") {
     throw new Error("App compilation is not available on this platform.");
   }
-    // This installed module and its dependencies stay outside app.asar. It
-    // resolves the worker and supervisor assets relative to its own location.
+  // This installed module and its dependencies stay outside app.asar. It
+  // resolves the worker and supervisor assets relative to its own location.
   const adapter = await import(/* @vite-ignore */ pathToFileURL(join(root, "adapter.mjs")).href);
   return (request: ClosedAppBuildRequest, bounds: CompilerProcessBounds, signal?: AbortSignal): Promise<ClosedAppBuild> => {
     return adapter.compileClosedAppInProcess({

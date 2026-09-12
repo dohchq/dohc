@@ -8,6 +8,8 @@ import { build } from "esbuild";
 export const NODE_VERSION = "24.16.0";
 // https://nodejs.org/dist/v24.16.0/SHASUMS256.txt, win-x64/node.exe
 export const NODE_SHA256 = "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3";
+const nodeUrl = `https://nodejs.org/dist/v${NODE_VERSION}/win-x64/node.exe`;
+const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const files = [
@@ -33,17 +35,43 @@ export async function requireAppCompiler(root = join(desktopRoot, "resources/app
   if (manifest.files["node.exe"] !== NODE_SHA256) throw new Error("App compiler Node identity changed.");
 }
 
-/** Stage only trusted build inputs. This never downloads or installs a runtime. */
+/** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
+export async function readPinnedCompilerNode(options = {}) {
+  if (options.nodeExecutable) {
+    const bytes = await readFile(options.nodeExecutable);
+    if (sha256(bytes) !== NODE_SHA256) throw new Error(`App compiler requires the official Node ${NODE_VERSION} Windows x64 executable.`);
+    return bytes;
+  }
+  for (const path of [options.stagedNodePath, options.currentNodeExecutable ?? process.execPath]) {
+    if (!path) continue;
+    const bytes = await readFile(path).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+    if (bytes && sha256(bytes) === NODE_SHA256) return bytes;
+  }
+  const response = await (options.fetchNode ?? fetch)(nodeUrl, { redirect: "error", signal: AbortSignal.timeout(120_000) });
+  if (!response.ok || !response.body) throw new Error(`Cannot download the pinned app compiler runtime (${response.status}).`);
+  if (Number(response.headers.get("content-length")) > maxNodeBytes) {
+    await response.body.cancel();
+    throw new Error("App compiler runtime download exceeds its size bound.");
+  }
+  const chunks = []; let length = 0;
+  for await (const chunk of response.body) {
+    length += chunk.byteLength;
+    if (length > maxNodeBytes) throw new Error("App compiler runtime download exceeds its size bound.");
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (sha256(bytes) !== NODE_SHA256) throw new Error("App compiler runtime download does not match the official Node checksum.");
+  return bytes;
+}
+
+/** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
   if (platform !== "win32") return { supported: false };
   if (arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const node = await readFile(options.nodeExecutable ?? process.execPath);
-  if (sha256(node) !== NODE_SHA256) {
-    throw new Error(`Stage app compiler with the official Node ${NODE_VERSION} Windows x64 executable. Pass --node=<absolute path>.`);
-  }
+  const node = await readPinnedCompilerNode({ nodeExecutable: options.nodeExecutable, stagedNodePath: join(destination, "node.exe") });
   const require = createRequire(join(sourceRoot, "package.json"));
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
