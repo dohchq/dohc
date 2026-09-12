@@ -92,7 +92,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
     "Native activation differs from the complete ordinary CRDT history.");
   const moment=storage.db.prepare(`SELECT moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
-    WHERE workspace_id=? AND object_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,source.committedCursor);
+    WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   let momentMatches=moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&moment.path===source.currentPath&&
     moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   if(!momentMatches){

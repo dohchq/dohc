@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
+import { initializeRelayDeployment } from "./relayDeployment";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -908,6 +909,50 @@ describe("sync relay startup guards", () => {
     SYNC_RELAY_PORT: "0",
     FORCE_COLOR: "0",
   } as const;
+
+  it.each([
+    ["malformed JSON", "{", "SyntaxError"],
+    ["wrong version", '{"version":2}', "Public Edit release"],
+    ["extra key", '{"version":1,"extra":true}', "Public Edit release"],
+  ])("refuses a public Edit release marker in production before storage opens: %s", async (_label, marker, reason) => {
+    const dbPath = join(await tempRoot("malformed-public-edit-release"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      ...productionEnv, SYNC_RELAY_DB_PATH: dbPath, DOHC_PUBLIC_EDIT_RELEASE: marker,
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(reason);
+    await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps public Edit routes closed in production without a release marker", async () => {
+    const root = await tempRoot("closed-public-edit-release");
+    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const baseUrl = await spawnRelay(relayPath, {
+      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+      DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_LINK_LIVE: undefined,
+      DOHC_RELAY_NAMED_LIVE_CONFIG: undefined, DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
+    });
+    expect((await fetch(baseUrl + "/health")).status).toBe(200);
+    for (const path of ["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]) {
+      expect((await fetch(baseUrl + path, {method: "POST"})).status).toBe(404);
+    }
+  });
+
+  it("refuses a production release marker without a configured live host", async () => {
+    const root = await tempRoot("public-edit-release-no-host");
+    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const {code, stderr} = await spawnRelayExpectExit({
+      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+      DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}', DOHC_RELAY_LINK_LIVE: undefined,
+      DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
+      DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxSessions: 4, retentionMs: 60000,
+        maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000}),
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("Public Edit release requires link live routes and the configured service host");
+  });
 
   it("refuses to start in production without a public share-web origin", async () => {
     const dbPath = join(await tempRoot("no-share-web-origin"), "relay.sqlite");

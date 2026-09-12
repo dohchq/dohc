@@ -98,6 +98,20 @@ it('activates an ordinary text write folded into a Ydoc update before its file m
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
   }finally{f.close()}
 })
+it('activates a folded main moment when a later branch moment exists for the same object',()=>{
+  const f=fixture();try{
+    appendFoldedMoment(f)
+    const source=f.capture.source
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',4,'moment.append',?,4)")
+      .run(JSON.stringify({versionId:'branch',objectId:'object',momentId:'branch-moment',path:'docs/a.md',operation:'write',
+        payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:source.sourceDigest,payloadAfterByteLength:source.sourceByteLength}))
+    f.raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',5,'branch-moment','branch','docs/a.md',?,'text',?,4)")
+      .run(source.sourceDigest,source.sourceByteLength)
+    Object.assign(source,{committedCursor:5})
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source.sourceMomentId).toBe('folded-write-moment')
+  }finally{f.close()}
+})
 it.each([['operation','delete'],['path','other.md'],['payloadAfterPath','other.md'],['payloadAfterContentKind','binary']] as const)
 ('refuses a folded moment with replaced %s', (field,value)=>{
   const f=fixture();try{
