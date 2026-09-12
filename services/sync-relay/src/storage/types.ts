@@ -561,6 +561,8 @@ export type CommittedLiveUpdateResult =
 
 export interface SyncRelayStorage {
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
+  approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
+  acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
   readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
