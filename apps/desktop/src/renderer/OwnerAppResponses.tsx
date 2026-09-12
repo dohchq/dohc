@@ -15,11 +15,11 @@ function resultFrom(value: unknown) {
   return parsed.data;
 }
 
-export function OwnerAppResponses(props: { workspaceId: string; grantId: string }) {
+export function OwnerAppResponses(props: { workspaceId: string; grantId: string; onBusyChange?: (busy: boolean) => void }) {
   return <ResponsePanel key={`${props.workspaceId}\0${props.grantId}`} {...props} />;
 }
 
-function ResponsePanel({ workspaceId, grantId }: { workspaceId: string; grantId: string }) {
+function ResponsePanel({ workspaceId, grantId, onBusyChange }: { workspaceId: string; grantId: string; onBusyChange?: (busy: boolean) => void }) {
   const api = useRef(bridge()).current;
   const current = useRef(true);
   const request = useRef(0);
@@ -33,6 +33,7 @@ function ResponsePanel({ workspaceId, grantId }: { workspaceId: string; grantId:
   const [continuation, setContinuation] = useState<Selection | null>(null);
   const [result, setResult] = useState<Undo | null>(null);
   useEffect(() => { current.current = true; return () => { current.current = false; request.current++; }; }, []);
+  useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => {
     if (!busy && focusAfterUndo.current) { focusAfterUndo.current = false; heading.current?.focus(); }
   }, [busy]);
@@ -40,7 +41,7 @@ function ResponsePanel({ workspaceId, grantId }: { workspaceId: string; grantId:
   async function list(cursor?: string) {
     if (busy) return;
     const mine = ++request.current;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setResult(null);
     try {
       const next = resultFrom(await api.ownerAppResponses({ action: "list", workspaceId, grantId, limit: 100,
         ...(cursor ? { afterAcceptanceId: cursor } : {}) }));
@@ -55,7 +56,7 @@ function ResponsePanel({ workspaceId, grantId }: { workspaceId: string; grantId:
   async function undo(selection: Selection) {
     if (busy) return;
     const mine = ++request.current;
-    setBusy(true); setError(null); setConfirmation(null);
+    setBusy(true); setError(null); setResult(null); setConfirmation(null);
     try {
       const next = resultFrom(await api.ownerAppResponses({ action: "undo", workspaceId, grantId,
         publicPrincipalId: selection.principalId, operationId: selection.operationId, limit: 100,

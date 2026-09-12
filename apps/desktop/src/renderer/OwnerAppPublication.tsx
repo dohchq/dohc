@@ -67,6 +67,7 @@ function PublicationDialog(props: {
   const [publications, setPublications] = useState<Publication[]>([]);
   const [pendingWithdraw, setPendingWithdraw] = useState<Publication | null>(null);
   const [publicationsLoading, setPublicationsLoading] = useState(true);
+  const [responsesBusy, setResponsesBusy] = useState(false);
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
   const alive = useRef(true);
@@ -75,7 +76,7 @@ function PublicationDialog(props: {
   const heading = useRef<HTMLHeadingElement>(null);
   const api = useRef(bridge()).current;
   const selectedLink = links.find(link => link.grantId === selected);
-  const committing = busy === "approve" || busy === "withdraw";
+  const committing = busy === "approve" || busy === "withdraw" || responsesBusy;
 
   useEffect(() => { heading.current?.focus(); }, [prepared]);
 
@@ -283,9 +284,9 @@ function PublicationDialog(props: {
                 </li>)}
               </ul>}
         </div>
-        {!publicationsLoading && !publicationsError ? [...new Set(publications.map(publication => publication.grantId))].map(grantId => <div key={grantId}>
+        {!publicationsError ? [...new Set(publications.filter(publication => !publication.manifestUnavailable && publication.appRoot === props.appRoot).map(publication => publication.grantId))].map(grantId => <div key={grantId}>
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Link {grantId}</p>
-          <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} />
+          <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} onBusyChange={setResponsesBusy} />
         </div>) : null}
         <label className="text-[13px] text-ink">Share link
           <select aria-label="Publication share link" disabled={loading || !!busy} value={selected} onChange={event => setSelected(event.target.value)}
