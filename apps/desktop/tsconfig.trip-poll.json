@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["react", "react-dom"],
+    "typeRoots": ["./node_modules/@types"],
+    "incremental": false
+  },
+  "include": ["../../examples/trip-poll/*.ts", "../../examples/trip-poll/*.tsx"]
+}
