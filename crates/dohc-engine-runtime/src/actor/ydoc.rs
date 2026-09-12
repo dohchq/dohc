@@ -2498,11 +2498,7 @@ pub(super) fn ydoc_settle_on_store(
                 path: Cow::Borrowed(path),
                 text: Cow::Owned(projected_text),
                 moment_id: &moment_id,
-                metadata_origin: if kind == SettlementKind::CollectionAdoption {
-                    "api"
-                } else {
-                    "ydoc"
-                },
+                metadata_origin: "ydoc",
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,

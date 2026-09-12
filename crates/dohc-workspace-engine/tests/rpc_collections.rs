@@ -3687,7 +3687,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         .expect("owner adoption must enter the outgoing replication journal");
     assert_eq!(adoption["objectId"], OBJECT);
     assert_eq!(
-        adoption["metadata"]["origin"], "api",
+        adoption["metadata"]["origin"], "local-file",
         "the adoption must use a valid ordinary replication origin"
     );
     assert_eq!(
