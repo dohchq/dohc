@@ -496,6 +496,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return appCollectionStorage.acceptAppCollection(this,input,policy);
   }
 
+  readAppCollection(input: appCollectionStorage.ReadAppCollectionInput) {
+    return appCollectionStorage.readAppCollection(this,input);
+  }
+
   readAppPublication(input: publicationStorage.ReadAppPublicationInput) {
     return publicationStorage.readAppPublication(this, input);
   }

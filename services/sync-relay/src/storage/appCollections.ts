@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { parseAppCollectionCapability, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
-import { parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { isRecordId, parseCollectionRecordFields, parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
@@ -60,10 +60,10 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
     if (revision !== input.expectedAuthorityRevision || revision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority changed.");
     if (capability) {
       const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
-      if (row.active !== 1 || !share || share.granterUserId !== input.ownerUserId || !grant || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
+      if (row.active !== 1 || !share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId || !grant || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
       const manifest = storage.getBlob(input.workspaceId, String(row.manifest_sha256));
       if (!manifest || manifest.byteLength > input.limits.maxMetadataBytes || sha(manifest) !== row.manifest_sha256) throw notFound();
-      const candidate = JSON.parse(Buffer.from(manifest).toString("utf8"));
+      const candidate = parseAppPublicationCandidate(JSON.parse(Buffer.from(manifest).toString("utf8")),input.limits);
       const requested = candidate.capabilities?.[0] && parseAppCollectionCapability(candidate.capabilities[0]);
       if (!requested || !narrows(requested, capability)) throw badRequest("Collection approval exceeds the publication request.");
       containment(storage,share.shareId,grant.grantId,candidate.versionId,capability);
@@ -147,5 +147,45 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
       .run(workspaceId,authority.result.grantId,principal.principalId,input.idempotencyKey,payloadHash,receiptJson,acceptanceId,receiptBytes);
     appendLogBatchInTransaction(storage,{workspaceId,originId,ops:[{originSeq:maxOriginSeq(storage,workspaceId,originId)+1,opKind:"moment.append",payloadJson:JSON.stringify(payload),recordedAtMs:input.nowMs}]});
     return receipt;
+  });
+}
+
+export interface ReadAppCollectionInput extends LinkAppPublicationInput {
+  expectedAuthorityRevision: number;
+  afterPath?: string;
+  limit: number;
+}
+export interface AppCollectionPage {
+  records: {path:string;recordId:string|null;fields:Record<string,unknown>}[];
+  nextPath:string|null;
+}
+/** Reads the current workspace projection, so owner edits and deletions take effect. */
+export function readAppCollection(storage: StorageContext, input: ReadAppCollectionInput): AppCollectionPage {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100 || (input.afterPath !== undefined && (typeof input.afterPath !== "string" || input.afterPath.length > 2048))) throw badRequest("Invalid collection page.");
+  return storage.readTx(() => {
+    const authority = approved(storage,input), prefix = `${authority.capability.collectionPath}/`;
+    if (!authority.capability.readFields.length) throw notFound();
+    const rows = storage.db.prepare(`SELECT path,blob_sha256,content_kind FROM sync_relay_current_files
+      WHERE workspace_id=? AND version_id=? AND path>? AND substr(path,1,?)=? AND instr(substr(path,?),'/')=0
+      AND path LIKE '%.md' ORDER BY path LIMIT ?`)
+      .all(authority.workspaceId,authority.candidate.versionId,input.afterPath ?? "",prefix.length,prefix,prefix.length+1,input.limit+1);
+    const records: AppCollectionPage["records"] = [];
+    let pageBytes = 0;
+    for (const row of rows.slice(0,input.limit)) {
+      const blob = storage.getBlob(authority.workspaceId,String(row.blob_sha256));
+      if (!blob || blob.byteLength > MAX_RECORD_BYTES || row.content_kind !== "text" || sha(blob) !== row.blob_sha256) throw notFound();
+      const value = parseCollectionRecordFields(new TextDecoder("utf-8",{fatal:true}).decode(blob));
+      if (!value) throw notFound();
+      const selected = Object.fromEntries(authority.capability.readFields.filter(name => Object.hasOwn(value,name)).map(name => [name,value[name]]));
+      for (const [name,value] of Object.entries(selected)) {
+        const field = authority.schema.fields.find(field => field.name === name)!;
+        if (validateFieldValue(field,value).status !== "valid") throw notFound();
+      }
+      const record = {path:String(row.path),recordId:typeof value.id === "string" && isRecordId(value.id) ? value.id : null,fields:selected};
+      const size = bytes(record);
+      if (pageBytes + size > 65_536 && records.length) return {records,nextPath:records.at(-1)!.path};
+      pageBytes += size;records.push(record);
+    }
+    return {records,nextPath:rows.length > input.limit ? records.at(-1)?.path ?? null : null};
   });
 }
