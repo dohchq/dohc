@@ -515,19 +515,22 @@ it.each([2, 3])("rejects overlapping or mergeable-adjacent baseline ranges endin
   });
 });
 
-it("holds one write transaction through grant lookup, preventing a second writer and leaving no transaction open", async () => {
+it("keeps one authority snapshot through concurrent grant changes and closes it before the next read", async () => {
   await withBindingFixture((storage, path) => {
     const getGrant = storage.getShareGrant.bind(storage);
     const lookup = vi.spyOn(storage, "getShareGrant").mockImplementation(id => {
       raw(path, db => {
         db.exec("PRAGMA busy_timeout = 0");
-        expect(() => db.exec("UPDATE sync_relay_share_grants SET generation = 9 WHERE grant_id = 'edit-1'")).toThrow(/locked|busy/i);
+        db.exec("UPDATE sync_relay_share_grants SET generation = 9 WHERE grant_id = 'edit-1'");
       });
       return getGrant(id);
     });
-    try { expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }).kind).toBe("current"); }
+    try {
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
+        .toMatchObject({ kind: "current", authority: { grantGeneration: 4 } });
+      expect(lookup).toHaveBeenCalledOnce();
+    }
     finally { lookup.mockRestore(); }
-    raw(path, db => db.exec("UPDATE sync_relay_share_grants SET generation = 9 WHERE grant_id = 'edit-1'"));
     expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
       .toMatchObject({ kind: "current", authority: { grantGeneration: 9 } });
   });

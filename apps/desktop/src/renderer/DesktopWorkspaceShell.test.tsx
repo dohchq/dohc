@@ -8422,9 +8422,8 @@ describe("shared view banner", () => {
     expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 
-  // Edit gets its own sentence. It states both halves: the
-  // recipient edits, and the granter decides.
-  it("tells an edit recipient to edit and send changes for the granter to accept", async () => {
+  // Markdown edits save live; other file changes still need acceptance.
+  it("distinguishes live Markdown edits from other changes needing acceptance", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, {
       ...SHARE_VIEW,
@@ -8437,7 +8436,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test. Edit these files and send your changes for sam@dohc.test to accept.",
+      "Shared view from sam@dohc.test. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
     expect(banner.textContent, "falling through to the PR2 sentence tells an edit recipient they cannot edit, which is the exact lie PR3a removes.").not.toContain("not edit them");
   });
@@ -8451,7 +8450,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from another dohc user. Edit these files and send your changes for another dohc user to accept.",
+      "Shared view from another dohc user. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
   });
 

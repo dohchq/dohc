@@ -124,15 +124,15 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     });
     expect(await resolve(actorRequest(aliceCookie), "workspace")).toEqual({ userId: alice.user.id, workspaceId: "workspace" });
     expect(await resolve(actorRequest(bobCookie), "workspace")).toEqual({ userId: bob.user.id, workspaceId: "workspace" });
-    expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toEqual({ userId: alice.user.id, ...aliceScope });
-    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toEqual({ kind: "named", userId: alice.user.id, ...aliceScope });
+    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ kind: "named", userId: bob.user.id, ...bobScope });
     expect(await resolveBrowser(actorRequest(aliceCookie), bobScope)).toBeNull();
     expect(await resolveBrowser(actorRequest(bobCookie), aliceScope)).toBeNull();
     const sessions = createNamedLiveBrowserSessions({ storage, resolveActor: resolve, maxSessions: 2, retentionMs: 60_000 });
     const aliceSession = sessions.create((await resolveBrowser(actorRequest(aliceCookie), aliceScope))!)!;
     const bobSession = sessions.create((await resolveBrowser(actorRequest(bobCookie), bobScope))!)!;
-    expect(await sessions.resolve(actorRequest(aliceCookie), aliceSession.discriminator)).toEqual({ userId: alice.user.id, ...aliceScope });
-    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await sessions.resolve(actorRequest(aliceCookie), aliceSession.discriminator)).toEqual({ kind: "named", userId: alice.user.id, ...aliceScope });
+    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ kind: "named", userId: bob.user.id, ...bobScope });
     expect(await sessions.resolve(actorRequest(aliceCookie), bobSession.discriminator)).toBeNull();
     expect(await sessions.resolve(actorRequest(bobCookie), aliceSession.discriminator)).toBeNull();
     expect(await sessions.resolve(actorRequest("dohc_share_link=link-secret; dohc_profile=profile-secret"), aliceSession.discriminator)).toBeNull();
@@ -145,9 +145,9 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     expect(signOut.headers.getSetCookie().every((line) => !line.includes("dohc_"))).toBe(true);
     await expect(resolve(actorRequest(aliceCookie), "workspace")).rejects.toBeInstanceOf(UnauthorizedError);
     expect(await resolveBrowser(actorRequest(aliceCookie), aliceScope)).toBeNull();
-    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toEqual({ kind: "named", userId: bob.user.id, ...bobScope });
     expect(await sessions.resolve(actorRequest(aliceCookie), aliceSession.discriminator)).toBeNull();
-    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ userId: bob.user.id, ...bobScope });
+    expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toEqual({ kind: "named", userId: bob.user.id, ...bobScope });
     expect(storage.revokeShareGrant({ shareId: bobScope.shareId, grantId: bobScope.grantId, revokedAtMs: 2 }).ok).toBe(true);
     expect(await resolveBrowser(actorRequest(bobCookie), bobScope)).toBeNull();
     expect(await sessions.resolve(actorRequest(bobCookie), bobSession.discriminator)).toBeNull();
@@ -360,7 +360,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
       expect(await web.resolveNamedBrowserSession(new Request(`${origin}/api/live`, { headers: { cookie: sessionCookie } }), issued[1]!)).not.toBeNull();
       expect(await sessionExpiry()).toBeGreaterThan(agedExpiry.getTime());
       expect(await web.resolveNamedBrowserSession(browser(0), issued[0]!)).toEqual({
-        userId: users[0]!.user.id, workspaceId: "route-workspace", shareId: "route-share-0", grantId: "route-grant-0" });
+        kind: "named", userId: users[0]!.user.id, workspaceId: "route-workspace", shareId: "route-share-0", grantId: "route-grant-0" });
       expect(await web.resolveNamedBrowserSession(browser(1), issued[0]!)).toBeNull();
       const crossed = await post("/api/live/named-session", { grantId: "route-grant-1" }, browserCookies[0]);
       expect(crossed.status).toBe(404); await crossed.body?.cancel();

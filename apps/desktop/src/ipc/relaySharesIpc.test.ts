@@ -204,6 +204,7 @@ describe("registered owner restore handler", () => {
 describe("registered relay share handlers", () => {
   it.each([
     ["comment", {ok: true, access: "comment", url: "https://relay.example/new"}, {outcome: "widened", url: "https://relay.example/new"}],
+    ["edit", {ok: true, access: "edit", url: "https://relay.example/new"}, {outcome: "widened", url: "https://relay.example/new"}],
     ["comment", {ok: true, access: "comment"}, {outcome: "narrowed"}],
     ["view", {ok: true, access: "view"}, {outcome: "narrowed"}],
   ])("reports the relay's actual credential transition for %s", async (access, response, expected) => {
@@ -228,13 +229,13 @@ describe("registered relay share handlers", () => {
     })).rejects.toThrow("sharing failed (500)");
   });
 
-  it("rejects a replacement URL for View and keeps Edit requests closed", async () => {
+  it("rejects a replacement URL for View and an unknown access level before making a request", async () => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view", url: "https://relay.example/new"}});
     const payload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
     await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "view"})).rejects.toThrow();
     h.request.mockClear();
-    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "edit"})).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "owner"})).rejects.toThrow();
     expect(h.request).not.toHaveBeenCalled();
   });
 
