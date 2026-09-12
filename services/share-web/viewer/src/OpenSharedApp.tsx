@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export function OpenSharedApp({session, publicationId}: {session: string; publicationId: string}) {
+export function OpenSharedApp({session, publicationId, showNotice = true}: {session: string; publicationId: string; showNotice?: boolean}) {
   const [state, setState] = useState<"idle" | "opening" | "failed">("idle");
   const active = useRef<AbortController | null>(null);
   useEffect(() => () => active.current?.abort(), [session, publicationId]);
@@ -23,7 +23,7 @@ export function OpenSharedApp({session, publicationId}: {session: string; public
     } catch { if (!controller.signal.aborted && active.current === controller) setState("failed"); }
   }
   return <section aria-label="Shared app">
-    <p>This app can use external services. Its author decides where it sends data.</p>
+    {showNotice && <p>This app can use external services. Its author decides where it sends data.</p>}
     <button className="handoff-button primary" onClick={() => void open()} disabled={state === "opening"}>{state === "opening" ? "Opening app" : "Open app"}</button>
     {state === "failed" && <p role="status">Could not open the app. Try again or ask the owner for a new link.</p>}
   </section>;

@@ -1,4 +1,5 @@
 import { createAppLaunchHandler } from "./appLaunch";
+import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
@@ -998,10 +999,12 @@ export function createShareWebApplication({
 
   if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host)) throw new TypeError("App viewer origin must be an exact configured public Host.");
   const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
+  const discoverApps = appLaunchConfig ? createAppDiscovery({viewerOrigin: appLaunchConfig.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
   const handle = async (request: Request): Promise<Response> => {
     if (appLaunch?.matches(request)) return appLaunch.handle(request);
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+    if (pathname === "/api/apps") return discoverApps ? discoverApps(request) : refused();
 
     if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
       if (!linkLive) return refused();

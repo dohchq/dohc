@@ -1,4 +1,5 @@
 import { OpenSharedApp } from "./OpenSharedApp";
+import { PublishedApps } from "./PublishedApps";
 import {
   Component,
   lazy,
@@ -1244,6 +1245,7 @@ export function App() {
         </div>
       </header>
       {new URLSearchParams(location.search).has("app") && <OpenSharedApp key={state.session} session={state.session} publicationId={new URLSearchParams(location.search).get("app") ?? ""} />}
+      <PublishedApps session={state.session}/>
       <Freshness
         lastSettledAtMs={state.meta.lastSettledAtMs}
         lastSettledKnown={state.meta.lastSettledKnown}

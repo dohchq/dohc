@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+// App discovery has its own request, cancellation, and rendering tests.
+vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
