@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, copyFileSync, renameSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { openSyncRelayStorage, type SyncRelayStorage } from "../storage";
 import { initializeRelayDeployment, openRelayDeployment } from "../relayDeployment";
@@ -489,4 +489,14 @@ it("hides damaged discovery rows and refuses stale or blocked discovery principa
   expect((await f.http("/sync/link/app-publications")).status).toBe(404);
   f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
   expect((await f.http("/sync/link/app-publications")).status).toBe(401);
+});
+
+it("does not reread manifests while streaming an authorized discovery page",async()=>{
+  const f=linkFixture();
+  const reads=vi.spyOn(f.storage as unknown as StorageContext,"getBlob");
+  const response=await f.http("/sync/link/app-publications");
+  expect(reads).toHaveBeenCalledTimes(1);
+  expect((await response.json()).publications).toHaveLength(1);
+  expect(reads).toHaveBeenCalledTimes(1);
+  reads.mockRestore();
 });
