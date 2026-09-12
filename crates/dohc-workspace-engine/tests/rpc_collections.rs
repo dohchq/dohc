@@ -3406,8 +3406,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
-    let schema =
-        "name: Responses\nfields:\n  destination:\n    type: text\n  name:\n    type: text\n";
+    let schema = "name: Responses\nfields:\n  destination:\n    type: text\n  name:\n    type: text\n  created_at:\n    type: number\n  created_by:\n    type: text\n  grant_id:\n    type: text\n  idempotency_key:\n    type: text\n  acceptance_id:\n    type: text\n";
     seed_text(&mut store, "responses/collection.yaml", schema, 2);
     write_file(
         scratch.path(),
