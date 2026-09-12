@@ -39,9 +39,9 @@ $cert.Dispose();$rsa.Dispose()`;
   });
   await new Promise<void>(resolve=>server!.listen(0,'127.0.0.1',resolve));const address=server.address();if(!address||typeof address==='string')throw Error('No server address');
   browser=await chromium.launch({headless:true,ignoreDefaultArgs:['--disable-features=ThirdPartyStoragePartitioning'],args:[`--ignore-certificate-errors-spki-list=${spki}`,`--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`,'--no-proxy-server']});
-    const open=async(colorScheme:'light'|'dark',width:number)=>{
+    const open=async(colorScheme:'light'|'dark',width:number,secret=fixture!.secret)=>{
       const context=await browser!.newContext({viewport:{width,height:900},colorScheme,reducedMotion:'reduce'}),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
-      await page.goto('https://viewer.example.com/s/#'+fixture!.secret);
+      await page.goto('https://viewer.example.com/s/#'+secret);
       await expect(page.getByRole('button',{name:'Open app',exact:true})).toBeVisible();
       await page.screenshot({path:evidence+'/p5-trip-viewer-discovery.png'});
       await page.getByRole('button',{name:'Open app',exact:true}).click();
@@ -55,6 +55,16 @@ $cert.Dispose();$rsa.Dispose()`;
     await expect(first.child.getByRole('listitem')).toHaveCount(1);await expect(first.child.getByRole('listitem')).toHaveText('IceManila');
     await first.page.screenshot({path:evidence+'/p5-trip-product-light.png'});
     const second=await open('dark',390);await expect(second.child.getByRole('listitem')).toHaveCount(1);await expect(second.child.getByRole('listitem')).toHaveText('IceManila');
+    await second.child.getByLabel('Name (optional)').fill('Alex');await second.child.getByRole('button',{name:'Send response',exact:true}).click();await expect(second.child.getByText('Response saved.',{exact:true})).toBeVisible();
+    const principals=fixture.principalEvidence();expect(principals).toHaveLength(2);expect(new Set(principals.map(row=>row.principal_id)).size).toBe(2);expect(new Set(principals.map(row=>row.public_principal_id)).size).toBe(2);expect(principals.every(row=>row.grant_id==='g')).toBe(true);
+    await first.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(first.child.getByRole('listitem')).toHaveCount(2);
+    const separate=await open('light',1000,fixture.secondSecret);expect(fixture.secondPublicationId).not.toBe(fixture.artifact.publicationId);expect(new URL(separate.page.url()).host).not.toBe(new URL(first.page.url()).host);
+    await separate.child.getByLabel('Name (optional)').fill('Sam');await separate.child.getByRole('button',{name:'Send response',exact:true}).click();await expect(separate.child.getByText('Response saved.',{exact:true})).toBeVisible();
+    const allPrincipals=fixture.principalEvidence();expect(allPrincipals).toHaveLength(3);expect(new Set(allPrincipals.map(row=>row.principal_id)).size).toBe(3);expect(allPrincipals.filter(row=>row.grant_id==='g2')).toHaveLength(1);
+    fixture.revokeSecond();await separate.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(separate.child.getByRole('alert')).toHaveText('This poll is unavailable. Ask its owner for a current link.');
+    await first.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(first.child.getByRole('alert')).toHaveCount(0);await expect(first.child.getByRole('listitem')).toHaveCount(3);
+    const frameLayout=await first.page.locator('iframe').evaluate(frame=>({top:frame.getBoundingClientRect().top,statusMargin:getComputedStyle(document.getElementById('status')!).margin,display:getComputedStyle(frame).display}));
+    writeFileSync(join(evidence,'frame-layout.json'),JSON.stringify(frameLayout));expect(frameLayout.top).toBe(0);
     expect(await second.child.locator('body').evaluate(body=>body.scrollWidth<=innerWidth)).toBe(true);
     await second.page.screenshot({path:evidence+'/p5-trip-product-dark-mobile.png'});
     fixture.withdraw();await second.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(second.child.getByRole('alert')).toHaveText('This poll is unavailable. Ask its owner for a current link.');
