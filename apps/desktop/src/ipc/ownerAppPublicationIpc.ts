@@ -49,7 +49,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications?${query}`, { signal: operation.signal }));
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("dohc could not read app publications.");
         const result = OwnerAppPublicationResult.parse({ ...raw, kind: "listed" });
-        if (result.kind !== "listed" || result.publications.some(row => row.appRoot !== input.appRoot)) throw new Error("The publication list belongs to another app.");
+        if (result.kind !== "listed" || result.publications.some(row => !row.manifestUnavailable && row.appRoot !== input.appRoot)) throw new Error("The publication list belongs to another app.");
         return result;
       }
       if (input.action === "withdraw") {

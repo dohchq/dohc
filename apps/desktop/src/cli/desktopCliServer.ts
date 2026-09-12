@@ -165,9 +165,18 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(await collectionEditContextFor(operation)),
       );
+    const publicationAttachment = dependencies.ownerAppPublication
+      ? await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+        if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
+        return operation.signal;
+      }) : undefined;
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) => dependencies.ownerAppPublication!(request) } : {}),
+      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment?.aborted) throw new Error("The app publication workspace attachment changed.");
+          return dependencies.ownerAppPublication!(request);
+        }) } : {}),
       rootPath: workspace.rootPath,
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
