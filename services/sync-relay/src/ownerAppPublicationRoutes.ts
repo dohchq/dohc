@@ -43,7 +43,6 @@ export function createOwnerAppPublicationRoutes(options: {
       }
       return response(storage.listAppPublications({workspaceId: route.workspaceId, ownerUserId, limits, cursor, appRoot}));
     }
-    if (route.action === "collection-approval" && !options.collectionsEnabled) throw notFound();
     if (request.method !== (route.action === "read" ? "GET" : "POST")) throw relayError("method_not_allowed");
     const lookup = "publicationId" in route ? {workspaceId: route.workspaceId, publicationId: route.publicationId, ownerUserId, limits} : null;
     if (route.action === "read") return response(storage.readAppPublication(lookup!));
@@ -63,6 +62,7 @@ export function createOwnerAppPublicationRoutes(options: {
       const input = record(raw, route.action === "collection-approval" ? ["expectedAuthorityRevision", "capability"] : ["expectedAuthorityRevision"]);
       if (!Number.isSafeInteger(input.expectedAuthorityRevision) || Number(input.expectedAuthorityRevision) < 1) throw badRequest("Invalid publication authority revision.");
       if (route.action === "collection-approval") {
+        if (!options.collectionsEnabled && input.capability !== null) throw notFound();
         let capability;
         try {capability = input.capability === null ? null : parseAppCollectionCapability(input.capability);}
         catch {throw badRequest("Invalid collection capability.");}
