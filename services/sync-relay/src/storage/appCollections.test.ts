@@ -250,3 +250,15 @@ it("refuses corrupt in-bound record blobs instead of treating corruption as a sk
   f.raw.prepare("UPDATE sync_relay_blobs SET content=zeroblob(byte_length) WHERE sha256=?").run(row.blob_sha256);
   expect(()=>f.storage.readAppCollection({...f.input,limit:10})).toThrow(/not found/i);
 });
+
+it.each(["binary","non-utf8"])("skips validly stored %s folder content and reaches the response",kind=>{
+  const f=fixture();f.write("responses/000-note.md","# Note");const receipt=f.accept();
+  if(kind==="binary")f.raw.prepare("UPDATE sync_relay_current_files SET content_kind='binary' WHERE path='responses/000-note.md'").run();
+  else {
+    const content=Buffer.from([0xff,0xfe]),digest=hash(content);
+    f.storage.putBlob({workspaceId:"w",sha256:digest,content,createdAtMs:30});
+    f.raw.prepare("UPDATE sync_relay_current_files SET blob_sha256=? WHERE path='responses/000-note.md'").run(digest);
+  }
+  const first=f.storage.readAppCollection({...f.input,limit:1});expect(first).toEqual({records:[],nextPath:"responses/000-note.md"});
+  expect(f.storage.readAppCollection({...f.input,limit:1,afterPath:first.nextPath!}).records[0].path).toBe(receipt.path);
+});

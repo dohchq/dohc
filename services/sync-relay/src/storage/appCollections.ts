@@ -182,10 +182,12 @@ export function readAppCollection(storage: StorageContext, input: ReadAppCollect
     const records: AppCollectionPage["records"] = [];
     let pageBytes = 0, scannedPath: string|null = null;
     for (const row of rows.slice(0,input.limit)) {
-      if (row.byte_length === null || row.byte_length !== row.actual || row.content_kind !== "text") throw notFound();
-      if (Number(row.byte_length) > MAX_RECORD_BYTES) {scannedPath=String(row.path);continue;}
+      if (row.byte_length === null || row.byte_length !== row.actual) throw notFound();
+      if (row.content_kind !== "text" || Number(row.byte_length) > MAX_RECORD_BYTES) {scannedPath=String(row.path);continue;}
       const blob = boundedBlob(storage,authority.workspaceId,String(row.blob_sha256),MAX_RECORD_BYTES);
-      const value = parseCollectionRecordFields(new TextDecoder("utf-8",{fatal:true}).decode(blob));
+      let value: Record<string,unknown>|null;
+      try {value=parseCollectionRecordFields(new TextDecoder("utf-8",{fatal:true}).decode(blob));}
+      catch {scannedPath=String(row.path);continue;}
       if (!value) {scannedPath=String(row.path);continue;}
       const selected = Object.fromEntries(authority.capability.readFields.filter(name => Object.hasOwn(value,name)).map(name => [name,value[name]]));
       if (Object.keys(selected).length === 0) {scannedPath=String(row.path);continue;}
