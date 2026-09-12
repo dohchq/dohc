@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
@@ -2068,6 +2068,27 @@ describe("global letter shortcut ownership", () => {
 });
 
 describe("collection folders", () => {
+  class ObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): never[] {
+      return [];
+    }
+  }
+
+  beforeAll(async () => {
+    // These tests assert the real lazy surface after opening the folder.
+    // Load its dependencies separately from that 15-second behavior budget.
+    vi.stubGlobal("ResizeObserver", ObserverStub);
+    vi.stubGlobal("IntersectionObserver", ObserverStub);
+    try {
+      await import("./CollectionPage");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 30_000);
+
   // The table virtualizer reads offsetWidth/offsetHeight, which jsdom reports
   // as 0 — no row would render (CollectionPage.test.tsx precedent).
   const offsetDescriptors = {
@@ -2080,14 +2101,6 @@ describe("collection folders", () => {
     // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
     // collection surface's lazy chunk evaluates @dnd-kit, which reads both
     // observers while its module loads, so they must exist before the click.
-    class ObserverStub {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-      takeRecords(): never[] {
-        return [];
-      }
-    }
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
