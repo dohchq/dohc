@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { createAppDocument, type AppDocumentFile } from "./appDocument";
+import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
   window: Window & typeof globalThis & { value?: string };
@@ -54,6 +55,15 @@ describe("compiled app document", () => {
     const inputs = [file("bundle.js", "/*😀*/")];
     expect(() => createAppDocument(inputs, { ...limits, maxBundleBytes: 7 })).toThrow("bundle exceeds");
     expect(() => createAppDocument(inputs, { ...limits, maxDocumentBytes: 100 })).toThrow("document exceeds");
+  });
+
+  it("admits sixfold JSON escaping within the shared publication document limit", () => {
+    const source = "/*" + "<\u0000".repeat(32_768) + "*/";
+    const input = file("bundle.js", source);
+    const output = createAppDocument([input], {maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES, maxDocumentBytes: APP_PUBLICATION_MAX_DOCUMENT_BYTES});
+    expect(output.byteLength).toBeGreaterThan(input.byteLength * 5);
+    expect(output.byteLength).toBeLessThanOrEqual(input.byteLength * 6 + 64 * 1024);
+    expect(APP_PUBLICATION_MAX_DOCUMENT_BYTES).toBe(APP_PUBLICATION_MAX_BUNDLE_BYTES * 6 + 64 * 1024);
   });
 
   it("rejects invalid UTF-8 rather than executing replacement text", () => {
