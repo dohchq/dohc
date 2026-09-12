@@ -25,11 +25,13 @@ Leave it unset or set it to `0` to keep these routes unavailable.
 Invalid values stop the relay before it opens storage.
 
 This enables authenticated owners to publish, list, inspect, and withdraw app builds.
-Link holders can read a publication within their current share grant.
+Link holders can read a publication within their current share grant when the
+relay also has `DOHC_RELAY_LINK_KEY` configured.
 The setting does not enable public Edit or app collection writes.
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
 `DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
-registrable domain. App launch remains unavailable when either value is missing.
+registrable domain. App launch stays off when the app domain is unset. Setting
+it without a public origin stops share-web at startup.
 
 Limits are shared with the desktop: 512 source files, 32 MiB per bundle,
 20 MiB per blob, and 256 KiB for the complete publication request.
