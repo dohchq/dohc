@@ -70,7 +70,7 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
 });
 
-it.each([{}, {destination:"Mars"},{destination:"Tokyo",created_by:"owner"},{destination:"Tokyo",created_at:0},{destination:"Tokyo",id:"rec_forged"},{destination:"Tokyo",secret:"private"},{destination:"Tokyo",name:"a".repeat(9000)}])("refuses invalid fields atomically, case %#",fields=>{
+it.each([{}, {destination:null},{destination:undefined}, {destination:"Mars"},{destination:"Tokyo",created_by:"owner"},{destination:"Tokyo",created_at:0},{destination:"Tokyo",id:"rec_forged"},{destination:"Tokyo",secret:"private"},{destination:"Tokyo",name:"a".repeat(9000)}])("refuses invalid fields atomically, case %#",fields=>{
   const f=fixture();expect(()=>f.accept({fields})).toThrow();
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_link_principals").get()!.n).toBe(0);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(0);
@@ -182,4 +182,28 @@ it("maps the same profile to unrelated public identities across grants",()=>{
   const mappings=f.raw.prepare("SELECT public_principal_id,principal_id FROM sync_relay_app_public_principals ORDER BY grant_id").all();
   expect(mappings).toHaveLength(2);expect(mappings[0].public_principal_id).not.toBe(mappings[1].public_principal_id);
   expect(mappings[0].principal_id).not.toBe(mappings[1].principal_id);
+});
+
+it("keeps accepted principals and receipts when principal cleanup is attempted",()=>{
+  const f=fixture(),receipt=f.accept({},1);
+  expect(()=>f.raw.prepare("DELETE FROM sync_relay_link_principals").run()).toThrow(/FOREIGN KEY/);
+  expect(f.accept({},1)).toEqual(receipt);
+  expect(()=>f.accept({idempotencyKey:"second"},1)).toThrow(/quota/);
+});
+
+it("charges approval bytes and refunds narrowing without refilling create quota",()=>{
+  const f=fixture();
+  const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
+  const before=usage(),size=Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_collection_approvals").get()!.storage_bytes);
+  f.storage.approveAppCollection({...f.owner,expectedAuthorityRevision:2,capability:null});
+  const reduced=Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_collection_approvals").get()!.storage_bytes);
+  expect(usage()).toBe(before-size+reduced);
+  const other=openSyncRelayStorage(f.path,{workspaceQuotaBytes:usage()});cleanups.push(()=>other.close());
+  expect(()=>other.approveAppCollection({...f.owner,expectedAuthorityRevision:3,capability})).toThrow(/quota/);
+  expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(3);
+});
+
+it("refuses an oversized projected response before loading its content",()=>{
+  const f=fixture(),receipt=f.accept();f.write(receipt.path,"---\nname: "+"a".repeat(20_000)+"\ndestination: Tokyo\n---\n",receipt.objectId);
+  expect(()=>f.storage.readAppCollection({...f.input,limit:10})).toThrow(/not found/i);
 });
