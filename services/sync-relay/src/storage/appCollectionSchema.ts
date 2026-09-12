@@ -4,6 +4,7 @@ export function initializeAppCollectionSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_app_collection_approvals (
       publication_id TEXT PRIMARY KEY REFERENCES sync_relay_app_publications(publication_id) ON DELETE CASCADE,
+      workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
       capability_json TEXT NOT NULL,
       active INTEGER NOT NULL CHECK(active IN (0,1)), storage_bytes INTEGER NOT NULL CHECK(storage_bytes >= 0)
     ) STRICT;
@@ -34,4 +35,10 @@ export function initializeAppCollectionSchema(db: SqliteDb): void {
       CREATE TRIGGER IF NOT EXISTS ${table}_usage_delete AFTER DELETE ON ${table} BEGIN
       UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id; END;`);
   }
+  db.exec(`CREATE TRIGGER IF NOT EXISTS app_collection_approval_usage_insert AFTER INSERT ON sync_relay_app_collection_approvals BEGIN
+    UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+NEW.storage_bytes WHERE workspace_id=NEW.workspace_id; END;
+    CREATE TRIGGER IF NOT EXISTS app_collection_approval_usage_update AFTER UPDATE ON sync_relay_app_collection_approvals BEGIN
+    UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+NEW.storage_bytes-OLD.storage_bytes WHERE workspace_id=NEW.workspace_id; END;
+    CREATE TRIGGER IF NOT EXISTS app_collection_approval_usage_delete AFTER DELETE ON sync_relay_app_collection_approvals BEGIN
+    UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id; END;`);
 }

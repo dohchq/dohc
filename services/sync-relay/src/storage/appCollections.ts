@@ -39,11 +39,18 @@ function schema(storage: StorageContext, workspaceId: string, versionId: string,
   const row = storage.db.prepare(`SELECT blob_sha256,content_kind FROM sync_relay_current_files WHERE workspace_id=? AND version_id=? AND path=?`)
     .get(workspaceId, versionId, `${capability.collectionPath}/collection.yaml`);
   if (!row || row.blob_sha256 !== capability.schemaSha256 || row.content_kind !== "text") throw notFound();
-  const blob = storage.getBlob(workspaceId, capability.schemaSha256);
+  const blob = boundedBlob(storage,workspaceId,capability.schemaSha256,MAX_SCHEMA_BYTES);
   if (!blob || blob.byteLength > MAX_SCHEMA_BYTES || sha(blob) !== capability.schemaSha256) throw notFound();
   const parsed = parseCollectionSchema(new TextDecoder("utf-8", {fatal: true}).decode(blob));
   if (parsed.status !== "valid" || [...capability.allowedFields, ...capability.readFields].some(name => !parsed.schema.fields.some(field => field.name === name))) throw badRequest("Collection schema does not match approval.");
   return parsed.schema;
+}
+function boundedBlob(storage: StorageContext, workspaceId: string, hash: string, limit: number): Uint8Array {
+  const row = storage.db.prepare("SELECT byte_length,length(content) AS actual FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(workspaceId,hash);
+  if (!row || !Number.isSafeInteger(Number(row.byte_length)) || Number(row.byte_length) < 0 || Number(row.byte_length) > limit || row.byte_length !== row.actual) throw notFound();
+  const blob = storage.getBlob(workspaceId,hash);
+  if (!blob || blob.byteLength !== row.byte_length || sha(blob) !== hash) throw notFound();
+  return blob;
 }
 function narrows(requested: AppCollectionCapability, approved: AppCollectionCapability): boolean {
   return requested.collectionPath === approved.collectionPath && requested.schemaSha256 === approved.schemaSha256 &&
@@ -61,7 +68,7 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
     if (capability) {
       const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
       if (row.active !== 1 || !share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId || !grant || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
-      const manifest = storage.getBlob(input.workspaceId, String(row.manifest_sha256));
+      const manifest = boundedBlob(storage,input.workspaceId,String(row.manifest_sha256),input.limits.maxMetadataBytes);
       if (!manifest || manifest.byteLength > input.limits.maxMetadataBytes || sha(manifest) !== row.manifest_sha256) throw notFound();
       const candidate = parseAppPublicationCandidate(JSON.parse(Buffer.from(manifest).toString("utf8")),input.limits);
       const requested = candidate.capabilities?.[0] && parseAppCollectionCapability(candidate.capabilities[0]);
@@ -70,9 +77,12 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
       schema(storage,input.workspaceId,candidate.versionId,capability);
     }
     const capabilityJson = JSON.stringify(capability);
-    storage.db.prepare(`INSERT INTO sync_relay_app_collection_approvals(publication_id,capability_json,active,storage_bytes) VALUES(?,?,?,?)
+    const storageBytes = bytes([input.publicationId,input.workspaceId,capabilityJson])+64;
+    const previous = storage.db.prepare("SELECT storage_bytes FROM sync_relay_app_collection_approvals WHERE publication_id=?").get(input.publicationId);
+    assertWorkspaceQuota(storage,input.workspaceId,storageBytes-Number(previous?.storage_bytes??0));
+    storage.db.prepare(`INSERT INTO sync_relay_app_collection_approvals(publication_id,workspace_id,capability_json,active,storage_bytes) VALUES(?,?,?,?,?)
       ON CONFLICT(publication_id) DO UPDATE SET capability_json=excluded.capability_json,active=excluded.active,storage_bytes=excluded.storage_bytes`)
-      .run(input.publicationId, capabilityJson, capability ? 1 : 0, Buffer.byteLength(capabilityJson));
+      .run(input.publicationId, input.workspaceId, capabilityJson, capability ? 1 : 0, storageBytes);
     storage.db.prepare("UPDATE sync_relay_app_publications SET authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
     return {publicationId: input.publicationId, authorityRevision: revision + 1, capability};
   });
@@ -173,7 +183,7 @@ export function readAppCollection(storage: StorageContext, input: ReadAppCollect
     const records: AppCollectionPage["records"] = [];
     let pageBytes = 0;
     for (const row of rows.slice(0,input.limit)) {
-      const blob = storage.getBlob(authority.workspaceId,String(row.blob_sha256));
+      const blob = boundedBlob(storage,authority.workspaceId,String(row.blob_sha256),MAX_RECORD_BYTES);
       if (!blob || blob.byteLength > MAX_RECORD_BYTES || row.content_kind !== "text" || sha(blob) !== row.blob_sha256) throw notFound();
       const value = parseCollectionRecordFields(new TextDecoder("utf-8",{fatal:true}).decode(blob));
       if (!value) throw notFound();
