@@ -436,6 +436,9 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     .await;
     assert_eq!(retry["deduped"], true);
     assert_eq!(retry["moment"]["momentId"], deleted["moment"]["momentId"]);
+    // The text delete commits canonical state; the desktop capture seam applies
+    // the corresponding disk removal. Simulate that owner materialization here.
+    std::fs::remove_file(owner_scratch.path().join(path)).expect("materialize owner delete");
     assert!(!owner_scratch.path().join(path).exists());
     reconcile_until_settled(&transport, &handle, 50).await;
     let empty = call(
