@@ -35,8 +35,9 @@ pub struct SourceCapture {
 }
 
 impl VersionedTextStore<'_> {
-    /// Pin selected, settled source identities in one SQLite read snapshot.
-    /// Blobs are hydrated separately by hash; this does not settle live documents.
+    /// Pin selected source identities without Y.Doc lineage in one SQLite
+    /// read snapshot. Live lineage markers survive settlement, so even a
+    /// settled live document is unsupported here. Hydrate blobs later by hash.
     pub fn capture_sources(
         &self,
         workspace_id: &str,
@@ -93,7 +94,7 @@ impl VersionedTextStore<'_> {
                         sha256: row.get(2)?, byte_length: row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?, latest_moment_id: row.get(4)?,
                     }, row.get(5)?)),
                 ).map_err(DomainError::sql_corrupt)?;
-                if live { return Err(invalid("live source requires settlement before capture")); }
+                if live { return Err(invalid("live-backed sources are not supported by this capture operation")); }
                 if !matches!(file.content_kind.as_str(), "text" | "binary")
                     || file.sha256.len() != 64 || !file.sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                     || alias_object_id(&tx, workspace_id, version_id, path)?.as_deref() != Some(file.object_id.as_str())
