@@ -70,5 +70,4 @@ export {
   parseLiveObjectBinding,
   type LiveObjectBinding,
   type OwnerYDocOutboxEntry,
-  type OwnerYDocOutboxLimits,
 } from "./ydoc/ownerYDocOutbox";

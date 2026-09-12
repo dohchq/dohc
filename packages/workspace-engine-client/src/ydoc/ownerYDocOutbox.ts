@@ -18,7 +18,7 @@ const OWNER_YDOC_OUTBOX_METHOD = {
   quarantine: "ydoc.ownerOutbox.quarantine",
 } as const;
 
-export interface OwnerYDocOutboxLimits {
+interface OwnerYDocOutboxLimits {
   readonly maxPendingBytes: number;
   readonly maxPendingAgeMs: number;
 }
