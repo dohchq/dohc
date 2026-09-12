@@ -504,6 +504,8 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
     path: string;
+    expectedObjectId?: WorkspaceObjectId;
+    requestId?: string;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentAuthor;
     momentId?: VersionedTextMomentId;

@@ -910,6 +910,8 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      expectedObjectId?: string;
+      requestId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentAuthor;
       momentId?: string;

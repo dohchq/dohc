@@ -983,6 +983,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     expectedObjectId?: string;
+    requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: AgentAuthor | null;
     momentId?: string;
@@ -993,7 +994,7 @@ export class VersionedLiveAdapter {
         "versionedText.delete does not accept a caller-supplied moment id.",
       );
     }
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
       {

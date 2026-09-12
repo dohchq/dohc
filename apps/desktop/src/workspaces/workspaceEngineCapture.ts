@@ -1,4 +1,5 @@
 import { errorMessage } from "./workspaceError";
+import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,
@@ -544,6 +545,7 @@ export interface WorkspaceEngineCapture {
   // write is not re-captured. Undo = call again with the returned
   // restoredMomentId.
   restoreFileToBeforeMoment(momentId: string): Promise<WorkspaceEngineRestoreResult>;
+  undoAcceptedAppResponse(input: AppResponseUndoSelection): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -5216,6 +5218,53 @@ export function createWorkspaceEngineCapture(
           };
         } catch (error) {
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
+        }
+      });
+    },
+
+    undoAcceptedAppResponse(input) {
+      return enqueueResult("remove app response", async () => {
+        const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
+        if(versionId!==input.versionId)return {status:"conflict" as const};
+        await engine.flushCapture?.();
+        const creation=await engine.getMoment({workspaceId,momentId:input.momentId});
+        if(!creation || creation.workspaceId!==workspaceId || creation.objectId!==input.objectId || creation.versionId!==versionId ||
+            creation.operation!=="write" || creation.syncRecordOnly || creation.payload.before!==null ||
+            creation.path!==input.path || creation.path!==`${input.collectionPath}/${input.acceptanceId}.md` ||
+            creation.author?.kind!=="public" || creation.author.principalId!==input.publicPrincipalId || creation.author.grantId!==input.grantId) return {status:"conflict" as const};
+        const page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
+        const previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
+        const files=await listTextFileMetadata(engine,versionId);
+        const current=files.find(file=>file.objectId===input.objectId);
+        // A completed retry must never remove an object the owner restored later.
+        if(previous && current)return {status:"deleted" as const,momentId:previous.id};
+        if(previous && !current) {
+          if(files.some(file=>file.path===previous.path))return {status:"deleted" as const,momentId:previous.id};
+          const deleted=await engine.getMoment({workspaceId,momentId:previous.id});
+          const disk=await readDiskTextState(rootPath,previous.path);
+          if(disk.kind==="text") {
+            if(!deleted?.payload.before || deleted.payload.before.text!==disk.text)return {status:"conflict" as const};
+            await materialize([{kind:"delete",path:previous.path}],await readPolicyForTask());
+          } else if(disk.kind!=="absent")return {status:"conflict" as const};
+          return {status:"deleted" as const,momentId:previous.id};
+        }
+        if(!current)return {status:"already-absent" as const,...(previous?{momentId:previous.id}:{})};
+        if(page.nextBeforeMomentOrder!==null)return {status:"conflict" as const};
+        if(!current.path.startsWith(input.collectionPath+"/") || current.path.slice(input.collectionPath.length+1).includes("/")) return {status:"conflict" as const};
+        const policy=await readPolicyForTask(),path=current.path;
+        const disk=await readDiskTextState(rootPath,path);
+        if(disk.kind!=="text")return {status:"conflict" as const};
+        const snapshot=await engine.readTextFile({workspaceId,versionId,path});
+        if(!snapshot || snapshot.objectId!==input.objectId || snapshot.text!==disk.text)return {status:"conflict" as const};
+        try {
+          const result=await engine.deleteTextFile({workspaceId,versionId,path,expectedObjectId:input.objectId,requestId:input.requestId,
+            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId}});
+          await materialize([{kind:"delete",path}],policy);
+          return {status:"deleted" as const,momentId:result.moment.id};
+        } catch(error) {
+          const reason=error && typeof error==="object" ? ("code" in error?error.code:"message" in error?error.message:undefined):undefined;
+          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active")return {status:"conflict" as const};
+          throw error;
         }
       });
     },
