@@ -20,7 +20,7 @@ const row: ListRelayShareLinksResult["links"][number] = {
 const page: ListRelayShareLinksResult = { supportedLinkAccess: ["view", "comment"], links: [row], independentGrants: [] };
 async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult> {
   if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
-  if (request.action === "prepare") return prepared;
+  if (request.action === "prepare" || request.action === "reviewReactivation") return prepared;
   if (request.action === "approve") return published;
   if (request.action === "withdraw") return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
   return { kind: "cancelled" };
@@ -54,6 +54,7 @@ describe("owner app publication", () => {
     expect(screen.getByTestId("app-publication-source-paths").textContent).toContain("trip/main.tsx");
     expect(screen.getByText("The app can use external services and send them data it receives.")).toBeTruthy();
     expect(screen.getByTestId("app-publication-digest").textContent).toBe(prepared.candidateDigest);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review app publication" }));
     await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
     await screen.findByText("App published on the selected link.");
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
@@ -151,6 +152,7 @@ describe("owner app publication", () => {
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
     await userEvent.setup().click(await screen.findByRole("button", { name: `Unpublish ${published.publicationId}` }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Unpublish app" }));
     await screen.findByText("App unpublished. The share link still works for its other shared content.");
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "withdraw", workspaceId: "ws-trip", publicationId: published.publicationId, expectedAuthorityRevision: 7 });
     expect(screen.queryByRole("button", { name: `Unpublish ${published.publicationId}` })).toBeNull();
@@ -164,7 +166,7 @@ describe("owner app publication", () => {
     });
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
-    await screen.findByText("No active publications.");
+    await screen.findByRole("button", { name: "Review and republish" });
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "list", workspaceId: "ws-trip", appRoot: "trip", cursor: "d".repeat(64) });
     expect(screen.queryByRole("button", { name: /^Unpublish/ })).toBeNull();
   });
@@ -191,6 +193,41 @@ describe("owner app publication", () => {
     expect(await screen.findByText("Source details unavailable. This publication may belong to another app.")).toBeTruthy();
     expect(screen.queryByText(/^Source b/)).toBeNull();
     await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
+    expect(screen.getByText("Source details are unavailable. This publication may belong to another app and cannot currently be republished.")).toBeTruthy();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Unpublish app" }));
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "withdraw", workspaceId: "ws-trip", publicationId: published.publicationId, expectedAuthorityRevision: 9 });
+  });
+
+  it("reviews a stored revision before explicitly republishing after withdrawal", async () => {
+    let active = true;
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "list") return { kind: "listed", publications: [{ ...published, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active, authorityRevision: active ? 7 : 8, manifestUnavailable: false }], nextCursor: null };
+      if (request.action === "withdraw") active = false;
+      if (request.action === "approve") active = true;
+      return answer(request);
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
+    expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "withdraw")).toBe(false);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Unpublish app" }));
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Review and republish" }));
+    await screen.findByText("Republish this stored revision. It does not include later source edits.");
+    expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "reviewReactivation", workspaceId: "ws-trip", publicationId: published.publicationId });
+    expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(false);
+    expect(screen.getByTestId("app-publication-digest").textContent).toBe(prepared.candidateDigest);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Republish this revision" }));
+    await screen.findByText("App published on the selected link.");
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
+  });
+
+  it("cancels withdrawal confirmation without mutation", async () => {
+    api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ ...published, manifestUnavailable: false, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true }], nextCursor: null } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: `Unpublish ${published.publicationId}` }));
+    await userEvent.setup().click(screen.getByTestId("app-publication-withdraw-cancel"));
+    expect(screen.queryByTestId("app-publication-withdraw-confirm")).toBeNull();
+    expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list")).toBe(true);
   });
 });

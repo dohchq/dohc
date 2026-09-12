@@ -5,6 +5,7 @@ import type { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContra
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
@@ -50,19 +51,26 @@ function PublicationDialog(props: {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [prepared, setPrepared] = useState<Prepared | null>(null);
+  const [reactivating, setReactivating] = useState(false);
+  const [preparedLink, setPreparedLink] = useState("");
   const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | null>(null);
+  const [busyPublicationId, setBusyPublicationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [publications, setPublications] = useState<Publication[]>([]);
+  const [pendingWithdraw, setPendingWithdraw] = useState<Publication | null>(null);
   const [publicationsLoading, setPublicationsLoading] = useState(true);
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
   const alive = useRef(true);
   const request = useRef(0);
   const candidate = useRef<Prepared | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const api = useRef(bridge()).current;
   const selectedLink = links.find(link => link.grantId === selected);
   const committing = busy === "approve" || busy === "withdraw";
+
+  useEffect(() => { heading.current?.focus(); }, [prepared]);
 
   const cancel = (value: Prepared | null) => {
     if (value) void api.publishOwnerApp({ action: "cancel", workspaceId: props.workspaceId, approvalId: value.approvalId }).catch(() => undefined);
@@ -115,7 +123,7 @@ function PublicationDialog(props: {
         if (!current) return;
         if (page.kind !== "listed") throw new Error("dohc could not load app publications. Reload the publications.");
         for (const row of page.publications) {
-          if ((row.manifestUnavailable || row.appRoot === props.appRoot) && row.active && !rows.some(value => value.publicationId === row.publicationId)) rows.push(row);
+          if ((row.manifestUnavailable || row.appRoot === props.appRoot) && !rows.some(value => value.publicationId === row.publicationId)) rows.push(row);
         }
         cursor = page.nextCursor ?? undefined;
         if (cursor && seen.has(cursor)) throw new Error("The publication list changed. Reload the publications.");
@@ -140,25 +148,49 @@ function PublicationDialog(props: {
       }
       candidate.current = result;
       setPrepared(result);
+      setReactivating(false);
+      setPreparedLink(linkLabel(selectedLink));
     } catch (error) {
       if (alive.current && mine === request.current) setError(ipcErrorMessage(error, "dohc could not prepare this app. Try again."));
     } finally { if (alive.current && mine === request.current) setBusy(null); }
+  };
+
+  const reviewReactivation = async (publication: Publication) => {
+    if (busy || publication.manifestUnavailable || publication.active) return;
+    const mine = ++request.current;
+    setBusy("prepare"); setBusyPublicationId(publication.publicationId); setError(null); setNotice(null);
+    try {
+      const result = await api.publishOwnerApp({ action: "reviewReactivation", workspaceId: props.workspaceId, publicationId: publication.publicationId });
+      if (!alive.current || mine !== request.current) { if (result.kind === "prepared") cancel(result); return; }
+      if (result.kind !== "prepared" || result.appRoot !== props.appRoot) {
+        if (result.kind === "prepared") cancel(result);
+        throw new Error("dohc could not load this publication. Reload the publications.");
+      }
+      candidate.current = result;
+      setPrepared(result);
+      setReactivating(true);
+      setPreparedLink(`Link ${publication.grantId}`);
+    } catch (error) {
+      if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not load this publication. Reload the publications.")); setPublicationsReload(value => value + 1); }
+    } finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
 
   const approve = async () => {
     if (busy || !prepared) return;
     const mine = ++request.current;
     setBusy("approve"); setError(null);
-    candidate.current = null;
     try {
       const result = await api.publishOwnerApp({ action: "approve", workspaceId: props.workspaceId, approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "published") throw new Error("dohc could not confirm publication. Reload the app publications.");
+      candidate.current = null;
       setPublicationsReload(value => value + 1);
       setPrepared(null);
       setNotice("App published on the selected link.");
     } catch (error) {
       if (alive.current && mine === request.current) {
+        cancel(prepared);
+        candidate.current = null;
         setPrepared(null);
         setPublicationsReload(value => value + 1);
         setError(ipcErrorMessage(error, "dohc could not confirm publication. Reload the app publications."));
@@ -169,16 +201,15 @@ function PublicationDialog(props: {
   const withdraw = async (publication: Publication) => {
     if (busy) return;
     const mine = ++request.current;
-    setBusy("withdraw"); setError(null);
+    setBusy("withdraw"); setBusyPublicationId(publication.publicationId); setError(null);
     try {
       const result = await api.publishOwnerApp({ action: "withdraw", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "withdrawn") throw new Error("dohc could not confirm that this publication ended. Try again.");
-      setPublications(rows => rows.filter(row => row.publicationId !== publication.publicationId));
       setPublicationsReload(value => value + 1);
       setNotice("App unpublished. The share link still works for its other shared content.");
     } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not unpublish the app. Try again.")); setPublicationsReload(value => value + 1); } }
-    finally { if (alive.current && mine === request.current) setBusy(null); }
+    finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
 
   const back = () => {
@@ -189,15 +220,15 @@ function PublicationDialog(props: {
     <section role="dialog" aria-modal="true" aria-labelledby="app-publication-title" data-testid="app-publication-dialog"
       className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(560px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5">
       <header className="flex items-center gap-2">
-        <h2 id="app-publication-title" className="m-0 flex-1 text-sm font-semibold text-ink">{prepared ? "Review app publication" : "Publish app"}</h2>
+        <h2 ref={heading} tabIndex={-1} id="app-publication-title" className="m-0 flex-1 text-sm font-semibold text-ink">{prepared ? "Review app publication" : "Publish app"}</h2>
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
       </header>
       <p className="m-0 break-all font-mono text-[12px] text-muted">{props.appRoot}</p>
       {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
       {error ? <p role="alert" className="m-0 text-[13px] text-danger">{error}</p> : null}
       {prepared ? <>
-        <p className="m-0 text-[13px] text-ink">Publish this captured app. Later source edits need a new publication.</p>
-        <div className="text-[12px] text-muted"><span className="font-medium text-ink">Link</span><p className="m-0 break-words">{selectedLink ? linkLabel(selectedLink) : selected}</p></div>
+        <p className="m-0 text-[13px] text-ink">{reactivating ? "Republish this stored revision. It does not include later source edits." : "Publish this captured app. Later source edits need a new publication."}</p>
+        <div className="text-[12px] text-muted"><span className="font-medium text-ink">Link</span><p className="m-0 break-words">{preparedLink}</p></div>
         <div><h3 className="m-0 text-[13px] font-medium text-ink">Files included</h3>
           <ul data-testid="app-publication-source-paths" className="mb-0 mt-2 max-h-40 list-none overflow-y-auto rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-muted">
             {prepared.sourcePaths.map(path => <li key={path} className="break-all">{path}</li>)}
@@ -213,20 +244,21 @@ function PublicationDialog(props: {
             <div><dt>Publication</dt><dd data-testid="app-publication-digest" className="m-0 break-all">{prepared.candidateDigest}</dd></div></dl>
         </details>
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={!!busy} onClick={back}>Back</SecondaryButton>
-          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy} onClick={() => void approve()}>{busy === "approve" ? "Publishing…" : "Publish this revision"}</PrimaryButton></footer>
+          <PrimaryButton data-testid="app-publication-approve" disabled={!!busy} onClick={() => void approve()}>{busy === "approve" ? "Publishing…" : reactivating ? "Republish this revision" : "Publish this revision"}</PrimaryButton></footer>
       </> : <>
         <div className="border-b border-line pb-4">
-          <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Active publications</h3>
+          <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Publications</h3>
             <SecondaryButton disabled={publicationsLoading || !!busy} onClick={() => setPublicationsReload(value => value + 1)}>Reload publications</SecondaryButton></div>
           {publicationsLoading ? <p role="status" className="mb-0 text-[12px] text-muted">Loading publications…</p> : publicationsError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
-              <p className="mb-0 text-[12px] text-muted">No active publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
-                {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)}</p>
+              <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
+                  {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {publication.active ? "Published" : "Unpublished"}</p>
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
                       <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}</div>
-                  <SecondaryButton disabled={!!busy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => void withdraw(publication)}>{busy === "withdraw" ? "Unpublishing…" : "Unpublish"}</SecondaryButton>
+                  {publication.active ? <SecondaryButton disabled={!!busy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
+                    publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
                 </li>)}
               </ul>}
         </div>
@@ -243,6 +275,11 @@ function PublicationDialog(props: {
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>
           <PrimaryButton disabled={!!busy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
       </>}
-    </section>
+      </section>
+      {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={() => setPendingWithdraw(null)} onConfirm={() => { const value = pendingWithdraw; setPendingWithdraw(null); void withdraw(value); }}>
+        <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
+        <p className="mt-2 mb-0 text-[13px] text-muted">{pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
+        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
+      </ConfirmDialog> : null}
   </Overlay>;
 }
