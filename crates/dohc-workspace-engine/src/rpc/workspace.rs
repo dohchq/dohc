@@ -82,6 +82,10 @@ impl WorkspaceHandleKind {
 }
 
 impl OpenWorkspace {
+    pub(super) fn is_local_owner(&self) -> bool {
+        self.handle_kind.owns_binding() && self.mode == WorkspaceOpenMode::Full
+    }
+
     fn read_only_attach(&self, owner: WorkspaceHandle) -> Self {
         Self {
             root: self.root.clone(),

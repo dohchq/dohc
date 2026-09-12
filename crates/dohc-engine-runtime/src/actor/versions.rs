@@ -44,6 +44,21 @@ pub struct ActiveVersionSwitch {
 }
 
 impl ActorHandle {
+    pub async fn capture_sources(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        paths: Vec<String>,
+        bounds: dohc_engine_domain::store::SourceCaptureBounds,
+    ) -> Result<dohc_engine_domain::store::SourceCapture, RuntimeError> {
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .capture_sources(&workspace_id, &version_id, &paths, &bounds)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn compare_version_files_page(
         &self,
         workspace_id: String,

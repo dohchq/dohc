@@ -4,6 +4,7 @@
 //! both sides, and close/reopen/mutate durability.
 
 use dohc_engine_domain::normalize;
+use dohc_engine_domain::store::SourceCaptureBounds;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
     MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation, VersionKind,
@@ -30,6 +31,90 @@ fn write(version: &str, path: &str, text: &str, moment: &str, object: &str, now:
         now_ms: now,
         request_id: None,
     }
+}
+
+#[test]
+fn captures_selected_source_identity_and_refuses_missing_or_duplicate_paths() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "notes/a.md", "hello", "m1", "o1", 2),
+            &NO_FAULTS,
+        )
+        .expect("write");
+    let bounds = SourceCaptureBounds {
+        max_input_files: 4,
+        max_input_bytes: 1024,
+    };
+    let capture = VersionedTextStore::new(&mut store)
+        .capture_sources(WS, "main", &["notes/a.md".into()], &bounds)
+        .expect("capture");
+    assert_eq!(capture.files[0].path, "notes/a.md");
+    assert_eq!(capture.total_bytes, 5);
+    assert_eq!(capture.files[0].sha256, hex_sha256(b"hello"));
+    assert_eq!(capture.files[0].object_id, "o1");
+    assert_eq!(capture.files[0].latest_moment_id, "m1");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "notes/a.md", "changed", "m2", "o1", 3),
+            &NO_FAULTS,
+        )
+        .expect("change");
+    let pinned = VersionedTextStore::new(&mut store)
+        .read_text_blob(WS, &capture.files[0].sha256)
+        .expect("blob")
+        .expect("retained");
+    assert_eq!(pinned.text.as_deref(), Some("hello"));
+    let changed = VersionedTextStore::new(&mut store)
+        .capture_sources(WS, "main", &["notes/a.md".into()], &bounds)
+        .expect("recapture");
+    assert_ne!(capture.source_digest, changed.source_digest);
+    let err = VersionedTextStore::new(&mut store)
+        .capture_sources(
+            WS,
+            "main",
+            &["notes/a.md".into(), "notes/a.md".into()],
+            &bounds,
+        )
+        .expect_err("duplicate");
+    assert_eq!(err.code(), "invalid-input");
+    for path in ["missing.js", ".env", "../outside.js", ".dohc/engine.db"] {
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .capture_sources(WS, "main", &[path.into()], &bounds)
+                .is_err(),
+            "{path}"
+        );
+    }
+    for (workspace, version) in [("elsewhere", "main"), (WS, "missing")] {
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .capture_sources(workspace, version, &["notes/a.md".into()], &bounds)
+                .is_err()
+        );
+    }
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .capture_sources(
+                WS,
+                "main",
+                &["notes/a.md".into()],
+                &SourceCaptureBounds {
+                    max_input_files: 1,
+                    max_input_bytes: 6
+                }
+            )
+            .is_err()
+    );
+    store.read_with(|conn| conn.execute("INSERT INTO ydoc_docs (workspace_id,version_id,object_id,updated_at_ms) VALUES (?1,'main','o1',3)", [WS])).expect("marker");
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .capture_sources(WS, "main", &["notes/a.md".into()], &bounds)
+            .is_err()
+    );
 }
 
 fn bootstrap(store: &mut EngineStore) {

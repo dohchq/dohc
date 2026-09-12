@@ -27,6 +27,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
             method,
             "capture.reconcile"
                 | "versionedText.list"
+                | "versionedText.captureSources"
                 | "versionedText.read"
                 | "versionedText.readBlob"
                 | "versionedText.compare"
@@ -464,6 +465,10 @@ impl EngineService {
             }
             "versionedText.list" => {
                 self.versioned_text_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.captureSources" => {
+                self.versioned_text_capture_sources(&ctx, request.workspace, request.params)
                     .await?
             }
             "versionedBinary.read" => {
@@ -1223,6 +1228,7 @@ mod tests {
             "versionedText.checkMove",
             "versionedText.delete",
             "versionedText.list",
+            "versionedText.captureSources",
             "versionedText.merge",
             "versionedText.read",
             "versionedText.readBlob",

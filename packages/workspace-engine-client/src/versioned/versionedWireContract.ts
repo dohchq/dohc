@@ -13,6 +13,7 @@ export const VERSIONED_METHOD = {
   textDelete: "versionedText.delete",
   textRollback: "versionedText.rollback",
   textList: "versionedText.list",
+  textCaptureSources: "versionedText.captureSources",
   binaryWrite: "versionedBinary.write",
   binaryWriteBlob: "versionedBinary.writeBlob",
   binaryRead: "versionedBinary.read",
@@ -430,6 +431,11 @@ type HistoryPageResult = typeof HistoryPageResultSchema.Type;
 type SearchEnsureIndexResult = JsonObject;
 
 export type VersionedMethodParamsMap = {
+  [VERSIONED_METHOD.textCaptureSources]: JsonObject & {
+    versionId: string;
+    paths: string[];
+    bounds: { maxInputFiles: number; maxInputBytes: number };
+  };
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteParams;
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
@@ -468,6 +474,7 @@ export type VersionedMethodParamsMap = {
 };
 
 export type VersionedMethodResultMap = {
+  [VERSIONED_METHOD.textCaptureSources]: SourceCapture;
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteResult;
   [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobResult;
@@ -907,7 +914,24 @@ const TextListResultSchema = mutableStruct({
   nextAfterPath: NullableString,
 });
 
+const SourceCaptureSchema = mutableStruct({
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  sourceDigest: Schema.String,
+  totalBytes: Schema.Int,
+  files: Schema.mutable(Schema.Array(mutableStruct({
+    path: Schema.String,
+    objectId: Schema.String,
+    contentKind: ContentKindSchema,
+    sha256: Schema.String,
+    byteLength: Schema.Int,
+    latestMomentId: Schema.String,
+  }))),
+});
+export type SourceCapture = typeof SourceCaptureSchema.Type;
+
 const VersionedResultSchemas = {
+  [VERSIONED_METHOD.textCaptureSources]: SourceCaptureSchema,
   [VERSIONED_METHOD.textWrite]: TextWriteResultSchema,
   [VERSIONED_METHOD.textRead]: Schema.NullOr(VersionedTextReadValueSchema),
   [VERSIONED_METHOD.textReadBlob]: BlobReadResultSchema,

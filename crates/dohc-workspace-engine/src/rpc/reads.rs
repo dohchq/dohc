@@ -168,6 +168,14 @@ struct VersionedTextListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourceCaptureParams {
+    version_id: String,
+    paths: Vec<String>,
+    bounds: dohc_engine_domain::store::SourceCaptureBounds,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct VersionPathParams {
     pub(super) version_id: String,
     pub(super) path: String,
@@ -284,6 +292,47 @@ pub(super) fn snapshot_metadata_json(
 }
 
 impl EngineService {
+    pub(super) async fn versioned_text_capture_sources(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SourceCaptureParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "source capture requires the local owning workspace handle",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let capture = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.captureSources",
+            open.actor.capture_sources(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.paths,
+                params.bounds,
+            ),
+        )
+        .await?;
+        let value = serde_json::to_value(capture)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "source capture encoding failed"))?;
+        if serde_json::to_vec(&value)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "source capture encoding failed"))?
+            .len()
+            > SINGLE_ROW_HARD_CAP_BYTES
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "source capture metadata exceeds response budget",
+            ));
+        }
+        Ok(value)
+    }
+
     pub(super) async fn versioned_text_read(
         &self,
         ctx: &RequestContext,

@@ -17,6 +17,12 @@ mod capture_write;
 mod delete_rename;
 mod request_ledger;
 mod rollback;
+mod source_capture;
+
+pub use source_capture::{
+    CapturedSource, MAX_SOURCE_CAPTURE_BYTES, MAX_SOURCE_CAPTURE_FILES, SourceCapture,
+    SourceCaptureBounds,
+};
 
 pub use binary_write::write_binary_in_tx;
 pub use capture_write::{

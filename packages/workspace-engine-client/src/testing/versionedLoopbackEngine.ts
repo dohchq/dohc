@@ -169,6 +169,10 @@ const OPTIONAL_SECRET_METADATA = ["summary", "correlationId"] as const;
 // handle; keeping the inventory exhaustive makes a new method fail typecheck
 // until its wire shape is stated here too.
 const VERSIONED_PARAM_SHAPES = {
+  [VERSIONED_METHOD.textCaptureSources]: {
+    requiredStrings: ["versionId"],
+    optionalJson: ["paths", "bounds"],
+  },
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
     optionalStrings: WRITE_OPTIONAL_STRINGS,
