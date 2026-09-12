@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { OwnerAppResponsesResult } from "@dohc/cli/app-responses";
+import type { OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
