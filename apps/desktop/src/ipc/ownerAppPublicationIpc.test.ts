@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
@@ -107,6 +107,20 @@ describe("owner app publication", () => {
     });
     await expect(h.prepare()).rejects.toThrow("bundle bound");
     expect(h.upload).not.toHaveBeenCalled();
+  });
+  it.each(["metadata", "blob"])("refuses withdrawn publications above the %s limit before approval", async kind => {
+    const baseline = harness();
+    await baseline.approve(await baseline.prepare());
+    const { candidate } = JSON.parse(String(baseline.relay.mock.calls.at(-1)![2]!.body));
+    if (kind === "metadata") candidate.compilerIdentity.version = "x".repeat(APP_PUBLICATION_MAX_REQUEST_BYTES + 1);
+    else candidate.files[0].byteLength = APP_PUBLICATION_MAX_BLOB_BYTES + 1;
+    const h = harness();
+    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate, active: false, authorityRevision: 2,
+      owner: { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 } });
+    await expect(h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) })).rejects.toThrow();
+    expect(h.upload).not.toHaveBeenCalled();
+    expect(h.relay).toHaveBeenCalledOnce();
+    expect(h.relay.mock.calls[0]![2]?.method).toBeUndefined();
   });
   it.each([-1, 0, 1])("checks the complete publication envelope at the byte limit %+i", async offset => {
     const baseline = harness();
