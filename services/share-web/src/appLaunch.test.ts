@@ -12,7 +12,7 @@ return{handler,requests,request,issue,redeem,revoke(){active=false;},narrow(){re
 async function launch(f:ReturnType<typeof fixture>){const issued=await f.issue();expect(issued.status).toBe(200);const handoff=await issued.json();const response=await f.redeem(handoff);expect(response.status).toBe(200);const html=await response.text(),proof=/const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!,cookie=response.headers.get('set-cookie')!.split(';')[0]!,origin=new URL(handoff.action).origin;const read=(path='/document',custom:Record<string,string>={})=>f.handler.handle(f.request(origin+path,'',{origin,cookie,'x-dohc-app-proof':proof,...custom}));return{handoff,response,html,proof,cookie,origin,read};}
 it('requires separate registrable domains including private PSL suffixes',()=>{expect(parseAppLaunchConfig(config)).toEqual(config);for(const appDomain of ['com','example.com','apps.example.com','localhost','127.0.0.1','github.io','EXAMPLE.NET'])expect(()=>parseAppLaunchConfig({...config,appDomain})).toThrow();expect(()=>parseAppLaunchConfig({viewerOrigin:'https://a.github.io',appDomain:'b.github.io'})).not.toThrow();});
 it('requires viewer cookies and exact origin',async()=>{const f=fixture();for(const custom of [{origin:'null',cookie:'viewer=session'},{origin:config.viewerOrigin,cookie:'bad'}] as Array<Record<string,string>>)expect((await f.handler.handle(f.request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{...custom,'content-type':'application/json'}))).status).toBe(404);expect(f.requests).toHaveLength(0);});
-it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
+it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts allow-forms'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
 it('atomically consumes concurrent handoffs once',async()=>{const f=fixture(),handoff=await(await f.issue()).json();expect((await Promise.all([f.redeem(handoff),f.redeem(handoff)])).map(r=>r.status).sort()).toEqual([200,404]);});
 it('rechecks revoked and narrowed authority at redemption',async()=>{for(const change of ['revoke','narrow']as const){const f=fixture(),handoff=await(await f.issue()).json();f[change]();expect((await f.redeem(handoff)).status).toBe(404);}});
 it('rechecks revocation on document and status requests',async()=>{const f=fixture(),app=await launch(f);f.revoke();expect((await app.read()).status).toBe(404);expect((await app.read('/status')).status).toBe(404);});
@@ -66,4 +66,22 @@ it('preserves staged bytes after invalid proof and expires abandoned stages', as
   expect((await app.read()).status).toBe(200);
   const expired = await launch(f);f.advance(30000);
   expect((await expired.read()).status).toBe(404);
+});
+it('keeps collection rate exhaustion independent from document and status',async()=>{
+  const f=fixture(),app=await launch(f);
+  const request=()=>f.handler.handle(f.request(app.origin+'/collection',JSON.stringify({id:'list',op:'collection.list',limit:1}),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
+  const before=f.requests.length;for(let i=0;i<13;i++)await request();expect(f.requests.length-before).toBe(12);
+  expect((await app.read('/status')).status).toBe(204);expect((await app.read()).status).toBe(200);
+});
+it('keeps full collection admission independent from document builds and status',async()=>{
+  let hold=async()=>{};
+  const f=fixture(()=>hold()),apps=[await launch(f),await launch(f)];
+  let release!:()=>void,admitted!:()=>void,count=0;const barrier=new Promise<void>(resolve=>{release=resolve;}),ready=new Promise<void>(resolve=>{admitted=resolve;});
+  hold=async()=>{if(++count===16)admitted();await barrier;};
+  const request=(app:typeof apps[number])=>f.handler.handle(f.request(app.origin+'/collection',JSON.stringify({id:'list',op:'collection.list',limit:1}),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
+  const calls=Array.from({length:16},(_,i)=>request(apps[i%2]!));await ready;
+  expect((await request(apps[0]!)).status).toBe(503);
+  hold=async()=>{};expect((await apps[1]!.read()).status).toBe(200);expect((await apps[0]!.read('/status')).status).toBe(204);
+  const issued=await f.issue();expect(issued.status).toBe(200);expect((await f.redeem(await issued.json())).status).toBe(200);
+  release();await Promise.all(calls);
 });

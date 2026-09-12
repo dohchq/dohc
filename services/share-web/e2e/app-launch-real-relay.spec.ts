@@ -8,8 +8,9 @@ test("real relay and HTTPS top-level handoff keep app authority outside its opaq
   const viewer = "https://viewer.example.com";
   
   const events: Array<{path: string; status: number; origin: string | null; cookie: boolean}> = [];
-  const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`);
-  const fixture = actualAppLaunchFixture(bytes), publicationId = fixture.publicationId, app = fixture.application;
+  const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);
+  addEventListener('message',async event=>{if(event.source!==parent||event.data?.kind!=='dohc-app-channel'||event.data?.version!==1||event.ports.length!==1)return;const port=event.ports[0],pending=new Map();let serial=0;port.onmessage=e=>{const done=pending.get(e.data.id);if(done){pending.delete(e.data.id);done(e.data);}};port.start();window.collectionCall=body=>new Promise(resolve=>{const id='q'+(++serial);pending.set(id,resolve);port.postMessage({id,...body});});const before=await window.collectionCall({op:'collection.list',limit:10});const receipt=await window.collectionCall({op:'collection.create',idempotencyKey:'browser-vote',fields:{destination:'Tokyo'}});const after=await window.collectionCall({op:'collection.list',limit:10});document.body.dataset.collection=JSON.stringify({before,receipt,after});});`);
+  const fixture = actualAppLaunchFixture(bytes,true), publicationId = fixture.publicationId, app = fixture.application;
   const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
 $req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-app-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
@@ -44,6 +45,13 @@ $cert.Dispose();$rsa.Dispose()`;
     const child=page.frameLocator("iframe");await expect(child.locator("#root")).toHaveText("App loaded");await expect(child.locator("body")).toHaveAttribute("data-external","received");
     expect(await page.evaluate(()=>document.cookie)).toBe("");
     const frame=page.frames().find(f=>f.url()==="about:srcdoc")!;
+    await frame.evaluate(()=>{const form=document.createElement('form');form.innerHTML='<button type="submit">Vote</button>';form.onsubmit=event=>{event.preventDefault();document.body.dataset.form='submitted';};document.body.append(form);});
+    await child.getByRole('button',{name:'Vote'}).click();await expect(child.locator('body')).toHaveAttribute('data-form','submitted');
+    await expect(child.locator('body')).toHaveAttribute('data-collection',/.+/);
+    const collection=JSON.parse((await child.locator('body').getAttribute('data-collection'))!);
+    expect(collection.before.value).toEqual({records:[],nextPath:null});expect(collection.receipt.ok).toBe(true);expect(collection.receipt.value.kind).toBe('accepted');expect(collection.after.value.records[0].fields).toEqual({destination:'Tokyo'});
+    const denied=await frame.evaluate(async()=>{const call=(window as unknown as {collectionCall(body:unknown):Promise<unknown>}).collectionCall;return Promise.all([call({op:'fetch',url:'https://viewer.example.com/private'}),call({op:'collection.list',limit:10,authorityRevision:2}),call({op:'collection.create',idempotencyKey:'oversized',fields:{destination:'X'.repeat(17000)}})]);});
+    expect(denied).toEqual([{id:'q4',ok:false,status:400},{id:'q5',ok:false,status:400},{id:'q6',ok:false,status:413}]);
     const checks=await frame.evaluate(async origin=>{
       const blocked:Record<string,boolean>={};for(const[name,fn]of Object.entries({parent:()=>parent.document,cookie:()=>document.cookie,storage:()=>localStorage.length})){try{fn();blocked[name]=false;}catch{blocked[name]=true;}}
       try{await fetch(origin+"/document",{method:"POST",credentials:"include"});}catch{}
