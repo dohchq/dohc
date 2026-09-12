@@ -52,6 +52,11 @@ $cert.Dispose();$rsa.Dispose()`;
     expect(checks).toEqual({parent:true,cookie:true,storage:true});
     await expect.poll(()=>events.some(e=>e.path==="/document"&&e.origin==="null"&&e.status===404)).toBe(true);
     expect(events.some(e=>e.path==="/document"&&e.status===200&&e.cookie)).toBe(true);
+    const refusedProof = await page.evaluate(async () => Promise.all([undefined, "Z".repeat(43)].map(async proof => {
+      const response = await fetch("/document", {method: "POST", credentials: "same-origin", headers: proof ? {"x-dohc-app-proof": proof} : {}});
+      return response.status;
+    })));
+    expect(refusedProof).toEqual([404, 404]);
     fixture.withdraw();await expect(page.getByRole("status")).toHaveText("This app session ended. Reopen the share link.",{timeout:20000});await expect(page.locator("iframe")).toHaveCount(0);
   } finally {await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));fixture.close();}
 });
