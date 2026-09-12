@@ -70,10 +70,7 @@ pub fn release_imported_owner_activation(
                 Err(rusqlite::Error::SqliteFailure(error, message))
                     if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
                         || (error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
-                            && message.as_deref() == Some("FOREIGN KEY constraint failed")) =>
-                {
-                    ()
-                }
+                            && message.as_deref() == Some("FOREIGN KEY constraint failed")) => {}
                 Err(error) => return Err(write_sql(error)),
             }
         } else {

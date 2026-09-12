@@ -375,14 +375,23 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
 #[test]
 fn accepted_owner_origin_does_not_load_retained_document_bytes() {
     use rusqlite::limits::Limit;
+    let seed: Value = serde_json::from_str(include_str!(
+        "../../tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let seed_bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
     let doc = Ydoc::wire();
+    doc.apply(&seed_bytes).unwrap();
     doc.rewrite_content_to_markdown(
         ContentKind::Richdoc,
         &"large retained source ".repeat(8_000),
     )
     .unwrap();
     let text = doc.project(ContentKind::Richdoc).unwrap().content;
-    let mut f = imported_source_fixture(Fixture::with_source(text, doc.encode_full_state()));
+    let bytes = doc.encode_full_state();
+    doc.validate_public_baseline(&bytes).unwrap();
+    assert!(text.len() > 65_536 && bytes.len() > 65_536);
+    let mut f = imported_source_fixture(Fixture::with_source(text, bytes));
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
     f.cut.adoption_id = captured.activation_id.clone();
     f.adopt().unwrap();
