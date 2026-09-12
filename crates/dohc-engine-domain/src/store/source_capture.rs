@@ -80,7 +80,7 @@ impl VersionedTextStore<'_> {
                 // Size strings before materializing them. The same transaction
                 // holds both this preflight and the subsequent identity read.
                 let size: Option<i64> = tx.query_row(
-                    "SELECT LENGTH(CAST(object_id AS BLOB)) + LENGTH(CAST(latest_moment_id AS BLOB)) + LENGTH(CAST(COALESCE(content_kind,'text') AS BLOB)) + LENGTH(CAST(CASE COALESCE(content_kind,'text') WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END AS BLOB)) FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    "SELECT LENGTH(CAST(s.object_id AS BLOB)) + LENGTH(CAST(s.latest_moment_id AS BLOB)) + LENGTH(CAST(COALESCE(s.content_kind,'text') AS BLOB)) + LENGTH(CAST(CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END AS BLOB)) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
                     params![workspace_id, version_id, path], |row| row.get(0),
                 ).optional().map_err(DomainError::sql_corrupt)?;
                 let size = size.ok_or_else(|| invalid("selected source is missing"))?;
@@ -88,7 +88,7 @@ impl VersionedTextStore<'_> {
                     .filter(|size| *size <= MAX_SOURCE_CAPTURE_METADATA_BYTES)
                     .ok_or_else(|| invalid("source capture metadata bounds exceeded"))?;
                 let (file, live): (CapturedSource, bool) = tx.query_row(
-                    "SELECT s.object_id, COALESCE(s.content_kind,'text'), CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.sha256 ELSE b.sha256 END, CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.byte_length ELSE LENGTH(CAST(b.text AS BLOB)) END, s.latest_moment_id, EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id) FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
+                    "SELECT s.object_id, COALESCE(s.content_kind,'text'), CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.sha256 ELSE b.sha256 END, CASE COALESCE(s.content_kind,'text') WHEN 'binary' THEN bb.byte_length ELSE LENGTH(CAST(b.text AS BLOB)) END, s.latest_moment_id, EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
                     params![workspace_id, version_id, path], |row| Ok((CapturedSource {
                         path: path.to_owned(), object_id: row.get(0)?, content_kind: row.get(1)?,
                         sha256: row.get(2)?, byte_length: row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?, latest_moment_id: row.get(4)?,
@@ -97,7 +97,6 @@ impl VersionedTextStore<'_> {
                 if live { return Err(invalid("live-backed sources are not supported by this capture operation")); }
                 if !matches!(file.content_kind.as_str(), "text" | "binary")
                     || file.sha256.len() != 64 || !file.sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                    || alias_object_id(&tx, workspace_id, version_id, path)?.as_deref() != Some(file.object_id.as_str())
                 {
                     return Err(DomainError::StateCorrupt { reason: "invalid selected source identity" });
                 }
