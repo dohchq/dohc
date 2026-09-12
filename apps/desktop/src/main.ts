@@ -4063,13 +4063,6 @@ function registerIpcHandlers(): void {
       return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
         maxInputBytes: 192 * 1024 * 1024, maxOutputBytes: 48 * 1024 * 1024, maxErrorBytes: 64 * 1024 }, signal);
     },
-    confirm: async (sender, detail) => {
-      const window = BrowserWindow.fromWebContents(sender);
-      if (!window || window.isDestroyed()) throw new Error("The app window closed before publication.");
-      const result = await dialog.showMessageBox(window, { type: "question", title: "Publish app", message: "Publish this captured app?",
-        detail, buttons: ["Cancel", "Publish app"], defaultId: 0, cancelId: 0, noLink: true });
-      return result.response === 1;
-    },
     relayJson: relayShareJsonWithCredentials,
     upload: async (credentials, workspaceId, sha256, bytes, signal) => {
       const result = await relayShareJsonWithCredentials<{ workspaceId: string; sha256: string; byteLength: number }>(credentials,
