@@ -64,15 +64,15 @@ $cert.Dispose();$rsa.Dispose()`;
     fixture.revokeSecond();await separate.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(separate.child.getByRole('alert')).toHaveText('This poll is unavailable. Ask its owner for a current link.');
     await first.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(first.child.getByRole('alert')).toHaveCount(0);await expect(first.child.getByRole('listitem')).toHaveCount(3);
     const frameLayout=await first.page.locator('iframe').evaluate(frame=>({top:frame.getBoundingClientRect().top,statusMargin:getComputedStyle(document.getElementById('status')!).margin,display:getComputedStyle(frame).display}));
-    writeFileSync(join(evidence,'frame-layout.json'),JSON.stringify(frameLayout));expect(frameLayout.top).toBe(0);
+    writeFileSync(join(evidence,'frame-layout.json'),JSON.stringify(frameLayout));expect(frameLayout.top).toBe(0);expect(frameLayout.display).toBe('block');
     expect(await second.child.locator('body').evaluate(body=>body.scrollWidth<=innerWidth)).toBe(true);
     await second.page.screenshot({path:evidence+'/p5-trip-product-dark-mobile.png'});
     fixture.withdraw();await second.child.getByRole('button',{name:'Refresh',exact:true}).click();await expect(second.child.getByRole('alert')).toHaveText('This poll is unavailable. Ask its owner for a current link.');
     await expect(first.page.getByRole('status')).toHaveText('This app session ended. Reopen the share link.',{timeout:20000});
     await expect(first.page.locator('iframe')).toHaveCount(0);
     const discovery=second.page.waitForResponse(response=>new URL(response.url()).pathname==='/api/apps');
-    await second.page.goto('https://viewer.example.com/s/#'+fixture.secret);expect((await discovery).status()).toBe(200);await expect(second.page.getByRole('button',{name:'Open app',exact:true})).toHaveCount(0);
-    expect(events.some(event=>event.path==='/api/apps'&&event.status===200)).toBe(true);expect(events.filter(event=>event.path==='/collection'&&event.status===200).length).toBeGreaterThanOrEqual(4);expect(errors).toEqual([]);
+    await second.page.goto('https://viewer.example.com/s/#'+fixture.secret);expect((await discovery).status()).toBe(200);await expect(second.page.getByText('No apps are available on this link. Ask the owner to publish one.')).toBeVisible();await expect(second.page.getByRole('button',{name:'Open app',exact:true})).toHaveCount(0);
+    expect(events.some(event=>event.path==='/api/apps'&&event.status===200)).toBe(true);expect(events.some(event=>event.path==='/bootstrap'&&event.origin==='null'&&event.status===200)).toBe(true);expect(events.filter(event=>event.path==='/collection'&&event.status===200).length).toBeGreaterThanOrEqual(4);expect(errors).toEqual([]);
     writeFileSync(evidence+'/p5-trip-product-browser.json',JSON.stringify({ok:true,...fixture.artifact,browser:await browser.version(),serverPort:address.port,events,checks:['production viewer app discovery','actual compiled React trip poll','actual SQLite relay collection approval and writes','second independent browser context sees response','withdrawal refuses reads and ends session','withdrawn app absent from discovery','light desktop and dark mobile'],errors},null,2));
   }finally{
     try{writeFileSync(evidence+'/p5-trip-product-attempt.json',JSON.stringify({events,errors},null,2));}
