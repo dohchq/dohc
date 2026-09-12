@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
-import { notFound, badRequest, relayError } from "../errors";
+import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
 import type { PublicEditRelease } from "@dohc/security-contract";
@@ -86,12 +86,16 @@ function header(storage: StorageContext, publicationId: string, workspaceId: str
     active: row.active === 1,authorityRevision: Number(row.authority_revision),createdAtMs: Number(row.created_at_ms)};
   return {row, state};
 }
+class PublicationManifestUnavailable extends RelayError {
+  constructor() {super("bad_request", "Publication manifest is unavailable.");}
+}
 function stored(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
   const {row, state} = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
   const {limits} = input;
   const bytes = storage.getBlob(String(row.workspace_id), String(row.manifest_sha256));
-  if (!bytes || bytes.byteLength > limits.maxMetadataBytes || sha(bytes) !== row.manifest_sha256) throw badRequest("Publication manifest is unavailable.");
-  return {...state, candidate: parseAppPublicationCandidate(JSON.parse(Buffer.from(bytes).toString("utf8")), limits)};
+  if (!bytes || bytes.byteLength > limits.maxMetadataBytes || sha(bytes) !== row.manifest_sha256) throw new PublicationManifestUnavailable();
+  try {return {...state, candidate: parseAppPublicationCandidate(JSON.parse(Buffer.from(bytes).toString("utf8")), limits)};}
+  catch {throw new PublicationManifestUnavailable();}
 }
 export function publishAppPublication(storage: StorageContext, input: PublishAppPublicationInput): AppPublicationRow {
   const candidate = parseAppPublicationCandidate(input.candidate, input.limits);
@@ -135,6 +139,9 @@ export interface ListAppPublicationsInput {
   cursor?: string;
   appRoot?: string;
 }
+export type AppPublicationListRow = {
+  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean;
+} & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
 
 export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
   return storage.readTx(() => {
@@ -142,12 +149,20 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
     const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
       WHERE workspace_id=? AND owner_user_id=? AND publication_id>? ORDER BY publication_id LIMIT 26`)
       .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
-    const publications = rows.slice(0, 25).flatMap(row => {
-      const publication = stored(storage, {...input, publicationId: String(row.publication_id)});
-      if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
-      return [{publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
-        shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
-        sourceRevision: publication.candidate.sourceRevision, active: publication.active}];
+    const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>(row => {
+      const publicationId = String(row.publication_id);
+      try {
+        const publication = stored(storage, {...input, publicationId});
+        if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
+        return [{publicationId, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
+          shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
+          sourceRevision: publication.candidate.sourceRevision, active: publication.active}];
+      } catch (error) {
+        if (!(error instanceof PublicationManifestUnavailable)) throw error;
+        const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
+        return [{publicationId, authorityRevision: state.authorityRevision, manifestUnavailable: true,
+          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active}];
+      }
     });
     return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
   });
@@ -165,8 +180,8 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
   });
 }
 
-/** Call within the caller's read or write transaction. */
-export function requireLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput) {
+function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput,
+  verified?: {candidate: AppPublicationCandidate; manifestHash: string}) {
   const enrollment = readLinkEnrollment(storage, input, input.nowMs);
   if (!enrollment || enrollment.principal?.blockedAtMs != null) throw notFound();
   const session = storage.findLinkSessionByCapabilityHash(input.capabilityHash);
@@ -177,14 +192,23 @@ export function requireLinkAppPublication(storage: StorageContext, input: LinkAp
       !isPublicLinkAccess(authorized.grant.access, input.publicEditRelease)) throw notFound();
   const lookup = {workspaceId: authorized.share.workspaceId, ownerUserId: authorized.share.granterUserId,
     publicationId: input.publicationId, limits: input.limits};
-  const {state: publication} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
+  const {state: publication, row} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
   if (!publication.active || publication.owner.shareId !== authorized.share.shareId ||
       publication.owner.grantId !== authorized.grant.grantId || publication.owner.generation !== authorized.grant.generation ||
       !Number.isSafeInteger(publication.authorityRevision) || publication.authorityRevision < 1 ||
       (input.expectedAuthorityRevision !== undefined && input.expectedAuthorityRevision !== publication.authorityRevision)) throw notFound();
-  const {candidate} = stored(storage, lookup);
+  let candidate: AppPublicationCandidate;
+  if (verified) {
+    if (row.manifest_sha256 !== verified.manifestHash) throw notFound();
+    candidate = verified.candidate;
+  } else {
+    try { candidate = stored(storage, lookup).candidate; } catch (error) {
+      if (error instanceof PublicationManifestUnavailable) throw notFound();
+      throw error;
+    }
+  }
   authority(storage, publication.owner, candidate);
-  const manifestHash = sha(JSON.stringify(candidate));
+  const manifestHash = verified?.manifestHash ?? sha(JSON.stringify(candidate));
   if (sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !== publication.publicationId) throw notFound();
   const result: LinkAppPublicationAuthority = {
     descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
@@ -192,7 +216,22 @@ export function requireLinkAppPublication(storage: StorageContext, input: LinkAp
     shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
     sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
   };
-  return {result, workspaceId: authorized.share.workspaceId, candidate};
+  return {result, workspaceId: authorized.share.workspaceId, candidate, manifestHash};
+}
+
+/** Call within the caller's read or write transaction. */
+export function requireLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput) {
+  return currentLinkAppPublication(storage, input);
+}
+
+/** Retain only verified immutable content; every invocation still rechecks current authority. */
+export function createLinkAppPublicationGuard(storage: StorageContext, input: LinkAppPublicationInput): (nowMs: number) => void {
+  const capturedInput = {...input, limits: {...input.limits}};
+  const captured = storage.readTx(() => currentLinkAppPublication(storage, capturedInput));
+  const pinned = {...capturedInput, expectedAuthorityRevision: captured.result.descriptor.authorityRevision};
+  return nowMs => storage.readTx(() => {
+    currentLinkAppPublication(storage, {...pinned, nowMs}, captured);
+  });
 }
 
 /** Shared by launch admission and protected reads; all standing comes from current server state. */

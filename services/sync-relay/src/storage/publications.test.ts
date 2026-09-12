@@ -353,7 +353,7 @@ it("recovers owner publications in bounded pages without leaking another owner o
   ids.sort();
   const first = await (await f.http("w/app-publications?appRoot=app")).json();
   expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
-  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app",
+  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", manifestUnavailable: false,
     sourceRevision: expect.stringMatching(/^[0-9a-f]{64}$/), active: true});
   const last = await (await f.http(`w/app-publications?appRoot=app&cursor=${first.nextCursor}`)).json();
   expect(last.publications.map((p: {publicationId: string}) => p.publicationId)).toEqual(ids.slice(25));expect(last.nextCursor).toBeNull();
@@ -366,4 +366,50 @@ it("recovers owner publications in bounded pages without leaking another owner o
   expect((await f.http("w/app-publications?ownerUserId=owner")).status).toBe(400);
   const withdrawal = await f.http(`w/app-publications/${ids[0]}/withdraw`, {expectedAuthorityRevision: 1});expect(withdrawal.status).toBe(200);
   const after = await (await f.http("w/app-publications")).json();expect(after.publications[0]).toMatchObject({active: false, authorityRevision: 2});
+});
+
+it("retains damaged owner rows for withdrawal and refuses their manifests generically to recipients", async () => {
+  const f = linkFixture();
+  const healthy = request();healthy.candidate.sourceRevision = digest("healthy");
+  const other = f.storage.publishAppPublication(healthy);
+  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?)").run(f.published.publicationId);
+  const page = f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits, appRoot: "app"});
+  expect(page.publications).toHaveLength(2);
+  const damaged = page.publications.find(row => row.publicationId === f.published.publicationId)!;
+  expect(damaged).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, manifestUnavailable: true});
+  expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({manifestUnavailable: false, appRoot: "app"});
+  const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found", code: "not_found"});
+  expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: damaged.publicationId, ownerUserId: "owner", expectedAuthorityRevision: damaged.authorityRevision}).active).toBe(false);
+});
+
+it("keeps unexpected storage failures distinct from a damaged manifest", async () => {
+  const f = linkFixture();
+  const original = f.storage.getBlob;
+  f.storage.getBlob = () => {throw new Error("test storage failure");};
+  expect(() => f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits})).toThrow("test storage failure");
+  expect(() => f.storage.authorizeLinkAppPublication({publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
+    profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20})).toThrow("test storage failure");
+  f.storage.getBlob = original;
+});
+
+it("measures publication guard cost for review", () => {
+  const f = linkFixture(), input = request();
+  input.limits = {maxFiles: 1000, maxMetadataBytes: 250_000, maxBundleBytes: 4096};
+  for (let index = 0; index < 998; index++) input.candidate.inputs.push({path: `app/source-${String(index).padStart(4, "0")}.ts`, sha256: "0".repeat(64), byteLength: 0});
+  input.candidate.inputs.sort((a,b) => a.path < b.path ? -1 : 1);
+  input.candidate.sourceDigest = digest(JSON.stringify(["dohc-app-source-v2", {entry: input.candidate.entryPath, files: input.candidate.inputs, packages: []}]));
+  input.candidate.buildDigest = digest(JSON.stringify(["dohc-app-build-v1", {sourceDigest: input.candidate.sourceDigest, dependencyLockDigest: input.candidate.dependencyLockDigest, compiler: input.candidate.compilerIdentity, bundleDigest: input.candidate.bundleDigest}]));
+  const big = f.storage.publishAppPublication(input);
+  for (const [name, id, policy] of [["small", f.published.publicationId, limits], ["1000-inputs", big.publicationId, input.limits]] as const) {
+    const call = () => f.storage.authorizeLinkAppPublication({publicationId: id, capabilityHash: f.capabilityHash,
+      profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits: policy, nowMs: 20});
+    for (let index=0;index<10;index++) call();
+    const started=performance.now();for(let index=0;index<100;index++) call();
+    console.log(JSON.stringify({name, calls:100, totalMs:performance.now()-started, manifestBytes:JSON.stringify(name==="small"?f.published.candidate:big.candidate).length}));
+    const guard = f.storage.createLinkAppPublicationGuard({publicationId: id, capabilityHash: f.capabilityHash,
+      profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits: policy, nowMs: 20});
+    for(let index=0;index<10;index++) guard(20);
+    const cachedStarted=performance.now();for(let index=0;index<100;index++) guard(20);
+    console.log(JSON.stringify({name: name+"-cached", calls:100, totalMs:performance.now()-cachedStarted}));
+  }
 });

@@ -56,9 +56,10 @@ export function createLinkAppPublicationRoutes(options: {
     let streamOwnsAdmission = false;
     try {
       const bytes = file ? options.storage.readLinkAppPublicationBlob({...pinned, sha256: file.sha256, nowMs: options.nowMs()}).bytes : metadata!;
+      const assertCurrent = options.storage.createLinkAppPublicationGuard({...pinned, nowMs: options.nowMs()});
       const guard = () => {
         signal.throwIfAborted();
-        options.storage.authorizeLinkAppPublication({...pinned, nowMs: options.nowMs()});
+        assertCurrent(options.nowMs());
       };
       guard();
       const response = options.streams.respondWithLinkBytes(bytes, admitted.shareId, admitted.grantId, releaseBytes, settleEgress, {

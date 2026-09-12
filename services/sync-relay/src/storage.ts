@@ -503,6 +503,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return publicationStorage.authorizeLinkAppPublication(this, input);
   }
 
+  createLinkAppPublicationGuard(input: publicationStorage.LinkAppPublicationInput) {
+    return publicationStorage.createLinkAppPublicationGuard(this, input);
+  }
+
   readLinkAppPublicationBlob(input: publicationStorage.LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}) {
     return publicationStorage.readLinkAppPublicationBlob(this, input);
   }
