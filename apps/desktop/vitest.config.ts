@@ -9,6 +9,8 @@ const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4
 
 // e2e/ runs under Playwright (playwright.config.ts), never vitest.
 export default defineConfig({
+  // Source-backed examples outside this package use the same React instance as their desktop tests.
+  resolve: { dedupe: ["react", "react-dom"] },
   test: {
     include: ["src/**/*.test.{ts,tsx}", "plugins/**/src/**/*.test.ts"],
     css: { include: [/[?&]raw(?:&|$)/] },
