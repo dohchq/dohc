@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
@@ -106,6 +107,29 @@ describe("owner app publication", () => {
     });
     await expect(h.prepare()).rejects.toThrow("bundle bound");
     expect(h.upload).not.toHaveBeenCalled();
+  });
+  it.each([-1, 0, 1])("checks the complete publication envelope at the byte limit %+i", async offset => {
+    const baseline = harness();
+    await baseline.approve(await baseline.prepare());
+    const baselineBody = String(baseline.relay.mock.calls.at(-1)![2]!.body);
+    const targetBytes = APP_PUBLICATION_MAX_REQUEST_BYTES + offset;
+    const paddingBytes = targetBytes - Buffer.byteLength(baselineBody, "utf8");
+    const h = harness();
+    h.compile.mockImplementationOnce(async request => {
+      const built = await compileClosedApp(request);
+      built.compiler.version += "x".repeat(paddingBytes);
+      return built;
+    });
+    if (offset > 0) {
+      await expect(h.prepare()).rejects.toThrow("supported publication size");
+      expect(h.upload).not.toHaveBeenCalled();
+      expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
+      return;
+    }
+    const prepared = await h.prepare();
+    expect(h.upload).not.toHaveBeenCalled();
+    await h.approve(prepared);
+    expect(Buffer.byteLength(String(h.relay.mock.calls.at(-1)![2]!.body), "utf8")).toBe(targetBytes);
   });
   it("refuses source declarations that change before final capture", async () => {
     const h = harness();
