@@ -1,10 +1,10 @@
-import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_METADATA_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 
-export const APP_PUBLICATION_LIMITS = { maxFiles: 512, maxMetadataBytes: 512 * 1024, maxBundleBytes: 32 * 1024 * 1024 };
+export const APP_PUBLICATION_LIMITS = { maxFiles: 512, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES };
 const inputBounds = { maxInputFiles: 512, maxInputBytes: 128 * 1024 * 1024 };
 const manifestLimit = 64 * 1024;
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
