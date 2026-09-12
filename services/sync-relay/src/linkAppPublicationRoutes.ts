@@ -39,7 +39,7 @@ export function createLinkAppPublicationRoutes(options: {
       const input = {capabilityHash: capability.session.capabilityHash, profileTokenHash: hashLinkProfileSecret(profileSecret, options.linkKey),
         limits, publicEditRelease: options.publicEditRelease, cursor};
       const signal = AbortSignal.any([request.signal, options.storage.unavailable]);signal.throwIfAborted();
-      const page = options.storage.listLinkAppPublications({...input, nowMs: options.nowMs()});
+      const {page, assertCurrent} = options.storage.listLinkAppPublications({...input, nowMs: options.nowMs()});
       const body = JSON.stringify(page), bytes = new TextEncoder().encode(body);
       const release = options.streams.admitLinkBlobBytes(capability.grantId, bytes.byteLength);
       if (!release) throw relayError("link_read_rate_limited");
@@ -48,7 +48,7 @@ export function createLinkAppPublicationRoutes(options: {
       try {
         return options.streams.respondWithLinkBytes(bytes, capability.shareId, capability.grantId, release, settle,
           {"content-type": "application/json", "content-length": String(bytes.byteLength), "cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"},
-          {signal, guard() {signal.throwIfAborted();if (JSON.stringify(options.storage.listLinkAppPublications({...input, nowMs: options.nowMs()})) !== body) throw notFound();}});
+          {signal, guard() {signal.throwIfAborted();assertCurrent(options.nowMs());}});
       } catch (error) {release();settle(0, options.nowMs());throw error;}
     }
     if ([...query.keys()].some(key => key !== "authorityRevision") || query.getAll("authorityRevision").length > 1) throw badRequest("Invalid publication query.");

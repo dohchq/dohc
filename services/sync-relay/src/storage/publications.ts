@@ -214,8 +214,9 @@ function currentLinkPublicationPrincipal(storage: StorageContext, input: Omit<Li
 }
 
 function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput,
-  verified?: {candidate: AppPublicationCandidate; manifestHash: string}) {
-  const {enrollment, session, authorized} = currentLinkPublicationPrincipal(storage, input);
+  verified?: {candidate: AppPublicationCandidate; manifestHash: string},
+  principal?: ReturnType<typeof currentLinkPublicationPrincipal>) {
+  const {enrollment, session, authorized} = principal ?? currentLinkPublicationPrincipal(storage, input);
   const lookup = {workspaceId: authorized.share.workspaceId, ownerUserId: authorized.share.granterUserId,
     publicationId: input.publicationId, limits: input.limits};
   const {state: publication, row} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
@@ -248,21 +249,41 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
 export interface ListLinkAppPublicationsInput extends Omit<LinkAppPublicationInput, "publicationId" | "expectedAuthorityRevision"> {cursor?: string}
 export function listLinkAppPublications(storage: StorageContext, input: ListLinkAppPublicationsInput) {
   return storage.readTx(() => {
-    const {session, authorized} = currentLinkPublicationPrincipal(storage, input);
+    const principal = currentLinkPublicationPrincipal(storage, input);
+    const {session, authorized} = principal;
+    const pinned: {publicationId: string; authorityRevision: number; manifestHash: string}[] = [];
     const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
       WHERE workspace_id=? AND grant_id=? AND grant_generation=? AND active=1 AND publication_id>?
       ORDER BY publication_id LIMIT 26`).all(authorized.share.workspaceId, session.grantId, session.generation, input.cursor ?? "");
     const publications = rows.slice(0, 25).flatMap(row => {
       try {
-        const {candidate, result} = currentLinkAppPublication(storage, {...input, publicationId: String(row.publication_id)});
+        const {candidate, result, manifestHash} = currentLinkAppPublication(storage, {...input, publicationId: String(row.publication_id)}, undefined, principal);
         const name = (candidate.appRoot.split("/").at(-1) ?? "App").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 128) || "App";
+        pinned.push({publicationId: result.descriptor.publicationId, authorityRevision: result.descriptor.authorityRevision, manifestHash});
         return [{publicationId: result.descriptor.publicationId, name}];
       } catch (error) {
         if (error instanceof RelayError && error.code === "not_found") return [];
         throw error;
       }
     });
-    return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
+    const page = {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
+    const capturedInput = {...input, limits: {...input.limits}};
+    const assertCurrent = (nowMs: number) => storage.readTx(() => {
+      const current = currentLinkPublicationPrincipal(storage, {...capturedInput, nowMs});
+      if (current.authorized.share.workspaceId !== authorized.share.workspaceId ||
+          current.authorized.share.granterUserId !== authorized.share.granterUserId ||
+          current.authorized.share.shareId !== authorized.share.shareId ||
+          current.authorized.share.selectorJson !== authorized.share.selectorJson ||
+          current.authorized.grant.access !== authorized.grant.access ||
+          current.session.grantId !== session.grantId || current.session.generation !== session.generation) throw notFound();
+      for (const publication of pinned) {
+        const {state, row} = header(storage, publication.publicationId, authorized.share.workspaceId, authorized.share.granterUserId);
+        if (!state.active || state.authorityRevision !== publication.authorityRevision ||
+            state.owner.shareId !== authorized.share.shareId || state.owner.grantId !== session.grantId ||
+            state.owner.generation !== session.generation || row.manifest_sha256 !== publication.manifestHash) throw notFound();
+      }
+    });
+    return {page, assertCurrent};
   });
 }
 

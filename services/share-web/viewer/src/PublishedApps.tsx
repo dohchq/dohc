@@ -40,7 +40,7 @@ function PublicationList({session}: {session: string}) {
     <ul>{publications.map(item => <li key={item.publicationId}><h3>{item.name}</h3><OpenSharedApp session={session} publicationId={item.publicationId} showNotice={false}/></li>)}</ul>
     {status === "loading" && <p role="status">Loading apps</p>}
     {status === "failed" && <><p role="status">Could not load apps.</p><button className="handoff-button" onClick={() => void load(cursor)}>Retry</button></>}
-    {status === "ready" && publications.length === 0 && <p>No apps are available on this link. Ask the owner to publish one.</p>}
+    {status === "ready" && publications.length === 0 && cursor === null && <p>No apps are available on this link. Ask the owner to publish one.</p>}
     {status === "ready" && cursor !== null && <button className="handoff-button" onClick={() => void load(cursor)}>Load more apps</button>}
   </section>;
 }
