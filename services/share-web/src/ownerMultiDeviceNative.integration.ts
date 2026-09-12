@@ -33,7 +33,6 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerSession: 3, maxConnect
 const exchangeKey = "native-network-exchange-".repeat(2);
 import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession.js";
 import {YdocOwnerDraftPendingError} from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
-import {isLiveSettlementCapacityRefusal} from "../../../packages/workspace-engine-client/src/live/daemonLiveAdapter.js";
 import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {startDesktopOwnerDelivery} from "../../../apps/desktop/src/workspaces/desktopOwnerDelivery.js";
 import type {OwnerYDocDrainResult} from "../../../apps/desktop/src/workspaces/ownerYDocOutbox.js";
@@ -243,7 +242,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       versionId: mainVersionId!, path: "docs/a.md", expectedObjectId: "object", contentKind: "richdoc",
       onRemoteUpdate(update) {Y.applyUpdate(rendererDoc, update); updateObserved?.();},
       onSessionError(error) {
-        if (isLiveSettlementCapacityRefusal(error)) {
+        if (error instanceof EngineRequestError && error.wireError?.code === "OVERLOADED" && error.wireError.message === "live-settlement-capacity") {
           ((results.providerCapacityRefusals ??= []) as unknown[]).push(error instanceof EngineRequestError ? error.wireError : String(error));
         } else results.providerError = String(error);
       },
