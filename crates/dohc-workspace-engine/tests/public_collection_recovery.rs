@@ -76,6 +76,8 @@ fn paired_public_collection_backup_preserves_acceptance_and_refuses_stale_relay(
                     "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
                     rusqlite::params![sha, text.len() as i64, text],
                 )
+                .expect("insert relay text blob");
+                Ok::<_, dohc_engine_storage::StorageError>(())
             })
             .expect("hydrate relay text blob");
         let envelope = ReplicationEnvelope {
