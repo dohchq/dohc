@@ -454,6 +454,21 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     let restored = call(&transport, &handle, 61, "versionedText.rollback", json!({"versionId": "main", "path": path,
         "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
     assert_eq!(restored["rolledBack"], true);
+    let snapshot = call(
+        &transport,
+        &handle,
+        62,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": path }),
+    )
+    .await;
+    assert_eq!(snapshot["objectId"], object_id);
+    assert_eq!(snapshot["text"], adopted);
+    std::fs::write(
+        owner_scratch.path().join(path),
+        snapshot["text"].as_str().expect("restored native text"),
+    )
+    .expect("materialize restored engine snapshot");
     reconcile_until_settled(&transport, &handle, 70).await;
     assert_eq!(
         std::fs::read_to_string(owner_scratch.path().join(path)).unwrap(),
