@@ -6,13 +6,14 @@ const headers = {"content-type": "application/json", "cache-control": "private, 
 const refuse = (status = 404) => Response.json({ok: false, error: "not found"}, {status, headers});
 const hash = /^[a-f0-9]{64}$/;
 
-export function createAppDiscovery(options: {viewerOrigin: string; relayUrl: string;
+export function createAppDiscovery(options: {viewerOrigin?: string; relayUrl: string;
   fetchRelay(request: Request): Promise<Response>;
   resolveMaterial(discriminator: string, cookie: string | null, signal: AbortSignal): Promise<LinkBrowserMaterial>;
 }) {
-  const viewer = new URL(options.viewerOrigin);let pending = 0;
+  let pending = 0;
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url), query = url.searchParams;
+    const viewer = new URL(options.viewerOrigin ?? request.url);
     if (request.method !== "GET" || url.origin !== viewer.origin || request.headers.get("host") !== viewer.host ||
         (request.headers.has("origin") && request.headers.get("origin") !== viewer.origin) ||
         (request.headers.has("sec-fetch-site") && request.headers.get("sec-fetch-site") !== "same-origin") ||
@@ -27,6 +28,9 @@ export function createAppDiscovery(options: {viewerOrigin: string; relayUrl: str
       signal.throwIfAborted();
       const material = await options.resolveMaterial(session, request.headers.get("cookie"), signal);
       signal.throwIfAborted();if (!material.ok) return refuse(material.status);
+      if (!options.viewerOrigin) return Response.json({publications: [], nextCursor: null}, {
+        headers: {...headers, ...(material.setCookie ? {"set-cookie": material.setCookie} : {})},
+      });
       const path = "/sync/link/app-publications" + (cursor ? `?cursor=${cursor}` : "");
       relay = await options.fetchRelay(new Request(new URL(path, options.relayUrl), {redirect: "manual", signal,
         headers: {authorization: `LinkCapability ${material.capabilityToken}`, "x-dohc-link-profile-secret": material.profileSecret}}));

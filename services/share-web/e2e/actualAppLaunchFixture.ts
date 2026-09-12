@@ -9,7 +9,7 @@ import type {StorageContext} from '../../sync-relay/src/storage/context';
 import {parseAppPublicationCandidate,type AppCollectionCapability} from '@dohc/security-contract/app-publication';
 import {createShareWebApplication} from '../src/server';
 
-export function actualAppLaunchFixture(script:Uint8Array,collection=false){
+ export function actualAppLaunchFixture(script:Uint8Array, appHosting=true, collection=false){
   const root=mkdtempSync(join(tmpdir(),'dohc-app-launch-real-')),storage=openSyncRelayStorage(join(root,'relay.sqlite'));
   const key='app-launch-fixture-key-with-more-than-thirty-two-bytes',exchangeKey='app-launch-relay-exchange-key-with-more-than-thirty-two-bytes';
   const profile='P'.repeat(43),secret='S'.repeat(43),wrongSecret='W'.repeat(43),viewerOrigin='https://viewer.example.com';
@@ -32,7 +32,7 @@ export function actualAppLaunchFixture(script:Uint8Array,collection=false){
   const published=storage.publishAppPublication({workspaceId:'w',shareId:'g',grantId:'g',generation:1,ownerUserId:'owner',candidate,limits,nowMs:Date.now(),blobs:[{sha256:digest(script),bytes:script}]});
   if(collection)storage.approveAppCollection({workspaceId:'w',publicationId:published.publicationId,ownerUserId:'owner',limits,expectedAuthorityRevision:1,capability});
   const relay=createSyncRelayHandler({storage,appPublicationLimits:limits,...(collection?{appCollectionPolicy:{maxCreatesPerGrant:5}}:{}),linkKey:key,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,resolveActor:()=>{throw Error('App link requests must not resolve an account');}});
-  const application=createShareWebApplication({relayUrl:'https://relay.example.org',publicRelayUrl:'https://relay.example.org',relayExchangeKey:exchangeKey,publicHosts:new Set(['viewer.example.com']),newProfileSecret:()=>profile,appLaunch:{viewerOrigin,appDomain:'example.net'},fetchRelay:relay});
+  const application=createShareWebApplication({relayUrl:'https://relay.example.org',publicRelayUrl:'https://relay.example.org',relayExchangeKey:exchangeKey,publicHosts:new Set(['viewer.example.com']),newProfileSecret:()=>profile,appLaunch:appHosting?{viewerOrigin,appDomain:'example.net'}:undefined,fetchRelay:relay});
   return {application,publicationId:published.publicationId,secret,wrongSecret,
     blockProfile(){(storage as StorageContext).db.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('blocked','g',1,?,1,2,1)").run(hashLinkProfileSecret(profile,key));},
     withdraw(){storage.withdrawAppPublication({workspaceId:'w',publicationId:published.publicationId,ownerUserId:'owner',expectedAuthorityRevision:collection?2:1});},

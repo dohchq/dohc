@@ -32,3 +32,18 @@ it("rejects private fields and stale viewer material after the relay response",a
   expect((await handler(request())).status).toBe(404);
   count=0;extra=true;expect((await handler(request())).status).toBe(404);
 });
+
+it("returns an authenticated empty page when app hosting is disabled",async()=>{
+  const f=actualAppLaunchFixture(Buffer.from("document.body.textContent='poll'"),false);
+  try {
+    const exchange=await f.application.handle(new Request("https://viewer.example.com/api/exchange",{method:"POST",headers:{host:"viewer.example.com","content-type":"application/json"},body:JSON.stringify({secret:f.secret})}));
+    const {session}=await exchange.json();
+    const cookie=exchange.headers.getSetCookie().map(value=>value.split(";")[0]).join("; ");
+    const discover=(suppliedCookie:string)=>f.application.handle(new Request(`https://viewer.example.com/api/apps?session=${session}`,{headers:{host:"viewer.example.com",cookie:suppliedCookie,"sec-fetch-site":"same-origin"}}));
+    const response=await discover(cookie);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({publications:[],nextCursor:null});
+    expect((await discover("")).status).toBe(404);
+  } finally {f.close();}
+});
