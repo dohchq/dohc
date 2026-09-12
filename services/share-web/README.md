@@ -298,13 +298,29 @@ Each proof covers settlement and restart recovery. The device proof also covers 
 Results and process logs remain in `.agent-artifacts/configured-hosts`.
 The command does not build Rust or select a default executable.
 
-## Reserved later-phase deployment work
+## App domains
+
+Use a separate registrable domain for apps. For example, a viewer at
+`https://share.example.com` can use `DOHC_SHARE_WEB_APP_DOMAIN=example.net`.
+Set the domain without a scheme, port, or wildcard. Subdomains of the viewer's
+registrable domain are refused.
+
+Point wildcard DNS for `*.example.net` at the share-web proxy and install a
+matching wildcard TLS certificate. Forward those requests to the same share-web
+instance as the viewer. Preserve the exact Host header and use HTTPS on port 443.
+Keep `DOHC_SHARE_WEB_PUBLIC_HOSTS` limited to the viewer's exact hosts.
+App routing separately accepts a 48-character lowercase hexadecimal label under
+the configured app domain and checks its server-issued launch binding.
+Unknown launches refuse access, even when the hostname has that shape.
+
+Do not share cookies or cached responses across app hosts. The proxy must preserve
+`Set-Cookie`, `Cache-Control`, `Content-Security-Policy`, and origin isolation headers.
+Restarting share-web ends app sessions; recipients reopen the share link to launch again.
+
+## Development
 
 Phase 4 must define and test reverse-proxy WebSocket timeouts before browser
-live editing ships. Phase 5 app publications require a separate registrable
-domain from the viewer. They also require their own exact Host allowlist,
-wildcard DNS, and wildcard TLS policy. Do not place app origins on subdomains
-of the viewer's registrable domain.
+live editing ships.
 
 Set `DOHC_SHARE_WEB_DEV=1` only with `NODE_ENV=development` or
 `NODE_ENV=test`. Production startup fails when the viewer build is missing.
