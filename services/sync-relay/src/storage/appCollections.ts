@@ -141,7 +141,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     const payload = {momentId,versionId:candidate.versionId,objectId,path,recordedAtMs:input.nowMs,operation:"write",beforePresent:"null",
       payloadBeforeBlobSha256:null,payloadBeforePath:null,payloadBeforeContentKind:null,payloadBeforeByteLength:null,
       payloadAfterBlobSha256:blobHash,payloadAfterPath:path,payloadAfterContentKind:"text",payloadAfterByteLength:document.byteLength,
-      metadata:{origin:"user"},author:{kind:"public",principalId:publicId,grantId:authority.result.grantId}};
+      metadata:{origin:"sync"},author:{kind:"public",principalId:publicId,grantId:authority.result.grantId}};
     // Insert the receipt before append so the append's quota check includes its durable charge.
     storage.db.prepare(`INSERT INTO sync_relay_app_collection_receipts(workspace_id,grant_id,principal_id,idempotency_key,payload_sha256,receipt_json,acceptance_id,storage_bytes) VALUES(?,?,?,?,?,?,?,?)`)
       .run(workspaceId,authority.result.grantId,principal.principalId,input.idempotencyKey,payloadHash,receiptJson,acceptanceId,receiptBytes);
