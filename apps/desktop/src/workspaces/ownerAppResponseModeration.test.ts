@@ -1,11 +1,11 @@
 import {expect,it,vi} from "vitest";
-import {bulkUndoAppResponses,type AppResponseAcceptance} from "./ownerAppResponseModeration";
+import {bulkUndoAppResponses,type AppResponseAcceptance,type AppResponseUndoSelection} from "./ownerAppResponseModeration";
 const input={workspaceId:"workspace",grantId:"grant",operationId:"operation",limit:100};
 const accepted:AppResponseAcceptance={acceptanceId:"accepted-a",objectId:"object",momentId:"moment",publicPrincipalId:"public-a",versionId:"main",collectionPath:"responses",path:"responses/accepted-a.md"};
 
 it("uses the same durable per-item key after restart or a lost reply",async()=>{
   const calls:string[]=[];
-  const deps={assertCurrent(){},readAcceptances:async()=>({acceptances:[accepted],nextAcceptanceId:null}),undoAcceptedResponse:vi.fn(async(selection)=>{
+  const deps={assertCurrent(){},readAcceptances:async()=>({acceptances:[accepted],nextAcceptanceId:null}),undoAcceptedResponse:vi.fn(async(selection:AppResponseUndoSelection)=>{
     calls.push(selection.requestId);return {status:"deleted" as const,momentId:"delete-moment"};
   })};
   expect((await bulkUndoAppResponses(input,deps)).items[0]).toEqual({acceptanceId:"accepted-a",status:"deleted",momentId:"delete-moment"});
