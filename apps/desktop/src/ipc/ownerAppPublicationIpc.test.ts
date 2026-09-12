@@ -96,6 +96,20 @@ describe("owner app publication", () => {
     expect(h.upload).not.toHaveBeenCalled();
     if (kind === "outside") expect(h.requests.filter(method => method === "versionedText.captureSources")).toHaveLength(1);
   });
+  it.each(["network", "null", "mismatch"])("reports partial publication and permits retry after %s collection approval failure", async kind => {
+    const h = withCollection(harness()), prepared = await h.prepare();
+    const original = h.relay.getMockImplementation()!;
+    h.relay.mockImplementation(async (...args) => {
+      if (!args[1].endsWith("/collection-approval")) return original(...args);
+      if (kind === "network") throw new Error("404");
+      return { publicationId: "a".repeat(64), authorityRevision: 2,
+        capability: kind === "null" ? null : { ...prepared.capabilities[0], readFields: [] } };
+    });
+    await expect(h.approve(prepared)).rejects.toThrow("The app is published. dohc could not confirm its collection access. Prepare it again to retry, or unpublish it.");
+    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/app-publications"))).toHaveLength(1);
+    h.relay.mockImplementation(original);
+    expect(await h.approve(await h.prepare())).toMatchObject({ kind: "published", authorityRevision: 2 });
+  });
   it("preserves the full collection capability when reviewing and approving reactivation", async () => {
     const h = withCollection(harness()), prepared = await h.prepare();
     await h.approve(prepared);

@@ -105,13 +105,17 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           if (published.kind !== "published") throw new Error("Invalid publication result.");
           const capability = candidate.capabilities[0];
           if (!capability) return published;
+          try {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
             `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/collection-approval`,
             { method: "POST", signal: operation.signal, body: JSON.stringify({ expectedAuthorityRevision: published.authorityRevision, capability }) }));
           const approval = raw as { publicationId?: unknown; authorityRevision?: unknown; capability?: unknown } | null;
           if (!approval || approval.publicationId !== published.publicationId || approval.authorityRevision !== published.authorityRevision + 1 ||
-              JSON.stringify(parseAppCollectionCapability(approval.capability)) !== JSON.stringify(capability)) throw new Error("dohc could not confirm the app's collection access.");
+              JSON.stringify(parseAppCollectionCapability(approval.capability)) !== JSON.stringify(capability)) throw new Error("Collection approval changed.");
           return OwnerAppPublicationResult.parse({ kind: "published", publicationId: published.publicationId, authorityRevision: approval.authorityRevision });
+          } catch {
+            throw new Error("The app is published. dohc could not confirm its collection access. Prepare it again to retry, or unpublish it.");
+          }
         };
         if (entry.reactivation) {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
