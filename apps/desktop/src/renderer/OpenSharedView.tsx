@@ -1,18 +1,26 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
-import { ArrowLeft, FolderOpen } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { IconButton, PrimaryButton } from "./ui/controls";
+import { FolderChip, Step } from "./ui/Step";
 
-// "Open a share" (PR 18 + share mounts): the receive side of an external
-// share grant. Paste the code someone sent you and either add it to the
-// current workspace (a read-only shared-with-me/<label>/ folder that
-// live-follows the share — the default when opened from inside a workspace)
-// or open it as a separate read-only view in an empty folder. Mirrors
-// JoinSyncedWorkspace's session gate and unmount guard.
+// "Open a share": the receive side of an external share grant. Three gates
+// shown as three steps, like JoinSyncedWorkspace: sign in, enter the code
+// someone sent you, choose where it goes. Inside a workspace the default is
+// to add it under shared-with-me/; on first run there is no workspace yet,
+// so it opens as a separate read-only view in an empty folder.
+
+function isWindows(): boolean {
+  return bridge().platform === "win32";
+}
+
+function displayPath(path: string): string {
+  return isWindows() ? path.replaceAll("/", "\\") : path;
+}
 
 type Gate =
   | { kind: "checking" }
@@ -131,99 +139,101 @@ export function OpenSharedView(props: {
     shareCode.length > 0 &&
     (mounting || folder !== null);
 
+  const signedIn = gate.kind === "signed-in";
+  const laterState = signedIn ? "current" : "pending";
+  const codeStep = props.resolvedShare ? null : 2;
+  const whereStep = props.resolvedShare ? 2 : 3;
+
   return (
     <div
       data-testid="open-shared-view"
-      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      className="dohc-elevated flex w-105 flex-col gap-5 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        <IconButton
-          aria-label="Back"
-          onClick={props.onBack}
-          className="shrink-0"
-        >
+        <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
           <ArrowLeft size={13} aria-hidden />
         </IconButton>
         <h2 className="m-0 text-sm font-semibold text-ink">Open a share</h2>
       </div>
 
-      {gate.kind === "checking" ? (
-        <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
-      ) : null}
+      {/* Not a <form>: the embedded sign-in panel owns one for its server
+          fields, and nested forms collapse. */}
+      <div className="flex flex-col">
+        {props.resolvedShare ? null : (
+          <Step
+            number={1}
+            title="Sign in to dohc Drive"
+            state={signedIn ? "done" : "current"}
+            summary={gate.kind === "signed-in" ? gate.email : undefined}
+          >
+            {gate.kind === "checking" ? (
+              <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
+            ) : (
+              <>
+                <p className="sr-only">
+                  Shares are addressed to your dohc Drive account — sign in first, then enter the code you received.
+                </p>
+                <CloudLogin onConnected={checkSession} embedded untitled />
+              </>
+            )}
+          </Step>
+        )}
 
-      {gate.kind === "signed-out" ? (
-        <>
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            Shares are addressed to your dohc Drive account — sign in first, then
-            enter the code you received.
-          </p>
-          <CloudLogin onConnected={checkSession} embedded />
-        </>
-      ) : null}
+        {codeStep === null ? null : (
+          <Step number={codeStep} title="Enter the share code you received" state={laterState}>
+            <input
+              data-testid="open-share-code"
+              aria-label="Share code"
+              value={code}
+              onChange={(event) => setCode(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void open();
+              }}
+              placeholder="dohc-share:…"
+              spellCheck={false}
+              className="h-9 w-full rounded-md border border-line bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+            />
+          </Step>
+        )}
 
-      {gate.kind === "signed-in" ? (
-        <>
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            {/* No level claim here: the share states its own level, and this
-                screen has not read it yet. The banner says it after open. */}
-            {props.resolvedShare
-              ? "Choose where to open this share."
-              : mounting
-                ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/."
-                : "Paste the share code you received. You get a separate view of the shared files."}
-          </p>
-          {props.resolvedShare ? null : (
-            <label className="block text-[11px] font-medium text-subtle">
-              Share code
-              <input
-                data-testid="open-share-code"
-                value={code}
-                onChange={(event) => setCode(event.currentTarget.value)}
-                placeholder="dohc-share:…"
-                spellCheck={false}
-                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-              />
-            </label>
-          )}
+        <Step
+          number={whereStep}
+          title={props.mountInto ? "Choose where it goes" : "Choose an empty folder on this machine"}
+          state={laterState}
+          last
+        >
           {props.mountInto ? (
-            <div className="flex flex-col gap-1">
-              <span className="text-[11px] font-medium text-subtle">How to open it</span>
-              <div className="flex gap-1.5" role="radiogroup" aria-label="How to open it">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={mode === "mount"}
-                  data-testid="open-share-mode-mount"
-                  onClick={() => setMode("mount")}
-                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                    mode === "mount"
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted hover:text-ink"
-                  }`}
-                >
-                  Add to this workspace
-                  <span className="block text-[10px] text-subtle">
-                    Appears under shared-with-me/
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={mode === "separate"}
-                  data-testid="open-share-mode-separate"
-                  onClick={() => setMode("separate")}
-                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                    mode === "separate"
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted hover:text-ink"
-                  }`}
-                >
-                  Open separately
-                  <span className="block text-[10px] text-subtle">
-                    A separate view in its own folder
-                  </span>
-                </button>
-              </div>
+            <div className="flex gap-1.5" role="radiogroup" aria-label="How to open it">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={mode === "mount"}
+                data-testid="open-share-mode-mount"
+                onClick={() => setMode("mount")}
+                className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                  mode === "mount"
+                    ? "border-ink bg-panel-2 text-ink"
+                    : "border-line bg-bg text-muted hover:text-ink"
+                }`}
+              >
+                Add to this workspace
+                <span className="block text-[11px] text-subtle">Under shared-with-me/</span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={mode === "separate"}
+                data-testid="open-share-mode-separate"
+                onClick={() => setMode("separate")}
+                className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                  mode === "separate"
+                    ? "border-ink bg-panel-2 text-ink"
+                    : "border-line bg-bg text-muted hover:text-ink"
+                }`}
+              >
+                Open separately
+                <span className="block text-[11px] text-subtle">In its own folder</span>
+              </button>
             </div>
           ) : null}
           {props.liveEditing && props.mountInto ? (
@@ -231,32 +241,21 @@ export function OpenSharedView(props: {
               Open separately to edit shared Markdown. Adding it to this workspace creates a read-only folder.
             </p>
           ) : null}
-          {!mounting ? (
-          <div className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium text-subtle">
-              Where it should live on this machine
-            </span>
-            <div className="flex items-start justify-between gap-2">
-              <code className="break-all font-mono text-[12px] leading-snug text-ink">
-                {folder ?? "Choose an empty folder"}
-              </code>
-              <button
-                type="button"
-                data-testid="open-share-choose-folder"
-                onClick={() => void chooseFolder()}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted transition-colors hover:text-ink"
-              >
-                <FolderOpen size={13} aria-hidden />
-                Choose folder
-              </button>
-            </div>
-          </div>
-          ) : null}
+          {mounting ? null : (
+            <FolderChip
+              folder={folder ? displayPath(folder) : null}
+              placeholder="Choose an empty folder"
+              testId="open-share-choose-folder"
+              onClick={() => void chooseFolder()}
+            />
+          )}
+
           <PrimaryButton
             type="button"
             data-testid="open-share-start"
             disabled={!canOpen}
             onClick={() => void open()}
+            className="mt-2"
           >
             {opening
               ? mounting
@@ -267,7 +266,7 @@ export function OpenSharedView(props: {
                 : "Open share"}
           </PrimaryButton>
           {opening ? (
-            <p className="m-0 text-[12px] leading-relaxed text-muted">
+            <p className="m-0 text-xs text-subtle">
               {mounting
                 ? "If you go back, dohc keeps adding the share to shared-with-me/."
                 : "If you go back, dohc keeps opening the share into the folder you chose."}
@@ -278,8 +277,8 @@ export function OpenSharedView(props: {
               {error}
             </p>
           ) : null}
-        </>
-      ) : null}
+        </Step>
+      </div>
     </div>
   );
 }

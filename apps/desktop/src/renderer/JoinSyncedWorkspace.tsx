@@ -1,12 +1,12 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
-import { ArrowLeft, Check, FolderOpen } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { IconButton, PrimaryButton } from "./ui/controls";
+import { FolderChip, Step } from "./ui/Step";
 
 // "Join a synced workspace": the second-machine half of multi-machine sync.
 // Three real gates, shown as three steps so the whole cost is visible up
@@ -25,51 +25,6 @@ function isWindows(): boolean {
 
 function displayPath(path: string): string {
   return isWindows() ? path.replaceAll("/", "\\") : path;
-}
-
-// One step: a numbered marker, a title, and a body that is only rendered
-// while the step is current. Done steps show a check and one line of what
-// was decided; pending steps show the title dimmed.
-function Step(props: {
-  number: number;
-  title: string;
-  state: "done" | "current" | "pending";
-  summary?: string;
-  last?: boolean;
-  children?: ReactNode;
-}) {
-  const marker =
-    props.state === "done"
-      ? "border-success bg-panel text-success"
-      : props.state === "current"
-        ? "border-ink bg-ink text-bg"
-        : "border-line bg-panel text-subtle";
-  return (
-    <div className={`relative grid grid-cols-[24px_1fr] gap-x-3 ${props.last ? "" : "pb-5"}`}>
-      {props.last ? null : (
-        <span aria-hidden className="absolute bottom-0 left-[11.5px] top-7 w-px bg-line" />
-      )}
-      <span
-        aria-hidden
-        className={`grid size-6 place-items-center rounded-full border font-mono text-[11px] font-medium ${marker}`}
-      >
-        {props.state === "done" ? <Check size={12} strokeWidth={2.4} /> : props.number}
-      </span>
-      <div className="flex min-w-0 flex-col gap-2 pt-0.5">
-        <span
-          className={`text-[13px] leading-5 ${
-            props.state === "pending" ? "font-medium text-subtle" : "font-semibold text-ink"
-          }`}
-        >
-          {props.title}
-        </span>
-        {props.state === "done" && props.summary ? (
-          <span className="truncate font-mono text-[12px] text-muted">{props.summary}</span>
-        ) : null}
-        {props.state === "current" ? props.children : null}
-      </div>
-    </div>
-  );
 }
 
 export function JoinSyncedWorkspace(props: {
@@ -268,25 +223,12 @@ export function JoinSyncedWorkspace(props: {
           </Step>
 
           <Step number={3} title="Choose an empty folder on this machine" state={folderState} last>
-            <button
-              type="button"
-              data-testid="join-choose-folder"
-              aria-label={folder ? "Change folder" : "Choose folder"}
+            <FolderChip
+              folder={folder ? displayPath(folder) : null}
+              placeholder="Choose an empty folder"
+              testId="join-choose-folder"
               onClick={() => void chooseFolder()}
-              className="group flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 text-left transition-colors hover:border-ink"
-            >
-              <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-              <code
-                className={`min-w-0 flex-1 truncate font-mono text-[13px] leading-snug group-hover:text-ink ${
-                  folder ? "text-ink" : "text-subtle"
-                }`}
-              >
-                {folder ? displayPath(folder) : "Choose an empty folder"}
-              </code>
-              <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
-                {folder ? "Change" : "Browse"}
-              </span>
-            </button>
+            />
 
             <PrimaryButton
               type="button"
