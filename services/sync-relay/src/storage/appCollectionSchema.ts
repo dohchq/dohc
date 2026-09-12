@@ -28,6 +28,8 @@ export function initializeAppCollectionSchema(db: SqliteDb): void {
       PRIMARY KEY(grant_id,principal_id,idempotency_key)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_app_collection_receipt_grant ON sync_relay_app_collection_receipts(grant_id);
+    CREATE INDEX IF NOT EXISTS idx_app_collection_receipt_page ON sync_relay_app_collection_receipts(grant_id,acceptance_id);
+    CREATE INDEX IF NOT EXISTS idx_app_collection_receipt_principal_page ON sync_relay_app_collection_receipts(grant_id,principal_id,acceptance_id);
   `);
   for (const table of ["sync_relay_app_public_principals", "sync_relay_app_collection_receipts"]) {
     db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_usage_insert AFTER INSERT ON ${table} BEGIN
