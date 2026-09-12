@@ -1,4 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";\nimport { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
+import { createHash, randomBytes } from "node:crypto";
+import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { createAppDocument, type AppDocumentFile } from "./appDocument";
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
