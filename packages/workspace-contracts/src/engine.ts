@@ -28,6 +28,7 @@ export type VersionedTextStoreErrorCode =
   | "duplicate-id"
   | "file-too-large"
   | "file-not-found"
+  | "object-identity-mismatch"
   | "fork-base-not-found"
   | "invalid-input"
   | "invalid-metadata"

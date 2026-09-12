@@ -56,6 +56,7 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "duplicate-id",
   "file-too-large",
   "file-not-found",
+  "object-identity-mismatch",
   "fork-base-not-found",
   "invalid-input",
   "invalid-metadata",
