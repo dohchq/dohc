@@ -163,7 +163,7 @@ describe("first run", () => {
     // No session yet: the panel asks for sign-in before showing the code
     // field, and the normal cloud sign-in is embedded right there.
     expect(
-      await screen.findByText(/sign in first, then paste the code/i),
+      await screen.findByText(/sign in first, then enter the code/i),
     ).toBeTruthy();
     expect(screen.queryByTestId("join-sync-code")).toBeNull();
     // Back returns to the normal first-run card.

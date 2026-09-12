@@ -254,7 +254,7 @@ describe("JoinSyncedWorkspace", () => {
 
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
     expect(
-      await screen.findByText(/sign in first, then paste the code/i),
+      await screen.findByText(/sign in first, then enter the code/i),
     ).toBeTruthy();
 
     await user.click(await screen.findByTestId("cloud-connect-start"));

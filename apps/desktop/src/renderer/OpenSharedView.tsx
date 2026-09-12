@@ -155,7 +155,7 @@ export function OpenSharedView(props: {
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
             Shares are addressed to your dohc Drive account — sign in first, then
-            paste the code you received.
+            enter the code you received.
           </p>
           <CloudLogin onConnected={checkSession} embedded />
         </>

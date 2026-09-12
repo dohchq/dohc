@@ -243,10 +243,10 @@ export function CloudLogin(props: {
         setConnectionError({
           message:
             missingServer && missingRelay
-              ? "Enter the cloud server URL and sync relay URL."
+              ? "Enter the server and sync relay."
               : missingServer
-                ? "Enter the cloud server URL."
-                : "Enter the sync relay URL.",
+                ? "Enter the server."
+                : "Enter the sync relay.",
           invalid:
             missingServer && missingRelay
               ? "both"
@@ -259,7 +259,7 @@ export function CloudLogin(props: {
       }
       if (!normalizedServerUrl) {
         setConnectionError({
-          message: "Enter the cloud server URL as an HTTP or HTTPS origin.",
+          message: "Enter the server as an HTTP or HTTPS origin.",
           invalid: "server",
         });
         serverUrlInput.current?.focus();
@@ -267,7 +267,7 @@ export function CloudLogin(props: {
       }
       if (!normalizedRelayUrl) {
         setConnectionError({
-          message: "Enter the sync relay URL as an HTTP or HTTPS origin.",
+          message: "Enter the sync relay as an HTTP or HTTPS origin.",
           invalid: "relay",
         });
         relayUrlInput.current?.focus();
@@ -429,7 +429,7 @@ export function CloudLogin(props: {
                   data-testid="cloud-managed-unconfigured"
                   className="mb-0 mt-2 text-xs leading-relaxed text-muted"
                 >
-                  dohc Drive isn't configured in this build. Enter your own server.
+                  dohc Drive isn't configured in this version. Enter your own server.
                 </p>
               ) : null}
               {managedCloudStatus === "invalid" ? (

@@ -10,7 +10,7 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Join a synced workspace": the second-machine half of multi-machine sync.
 // Three real gates, shown as three steps so the whole cost is visible up
-// front: sign in, paste the code from the machine that has the workspace,
+// front: sign in, enter the code from the machine that has the workspace,
 // pick an empty folder. Joining needs a dohc Drive session, so step one
 // embeds the normal sign-in until one exists.
 
@@ -211,13 +211,10 @@ export function JoinSyncedWorkspace(props: {
           </PrimaryButton>
         </>
       ) : (
-        <form
-          className="flex flex-col"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void join();
-          }}
-        >
+        // Not a <form>: the embedded sign-in panel owns one, and nested forms
+        // collapse so Connect would submit the join instead. Enter in either
+        // join field submits through onKeyDown.
+        <div className="flex flex-col">
           <Step
             number={1}
             title="Sign in to dohc Drive"
@@ -228,13 +225,13 @@ export function JoinSyncedWorkspace(props: {
               <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
             ) : (
               <>
-                <p className="sr-only">Sign in first, then paste the code from your other machine.</p>
+                <p className="sr-only">Sign in first, then enter the code from your other machine.</p>
                 <CloudLogin onConnected={checkSession} embedded untitled />
               </>
             )}
           </Step>
 
-          <Step number={2} title="Paste the code from your other machine" state={codeState}>
+          <Step number={2} title="Enter the code from your other machine" state={codeState}>
             <input
               data-testid="join-sync-code"
               aria-label="Workspace code"
@@ -247,6 +244,9 @@ export function JoinSyncedWorkspace(props: {
               }}
               placeholder="dohc-sync:…"
               spellCheck={false}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void join();
+              }}
               className="h-9 w-full rounded-md border border-line bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
             {needsPassphrase ? (
@@ -258,6 +258,9 @@ export function JoinSyncedWorkspace(props: {
                   type="password"
                   spellCheck={false}
                   onChange={(event) => setPassphrase(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void join();
+                  }}
                   className="h-9 w-full rounded-md border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
                 />
               </label>
@@ -286,8 +289,9 @@ export function JoinSyncedWorkspace(props: {
             </button>
 
             <PrimaryButton
-              type="submit"
+              type="button"
               data-testid="join-workspace-start"
+              onClick={() => void join()}
               disabled={!canJoin}
               className="mt-2"
             >
@@ -305,7 +309,7 @@ export function JoinSyncedWorkspace(props: {
               </p>
             ) : null}
           </Step>
-        </form>
+        </div>
       )}
     </div>
   );

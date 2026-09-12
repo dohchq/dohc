@@ -87,7 +87,7 @@ describe("CloudLogin", () => {
     render(<CloudLogin workspaceId="ws-1" />);
 
     expect((await screen.findByTestId("cloud-managed-unconfigured")).textContent).toContain(
-      "isn't configured in this build",
+      "isn't configured in this version",
     );
     expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).placeholder).toBe(
       "https://cloud.example.com",
@@ -99,7 +99,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
     const error = screen.getByRole("alert");
     expect(error.textContent).toBe(
-      "Enter the cloud server URL and sync relay URL.",
+      "Enter the server and sync relay.",
     );
     const serverUrl = screen.getByTestId("cloud-server-url");
     const relayUrl = screen.getByTestId("cloud-relay-url");
@@ -190,7 +190,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "Enter the cloud server URL as an HTTP or HTTPS origin.",
+      "Enter the server as an HTTP or HTTPS origin.",
     );
     const serverUrl = screen.getByTestId("cloud-server-url");
     const relayUrl = screen.getByTestId("cloud-relay-url");
@@ -216,7 +216,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByRole("alert").textContent).toBe(
-      "Enter the sync relay URL as an HTTP or HTTPS origin.",
+      "Enter the sync relay as an HTTP or HTTPS origin.",
     );
     const serverUrl = screen.getByTestId("cloud-server-url");
     const relayUrl = screen.getByTestId("cloud-relay-url");

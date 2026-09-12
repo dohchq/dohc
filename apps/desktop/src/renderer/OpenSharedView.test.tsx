@@ -408,7 +408,7 @@ describe("OpenSharedView", () => {
     bridgeMock.cloudStatus.mockResolvedValue({ connected: false });
     render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
     await screen.findByText(
-      "Shares are addressed to your dohc Drive account — sign in first, then paste the code you received.",
+      "Shares are addressed to your dohc Drive account — sign in first, then enter the code you received.",
     );
     expect(screen.queryByTestId("open-share-code")).toBeNull();
   });
