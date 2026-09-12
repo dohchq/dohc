@@ -182,6 +182,8 @@ async function run() {
     { stdio: "inherit" },
     "stage the plugin install/build tools",
   );
+  runRequired(process.execPath, [join(import.meta.dirname, "stage-app-compiler.mjs")],
+    { stdio: "inherit" }, "stage the app compiler");
 
   const devServer = await buildThenStartDesktop();
   if (devServer.error) fail("start electron-vite", devServer.error);
