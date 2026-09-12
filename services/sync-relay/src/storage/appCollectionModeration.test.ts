@@ -64,6 +64,23 @@ it("refuses a receipt that no longer matches its original server moment",()=>{
   f.raw.prepare("UPDATE sync_relay_app_collection_receipts SET receipt_json=?").run(JSON.stringify({...receipt,objectId:"another-object"}));
   expect(()=>f.storage.readOwnerAppCollectionAcceptances(ownerPage)).toThrow(/damaged/);
 });
+
+it("refuses a missing public mapping instead of silently hiding its receipt",()=>{
+  const f=fixture();f.accept();
+  f.raw.prepare("DELETE FROM sync_relay_app_public_principals").run();
+  expect(()=>f.storage.readOwnerAppCollectionAcceptances(ownerPage)).toThrow(/damaged/);
+});
+
+it.each(["not json","null","x".repeat(8193)])("refuses damaged or oversized receipt metadata",receipt=>{
+  const f=fixture();f.accept();
+  f.raw.prepare("UPDATE sync_relay_app_collection_receipts SET receipt_json=?").run(receipt);
+  expect(()=>f.storage.readOwnerAppCollectionAcceptances(ownerPage)).toThrow(/damaged/);
+});
+
+it("keeps owner selection stable through restart",()=>{
+  const f=fixture();f.accept();const page=f.storage.readOwnerAppCollectionAcceptances(ownerPage);
+  f.restart();expect(f.storage.readOwnerAppCollectionAcceptances(ownerPage)).toEqual(page);
+});
 function fixture() {
   const directory=mkdtempSync(join(tmpdir(),"app-collections-")),path=join(directory,"relay.sqlite");
   cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));

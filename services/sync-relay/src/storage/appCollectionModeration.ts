@@ -41,27 +41,29 @@ export function readOwnerAppCollectionAcceptances(storage: StorageContext, input
       CASE WHEN length(CAST(r.receipt_json AS BLOB))<=8192 THEN r.receipt_json END AS receipt_json,
       p.public_principal_id
       FROM sync_relay_app_collection_receipts r
-      JOIN sync_relay_app_public_principals p ON p.workspace_id=r.workspace_id AND p.grant_id=r.grant_id AND p.principal_id=r.principal_id
+      LEFT JOIN sync_relay_app_public_principals p ON p.workspace_id=r.workspace_id AND p.grant_id=r.grant_id AND p.principal_id=r.principal_id
       WHERE r.workspace_id=? AND r.grant_id=? AND r.acceptance_id>?
         ${selected ? "AND r.principal_id=?" : ""}
       ORDER BY r.acceptance_id LIMIT ?`).all(input.workspaceId,input.grantId,input.afterAcceptanceId ?? "",
         ...(selected ? [String(selected.principal_id)] : []),input.limit+1);
     const acceptances: OwnerAppCollectionAcceptance[] = [];
     let pageBytes = 0;
+    const firstMoment = storage.db.prepare(`SELECT m.moment_id,m.version_id,m.path,l.origin_id,l.op_kind,
+      json_extract(l.payload_json,'$.author.kind') AS author_kind,
+      json_extract(l.payload_json,'$.author.principalId') AS public_id,
+      json_extract(l.payload_json,'$.author.grantId') AS grant_id,
+      json_extract(l.payload_json,'$.operation') AS operation
+      FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq AND l.workspace_id=m.workspace_id
+      WHERE m.workspace_id=? AND m.object_id=? ORDER BY m.relay_seq LIMIT 1`);
     for (const row of rows.slice(0,input.limit)) {
       if (typeof row.receipt_json !== "string" || !identifier(row.public_principal_id)) damaged();
-      const receipt = JSON.parse(row.receipt_json) as AppCollectionReceipt;
+      let receipt: AppCollectionReceipt;
+      try { receipt = JSON.parse(row.receipt_json) as AppCollectionReceipt; } catch { damaged(); }
+      if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) damaged();
       if (receipt.kind !== "accepted" || receipt.acceptanceId !== row.acceptance_id ||
           !identifier(receipt.objectId) || !identifier(receipt.momentId) || typeof receipt.path !== "string" ||
           Buffer.byteLength(receipt.path)>4096 || !Number.isSafeInteger(receipt.acceptedAtMs) || receipt.acceptedAtMs<0) damaged();
-      const original = storage.db.prepare(`SELECT m.moment_id,m.version_id,m.path,l.origin_id,l.op_kind,
-        json_extract(l.payload_json,'$.author.kind') AS author_kind,
-        json_extract(l.payload_json,'$.author.principalId') AS public_id,
-        json_extract(l.payload_json,'$.author.grantId') AS grant_id,
-        json_extract(l.payload_json,'$.operation') AS operation
-        FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq AND l.workspace_id=m.workspace_id
-        WHERE m.workspace_id=? AND m.object_id=? ORDER BY m.relay_seq LIMIT 1`)
-        .get(input.workspaceId,receipt.objectId);
+      const original = firstMoment.get(input.workspaceId,receipt.objectId);
       if (!original || original.moment_id !== receipt.momentId || !identifier(original.version_id) || original.path !== receipt.path ||
           original.origin_id !== `relay:collection-create:${input.grantId}` || original.op_kind !== "moment.append" ||
           original.operation !== "write" || original.author_kind !== "public" || original.public_id !== row.public_principal_id ||
