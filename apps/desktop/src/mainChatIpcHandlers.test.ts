@@ -91,7 +91,7 @@ describe("runtime main chat IPC boundaries", () => {
     resolveIdentity({ authorUserId: "old-user-id" });
 
     await expect(resolving).rejects.toThrow(
-      "Your dohc Cloud session changed. Try again.",
+      "Your dohc Drive session changed. Try again.",
     );
   });
 
@@ -242,14 +242,14 @@ describe("runtime main chat IPC boundaries", () => {
       writeChatMessageFromMain({
         resolveAuthorUserId: async () => {
           throw new Error(
-            "Sign in to dohc Cloud to send a message in this shared channel.",
+            "Sign in to dohc Drive to send a message in this shared channel.",
           );
         },
         resolveAttachments,
         revalidateAuthorUserId,
         write,
       }),
-    ).rejects.toThrow(/Sign in to dohc Cloud/u);
+    ).rejects.toThrow(/Sign in to dohc Drive/u);
     expect(resolveAttachments).not.toHaveBeenCalled();
     expect(revalidateAuthorUserId).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
@@ -302,7 +302,7 @@ describe("runtime main chat IPC boundaries", () => {
   it("revalidates the reaction author before the mutation", async () => {
     const setReaction = vi.fn(async () => ({ reactionId: "reaction-1" }));
     const revalidateReplicationAuthorId = vi.fn(async () => {
-      throw new Error("Your dohc Cloud session changed. Try again.");
+      throw new Error("Your dohc Drive session changed. Try again.");
     });
 
     await expect(
@@ -318,7 +318,7 @@ describe("runtime main chat IPC boundaries", () => {
         revalidateReplicationAuthorId,
         setReaction,
       }),
-    ).rejects.toThrow("Your dohc Cloud session changed. Try again.");
+    ).rejects.toThrow("Your dohc Drive session changed. Try again.");
 
     expect(revalidateReplicationAuthorId).toHaveBeenCalledWith(
       "verified-user-id",
@@ -517,7 +517,7 @@ describe("readRelayChatShareLanes", () => {
       fetchListing: () =>
         Promise.reject(
           new RelaySessionError(
-            "Your dohc Cloud session expired. Sign in again, then retry.",
+            "Your dohc Drive session expired. Sign in again, then retry.",
           ),
         ),
       workspaceId: "workspace-1",
@@ -1191,7 +1191,7 @@ describe("readRelayChatShareLanes session classification", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.reject(
-          new RelaySessionError("Your dohc Cloud session expired.", {
+          new RelaySessionError("Your dohc Drive session expired.", {
             sessionWasCurrent: false,
           }),
         ),

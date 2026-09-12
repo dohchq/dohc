@@ -148,13 +148,13 @@ export function OpenSharedView(props: {
       </div>
 
       {gate.kind === "checking" ? (
-        <p className="m-0 text-xs text-subtle">Checking your dohc Cloud connection…</p>
+        <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
       ) : null}
 
       {gate.kind === "signed-out" ? (
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
-            Shares are addressed to your dohc Cloud account — sign in first, then
+            Shares are addressed to your dohc Drive account — sign in first, then
             paste the code you received.
           </p>
           <CloudLogin onConnected={checkSession} embedded />

@@ -796,7 +796,7 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
     cloudLogin().credentials(),
   );
   if (!loaded.current) {
-    throw new Error("Your dohc Cloud session changed. Try again.");
+    throw new Error("Your dohc Drive session changed. Try again.");
   }
   return loaded.credentials;
 }
@@ -837,7 +837,7 @@ function relayShareErrorCopy(
     case "secret_path":
       return "Secret files can't be shared.";
     case "recipient_not_found":
-      return "No dohc account matches that email. Ask them to sign in to dohc Cloud once, then share again.";
+      return "No dohc account matches that email. Ask them to sign in to dohc Drive once, then share again.";
     case "empty_selector":
       return "Pick a file, folder, or version to share.";
     case "invalid_path":
@@ -898,7 +898,7 @@ async function relayShareJsonWithCredentials<T>(
   | RelayShareRetainedNotFoundResult<T>
 > {
   if (!credentials.relayUrl) {
-    throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+    throw new Error("Reconnect dohc Drive with a sync relay URL, then try again.");
   }
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -921,7 +921,7 @@ async function relayShareJsonWithCredentials<T>(
         cloudLogin().invalidateSessionIf(expected),
     });
     throw new RelaySessionError(
-      "Your dohc Cloud session expired. Sign in again, then retry.",
+      "Your dohc Drive session expired. Sign in again, then retry.",
       { sessionWasCurrent },
     );
   }
@@ -2322,7 +2322,7 @@ async function revalidateChatWrite(
     store,
   );
   if (currentAuthorUserId !== authorUserId) {
-    throw new Error("Your dohc Cloud session changed. Try again.");
+    throw new Error("Your dohc Drive session changed. Try again.");
   }
 }
 
@@ -3321,7 +3321,7 @@ function createShareViewFilesForOperation(
       const credentials = cachedCredentials;
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
-          throw new Error("Sign in to dohc Cloud first.");
+          throw new Error("Sign in to dohc Drive first.");
         }
         return null;
       }

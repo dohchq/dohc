@@ -5,7 +5,7 @@ import {
 } from "./cloudCredentialStore";
 import { canonicalCloudOrigin } from "./cloudConfiguration";
 
-// Desktop side of the OAuth device-authorization flow against dohc Cloud (or
+// Desktop side of the OAuth device-authorization flow against dohc Drive (or
 // a self-host server): start() asks the server for a short user code, the
 // user approves it in the system browser, poll() exchanges the device code
 // for a session token once approved. The token is persisted via the injected
@@ -356,7 +356,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       const serverInput = serverUrl?.trim() || options.defaultServerUrl?.trim();
       if (!serverInput) {
         throw new Error(
-          "No dohc Cloud server is configured. Enter your self-hosted server URL.",
+          "No dohc Drive server is configured. Enter your self-hosted server URL.",
         );
       }
       const server = canonicalCloudOrigin(serverInput);

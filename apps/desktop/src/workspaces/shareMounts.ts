@@ -577,7 +577,7 @@ export function classifyShareMountRefreshError(
   if (error instanceof RelayUnauthorizedError) {
     return {
       kind: "abort",
-      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+      message: "Your dohc Drive session expired. Sign in again, then refresh shares.",
     };
   }
   if (error instanceof SharePinInvalidError) return { kind: "row", status: "damaged" };

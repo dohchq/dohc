@@ -10,7 +10,7 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // "Join a synced workspace" (0P-C): the second-machine half of multi-machine
 // sync. Paste the code copied from the machine that already has the
 // workspace, pick an empty folder, and the workspace arrives — files,
-// history, and chats. Joining needs a signed-in dohc Cloud session, so the
+// history, and chats. Joining needs a signed-in dohc Drive session, so the
 // panel gates on that first and embeds the normal sign-in when absent.
 
 type Gate =
@@ -140,13 +140,13 @@ export function JoinSyncedWorkspace(props: {
       </div>
 
       {gate.kind === "checking" ? (
-        <p className="m-0 text-xs text-subtle">Checking your dohc Cloud connection…</p>
+        <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
       ) : null}
 
       {gate.kind === "signed-out" ? (
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
-            The workspace you're joining belongs to your dohc Cloud account —
+            The workspace you're joining belongs to your dohc Drive account —
             sign in first, then paste the code from your other machine.
           </p>
           <CloudLogin onConnected={checkSession} embedded />
@@ -156,7 +156,7 @@ export function JoinSyncedWorkspace(props: {
       {gate.kind === "signed-in" && warning === null ? (
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
-            On the machine that already has the workspace, open dohc Cloud and
+            On the machine that already has the workspace, open dohc Drive and
             copy the code under "Add this workspace on another machine".
           </p>
           <label className="block text-[11px] font-medium text-subtle">

@@ -136,12 +136,12 @@ export function assertSharedChannelMessageIdentity(input: {
 }): void {
   if (!input.joinedChannel) {
     if (input.authorUserId !== input.resolvedAuthorUserId) {
-      throw new Error("Your dohc Cloud session changed. Try again.");
+      throw new Error("Your dohc Drive session changed. Try again.");
     }
     return;
   }
   if (!input.credentials) {
-    throw new Error("Sign in to dohc Cloud to send a message in this shared channel.");
+    throw new Error("Sign in to dohc Drive to send a message in this shared channel.");
   }
   if (
     !input.credentials.relayUrl ||

@@ -3,7 +3,7 @@ import { betterAuth } from "better-auth";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 
-// dohc Cloud auth: Better Auth mounted on the same Postgres the workspace
+// dohc Drive auth: Better Auth mounted on the same Postgres the workspace
 // backend uses (self-host = one database, no auth vendor). Email/password for
 // accounts, the organization plugin for team workspaces, and the OAuth
 // device-authorization grant for desktop login (the desktop shows a code, the

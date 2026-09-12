@@ -291,7 +291,7 @@ export function CloudLogin(props: {
           kind: "failed",
           reason:
             connectionMode === "managed"
-              ? "dohc could not reach dohc Cloud. Check your connection, then try again."
+              ? "dohc could not reach dohc Drive. Check your connection, then try again."
               : "dohc could not reach this self-hosted server. Check both URLs, then try again.",
         });
       }
@@ -342,7 +342,7 @@ export function CloudLogin(props: {
       if (sessionRef.isCurrent(session)) setPhase({ kind: "disconnected" });
     } catch {
       if (sessionRef.isCurrent(session)) {
-        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Cloud." });
+        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Drive." });
       }
     }
   }
@@ -358,7 +358,7 @@ export function CloudLogin(props: {
     >
       <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
         <Cloud size={14} aria-hidden className="text-subtle" />
-        dohc Cloud
+        dohc Drive
       </h2>
 
       {phase.kind === "loading" ? (
@@ -395,7 +395,7 @@ export function CloudLogin(props: {
           {managedCloudStatus === "ready" && connectionMode === "managed" ? (
             <>
               <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-                Connect to dohc Cloud for sync and sharing. Your workspace keeps
+                Connect to dohc Drive for sync and sharing. Your workspace keeps
                 working locally without a connection.
               </p>
               <PrimaryButton
@@ -403,7 +403,7 @@ export function CloudLogin(props: {
                 onClick={() => void connect()}
                 className="mt-3"
               >
-                Connect to dohc Cloud
+                Connect to dohc Drive
               </PrimaryButton>
               <SecondaryButton
                 type="button"
@@ -424,7 +424,7 @@ export function CloudLogin(props: {
                   data-testid="cloud-managed-unconfigured"
                   className="mb-0 mt-2 text-xs leading-relaxed text-muted"
                 >
-                  dohc Cloud isn't configured in this build. You can still connect
+                  dohc Drive isn't configured in this build. You can still connect
                   to a self-hosted server.
                 </p>
               ) : null}
@@ -434,7 +434,7 @@ export function CloudLogin(props: {
                     data-testid="cloud-managed-invalid"
                     className="mb-0 mt-2 text-xs leading-relaxed text-danger"
                   >
-                    dohc Cloud is unavailable because this build has incomplete
+                    dohc Drive is unavailable because this build has incomplete
                     server settings.
                   </p>
                   <p className="mb-0 mt-1 text-xs leading-relaxed text-muted">
@@ -452,7 +452,7 @@ export function CloudLogin(props: {
                   }}
                   className="mt-3"
                 >
-                  Use dohc Cloud
+                  Use dohc Drive
                 </SecondaryButton>
               ) : null}
               <form

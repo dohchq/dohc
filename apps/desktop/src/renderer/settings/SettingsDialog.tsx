@@ -634,7 +634,7 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-cloud">
             <SettingRow
-              title="dohc Cloud"
+              title="dohc Drive"
               description="Connect, sync, and manage cloud collaboration for this workspace."
             >
               <button

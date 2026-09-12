@@ -3648,7 +3648,7 @@ export type InvokePluginPanelSdkResult = z.infer<
   typeof InvokePluginPanelSdkResult
 >;
 
-// dohc Cloud login (device-authorization flow): the desktop shows a short
+// dohc Drive login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
 // session token never reaches the renderer — main stores it via safeStorage
 // and the renderer only ever sees connection status + email.

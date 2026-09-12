@@ -3620,7 +3620,7 @@ export function DesktopWorkspaceShell(props: {
       })),
       {
         id: "connect-cloud",
-        label: "Connect dohc Cloud",
+        label: "Connect dohc Drive",
         run: () => setCloudOpen(true),
       },
       {

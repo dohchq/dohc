@@ -404,11 +404,11 @@ describe("OpenSharedView", () => {
     );
   });
 
-  it("gates on a signed-in dohc Cloud session first", async () => {
+  it("gates on a signed-in dohc Drive session first", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({ connected: false });
     render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
     await screen.findByText(
-      "Shares are addressed to your dohc Cloud account — sign in first, then paste the code you received.",
+      "Shares are addressed to your dohc Drive account — sign in first, then paste the code you received.",
     );
     expect(screen.queryByTestId("open-share-code")).toBeNull();
   });

@@ -138,7 +138,7 @@ export function registerShareProposalsIpcHandlers<
           }
           if (!credentials.relayUrl) {
             throw new Error(
-              "Reconnect dohc Cloud with a sync relay URL, then try again.",
+              "Reconnect dohc Drive with a sync relay URL, then try again.",
             );
           }
           return {
@@ -225,7 +225,7 @@ export function registerShareProposalsIpcHandlers<
           const proposalScope = resolveScope(workspace.shareView);
           const credentials = currentCredentials();
           if (!credentials?.relayUrl) {
-            throw new Error("Sign in to dohc Cloud first.");
+            throw new Error("Sign in to dohc Drive first.");
           }
           const shareRelayUrl = isRecordValue(workspace.shareView)
             ? workspace.shareView.relayUrl
