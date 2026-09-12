@@ -9,7 +9,8 @@ import type {StorageContext} from '../../sync-relay/src/storage/context';
 import {parseAppPublicationCandidate,type AppCollectionCapability} from '@dohc/security-contract/app-publication';
 import {createShareWebApplication} from '../src/server';
 
- export function actualAppLaunchFixture(script:Uint8Array, appHosting=true, collection=false){
+export function actualAppLaunchFixture(script:Uint8Array, options:{appHosting?:boolean;collection?:boolean}={}){
+  const {appHosting=true,collection=false}=options;
   const root=mkdtempSync(join(tmpdir(),'dohc-app-launch-real-')),storage=openSyncRelayStorage(join(root,'relay.sqlite'));
   const key='app-launch-fixture-key-with-more-than-thirty-two-bytes',exchangeKey='app-launch-relay-exchange-key-with-more-than-thirty-two-bytes';
   const profile='P'.repeat(43),secret='S'.repeat(43),wrongSecret='W'.repeat(43),viewerOrigin='https://viewer.example.com';

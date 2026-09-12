@@ -2,7 +2,7 @@ import {it,expect} from 'vitest';
 import {actualAppLaunchFixture} from '../e2e/actualAppLaunchFixture';
 
 it('uses actual approved collection authority for list, idempotent create, and withdrawal',async()=>{
-  const f=actualAppLaunchFixture(Buffer.from("document.body.textContent='ok'"),true);
+  const f=actualAppLaunchFixture(Buffer.from("document.body.textContent='ok'"),{collection:true});
   try{
     const viewer='https://viewer.example.com';
     const post=(url:string,body:unknown,headers:Record<string,string>={})=>f.application.handle(new Request(url,{method:'POST',headers:{host:new URL(url).host,origin:new URL(url).origin,'content-type':'application/json',...headers},body:JSON.stringify(body)}));

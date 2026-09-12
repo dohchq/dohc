@@ -35,7 +35,7 @@ it("rejects private fields and stale viewer material after the relay response",a
 });
 
 it("returns an authenticated empty page when app hosting is disabled",async()=>{
-  const f=actualAppLaunchFixture(Buffer.from("document.body.textContent='poll'"),false);
+  const f=actualAppLaunchFixture(Buffer.from("document.body.textContent='poll'"),{appHosting:false});
   try {
     const exchange=await f.application.handle(new Request("https://viewer.example.com/api/exchange",{method:"POST",headers:{host:"viewer.example.com","content-type":"application/json"},body:JSON.stringify({secret:f.secret})}));
     const {session}=await exchange.json();
