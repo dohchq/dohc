@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
+import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { createAppDocument, type AppDocumentFile } from "./appDocument";
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
@@ -17,7 +17,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
 interface Descriptor { publicationId: string; authorityRevision: number; files: Omit<AppDocumentFile, "bytes">[] }
-interface Launch { origin: string; publicationId: string; capability: string; profileSecret: string; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string }
+interface Launch { origin: string; publicationId: string; capability: string; profileSecret: string; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string; staged?: ReturnType<typeof createAppDocument>; stagedExpires?: number }
 
 async function boundedBytes(response: Request | Response, max: number, signal: AbortSignal): Promise<Uint8Array> {
   const reader = response.body?.getReader(); if (!reader) return new Uint8Array();
@@ -35,7 +35,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   resolveMaterial(discriminator: string, cookie: string | null, signal: AbortSignal): Promise<LinkBrowserMaterial> }) {
   const config = parseAppLaunchConfig(options.config), viewerHost = new URL(config.viewerOrigin).host;
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
-  const rate = new TokenBucketLimiter(12, 0.2, 2048); let pending = 0;
+  const stagedSlots = new Set<Launch>();
+  const rate = new TokenBucketLimiter(12, 0.2, 2048); let pending = 0, statusPending = 0;
   const appHost = (host: string) => new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`).test(host);
   async function relay(launch: Pick<Launch, "publicationId" | "capability" | "profileSecret">, suffix: string, signal: AbortSignal) {
     return options.fetchRelay(new Request(new URL(`/sync/link/app-publications/${launch.publicationId}${suffix}`, options.relayUrl),
@@ -54,7 +55,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!exact(file, "byteLength,contentType,path,sha256") || typeof file.path !== "string" || paths.has(file.path) ||
             !["bundle.js", "bundle.css"].includes(file.path) || file.contentType !== (file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8") ||
             typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || (file.byteLength as number) < 0) throw new Error("Invalid bundle.");
-        paths.add(file.path); total += file.byteLength as number;
+        paths.add(file.path); if ((file.byteLength as number) > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Bundle file exceeds blob limit."); total += file.byteLength as number;
       }
       if (!paths.has("bundle.js") || total > MAX_BUNDLE) throw new Error("Invalid bundle size.");
       return value as unknown as Descriptor;
@@ -70,15 +71,20 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     }
     return createAppDocument(files, { maxBundleBytes: MAX_BUNDLE, maxDocumentBytes: MAX_DOCUMENT });
   }
-  function prune() { for (const [host, launch] of launches) if (launch.expires <= now()) launches.delete(host); }
+  function prune() { for (const [host, launch] of launches) {
+    if (launch.stagedExpires !== undefined && launch.stagedExpires <= now()) {launch.staged = undefined; stagedSlots.delete(launch);}
+    if (launch.expires <= now()) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
+  } }
   return { matches(request: Request) { return appHost(request.headers.get("host") ?? "") || new URL(request.url).pathname === "/api/apps/launch"; },
     async handle(request: Request): Promise<Response> {
       const url = new URL(request.url), host = request.headers.get("host") ?? ""; prune();
-      if (request.method !== "POST" || url.search || request.signal.aborted || pending >= MAX_PENDING) return refusal();
+      const statusRequest = url.pathname === "/status" && appHost(host);
+      if (request.method !== "POST" || url.search || request.signal.aborted) return refusal();
+      if (statusRequest ? statusPending >= 64 : pending >= MAX_PENDING) return new Response(null, {status: 503, headers});
       const issue = host === viewerHost && url.pathname === "/api/apps/launch";
       if (!issue && !appHost(host)) return refusal();
       if (!rate.allow(issue ? request.headers.get("x-dohc-share-web-client-ip") ?? "unknown" : host, now())) return refusal();
-      pending++; const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
+      if (statusRequest) statusPending++; else pending++; const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
       try {
         if (issue) {
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/json" || launches.size >= MAX_LAUNCHES) return refusal();
@@ -96,12 +102,17 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
           const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
           const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
+          if (stagedSlots.size >= 2) return new Response(null, {status: 503, headers});
+          stagedSlots.add(launch);
           // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
           delete launch.handoffHash;
-          const doc = await document(launch, signal); signal.throwIfAborted();
-          if (launch.expires <= now()) { launches.delete(host); return refusal(); }
+          let doc: ReturnType<typeof createAppDocument>;
+          try {doc = await document(launch, signal); signal.throwIfAborted();}
+          catch (error) {stagedSlots.delete(launch); throw error;}
+          launch.staged = doc; launch.stagedExpires = now() + HANDOFF_MS;
+          if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
           const cookie = token(), proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); launch.expires = now() + SESSION_MS;
-          const script = `(()=>{const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts';frame.style='border:0;width:100%;height:100vh';const stop=()=>{stopped=true;frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});call('/document').then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);const poll=async()=>{if(stopped)return;try{if(!(await call('/status')).ok)throw Error();}catch{stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});addEventListener('pagehide',stop,{once:true});})();`;
+          const script = `(()=>{const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts';frame.style='border:0;width:100%;height:100vh';const stop=()=>{stopped=true;frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});call('/document').then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});addEventListener('pagehide',stop,{once:true});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
           return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shared app</title></head><body style="margin:0"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`,
@@ -112,10 +123,12 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!launch.cookieHash || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash || !TOKEN.test(proof) || hash(proof) !== launch.proofHash || request.headers.get("origin") !== launch.origin) return refusal();
         if (url.pathname === "/status") { await descriptor(launch, signal); return new Response(null, { status: 204, headers }); }
         if (url.pathname !== "/document") return refusal();
-        const doc = await document(launch, signal); signal.throwIfAborted();
+        const doc = launch.staged; launch.staged = undefined; stagedSlots.delete(launch);
+        if (!doc) return refusal();
+        await descriptor(launch, signal); signal.throwIfAborted();
         if (launch.expires <= now()) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-      } catch { return refusal(); } finally { pending--; }
+      } catch { return refusal(); } finally { if (statusRequest) statusPending--; else pending--; }
     }
   };
 }
