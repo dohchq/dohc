@@ -96,7 +96,6 @@ describe("joined workspace creation", () => {
       rootPath: "/joined",
       workspaceId: "joined",
       kind: "personal",
-      bootstrap: "join",
     });
   });
 

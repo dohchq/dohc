@@ -349,8 +349,6 @@ import {
   startCliServer,
   type CliRunMessageLink,
 } from "./cli/cliServer";
-import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
-import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
   createShareHandoffIntentSlot,
@@ -991,7 +989,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   pluginSurfaces: PluginSurfaces<WebContentsView>;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
-  workspaceChatLifecycle: ReturnType<typeof createWorkspaceChatLifecycle>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
   operationLanes: Map<string, Promise<void>>;
@@ -1052,7 +1049,6 @@ function createDesktopWorkspaceAuthorityState(
       allowOrigin: allowLoopbackFrameOrigin,
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
-    workspaceChatLifecycle: createWorkspaceChatLifecycleFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
     shareViewFiles: new ShareViewFilesState(),
     operationLanes: new Map(),
@@ -1133,7 +1129,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       ),
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
-      state.workspaceChatLifecycle.settled(),
       ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
@@ -2621,10 +2616,7 @@ async function acquireDispatchRunActivity(
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
     const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
-    await lease.state.workspaceChatLifecycle.open(
-      current,
-      () => ensureWorkspaceActivityOpen(current),
-    );
+    await ensureWorkspaceActivityOpen(current);
     let released = false;
     return async () => {
       if (released) return;
@@ -2873,32 +2865,6 @@ function assertChatRunnerIdle(workspaceId: string): void {
   }
 }
 
-function createWorkspaceChatLifecycleFor(
-  binding: WorkspaceAuthorityBinding<RegistryEntry>,
-) {
-  return createWorkspaceChatLifecycle({
-    isReadOnly: (workspaceId) =>
-      withWorkspaceAttachment(
-        { workspaceId, attachmentId: binding.attachmentId },
-        () => Boolean(sharedViewOf(workspaceId)),
-      ) ?? true,
-    isReadyForMaintenance: (workspaceId) =>
-      withWorkspaceAttachment(
-        { workspaceId, attachmentId: binding.attachmentId },
-        () => findWorkspace(workspaceId)?.joinBootstrapPending !== true,
-      ) ?? false,
-    maintain: async (rootPath) => {
-      if (rootPath !== binding.canonicalRootPath) {
-        throw new Error("Chat maintenance received a stale workspace root.");
-      }
-      await ensureAgentsChatBlock(rootPath);
-    },
-    onError: (error) => {
-      console.error("[desktop] AGENTS.md chat description:", error);
-    },
-  });
-}
-
 async function openWorkspaceActivityForOperation(
   operation: DesktopWorkspaceOperation,
   options: WorkspaceActivityOpenOptions,
@@ -2914,11 +2880,8 @@ async function openWorkspaceActivityForOperation(
   operation.assertCurrent();
   const canonicalWorkspace = operation.workspace;
   operation.state.retainedActivity = true;
-  const result = await operation.state.workspaceChatLifecycle.open(
-    canonicalWorkspace,
-    () => ensureOpen(canonicalWorkspace, options),
-    options.afterActivityOpen,
-  );
+  const result = await ensureOpen(canonicalWorkspace, options);
+  await options.afterActivityOpen?.();
   operation.assertCurrent();
   void chatDispatchService.scanWorkspace(
     canonicalWorkspace.workspaceId,
@@ -3070,8 +3033,6 @@ const { startDesktopCliServer } = createDesktopCliServer({
   assertWritableWorkspace,
   chatRelayIdentityFor,
   currentCredentials: () => cachedCredentials,
-  workspaceAuthorities,
-  canonicalWorkspaceFor,
   startCliServer,
   stateDir,
   warmCredentialCache,

@@ -33,7 +33,6 @@ import {
   closeWorkspaceActivityAndRelay,
 } from "./workspaceActivity";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -1082,25 +1081,18 @@ describe("moveEngineStoreAside", () => {
     };
     const activity = createWorkspaceActivity(() => {});
     const openActivity = vi.fn(() => activity.open(workspace));
-    const lifecycle = createWorkspaceChatLifecycle({
-      isReadOnly: () => false,
-      maintain: async () => undefined,
-      onError: vi.fn(),
-    });
     const renameError = new Error("rename denied");
 
-    const opening = lifecycle.open(workspace, () =>
-      withEngineStoreRecovered(
-        new Map(),
-        workspace,
-        openActivity,
-        (rootPath) =>
-          completePendingEngineStoreMove(rootPath, {
-            rename: async () => {
-              throw renameError;
-            },
-          }),
-      ),
+    const opening = withEngineStoreRecovered(
+      new Map(),
+      workspace,
+      openActivity,
+      (rootPath) =>
+        completePendingEngineStoreMove(rootPath, {
+          rename: async () => {
+            throw renameError;
+          },
+        }),
     );
 
     try {

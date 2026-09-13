@@ -425,18 +425,14 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       syncBeforeLocalChange.lastSyncedAtMs,
     );
 
-    // The join is pull-first and seeds no starter files. The relay log must
-    // therefore carry no `.context/me.md` operation from the joining app.
-    //
     // The joining app must adopt the coordinate that the remote peer
-    // established before its first pull.
+    // established before its first pull: the relay log reads cleanly under
+    // that identity once the join settles.
     let identity: RelayWorkspaceIdentity | null = establishedIdentity;
-    const loggedPaths: string[] = [];
     await expect
       .poll(
         async () => {
           identity ??= relayAdoptedIdentity(relayDb, workspaceId);
-          loggedPaths.length = 0;
           let since = 0;
           while (true) {
             const query = new URLSearchParams({ since: String(since), limit: "500" });
@@ -452,22 +448,15 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
               // Identity was adopted between our read and this request (or
               // rotated); relearn on the next interval.
               identity = null;
-              loggedPaths.length = 0;
               return null;
             }
             if (!response.ok) {
               throw new Error(`relay log read failed (${response.status})`);
             }
             const body = (await response.json()) as {
-              ops: Array<{ payload?: { path?: string } }>;
               nextCursor: number;
               hasMore: boolean;
             };
-            for (const op of body.ops) {
-              if (typeof op.payload?.path === "string") {
-                loggedPaths.push(op.payload.path);
-              }
-            }
             if (!body.hasMore) break;
             if (!Number.isSafeInteger(body.nextCursor) || body.nextCursor <= since) {
               throw new Error("relay log pagination did not advance");
@@ -479,7 +468,6 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
         { timeout: 30_000, intervals: [500] },
       )
       .toBe(true);
-    expect(loggedPaths).not.toContain(".context/me.md");
 
     // Full history came along (both roadmap moments, not just latest state).
     // In perf runs the first history page is bulk files, so assert on the
