@@ -84,8 +84,8 @@ describe("owner app publication", () => {
     await screen.findByText("App collection access revoked. Prepare the app again to review and restore access.");
     expect(api.publishOwnerApp).toHaveBeenCalledWith({action:"revokeCollection",workspaceId:"ws-trip",publicationId:published.publicationId,expectedAuthorityRevision:7});
     expect(screen.getByRole("button",{name:`Unpublish ${published.publicationId}`})).toBeTruthy();
+    await screen.findByText("No collection access");
     expect(screen.queryByRole("button",{name:`Revoke collection access ${published.publicationId}`})).toBeNull();
-    expect(screen.getByText("No collection access")).toBeTruthy();
   });
   it("does not show a late revocation result in another workspace", async () => {
     const pending = deferred<OwnerAppPublicationResult>();
