@@ -35,13 +35,18 @@ export function DesktopRoot() {
     if (request < committedRegistryRequest.current) return registry.workspaces;
     committedRegistryRequest.current = request;
     setWorkspaces(registry.workspaces);
-    setWorkspace((current) =>
-      current
-        ? (registry.workspaces.find(
-            (candidate) => candidate.workspaceId === current.workspaceId,
-          ) ?? current)
-        : (registry.workspaces[0] ?? null),
-    );
+    // An open workspace that left the registry (forgotten, or its binding
+    // retired) must not keep the shell alive with nothing to open: drop to
+    // first run, or to whichever workspace remains.
+    setWorkspace((current) => {
+      if (registry.workspaces.length === 0) return null;
+      if (!current) return registry.workspaces[0] ?? null;
+      return (
+        registry.workspaces.find((candidate) => candidate.workspaceId === current.workspaceId) ??
+        registry.workspaces[0] ??
+        null
+      );
+    });
     setLoadError(null);
     setLoaded(true);
     return registry.workspaces;

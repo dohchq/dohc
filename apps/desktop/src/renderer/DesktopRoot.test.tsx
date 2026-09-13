@@ -320,3 +320,40 @@ describe("DesktopRoot", () => {
     await waitFor(() => expect(getWorkspaceRegistry).toHaveBeenCalledTimes(2));
   });
 });
+
+describe("registry emptied under an open workspace", () => {
+  it("drops to first run instead of keeping a shell with nothing to open", async () => {
+    const workspace = {
+      workspaceId: "ws-1",
+      rootPath: "/home/ice/dohc/personal",
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    let registry: { workspaces: typeof workspace[] } = { workspaces: [workspace] };
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      getWorkspaceRegistry: vi.fn(async () => registry),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+    expect(await screen.findByTestId("workspace-shell")).toBeTruthy();
+
+    registry = { workspaces: [] };
+    await act(async () => {
+      emitActivity?.({});
+    });
+    expect(await screen.findByTestId("first-run")).toBeTruthy();
+  });
+});
