@@ -269,9 +269,6 @@ export function OpenSharedView(props: {
 
       {signingIn && gate.kind !== "signed-in" ? (
         <div className="flex flex-col gap-2 rounded-md border border-line bg-bg p-3">
-          <p className="m-0 text-xs text-muted">
-            Sign in to open this share. It is addressed to your dohc Drive account.
-          </p>
           <p className="sr-only">
             Shares are addressed to your dohc Drive account — sign in first, then enter the code you received.
           </p>
