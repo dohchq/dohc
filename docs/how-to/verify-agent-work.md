@@ -92,6 +92,4 @@ Use `--tiny` to check the harness; use the full fixture for performance claims.
 
 ## Finish the task
 
-Stop every process started by the task. Keep its evidence until review finishes.
-Remove only worktrees owned by the task, after accounting for their commits and checking for uncommitted work.
-Do not infer ownership from a worktree's name or age.
+Follow the [cleanup skill](../../.agents/skills/workspace-cleanup/SKILL.md). Keep verification evidence until review finishes.
