@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { bridge } from "./bridge";
 import { rendererMarks } from "../performance/rendererMarks";
-import { toggleTheme } from "./theme";
+import { applyAppearanceSettings, toggleTheme } from "./theme";
 import { IconButton } from "./ui/controls";
 
 // Debug panel for working on the UI. Present only when main launched with
@@ -69,9 +69,9 @@ export function DevPanel(props: { workspaceId?: string }) {
   function setAppearance(patch: { themeMode?: "light" | "dark" | "system"; density?: "comfortable" | "compact"; reduceMotion?: boolean }) {
     run("Appearance", async () => {
       const result = await bridge().getUserSettings();
-      await bridge().setUserSettings({
-        settings: { ...result.settings, appearance: { ...result.settings.appearance, ...patch } },
-      });
+      const appearance = { ...result.settings.appearance, ...patch };
+      applyAppearanceSettings(appearance);
+      await bridge().setUserSettings({ settings: { ...result.settings, appearance } });
     });
   }
 
