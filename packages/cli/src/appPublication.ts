@@ -3,12 +3,12 @@ import { parseAppCollectionCapability } from "@dohc/security-contract/app-public
 
 const id = z.string().min(1).max(200);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-export const OwnerAppCollectionCapability = z.unknown().transform((value, context) => {
+const OwnerAppCollectionCapability = z.unknown().transform((value, context) => {
   try { return parseAppCollectionCapability(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid collection capability." }); return z.NEVER; }
 });
 const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable() };
-export const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
+const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
 ]);

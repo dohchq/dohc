@@ -50,7 +50,6 @@ export {
   type AgentAuthor,
   type MomentRecord,
   type SecretMomentRecord,
-  type SourceCapture,
   type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
