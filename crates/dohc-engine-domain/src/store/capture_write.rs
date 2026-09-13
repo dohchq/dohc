@@ -1410,12 +1410,14 @@ fn write_normalized_text_in_tx(
             author_json,
         ],
     );
-    let payload_hash = history_source.map_or(payload_hash.clone(), |source| {
+    let payload_hash = if let Some(source) = history_source {
         hash_request_fields(
             input.request_id,
             &[payload_hash.as_bytes(), source.moment_id.as_bytes()],
         )
-    });
+    } else {
+        payload_hash
+    };
     if let Some(request_id) = input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {

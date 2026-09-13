@@ -1272,6 +1272,21 @@ fn record_adoption_refuses_an_insertion_outside_the_root_mapping() {
 }
 
 #[test]
+fn copied_record_cannot_remint_an_id_inside_a_mapping_key() {
+    let markdown = format!("---\n{{\"id\":\"{PERSON_ID}\",a: 1}}: value\nid: {PERSON_ID}\n---\n");
+    assert_eq!(
+        markdown_frontmatter_json_with_provenance(&markdown)
+            .unwrap()
+            .0["id"],
+        PERSON_ID
+    );
+    assert_eq!(
+        collection_record_markdown_with_id(&markdown, SECOND_PERSON_ID),
+        None
+    );
+}
+
+#[test]
 fn changing_an_adopted_record_id_keeps_the_query_surface_on_the_engine_id() {
     const RECORD_OBJECT_ID: &str = "changed-id-record-object";
     let (_scratch, mut store) = fresh_store();

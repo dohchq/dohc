@@ -1792,7 +1792,7 @@ pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Op
         let range = engine_authored_record_id_range(markdown, existing_id)?;
         let mut reminted = markdown.to_owned();
         reminted.replace_range(range, record_id);
-        return Some(reminted);
+        return validate_record_id_insertion(&frontmatter, reminted, record_id);
     }
 
     let first_line = markdown.split_inclusive('\n').next();

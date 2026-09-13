@@ -216,28 +216,6 @@ fn parsed_moment_author(raw: &str) -> Value {
     }
 }
 
-#[cfg(test)]
-mod public_author_tests {
-    use super::parsed_moment_author;
-    use serde_json::json;
-
-    #[test]
-    fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
-        let author = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
-        assert_eq!(parsed_moment_author(&author.to_string()), author);
-        for malformed in [
-            json!({"kind":"public", "principalId":"holder"}),
-            json!({"kind":"public", "principalId":"", "grantId":"grant"}),
-            json!({"kind":"public", "principalId":"holder", "grantId":"grant", "agentId":"agent"}),
-        ] {
-            assert_eq!(
-                parsed_moment_author(&malformed.to_string()),
-                json!({"corrupt":true})
-            );
-        }
-    }
-}
-
 /// Withhold both payload bodies of one serialized moment, in place. The
 /// digests beside them stay, so the caller hydrates through
 /// `versionedText.readBlob` — the shape an over-cap moment already arrives in.
@@ -404,5 +382,27 @@ impl EngineService {
             None => Value::Null,
             Some(moment) => moment_json(&moment),
         })
+    }
+}
+
+#[cfg(test)]
+mod public_author_tests {
+    use super::parsed_moment_author;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_public_author_and_refuses_incomplete_or_mixed_shapes() {
+        let author = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
+        assert_eq!(parsed_moment_author(&author.to_string()), author);
+        for malformed in [
+            json!({"kind":"public", "principalId":"holder"}),
+            json!({"kind":"public", "principalId":"", "grantId":"grant"}),
+            json!({"kind":"public", "principalId":"holder", "grantId":"grant", "agentId":"agent"}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
     }
 }
