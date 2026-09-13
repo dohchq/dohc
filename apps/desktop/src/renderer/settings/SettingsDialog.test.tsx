@@ -183,8 +183,6 @@ beforeEach(() => {
   bridge.setWorkspaceSettings.mockImplementation(writeWorkspaceSettings);
   bridge.resetWorkspaceSettings.mockImplementation(resetWorkspaceSettings);
   document.documentElement.dataset.theme = "";
-  document.documentElement.dataset.density = "";
-  document.documentElement.dataset.reduceMotion = "";
   vi.stubGlobal("dohcDesktop", bridge);
 });
 

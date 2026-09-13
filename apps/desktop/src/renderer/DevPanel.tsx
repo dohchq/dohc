@@ -66,7 +66,7 @@ export function DevPanel(props: { workspaceId?: string }) {
       );
   }
 
-  function setAppearance(patch: { themeMode?: "light" | "dark" | "system"; density?: "comfortable" | "compact"; reduceMotion?: boolean }) {
+  function setAppearance(patch: { themeMode?: "light" | "dark" | "system" }) {
     run("Appearance", async () => {
       const result = await bridge().getUserSettings();
       const appearance = { ...result.settings.appearance, ...patch };
@@ -109,14 +109,6 @@ export function DevPanel(props: { workspaceId?: string }) {
             <Act onClick={() => setAppearance({ themeMode: "light" })}>Light</Act>
             <Act onClick={() => setAppearance({ themeMode: "dark" })}>Dark</Act>
             <Act onClick={toggleTheme}>Flip</Act>
-          </Row>
-          <Row label="Density">
-            <Act onClick={() => setAppearance({ density: "comfortable" })}>Comfortable</Act>
-            <Act onClick={() => setAppearance({ density: "compact" })}>Compact</Act>
-          </Row>
-          <Row label="Motion">
-            <Act onClick={() => setAppearance({ reduceMotion: false })}>Normal</Act>
-            <Act onClick={() => setAppearance({ reduceMotion: true })}>Reduced</Act>
           </Row>
 
           <div className="h-px bg-line" />

@@ -13,8 +13,6 @@ type AppearanceSettings = DesktopUserSettings["appearance"];
 let media: MediaQueryList | null = null;
 let currentAppearance: AppearanceSettings = {
   themeMode: "system",
-  density: "comfortable",
-  reduceMotion: false,
   zoomLevel: DEFAULT_ZOOM_LEVEL,
 };
 
@@ -30,8 +28,6 @@ function applyAppearance(appearance: AppearanceSettings): void {
   currentAppearance = appearance;
   const prefersDark = media?.matches ?? false;
   applyTheme(effectiveThemeMode(appearance.themeMode, prefersDark));
-  document.documentElement.dataset.density = appearance.density;
-  document.documentElement.dataset.reduceMotion = String(appearance.reduceMotion);
   // appearance.zoomLevel is deliberately not applied here: zoom is a window
   // property main owns (windowZoom.ts) — main applies it on window load, on
   // every zoom step, and on every settings save.

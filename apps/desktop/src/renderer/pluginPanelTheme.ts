@@ -9,16 +9,12 @@ import { type DohcTheme } from "@dohc/sdk";
 import { CSS_TOKEN_NAMES, fonts, palette, type ThemeTokens } from "./tokens";
 
 /**
- * The attributes theme.ts writes to <html>. They are the whole appearance
- * state a panel can see, so watching exactly these catches every change —
- * the settings dialog, the command palette toggle, and an OS theme flip
- * while the mode is "system" — without the bridge knowing about any of them.
+ * The attribute theme.ts writes to <html>. It is the whole appearance state
+ * a panel can see, so watching exactly this catches every change: the
+ * settings dialog, the command palette toggle, and an OS theme flip while
+ * the mode is "system", without the bridge knowing about any of them.
  */
-export const THEME_ATTRIBUTES = [
-  "data-theme",
-  "data-density",
-  "data-reduce-motion",
-] as const;
+export const THEME_ATTRIBUTES = ["data-theme"] as const;
 
 /**
  * Reads what is on screen right now. The values come from `palette`, which
@@ -31,10 +27,5 @@ export function readDohcTheme(root: HTMLElement): DohcTheme {
   for (const key of Object.keys(CSS_TOKEN_NAMES) as (keyof ThemeTokens)[]) {
     tokens[CSS_TOKEN_NAMES[key]] = palette[mode][key];
   }
-  return {
-    mode,
-    density: root.dataset.density === "compact" ? "compact" : "comfortable",
-    reduceMotion: root.dataset.reduceMotion === "true",
-    tokens,
-  };
+  return { mode, tokens };
 }
