@@ -9,6 +9,7 @@ import {
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { DesktopFirstRun } from "./DesktopFirstRun";
+import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
 export function DesktopRoot() {
@@ -188,18 +189,22 @@ export function DesktopRoot() {
   }
   if (!workspace) {
     return (
-      <DesktopFirstRun
-        handoffStatus={shareHandoffStatus}
-        onDismissShareHandoff={dismissShareHandoff}
-        onShareHandoffOpened={dismissShareHandoff}
-        onWorkspaceReady={(created) => {
-          setWorkspaces([created]);
-          setWorkspace(created);
-        }}
-      />
+      <>
+        <DesktopFirstRun
+          handoffStatus={shareHandoffStatus}
+          onDismissShareHandoff={dismissShareHandoff}
+          onShareHandoffOpened={dismissShareHandoff}
+          onWorkspaceReady={(created) => {
+            setWorkspaces([created]);
+            setWorkspace(created);
+          }}
+        />
+        <DevPanel />
+      </>
     );
   }
   return (
+    <>
     <DesktopWorkspaceShell
       // Remount on switch: file list and selection are workspace-local and
       // must never leak from workspace A into workspace B.
@@ -222,5 +227,7 @@ export function DesktopRoot() {
         setWorkspace(next);
       }}
     />
+    <DevPanel workspaceId={workspace.workspaceId} />
+    </>
   );
 }

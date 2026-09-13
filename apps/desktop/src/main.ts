@@ -8,6 +8,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
+import { devToolsEnabled, registerDevToolsIpcHandlers } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -3887,6 +3888,30 @@ function registerIpcHandlers(): void {
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
+  });
+
+  registerDevToolsIpcHandlers<IpcMainInvokeEvent>({
+    enabled: devToolsEnabled(process.env, app),
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    listWorkspaces,
+    forgetWorkspace: async (workspaceId) => {
+      const lease = workspaceAuthorities.acquire(workspaceId);
+      try {
+        await removePhysicalWorkspace(lease.binding);
+      } finally {
+        lease.release();
+      }
+      refreshNativeWorkspaceSurfaces();
+      notifyRenderer();
+    },
+    stateDir,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
+    relaunch: () => {
+      quitGuard.approve();
+      app.relaunch();
+      app.quit();
+    },
   });
 
   const workspaceFilesIpc = createWorkspaceFilesIpc<

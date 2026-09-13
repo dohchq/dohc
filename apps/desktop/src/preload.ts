@@ -111,8 +111,12 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
+  devTools: process.env.DOHC_DEV_TOOLS === "1",
   reloadRenderer: () =>
     ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
+  devForgetWorkspaces: () => ipcRenderer.invoke(CHANNELS.devForgetWorkspaces),
+  devRevealPath: (payload) => ipcRenderer.invoke(CHANNELS.devRevealPath, payload),
+  devRelaunch: () => ipcRenderer.invoke(CHANNELS.devRelaunch),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>

@@ -20,6 +20,9 @@ export function desktopDevEnvironment(source) {
       delete environment[name];
     }
   }
+  // The dev session is a bench: turn on the in-app dev panel unless the
+  // caller chose otherwise. Main gates it again on an unpackaged build.
+  environment.DOHC_DEV_TOOLS ??= "1";
   return environment;
 }
 

@@ -5887,6 +5887,14 @@ export const DesktopMarksResult = z.object({
 });
 export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 
+export const DevRevealPathPayload = z.object({
+  target: z.enum(["workspace", "state-dir"]),
+  workspaceId: WORKSPACE_ID.optional(),
+});
+export type DevRevealPathPayload = z.infer<typeof DevRevealPathPayload>;
+export const DevForgetWorkspacesResult = z.object({ forgot: z.number().int().nonnegative() });
+export type DevForgetWorkspacesResult = z.infer<typeof DevForgetWorkspacesResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   // The daemon handshake and the renderer's first paint race each other, so a
@@ -5905,7 +5913,14 @@ export interface DohcDesktopBridge {
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
+  // Constant: true only when main launched with DOHC_DEV_TOOLS=1 in an
+  // unpackaged build. The renderer shows the debug panel on it; every dev
+  // channel is separately gated in main, so this is a hint, not authority.
+  devTools: boolean;
   reloadRenderer(): Promise<void>;
+  devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
+  devRevealPath(payload: DevRevealPathPayload): Promise<void>;
+  devRelaunch(): Promise<void>;
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;
