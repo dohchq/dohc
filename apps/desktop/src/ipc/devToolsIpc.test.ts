@@ -7,7 +7,6 @@ function harness(enabled: boolean) {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const forgetWorkspace = vi.fn(async (_workspaceId: string) => undefined);
   const showItemInFolder = vi.fn();
-  const relaunch = vi.fn();
   registerDevToolsIpcHandlers<Event>({
     enabled,
     registerHandler: (channel, handler) => handlers.set(channel, handler),
@@ -21,11 +20,10 @@ function harness(enabled: boolean) {
     forgetWorkspace,
     stateDir: () => "/state",
     showItemInFolder,
-    relaunch,
   });
   const invoke = (channel: string, payload?: unknown, trusted = true) =>
     handlers.get(channel)!({ trusted }, payload);
-  return { handlers, invoke, forgetWorkspace, showItemInFolder, relaunch };
+  return { handlers, invoke, forgetWorkspace, showItemInFolder };
 }
 
 describe("dev tools ipc", () => {
@@ -60,11 +58,5 @@ describe("dev tools ipc", () => {
     await expect(async () =>
       h.invoke(CHANNELS.devRevealPath, { target: "workspace", workspaceId: "nope" }),
     ).rejects.toThrow("not in the registry");
-  });
-
-  it("relaunches on request", async () => {
-    const h = harness(true);
-    await h.invoke(CHANNELS.devRelaunch);
-    expect(h.relaunch).toHaveBeenCalledOnce();
   });
 });

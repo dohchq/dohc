@@ -18,11 +18,10 @@ export function registerDevToolsIpcHandlers<Event>(dependencies: {
   forgetWorkspace(workspaceId: string): Promise<void>;
   stateDir(): string;
   showItemInFolder(path: string): void;
-  relaunch(): void;
 }): void {
   const {
     enabled, registerHandler, assertTrustedSender, listWorkspaces, forgetWorkspace,
-    stateDir, showItemInFolder, relaunch,
+    stateDir, showItemInFolder,
   } = dependencies;
   if (!enabled) return;
 
@@ -43,10 +42,5 @@ export function registerDevToolsIpcHandlers<Event>(dependencies: {
     const workspace = listWorkspaces().find((entry) => entry.workspaceId === input.workspaceId);
     if (!workspace) throw new Error("That workspace is not in the registry.");
     showItemInFolder(workspace.rootPath);
-  });
-
-  registerHandler(CHANNELS.devRelaunch, (event) => {
-    assertTrustedSender(event);
-    relaunch();
   });
 }

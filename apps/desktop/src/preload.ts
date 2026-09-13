@@ -116,7 +116,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
   devForgetWorkspaces: () => ipcRenderer.invoke(CHANNELS.devForgetWorkspaces),
   devRevealPath: (payload) => ipcRenderer.invoke(CHANNELS.devRevealPath, payload),
-  devRelaunch: () => ipcRenderer.invoke(CHANNELS.devRelaunch),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>

@@ -387,7 +387,6 @@ export const CHANNELS = {
   // actions. Each handler is double-gated in main.
   devForgetWorkspaces: "desktop:dev:forget-workspaces",
   devRevealPath: "desktop:dev:reveal-path",
-  devRelaunch: "desktop:dev:relaunch",
   getLaunchMarks: "desktop:test:get-launch-marks",
   getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;

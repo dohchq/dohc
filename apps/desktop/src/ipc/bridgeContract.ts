@@ -5920,7 +5920,6 @@ export interface DohcDesktopBridge {
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
   devRevealPath(payload: DevRevealPathPayload): Promise<void>;
-  devRelaunch(): Promise<void>;
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;

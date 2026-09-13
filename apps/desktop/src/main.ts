@@ -3907,11 +3907,6 @@ function registerIpcHandlers(): void {
     },
     stateDir,
     showItemInFolder: (path) => shell.showItemInFolder(path),
-    relaunch: () => {
-      quitGuard.approve();
-      app.relaunch();
-      app.quit();
-    },
   });
 
   const workspaceFilesIpc = createWorkspaceFilesIpc<

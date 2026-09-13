@@ -60,7 +60,7 @@ export function DevPanel(props: { workspaceId?: string }) {
   function run(label: string, action: () => Promise<unknown>) {
     setStatus(null);
     void action()
-      .then(() => setStatus(`${label}: done`))
+      .then(() => setStatus((current) => current ?? `${label}: done`))
       .catch((error: unknown) =>
         setStatus(`${label}: ${error instanceof Error ? error.message : String(error)}`),
       );
@@ -123,7 +123,6 @@ export function DevPanel(props: { workspaceId?: string }) {
 
           <Row label="Renderer">
             <Act onClick={() => run("Reload", () => bridge().reloadRenderer())}>Reload</Act>
-            <Act onClick={() => run("Relaunch", () => bridge().devRelaunch())}>Relaunch app</Act>
           </Row>
           <Row label="Reveal">
             {props.workspaceId ? (
@@ -145,7 +144,15 @@ export function DevPanel(props: { workspaceId?: string }) {
             <Act onClick={() => run("Reset settings", () => bridge().resetUserSettings())}>
               Settings
             </Act>
-            <Act danger onClick={() => run("Forget workspaces", () => bridge().devForgetWorkspaces())}>
+            <Act
+              danger
+              onClick={() =>
+                run("Forget workspaces", async () => {
+                  const result = await bridge().devForgetWorkspaces();
+                  setStatus(`Forgot ${result.forgot} workspace${result.forgot === 1 ? "" : "s"}. Folders were not deleted.`);
+                })
+              }
+            >
               Forget all workspaces
             </Act>
           </Row>
