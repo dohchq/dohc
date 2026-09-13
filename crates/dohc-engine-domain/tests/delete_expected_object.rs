@@ -98,7 +98,6 @@ fn expected_object_refuses_replaced_path_and_deletes_renamed_object() {
             .unwrap()
             .is_none()
     );
-    drop(files);
     drop(store);
 
     let mut reopened = EngineStore::open(&db, 4).unwrap();

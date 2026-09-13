@@ -95,6 +95,7 @@ impl ActorHandle {
                     store,
                     &input,
                     root_dir.as_deref(),
+                    None,
                     faults.as_ref(),
                     &token,
                 )
@@ -111,6 +112,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        self.versioned_text_write_indexed_with_history(input, root_dir, None, faults, token)
+            .await
+    }
+
+    pub async fn versioned_text_write_indexed_with_history(
+        &self,
+        input: WriteText,
+        root_dir: PathBuf,
+        restore_before_moment_id: Option<String>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
         let root_dir: Option<PathBuf> = Some(root_dir);
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
@@ -118,6 +131,7 @@ impl ActorHandle {
                     store,
                     &input,
                     root_dir.as_deref(),
+                    restore_before_moment_id.as_deref(),
                     faults.as_ref(),
                     &token,
                 )
@@ -552,6 +566,7 @@ fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
+    restore_before_moment_id: Option<&str>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -570,7 +585,11 @@ fn versioned_text_write_on_store(
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
-        let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let result = match restore_before_moment_id {
+            Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
+            None => write_text_in_tx(tx, input),
+        }
+        .map_err(RuntimeError::from)?;
         if !result.deduped {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,

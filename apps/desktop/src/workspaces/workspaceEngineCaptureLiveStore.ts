@@ -831,6 +831,7 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       text: string;
+      restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentAuthor;
       momentId?: string;

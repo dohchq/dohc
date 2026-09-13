@@ -384,6 +384,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
     author?: AgentAuthor | null;
     momentId?: string;
@@ -397,6 +398,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         text: input.text,
+        ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
           ? { summary: input.metadata.summary }

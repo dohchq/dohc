@@ -147,7 +147,7 @@ pub use store::{
     derive_capture_retire_moment_id, ensure_main_version_in_tx, normalize_tracked_workspace_path,
     object_has_live_alias, rollback_compensating_moment_id, validate_addressable_plaintext_path,
     validate_delete_input, validate_plaintext_storable_path, validate_write_input,
-    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    write_binary_in_tx, write_history_text_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

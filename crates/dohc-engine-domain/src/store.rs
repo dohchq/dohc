@@ -32,7 +32,7 @@ pub use capture_write::{
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
-    validate_write_input, write_projected_text_in_tx, write_text_in_tx,
+    validate_write_input, write_history_text_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 
 pub use delete_rename::{delete_text_in_tx, delete_text_in_tx_checked, validate_delete_input};
@@ -1378,7 +1378,13 @@ pub(crate) fn validate_moment_metadata(
     let Some(author) = author.as_object() else {
         return Ok(());
     };
-    for field in ["agentId", "onBehalfOf", "agentRunId", "principalId", "grantId"] {
+    for field in [
+        "agentId",
+        "onBehalfOf",
+        "agentRunId",
+        "principalId",
+        "grantId",
+    ] {
         let Some(value) = author.get(field).and_then(serde_json::Value::as_str) else {
             continue;
         };

@@ -423,6 +423,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     text: string;
+    restoreBeforeMomentId?: VersionedTextMomentId;
     metadata: ActorNeutralWriteMetadata;
     author?: MomentAuthor;
     momentId?: VersionedTextMomentId;

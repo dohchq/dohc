@@ -1026,6 +1026,10 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);
     expect(existsSync(join(root,created.snapshot.path))).toBe(false);
     await engine.restoreFileToBeforeMoment(deleted.momentId!);
+    expect(requests.filter(request=>request.method==="versionedText.write").at(-1)?.params).toMatchObject({
+      restoreBeforeMomentId: deleted.momentId,
+      origin: "restore",
+    });
     for(let i=0;i<105;i++)await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:created.snapshot.path,text:`restored ${i}`,metadata:{origin:"api"}});
     await write(root,created.snapshot.path,"restored 104");
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);

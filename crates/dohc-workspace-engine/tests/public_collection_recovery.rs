@@ -463,9 +463,31 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     .await;
     assert_eq!(empty["records"], json!([]));
     export_owner_journal(&db, scratch.path(), "owner-deleted", &deleted, &request_id);
-    let restored = call(&transport, &handle, 61, "versionedText.rollback", json!({"versionId": "main", "path": path,
-        "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
-    assert_eq!(restored["rolledBack"], true);
+    for (id, changes) in [
+        (600, json!({"text": "forged response"})),
+        (601, json!({"path": "responses/other.md"})),
+        (602, json!({"restoreBeforeMomentId": "missing-moment"})),
+        (603, json!({"origin": "api"})),
+    ] {
+        let mut params = json!({"versionId": "main", "path": path, "text": adopted,
+            "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore"});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(changes.as_object().unwrap().clone());
+        let refused = call_error(&transport, &handle, id, "versionedText.write", params).await;
+        assert_eq!(refused.message, "invalid-input");
+    }
+    let restored = call(&transport, &handle, 61, "versionedText.write", json!({"versionId": "main", "path": path,
+        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
+    assert_eq!(restored["snapshot"]["objectId"], object_id);
+    let restore_retry = call(&transport, &handle, 610, "versionedText.write", json!({"versionId": "main", "path": path,
+        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
+    assert_eq!(restore_retry["deduped"], true);
+    assert_eq!(
+        restore_retry["moment"]["momentId"],
+        restored["moment"]["momentId"]
+    );
     let snapshot = call(
         &transport,
         &handle,

@@ -1714,6 +1714,15 @@ fn engine_authored_record_id_range(
     if !first_line.ends_with('\n') || !is_frontmatter_delimiter(first_line) {
         return None;
     }
+    if let Some(open) = frontmatter_flow_mapping_start(markdown) {
+        let prefix = format!("{{\"{RECORD_ID_FRONTMATTER_KEY}\":\"");
+        let value_start = open + prefix.len();
+        if markdown[open..].starts_with(&prefix)
+            && markdown[value_start..].starts_with(&format!("{existing_id}\""))
+        {
+            return Some(value_start..value_start + existing_id.len());
+        }
+    }
     let id_line_start = first_line.len();
     let id_line = markdown[id_line_start..].split_inclusive('\n').next()?;
     let id_line_content = id_line
@@ -1725,6 +1734,38 @@ fn engine_authored_record_id_range(
     }
     let value_start = id_line_start + prefix.len();
     Some(value_start..value_start + existing_id.len())
+}
+
+fn frontmatter_flow_mapping_start(markdown: &str) -> Option<usize> {
+    let mut lines = markdown.split_inclusive('\n');
+    let mut offset = lines.next()?.len();
+    for line in lines {
+        if is_frontmatter_delimiter(line) {
+            return None;
+        }
+        let content = line.trim_start();
+        if !content.is_empty() && !content.starts_with('#') {
+            return content
+                .starts_with('{')
+                .then_some(offset + line.len() - content.len());
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn validate_record_id_insertion(
+    original: &Value,
+    adopted: String,
+    record_id: &str,
+) -> Option<String> {
+    let (parsed, _) = markdown_frontmatter_json_with_body(&adopted)?;
+    let mut expected = original.as_object()?.clone();
+    expected.insert(
+        RECORD_ID_FRONTMATTER_KEY.to_owned(),
+        Value::String(record_id.to_owned()),
+    );
+    (parsed == Value::Object(expected)).then_some(adopted)
 }
 
 /// Set a collection record id without reserializing the user's Markdown.
@@ -1764,6 +1805,19 @@ pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Op
         } else {
             "\n"
         };
+        if let Some(open) = frontmatter_flow_mapping_start(markdown) {
+            let separator = if frontmatter.as_object()?.is_empty() {
+                ""
+            } else {
+                ","
+            };
+            let mut adopted = markdown.to_owned();
+            adopted.insert_str(
+                open + 1,
+                &format!("\"{RECORD_ID_FRONTMATTER_KEY}\":\"{record_id}\"{separator}"),
+            );
+            return validate_record_id_insertion(&frontmatter, adopted, record_id);
+        }
         let mut adopted = String::with_capacity(
             markdown.len() + RECORD_ID_FRONTMATTER_KEY.len() + record_id.len() + 3,
         );
@@ -1773,7 +1827,7 @@ pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Op
         adopted.push_str(record_id);
         adopted.push_str(line_ending);
         adopted.push_str(&markdown[first_line.len()..]);
-        return Some(adopted);
+        return validate_record_id_insertion(&frontmatter, adopted, record_id);
     }
 
     let line_ending = markdown

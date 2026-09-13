@@ -175,7 +175,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
-    optionalStrings: WRITE_OPTIONAL_STRINGS,
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
   },
@@ -1256,7 +1256,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
       this.version(state, versionId);
     }
     const requestId = parsed.requestId;
-    const objectId = parsed.objectId ??
+    const restoreBeforeMomentId = serdeOptionalParamString(params, "restoreBeforeMomentId");
+    const historySource = restoreBeforeMomentId === undefined ? undefined : state.moments.get(restoreBeforeMomentId);
+    if (restoreBeforeMomentId !== undefined && (!historySource || origin !== "restore" ||
+        historySource.wire.versionId !== versionId || historySource.wire.path !== path ||
+        historySource.wire.operation === "rename" || historySource.wire.syncRecordOnly ||
+        historySource.before?.contentKind !== "text" || historySource.before.text !== text)) {
+      throw new Error("invalid-input");
+    }
+    const objectId = historySource?.wire.objectId ?? parsed.objectId ??
       (requestId !== undefined
         ? this.generatedWriteId("object", requestId, parsed.path)
         : knownVersion?.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
@@ -1322,6 +1330,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     if (momentId === undefined) this.assertFreshMoment(state, resolvedMomentId);
     const before = version.files.get(path);
+    if (historySource && ((before && before.objectId !== objectId) ||
+        [...version.files.entries()].some(([boundPath, file]) => boundPath !== path && file.objectId === objectId))) {
+      throw new Error("invalid-input");
+    }
     // The daemon binds the input object id to new paths only — an existing
     // head keeps its identity (store.rs existing_object.unwrap_or).
     const effectiveObjectId = before?.objectId ?? objectId;
@@ -2776,6 +2788,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataSummary: params.summary ?? null,
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
+      restoreBeforeMomentId: params.restoreBeforeMomentId ?? null,
     });
   }
 

@@ -5191,6 +5191,7 @@ export function createWorkspaceEngineCapture(
                     versionId: activeVersionId,
                     path,
                     text: target.text,
+                    restoreBeforeMomentId: momentId,
                     metadata,
                   });
             await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);

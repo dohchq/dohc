@@ -1215,6 +1215,63 @@ fn empty_frontmatter_record_is_adopted_with_only_the_minted_id() {
 }
 
 #[test]
+fn json_frontmatter_record_keeps_a_valid_flow_mapping_when_adopted() {
+    for markdown in [
+        "---\n{\"name\":\"Ice\",\"destination\":\"Tokyo\"}\n---\nBody\n",
+        "---\r\n# Keep this comment\r\n  {name: Ice, destination: Tokyo}\r\n---\r\nBody\r\n",
+        "---\n{}\n---\n",
+        "---\n{ # empty mapping\n}\n---",
+    ] {
+        let original = markdown_frontmatter_json_with_provenance(markdown)
+            .unwrap()
+            .0;
+        let adopted =
+            collection_record_markdown_with_id(markdown, PERSON_ID).expect("flow adoption");
+        let inserted = format!(
+            "\"id\":\"{PERSON_ID}\"{}",
+            if original.as_object().unwrap().is_empty() {
+                ""
+            } else {
+                ","
+            }
+        );
+        assert_eq!(adopted.replacen(&inserted, "", 1), markdown);
+        let mut expected = original;
+        expected["id"] = json!(PERSON_ID);
+        assert_eq!(
+            markdown_frontmatter_json_with_provenance(&adopted)
+                .unwrap()
+                .0,
+            expected
+        );
+        let reminted =
+            collection_record_markdown_with_id(&adopted, SECOND_PERSON_ID).expect("copy remint");
+        assert_eq!(reminted, adopted.replacen(PERSON_ID, SECOND_PERSON_ID, 1));
+        expected["id"] = json!(SECOND_PERSON_ID);
+        assert_eq!(
+            markdown_frontmatter_json_with_provenance(&reminted)
+                .unwrap()
+                .0,
+            expected
+        );
+    }
+}
+
+#[test]
+fn record_adoption_refuses_an_insertion_outside_the_root_mapping() {
+    for markdown in [
+        "---\n{a: 1}: value\nother: 2\n---\n",
+        "---\n  name: Ice\n---\n",
+    ] {
+        assert!(markdown_frontmatter_json_with_provenance(markdown).is_some());
+        assert_eq!(
+            collection_record_markdown_with_id(markdown, PERSON_ID),
+            None
+        );
+    }
+}
+
+#[test]
 fn changing_an_adopted_record_id_keeps_the_query_surface_on_the_engine_id() {
     const RECORD_OBJECT_ID: &str = "changed-id-record-object";
     let (_scratch, mut store) = fresh_store();

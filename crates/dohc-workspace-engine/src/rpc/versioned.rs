@@ -50,6 +50,8 @@ struct VersionedTextWriteParams {
     path: String,
     text: String,
     #[serde(default)]
+    restore_before_moment_id: Option<String>,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -313,7 +315,7 @@ impl EngineService {
         });
         let result = open
             .actor
-            .versioned_text_write_indexed(
+            .versioned_text_write_indexed_with_history(
                 WriteText {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -329,6 +331,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
                 open.root.clone(),
+                params.restore_before_moment_id,
                 Arc::new(NoFaults),
                 cancellation.token(),
             )

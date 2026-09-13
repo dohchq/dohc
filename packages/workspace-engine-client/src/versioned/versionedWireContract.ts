@@ -79,6 +79,7 @@ type VersionedTextWriteParams = MutationMetadata & {
   objectId?: string;
   path: string;
   text: string;
+  restoreBeforeMomentId?: string;
   momentId?: string;
 };
 
