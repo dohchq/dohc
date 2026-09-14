@@ -265,6 +265,11 @@ export const WorkspaceSummary = z.object({
   rootPath: PATH_STRING,
   kind: KIND_ENUM,
   mode: MODE_ENUM,
+  // When the desktop last opened it. Absent until the first open.
+  lastOpenedAt: z.number().int().positive().optional(),
+  // True once the person enabled sync on it (a registry remote exists). The
+  // manager says "Synced" or "Local only" from this and nothing else.
+  synced: z.boolean().optional(),
   // Present only on a shared VIEW received through a relay share grant:
   // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.

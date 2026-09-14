@@ -290,6 +290,9 @@ export interface ShareMountRecord {
 export interface RegistryEntry extends CreatedWorkspace {
   // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
+  // Stamped by the open handler. Orders the workspace manager; absent on a
+  // row that has never been opened through the desktop.
+  lastOpenedAt?: number;
   // Durable join gate: true from registration until the first pull has
   // materialized and committed. Boot-time local writers must skip the entry.
   joinBootstrapPending?: true;
@@ -508,6 +511,10 @@ export function createRegistryStore(registryFile: string) {
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
       updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, remote }));
+    },
+
+    touchOpened(workspaceId: string, atMs: number): void {
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, lastOpenedAt: atMs }));
     },
 
     completeJoinBootstrap(workspaceId: string): void {

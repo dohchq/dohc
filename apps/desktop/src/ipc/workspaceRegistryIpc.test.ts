@@ -165,6 +165,7 @@ function openHarness() {
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
     setPreferredWorkspaceId: preferred, openWorkspaceActivity: activity,
+    touchWorkspaceOpened: vi.fn(),
     syncStatusWithOwnedProjection: projection, sharedViewOf: shared,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {

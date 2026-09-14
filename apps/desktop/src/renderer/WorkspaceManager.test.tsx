@@ -242,3 +242,37 @@ describe("workspace manager with registered workspaces", () => {
     expect(screen.queryByRole("button", { name: "Back to workspace" })).toBeNull();
   });
 });
+
+describe("workspace shelf", () => {
+  it("orders folders by last opened and marks the shared one", async () => {
+    const shared = {
+      workspaceId: "ws-c",
+      rootPath: "/home/ice/dohc/shared/trip",
+      kind: "personal" as const,
+      mode: "local-first" as const,
+      lastOpenedAt: 1_000,
+      shareView: { shareId: "s-1", granterEmail: "maya@dohc.app", access: "read-only" as const },
+    };
+    const recent = { ...KNOWN[0]!, lastOpenedAt: 3_000 };
+    const old = { ...KNOWN[1]!, lastOpenedAt: 2_000 };
+    render(
+      <WorkspaceManager workspaces={[old, shared, recent]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />,
+    );
+    const rows = await screen.findAllByTestId("workspace-manager-row");
+    expect(rows.map((row) => row.getAttribute("data-workspace-id"))).toEqual(["ws-a", "ws-b", "ws-c"]);
+    expect(screen.getByText("Shared by maya")).toBeTruthy();
+    expect(screen.getAllByText("Local only")).toHaveLength(2);
+    expect(screen.getByTestId("workspace-manager-new")).toBeTruthy();
+  });
+
+  it("opens the new-workspace card from the dashed folder and comes back", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]!} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByTestId("workspace-manager-new"));
+    expect(await screen.findByLabelText("Folder name")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByTestId("workspace-manager-new")).toBeTruthy();
+  });
+});
