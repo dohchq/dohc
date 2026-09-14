@@ -138,6 +138,7 @@ import {
   effectiveHome,
   findWorkspace,
   listWorkspaces,
+  markWorkspaceOpened,
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
@@ -4274,6 +4275,7 @@ function registerIpcHandlers(): void {
     setPreferredWorkspaceId: (workspaceId) => {
       desktopWindows.setPreferredWorkspaceId(workspaceId);
     },
+    markWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: (operation) =>
       openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),

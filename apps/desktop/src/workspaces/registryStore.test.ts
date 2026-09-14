@@ -646,6 +646,20 @@ describe("registry store", () => {
     });
   });
 
+  it("stamps when a workspace was last opened and ignores unknown ids", () => {
+    store.register(personal);
+    expect(store.find("ws-1")?.lastOpenedAt).toBeUndefined();
+    store.markOpened("ws-1", 1_000);
+    expect(store.find("ws-1")?.lastOpenedAt).toBe(1_000);
+    expect(createRegistryStore(registryPath).find("ws-1")?.lastOpenedAt).toBe(1_000);
+    const writes = vi.mocked(renameSync).mock.calls.length;
+    store.markOpened("ws-1", 1_000);
+    expect(vi.mocked(renameSync).mock.calls.length, "an unchanged stamp does not rewrite").toBe(writes);
+    expect(() => store.markOpened("missing", 2_000)).not.toThrow();
+    store.markOpened("ws-1", 3_000);
+    expect(store.find("ws-1")?.lastOpenedAt).toBe(3_000);
+  });
+
   it("keeps the cloud binding truthful when its atomic rename fails", () => {
     const original = {
       serverUrl: "https://cloud.dohc.example",

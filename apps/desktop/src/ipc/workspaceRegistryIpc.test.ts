@@ -160,20 +160,21 @@ function openHarness() {
   const activity = vi.fn(async () => status);
   const projection = vi.fn(async (_workspace: typeof workspace, value: SyncStatusResult) => value);
   const preferred = vi.fn();
+  const opened = vi.fn();
   const shared = vi.fn<() => unknown>(() => null);
   const handlers = new Map<string, (event: OpenEvent, payload: unknown) => unknown>();
   registerOpenWorkspaceIpcHandler<typeof sender, OpenEvent, typeof workspace, typeof operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
-    setPreferredWorkspaceId: preferred, openWorkspaceActivity: activity,
+    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, openWorkspaceActivity: activity,
     syncStatusWithOwnedProjection: projection, sharedViewOf: shared,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {
     workspaceId: workspace.workspaceId, rendererDocumentId: documentId,
   });
   return {
-    sender, workspace, sessions, activity, projection, preferred, shared, warmup, handlers, invoke,
+    sender, workspace, sessions, activity, projection, preferred, opened, shared, warmup, handlers, invoke,
     retirePhysical: () => { physicalCurrent = false; },
     replaceWarmupAttachment: () => { warmupWorkspace = { ...workspace, attachmentId: Symbol("replacement") }; },
   };
@@ -187,6 +188,7 @@ describe("registered workspace open", () => {
     expect(h.activity).not.toHaveBeenCalled();
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.preferred).toHaveBeenCalledWith("workspace");
+    expect(h.opened).toHaveBeenCalledWith("workspace");
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
     expect(h.warmup).toHaveBeenCalledWith(h.workspace);
   });

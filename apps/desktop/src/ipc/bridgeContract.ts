@@ -265,6 +265,8 @@ export const WorkspaceSummary = z.object({
   rootPath: PATH_STRING,
   kind: KIND_ENUM,
   mode: MODE_ENUM,
+  // Epoch ms of the last open in any window; absent when never stamped.
+  lastOpenedAt: z.number().int().nonnegative().optional(),
   // Present only on a shared VIEW received through a relay share grant:
   // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.

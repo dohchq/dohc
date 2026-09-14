@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -11,6 +11,7 @@ import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
+import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 
 // The workspace manager. It is the first-run screen and the "manage
 // workspaces" screen in one: with nothing registered it is only the routes
@@ -50,6 +51,54 @@ function RouteRow(props: {
   );
 }
 
+// Coarse, like the notice ledger: the row says when, not to the second.
+export function openedLabel(thenMs: number, nowMs = Date.now()): string {
+  const minutes = Math.floor(Math.max(0, nowMs - thenMs) / 60_000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days} days ago`;
+  return new Date(thenMs).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// Most recently opened first; never-stamped rows keep registry order at the end.
+export function byRecency(workspaces: readonly Workspace[]): Workspace[] {
+  return [...workspaces].sort(
+    (a, b) => (b.lastOpenedAt ?? -1) - (a.lastOpenedAt ?? -1),
+  );
+}
+
+const LIST_WIDTH_KEY = "dohc.workspace-manager.list-width";
+const LIST_MIN_WIDTH = 220;
+const LIST_MAX_WIDTH = 560;
+const LIST_DEFAULT_WIDTH = 320;
+const KEYBOARD_RESIZE_STEP = 16;
+
+function clampListWidth(width: number): number {
+  if (!Number.isFinite(width)) return LIST_DEFAULT_WIDTH;
+  return Math.min(LIST_MAX_WIDTH, Math.max(LIST_MIN_WIDTH, Math.round(width)));
+}
+
+function readListWidth(): number {
+  try {
+    const stored = window.localStorage.getItem(LIST_WIDTH_KEY);
+    return stored === null ? LIST_DEFAULT_WIDTH : clampListWidth(Number(stored));
+  } catch {
+    return LIST_DEFAULT_WIDTH;
+  }
+}
+
+function writeListWidth(width: number): void {
+  try {
+    window.localStorage.setItem(LIST_WIDTH_KEY, String(width));
+  } catch {
+    // The width is a convenience; storage refusal must not break the manager.
+  }
+}
+
 function WorkspaceRow(props: {
   workspace: Workspace;
   current: boolean;
@@ -82,8 +131,18 @@ function WorkspaceRow(props: {
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 flex-col text-left"
       >
-        <span className="truncate text-[13px] font-medium leading-5 text-ink">
-          {workspaceName(props.workspace)}
+        <span className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-5 text-ink">
+            {workspaceName(props.workspace)}
+          </span>
+          {props.workspace.lastOpenedAt !== undefined ? (
+            <time
+              dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
+              className="shrink-0 text-[11px] leading-4 text-subtle"
+            >
+              {openedLabel(props.workspace.lastOpenedAt)}
+            </time>
+          ) : null}
         </span>
         <span className="truncate font-mono text-[11px] leading-4 text-subtle">
           {displayPath(props.workspace.rootPath)}
@@ -150,6 +209,15 @@ export function WorkspaceManager(props: {
   const [openingShare, setOpeningShare] = useState(false);
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   const hasWorkspaces = props.workspaces.length > 0;
+  const workspaces = useMemo(() => byRecency(props.workspaces), [props.workspaces]);
+  const [listWidth, setListWidth] = useState(readListWidth);
+  const asideRef = useRef<HTMLElement | null>(null);
+  const dragLeft = useRef<number | null>(null);
+  const resize = useCommitOnRelease((width: number) => {
+    setListWidth(width);
+    writeListWidth(width);
+  });
+  const width = resize.previewValue ?? listWidth;
 
   useEffect(() => {
     if (handoffStatus.status === "idle") return;
@@ -243,12 +311,17 @@ export function WorkspaceManager(props: {
       <Titlebar />
       <div className="flex min-h-0 flex-1">
         {hasWorkspaces ? (
-          <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-panel">
+          <aside
+            ref={asideRef}
+            data-testid="workspace-manager-list"
+            className="relative flex shrink-0 flex-col border-r border-line bg-panel"
+            style={{ width }}
+          >
             <div className="flex h-11 items-center px-4">
               <span className="text-[13px] font-semibold text-ink">Workspaces</span>
             </div>
             <ul className="m-0 flex list-none flex-col gap-0.5 overflow-y-auto px-2 pb-2">
-              {props.workspaces.map((workspace) => (
+              {workspaces.map((workspace) => (
                 <WorkspaceRow
                   key={workspace.workspaceId}
                   workspace={workspace}
@@ -260,6 +333,50 @@ export function WorkspaceManager(props: {
               ))}
             </ul>
             {notice ? <p className="m-0 px-4 pb-3 text-[11px] text-subtle">{notice}</p> : null}
+            <div
+              data-testid="workspace-manager-list-resize"
+              role="separator"
+              tabIndex={0}
+              aria-orientation="vertical"
+              aria-label="Resize workspace list"
+              aria-valuemin={LIST_MIN_WIDTH}
+              aria-valuemax={LIST_MAX_WIDTH}
+              aria-valuenow={width}
+              onKeyDown={(event) => {
+                const next =
+                  event.key === "ArrowLeft"
+                    ? clampListWidth(width - KEYBOARD_RESIZE_STEP)
+                    : event.key === "ArrowRight"
+                      ? clampListWidth(width + KEYBOARD_RESIZE_STEP)
+                      : event.key === "Home"
+                        ? LIST_MIN_WIDTH
+                        : event.key === "End"
+                          ? LIST_MAX_WIDTH
+                          : null;
+                if (next === null) return;
+                event.preventDefault();
+                setListWidth(next);
+                writeListWidth(next);
+              }}
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                dragLeft.current = asideRef.current?.getBoundingClientRect().left ?? 0;
+                resize.begin(event.pointerId, width);
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                if (dragLeft.current === null || !resize.isActive(event.pointerId)) return;
+                resize.update(
+                  event.pointerId,
+                  clampListWidth(event.clientX - dragLeft.current),
+                  event.buttons,
+                );
+              }}
+              onPointerUp={(event) => resize.commit(event.pointerId)}
+              onPointerCancel={(event) => resize.commit(event.pointerId)}
+              onLostPointerCapture={(event) => resize.commit(event.pointerId)}
+              className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
+            />
           </aside>
         ) : null}
         <div className="dohc-paper-grid flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-8">

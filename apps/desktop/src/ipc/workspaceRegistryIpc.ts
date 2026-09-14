@@ -260,6 +260,7 @@ export function registerOpenWorkspaceIpcHandler<
     ): Promise<{ isCurrent(): boolean }>;
   };
   setPreferredWorkspaceId(workspaceId: string): void;
+  markWorkspaceOpened(workspaceId: string): void;
   syncStatusWithOwnedProjection(
     workspace: Workspace,
     status: SyncStatusResult,
@@ -273,6 +274,7 @@ export function registerOpenWorkspaceIpcHandler<
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
     setPreferredWorkspaceId,
+    markWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity,
     sharedViewOf,
@@ -288,6 +290,7 @@ export function registerOpenWorkspaceIpcHandler<
         input.rendererDocumentId,
       );
       setPreferredWorkspaceId(workspace.workspaceId);
+      markWorkspaceOpened(workspace.workspaceId);
       const status = SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,

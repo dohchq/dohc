@@ -288,6 +288,9 @@ export interface ShareMountRecord {
 }
 
 export interface RegistryEntry extends CreatedWorkspace {
+  // When a window last opened this workspace, epoch ms. Absent until the
+  // first open after this field existed; the manager sorts those last.
+  lastOpenedAt?: number;
   // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
   // Durable join gate: true from registration until the first pull has
@@ -508,6 +511,16 @@ export function createRegistryStore(registryFile: string) {
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
       updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, remote }));
+    },
+
+    // Unknown ids are ignored: an open racing a forget must not fail on the
+    // recency stamp, and the stamp is the least important thing an open does.
+    markOpened(workspaceId: string, atMs: number): void {
+      const registry = read();
+      if (!registry.workspaces.some((entry) => entry.workspaceId === workspaceId)) return;
+      updateWorkspaceEntry(workspaceId, (entry) =>
+        entry.lastOpenedAt === atMs ? undefined : { ...entry, lastOpenedAt: atMs },
+      );
     },
 
     completeJoinBootstrap(workspaceId: string): void {

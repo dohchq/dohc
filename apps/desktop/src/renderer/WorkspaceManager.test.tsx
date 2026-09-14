@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceManager } from "./WorkspaceManager";
+import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
 
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/ice/dohc"),
@@ -44,12 +44,39 @@ const KNOWN = [
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", bridge);
+  // jsdom has no pointer capture; the resize handle only calls these.
+  HTMLElement.prototype.setPointerCapture = vi.fn();
+  HTMLElement.prototype.hasPointerCapture = vi.fn(() => true);
+  HTMLElement.prototype.releasePointerCapture = vi.fn();
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  window.localStorage.clear();
+});
+
+describe("workspace recency", () => {
+  it("labels an open coarsely", () => {
+    const now = 1_700_000_000_000;
+    expect(openedLabel(now - 10_000, now)).toBe("Just now");
+    expect(openedLabel(now - 5 * 60_000, now)).toBe("5 min ago");
+    expect(openedLabel(now - 3 * 60 * 60_000, now)).toBe("3 h ago");
+    expect(openedLabel(now - 30 * 60 * 60_000, now)).toBe("Yesterday");
+    expect(openedLabel(now - 4 * 24 * 60 * 60_000, now)).toBe("4 days ago");
+    expect(openedLabel(now - 20 * 24 * 60 * 60_000, now)).toMatch(/^[A-Z][a-z]{2} \d{1,2}$/);
+  });
+
+  it("sorts stamped rows newest first and keeps unstamped rows last in order", () => {
+    const rows = [
+      { ...KNOWN[0] },
+      { ...KNOWN[1], lastOpenedAt: 5 },
+      { ...KNOWN[0], workspaceId: "ws-c", lastOpenedAt: 9 },
+      { ...KNOWN[0], workspaceId: "ws-d" },
+    ];
+    expect(byRecency(rows).map((row) => row.workspaceId)).toEqual(["ws-c", "ws-b", "ws-a", "ws-d"]);
+  });
 });
 
 describe("workspace manager", () => {
@@ -214,6 +241,45 @@ describe("workspace manager with registered workspaces", () => {
     expect(screen.getByText("/home/ice/dohc/team")).toBeTruthy();
     await user.click(screen.getByText("team"));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-b" }));
+  });
+
+  it("lists the most recently opened workspace first and says when", async () => {
+    const now = Date.now();
+    const stamped = [
+      { ...KNOWN[0], lastOpenedAt: now - 3 * 24 * 60 * 60_000 },
+      { ...KNOWN[1], lastOpenedAt: now - 5 * 60_000 },
+      { workspaceId: "ws-c", rootPath: "/home/ice/dohc/never", kind: "personal" as const, mode: "local-first" as const },
+    ];
+    render(
+      <WorkspaceManager workspaces={stamped} current={null} onForgot={async () => stamped} onOpenWorkspace={() => {}} />,
+    );
+    const rows = await screen.findAllByTestId("workspace-manager-row");
+    expect(rows.map((row) => row.getAttribute("data-workspace-id"))).toEqual(["ws-b", "ws-a", "ws-c"]);
+    expect(rows[0]?.textContent).toContain("5 min ago");
+    expect(rows[1]?.textContent).toContain("3 days ago");
+    expect(rows[2]?.querySelector("time")).toBeNull();
+  });
+
+  it("resizes the list by drag and keyboard and remembers the width", () => {
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    const list = screen.getByTestId("workspace-manager-list");
+    const handle = screen.getByTestId("workspace-manager-list-resize");
+    expect(list.style.width).toBe("320px");
+    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 400, pointerId: 1 });
+    expect(list.style.width).toBe("400px");
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(list.style.width).toBe("400px");
+    expect(window.localStorage.getItem("dohc.workspace-manager.list-width")).toBe("400");
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(list.style.width).toBe("384px");
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(list.style.width).toBe("560px");
+    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 2 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 10, pointerId: 2 });
+    expect(list.style.width, "clamped to the minimum").toBe("220px");
   });
 
   it("forgets a workspace, refreshes, and says the folder was kept", async () => {
