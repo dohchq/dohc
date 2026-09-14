@@ -60,11 +60,11 @@ afterEach(() => {
 describe("workspace recency", () => {
   it("labels an open coarsely", () => {
     const now = 1_700_000_000_000;
-    expect(openedLabel(now - 10_000, now)).toBe("Just now");
-    expect(openedLabel(now - 5 * 60_000, now)).toBe("5 min ago");
-    expect(openedLabel(now - 3 * 60 * 60_000, now)).toBe("3 h ago");
-    expect(openedLabel(now - 30 * 60 * 60_000, now)).toBe("Yesterday");
-    expect(openedLabel(now - 4 * 24 * 60 * 60_000, now)).toBe("4 days ago");
+    expect(openedLabel(now - 10_000, now)).toBe("now");
+    expect(openedLabel(now - 5 * 60_000, now)).toBe("5m");
+    expect(openedLabel(now - 3 * 60 * 60_000, now)).toBe("3h");
+    expect(openedLabel(now - 30 * 60 * 60_000, now)).toBe("1d");
+    expect(openedLabel(now - 4 * 24 * 60 * 60_000, now)).toBe("4d");
     expect(openedLabel(now - 20 * 24 * 60 * 60_000, now)).toMatch(/^[A-Z][a-z]{2} \d{1,2}$/);
   });
 
@@ -255,8 +255,8 @@ describe("workspace manager with registered workspaces", () => {
     );
     const rows = await screen.findAllByTestId("workspace-manager-row");
     expect(rows.map((row) => row.getAttribute("data-workspace-id"))).toEqual(["ws-b", "ws-a", "ws-c"]);
-    expect(rows[0]?.textContent).toContain("5 min ago");
-    expect(rows[1]?.textContent).toContain("3 days ago");
+    expect(rows[0]?.querySelector("time")?.textContent).toBe("5m");
+    expect(rows[1]?.querySelector("time")?.textContent).toBe("3d");
     expect(rows[2]?.querySelector("time")).toBeNull();
   });
 

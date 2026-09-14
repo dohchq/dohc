@@ -51,16 +51,15 @@ function RouteRow(props: {
   );
 }
 
-// Coarse, like the notice ledger: the row says when, not to the second.
+// Compact: "now", "5m", "3h", "4d", then a short date.
 export function openedLabel(thenMs: number, nowMs = Date.now()): string {
   const minutes = Math.floor(Math.max(0, nowMs - thenMs) / 60_000);
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  if (days === 1) return "Yesterday";
-  if (days < 7) return `${days} days ago`;
+  if (days < 7) return `${days}d`;
   return new Date(thenMs).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
