@@ -1,12 +1,12 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-react";
 import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
-import { IconButton, PrimaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton, SectionLabel } from "./ui/controls";
 import { FolderChip } from "./ui/Step";
 
 // "Open a share": the receive side of an external share grant. One card:
@@ -27,6 +27,34 @@ function isWindows(): boolean {
 
 function displayPath(path: string): string {
   return isWindows() ? path.replaceAll("/", "\\") : path;
+}
+
+// One half of the segmented "how to open it" control: icon and label, the
+// checked half raised on the panel colour.
+function ModeOption(props: {
+  checked: boolean;
+  testId: string;
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={props.checked}
+      data-testid={props.testId}
+      onClick={props.onClick}
+      className={`flex h-9 items-center justify-center gap-2 rounded-md text-[12.5px] font-medium transition-colors ${
+        props.checked
+          ? "border border-line bg-panel text-ink shadow-[0_1px_2px_rgba(28,27,24,0.06)]"
+          : "border border-transparent text-muted hover:text-ink"
+      }`}
+    >
+      {props.icon}
+      {props.label}
+    </button>
+  );
 }
 
 export function OpenSharedView(props: {
@@ -181,60 +209,75 @@ export function OpenSharedView(props: {
         <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
           <ArrowLeft size={13} aria-hidden />
         </IconButton>
-        <h2 className="m-0 text-sm font-semibold text-ink">Open a share</h2>
+        <h2 className="m-0 text-[15px] font-semibold text-ink">Open a share</h2>
       </div>
 
-      {props.resolvedShare ? null : (
-        <input
-          data-testid="open-share-code"
-          aria-label="Share code"
-          value={code}
-          onChange={(event) => {
-            setCode(event.currentTarget.value);
-            setError(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void open();
-          }}
-          placeholder="Share code, dohc-share:…"
-          spellCheck={false}
-          autoFocus
-          className="h-9 w-full rounded-md border border-line bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-        />
-      )}
+      <div className="flex flex-col gap-1.5">
+        <SectionLabel>Share code</SectionLabel>
+        {props.resolvedShare ? (
+          <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3">
+            <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
+              {props.resolvedShare.shareId}
+            </code>
+            <Check size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-success" />
+          </div>
+        ) : (
+          <div
+            className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 transition-colors focus-within:border-ink"
+          >
+            <input
+              data-testid="open-share-code"
+              aria-label="Share code"
+              value={code}
+              onChange={(event) => {
+                setCode(event.currentTarget.value);
+                setError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void open();
+              }}
+              placeholder="dohc-share:…"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoFocus
+              className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[13px] text-ink outline-none placeholder:text-subtle"
+            />
+            {shareId !== null ? (
+              <Check
+                size={13}
+                strokeWidth={2.2}
+                aria-label="Valid share code"
+                className="shrink-0 text-success"
+              />
+            ) : null}
+          </div>
+        )}
+      </div>
 
       {props.mountInto ? (
-        <div className="flex gap-1.5" role="radiogroup" aria-label="How to open it">
-          <button
-            type="button"
-            role="radio"
-            aria-checked={mode === "mount"}
-            data-testid="open-share-mode-mount"
-            onClick={() => setMode("mount")}
-            className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
-              mode === "mount"
-                ? "border-ink bg-panel-2 text-ink"
-                : "border-line bg-bg text-muted hover:text-ink"
-            }`}
+        <div className="flex flex-col gap-1.5">
+          <SectionLabel>Open it</SectionLabel>
+          <div
+            className="grid grid-cols-2 gap-1 rounded-lg border border-line bg-bg p-1"
+            role="radiogroup"
+            aria-label="How to open it"
           >
-            Add to this workspace
-            <span className="block text-[11px] text-subtle">Under shared-with-me/</span>
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={mode === "separate"}
-            data-testid="open-share-mode-separate"
-            onClick={() => setMode("separate")}
-            className={`flex-1 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
-              mode === "separate"
-                ? "border-ink bg-panel-2 text-ink"
-                : "border-line bg-bg text-muted hover:text-ink"
-            }`}
-          >
-            Open separately
-            <span className="block text-[11px] text-subtle">In its own folder</span>
-          </button>
+            <ModeOption
+              checked={mode === "mount"}
+              testId="open-share-mode-mount"
+              icon={<FolderInput size={14} strokeWidth={1.9} aria-hidden />}
+              label="Add to this workspace"
+              onClick={() => setMode("mount")}
+            />
+            <ModeOption
+              checked={mode === "separate"}
+              testId="open-share-mode-separate"
+              icon={<AppWindow size={14} strokeWidth={1.9} aria-hidden />}
+              label="Open separately"
+              onClick={() => setMode("separate")}
+            />
+          </div>
         </div>
       ) : null}
 
@@ -243,14 +286,25 @@ export function OpenSharedView(props: {
           Open separately to edit shared Markdown. Adding it to this workspace creates a read-only folder.
         </p>
       ) : null}
-      {mounting ? null : (
-        <FolderChip
-          folder={folder ? displayPath(folder) : null}
-          placeholder="Choose an empty folder"
-          testId="open-share-choose-folder"
-          onClick={() => void chooseFolder()}
-        />
-      )}
+      <div className="flex flex-col gap-1.5">
+        <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
+        {mounting ? (
+          <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3">
+            <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+            <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
+              shared-with-me{isWindows() ? "\\" : "/"}
+            </code>
+            <span className="shrink-0 text-[11px] text-subtle">This workspace</span>
+          </div>
+        ) : (
+          <FolderChip
+            folder={folder ? displayPath(folder) : null}
+            placeholder="Choose an empty folder"
+            testId="open-share-choose-folder"
+            onClick={() => void chooseFolder()}
+          />
+        )}
+      </div>
 
       <PrimaryButton
         type="button"
