@@ -78,10 +78,6 @@ export function setWorkspaceRemote(
   store().setRemote(workspaceId, remote);
 }
 
-export function touchWorkspaceOpened(workspaceId: string, atMs = Date.now()): void {
-  store().touchOpened(workspaceId, atMs);
-}
-
 export function completeWorkspaceJoinBootstrap(workspaceId: string): void {
   store().completeJoinBootstrap(workspaceId);
 }

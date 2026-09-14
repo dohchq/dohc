@@ -135,7 +135,6 @@ import {
 } from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
-  touchWorkspaceOpened,
   effectiveHome,
   findWorkspace,
   listWorkspaces,
@@ -4262,7 +4261,6 @@ function registerIpcHandlers(): void {
     setPreferredWorkspaceId: (workspaceId) => {
       desktopWindows.setPreferredWorkspaceId(workspaceId);
     },
-    touchWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: (operation) =>
       openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),

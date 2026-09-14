@@ -1,23 +1,22 @@
 import { DohcMark } from "@dohc/brand";
-import { ArrowLeft, FolderOpen, Inbox, Laptop } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowLeft, FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
-import { NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
-import { NewWorkspaceFolder, WorkspaceFolder } from "./WorkspaceFolder";
+import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 
 // The workspace manager. It is the first-run screen and the "manage
-// workspaces" screen in one. With nothing registered it is the folder card
-// and the three routes. With workspaces it is a shelf of folders, most
-// recently opened first, with a dashed folder-to-be at the end; the three
-// routes move up beside the title. Clicking a folder opens it.
+// workspaces" screen in one: with nothing registered it is only the routes
+// on the right; with workspaces, the list on the left is the switcher, each
+// row showing the name and the path the dropdown cannot fit. Nothing new to
+// learn between the two states.
 
 // One route: what it is, one line on what it does, and the verb that does it.
 function RouteRow(props: {
@@ -51,6 +50,89 @@ function RouteRow(props: {
   );
 }
 
+function WorkspaceRow(props: {
+  workspace: Workspace;
+  current: boolean;
+  onOpen: () => void;
+  onReveal: () => void;
+  onForget: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onPointerDown(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [menuOpen]);
+
+  return (
+    <li
+      data-testid="workspace-manager-row"
+      data-workspace-id={props.workspace.workspaceId}
+      className={`group relative flex items-center gap-2 rounded-lg px-3 py-2.5 transition-colors ${
+        props.current ? "bg-panel-2" : "hover:bg-panel-2"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={props.onOpen}
+        className="flex min-w-0 flex-1 flex-col text-left"
+      >
+        <span className="truncate text-[13px] font-medium leading-5 text-ink">
+          {workspaceName(props.workspace)}
+        </span>
+        <span className="truncate font-mono text-[11px] leading-4 text-subtle">
+          {displayPath(props.workspace.rootPath)}
+        </span>
+      </button>
+      <div ref={menuRef} className="relative shrink-0">
+        <IconButton
+          aria-label={`More for ${workspaceName(props.workspace)}`}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+          className={menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"}
+        >
+          <MoreHorizontal size={14} aria-hidden />
+        </IconButton>
+        {menuOpen ? (
+          <div
+            role="menu"
+            className="dohc-popover dohc-pop-in absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-line bg-panel p-1"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                props.onReveal();
+              }}
+              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
+            >
+              Reveal in folder
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                props.onForget();
+              }}
+              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-danger"
+            >
+              Forget
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
 export function WorkspaceManager(props: {
   workspaces: Workspace[];
   // The workspace open behind the manager, when there is one. Back returns
@@ -67,7 +149,6 @@ export function WorkspaceManager(props: {
   const [notice, setNotice] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
-  const [creating, setCreating] = useState(false);
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   const hasWorkspaces = props.workspaces.length > 0;
 
@@ -75,7 +156,6 @@ export function WorkspaceManager(props: {
     if (handoffStatus.status === "idle") return;
     setJoining(false);
     setOpeningShare(false);
-    setCreating(false);
   }, [handoffStatus.status]);
 
   async function openExisting() {
@@ -109,13 +189,7 @@ export function WorkspaceManager(props: {
     }
   }
 
-  const sorted = [...props.workspaces].sort(
-    (left, right) => (right.lastOpenedAt ?? 0) - (left.lastOpenedAt ?? 0),
-  );
-
-  // A sub-flow replaces the shelf: handoff, join, open share, or (with
-  // workspaces present) the new-workspace card.
-  const flow =
+  const routes =
     handoffStatus.status !== "idle" ? (
       <ShareHandoffSurface
         status={handoffStatus}
@@ -127,136 +201,80 @@ export function WorkspaceManager(props: {
       <JoinSyncedWorkspace onWorkspaceReady={props.onOpenWorkspace} onBack={() => setJoining(false)} />
     ) : openingShare ? (
       <OpenSharedView onWorkspaceReady={props.onOpenWorkspace} onBack={() => setOpeningShare(false)} />
-    ) : hasWorkspaces && creating ? (
-      <div className="flex w-full flex-col gap-4">
-        <div className="flex items-center gap-2">
-          <IconButton aria-label="Back" onClick={() => setCreating(false)}>
-            <ArrowLeft size={13} aria-hidden />
-          </IconButton>
-          <span className="text-sm font-semibold text-ink">New workspace</span>
-        </div>
+    ) : (
+      <div className="flex w-full flex-col gap-5">
         <NewWorkspaceCard onWorkspaceReady={props.onOpenWorkspace} />
-      </div>
-    ) : null;
-
-  const errorLine = error ? (
-    <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-      {error}
-    </p>
-  ) : null;
-
-  // First run: the card and the three explained routes, centered.
-  const firstRun = (
-    <div className="dohc-paper-grid flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-8">
-      <div className="m-auto flex w-105 max-w-full flex-col items-center gap-8">
-        <DohcMark size={32} className="text-ink" />
-        {flow ?? (
-          <div className="flex w-full flex-col gap-5">
-            <NewWorkspaceCard onWorkspaceReady={props.onOpenWorkspace} />
-            <div className="flex flex-col divide-y divide-line">
-              <RouteRow
-                icon={<FolderOpen size={15} strokeWidth={1.9} aria-hidden />}
-                title="Open an existing folder"
-                detail="Use a folder of files you already have."
-                action="Open"
-                ariaLabel="Open an existing folder as a workspace"
-                onClick={() => void openExisting()}
-              />
-              <RouteRow
-                icon={<Laptop size={15} strokeWidth={1.9} aria-hidden />}
-                title="Join from another machine"
-                detail="Bring over a workspace you sync with dohc Drive."
-                action="Join"
-                testId="first-run-join-synced"
-                onClick={() => setJoining(true)}
-              />
-              <RouteRow
-                icon={<Inbox size={15} strokeWidth={1.9} aria-hidden />}
-                title="Open a share"
-                detail="Open files someone shared with you."
-                action="Open"
-                testId="first-run-open-share"
-                onClick={() => setOpeningShare(true)}
-              />
-            </div>
-            {errorLine}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  // The shelf: title and routes across the top, folders below.
-  const shelf = (
-    <div className="dohc-paper-grid flex min-h-0 flex-1 flex-col overflow-y-auto px-12 py-8">
-      {flow ? (
-        <div className="m-auto flex w-105 max-w-full flex-col items-center gap-8">
-          <DohcMark size={32} className="text-ink" />
-          {flow}
+        <div className="flex flex-col divide-y divide-line">
+          <RouteRow
+            icon={<FolderOpen size={15} strokeWidth={1.9} aria-hidden />}
+            title="Open an existing folder"
+            detail="Use a folder of files you already have."
+            action="Open"
+            ariaLabel="Open an existing folder as a workspace"
+            onClick={() => void openExisting()}
+          />
+          <RouteRow
+            icon={<Laptop size={15} strokeWidth={1.9} aria-hidden />}
+            title="Join from another machine"
+            detail="Bring over a workspace you sync with dohc Drive."
+            action="Join"
+            testId="first-run-join-synced"
+            onClick={() => setJoining(true)}
+          />
+          <RouteRow
+            icon={<Inbox size={15} strokeWidth={1.9} aria-hidden />}
+            title="Open a share"
+            detail="Open files someone shared with you."
+            action="Open"
+            testId="first-run-open-share"
+            onClick={() => setOpeningShare(true)}
+          />
         </div>
-      ) : (
-        <div className="flex w-full max-w-5xl flex-col gap-6">
-          <div className="flex items-baseline justify-between gap-6">
-            <div className="flex items-center gap-2">
-              {props.onBack ? (
-                <IconButton aria-label="Back to workspace" onClick={props.onBack} className="-ml-1">
-                  <ArrowLeft size={13} aria-hidden />
-                </IconButton>
-              ) : null}
-              <h1 className="m-0 font-serif text-[22px] font-medium leading-tight">Workspaces</h1>
-            </div>
-            <div className="flex items-center gap-4 text-[12px] text-muted">
-              <button
-                type="button"
-                aria-label="Open an existing folder as a workspace"
-                onClick={() => void openExisting()}
-                className="hover:text-ink"
-              >
-                Open a folder
-              </button>
-              <button
-                type="button"
-                data-testid="first-run-join-synced"
-                onClick={() => setJoining(true)}
-                className="hover:text-ink"
-              >
-                Join from another machine
-              </button>
-              <button
-                type="button"
-                data-testid="first-run-open-share"
-                onClick={() => setOpeningShare(true)}
-                className="hover:text-ink"
-              >
-                Open a share
-              </button>
-            </div>
-          </div>
-          <ul className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4 p-0">
-            {sorted.map((workspace) => (
-              <WorkspaceFolder
-                key={workspace.workspaceId}
-                workspace={workspace}
-                current={workspace.workspaceId === props.current?.workspaceId}
-                onOpen={() => props.onOpenWorkspace(workspace)}
-                onReveal={() => void reveal(workspace)}
-                onForget={() => void forget(workspace)}
-              />
-            ))}
-            <NewWorkspaceFolder onClick={() => setCreating(true)} />
-          </ul>
-          {notice ? <p className="m-0 text-[11px] text-subtle">{notice}</p> : null}
-          {errorLine}
-        </div>
-      )}
-    </div>
-  );
+        {error ? (
+          <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
 
   return (
     <div data-testid="workspace-manager" className="app-chrome flex h-screen flex-col bg-bg text-ink">
       {/* Frameless window: without the drag strip it could not be moved. */}
       <Titlebar />
-      {hasWorkspaces ? shelf : firstRun}
+      <div className="flex min-h-0 flex-1">
+        {hasWorkspaces ? (
+          <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-panel">
+            <div className="flex h-11 items-center gap-1 px-3">
+              {props.onBack ? (
+                <IconButton aria-label="Back to workspace" onClick={props.onBack}>
+                  <ArrowLeft size={13} aria-hidden />
+                </IconButton>
+              ) : null}
+              <span className="text-[13px] font-semibold text-ink">Workspaces</span>
+            </div>
+            <ul className="m-0 flex list-none flex-col gap-0.5 overflow-y-auto px-2 pb-2">
+              {props.workspaces.map((workspace) => (
+                <WorkspaceRow
+                  key={workspace.workspaceId}
+                  workspace={workspace}
+                  current={workspace.workspaceId === props.current?.workspaceId}
+                  onOpen={() => props.onOpenWorkspace(workspace)}
+                  onReveal={() => void reveal(workspace)}
+                  onForget={() => void forget(workspace)}
+                />
+              ))}
+            </ul>
+            {notice ? <p className="m-0 px-4 pb-3 text-[11px] text-subtle">{notice}</p> : null}
+          </aside>
+        ) : null}
+        <div className="dohc-paper-grid flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-8">
+          <div className="m-auto flex w-105 max-w-full flex-col items-center gap-8">
+            <DohcMark size={32} className="text-ink" />
+            {routes}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

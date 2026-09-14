@@ -123,7 +123,6 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
 
   return WorkspaceSummary.parse({
     ...entry,
-    ...(entry.remote ? { synced: true } : {}),
     shareView,
     ...(shareMounts ? { shareMounts } : {}),
   });
