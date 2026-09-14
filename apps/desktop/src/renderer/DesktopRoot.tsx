@@ -8,7 +8,7 @@ import {
   type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { DesktopFirstRun } from "./DesktopFirstRun";
+import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
@@ -17,6 +17,7 @@ export function DesktopRoot() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [managing, setManaging] = useState(false);
   const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
     null,
   );
@@ -192,19 +193,28 @@ export function DesktopRoot() {
       </div>
     );
   }
-  if (!workspace) {
+  if (!workspace || managing) {
     return (
       <>
-        <DesktopFirstRun
+        <WorkspaceManager
+          workspaces={workspaces}
+          current={workspace}
           handoffStatus={shareHandoffStatus}
           onDismissShareHandoff={dismissShareHandoff}
           onShareHandoffOpened={dismissShareHandoff}
-          onWorkspaceReady={(created) => {
-            setWorkspaces([created]);
-            setWorkspace(created);
+          onBack={workspace ? () => setManaging(false) : undefined}
+          onForgot={refreshWorkspaceRegistry}
+          onOpenWorkspace={(next) => {
+            setWorkspaces((known) =>
+              known.some((entry) => entry.workspaceId === next.workspaceId)
+                ? known
+                : [...known, next],
+            );
+            setWorkspace(next);
+            setManaging(false);
           }}
         />
-        <DevPanel />
+        <DevPanel workspaceId={workspace?.workspaceId} />
       </>
     );
   }
@@ -221,6 +231,7 @@ export function DesktopRoot() {
       onDismissShareHandoff={dismissShareHandoff}
       onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
+      onManageWorkspaces={() => setManaging(true)}
       onSwitchWorkspace={(next) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.

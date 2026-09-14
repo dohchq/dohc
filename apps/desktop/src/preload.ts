@@ -126,6 +126,9 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.createLocalWorkspace, payload),
   attachWorkspaceFolder: (payload) =>
     ipcRenderer.invoke(CHANNELS.attachWorkspaceFolder, payload),
+  forgetWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.forgetWorkspace, payload),
+  revealWorkspaceFolder: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revealWorkspaceFolder, payload),
   listWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   listCollections: (payload) =>

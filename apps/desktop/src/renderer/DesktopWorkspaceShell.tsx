@@ -124,7 +124,6 @@ import {
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import { OpenSharedView } from "./OpenSharedView";
-import { NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { useGuestBlockingUi } from "./guestBlockingUi";
@@ -529,6 +528,7 @@ export function DesktopWorkspaceShell(props: {
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   onSwitchWorkspace: (workspace: Workspace) => void;
+  onManageWorkspaces?: () => void;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
@@ -592,7 +592,6 @@ export function DesktopWorkspaceShell(props: {
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
-  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   useEffect(() => {
     if (handoffStatus.status !== "idle") setOpenShareOpen(false);
@@ -4262,14 +4261,7 @@ export function DesktopWorkspaceShell(props: {
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
         onOpenShare={() => setOpenShareOpen(true)}
-        onNewWorkspace={() => setNewWorkspaceOpen(true)}
-        onOpenFolder={() =>
-          void openExistingFolder()
-            .then((workspace) => {
-              if (workspace) props.onSwitchWorkspace(workspace);
-            })
-            .catch((error) => reportShellError("Could not open that folder as a workspace.", error))
-        }
+        onManageWorkspaces={props.onManageWorkspaces}
         onQuickOpen={() => setQuickOpenOpen(true)}
         primarySidebar={{
           visible: wb.sidebarVisible,
@@ -5564,17 +5556,6 @@ export function DesktopWorkspaceShell(props: {
                   },
                 })}
           />
-        </Overlay>
-      ) : newWorkspaceOpen ? (
-        <Overlay onClose={() => setNewWorkspaceOpen(false)}>
-          <div className="w-105">
-            <NewWorkspaceCard
-              onWorkspaceReady={(workspace) => {
-                setNewWorkspaceOpen(false);
-                props.onSwitchWorkspace(workspace);
-              }}
-            />
-          </div>
         </Overlay>
       ) : openShareOpen ? (
         <Overlay onClose={() => setOpenShareOpen(false)}>

@@ -30,6 +30,8 @@ async function registryHarness() {
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
   const refresh = vi.fn(() => { steps.push("refresh"); });
   const pick = vi.fn(async () => ({ canceled: false, filePaths: [join(home, "picked")] }));
+  const forget = vi.fn(async (_workspaceId: string) => { steps.push("forget"); });
+  const reveal = vi.fn((_path: string) => { steps.push("reveal"); });
   registerWorkspaceRegistryIpcHandlers<Event>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
@@ -37,6 +39,7 @@ async function registryHarness() {
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    forgetWorkspace: forget, showItemInFolder: reveal,
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });
@@ -45,7 +48,7 @@ async function registryHarness() {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ trusted }, payload);
   };
-  return { home, roots, handlers, createFolder, register, refresh, pick, steps, summaries, invoke };
+  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke };
 }
 
 describe("registered workspace registry handlers", () => {
@@ -55,6 +58,7 @@ describe("registered workspace registry handlers", () => {
       CHANNELS.pickWorkspaceRoot, CHANNELS.getWorkspaceRegistry, CHANNELS.getDefaultWorkspaceRoot,
       CHANNELS.getDefaultShareRoot,
       CHANNELS.createLocalWorkspace, CHANNELS.attachWorkspaceFolder,
+      CHANNELS.forgetWorkspace, CHANNELS.revealWorkspaceFolder,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     expect(h.pick).not.toHaveBeenCalled();
@@ -217,5 +221,22 @@ describe("registered workspace open", () => {
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.warmup).toHaveBeenCalledOnce();
     held.resolve();
+  });
+});
+
+describe("forget and reveal", () => {
+  it("forgets by id and refreshes native surfaces", async () => {
+    const h = await registryHarness();
+    await h.invoke(CHANNELS.forgetWorkspace, { workspaceId: "ws-1" });
+    expect(h.forget).toHaveBeenCalledWith("ws-1");
+    expect(h.steps).toEqual(["forget", "refresh"]);
+  });
+
+  it("reveals a registered root and refuses an unknown id", async () => {
+    const h = await registryHarness();
+    h.summaries.push({ workspaceId: "ws-1", rootPath: "/w/one", kind: "personal", mode: "local-first" });
+    await h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1" });
+    expect(h.reveal).toHaveBeenCalledWith("/w/one");
+    await expect(h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-9" })).rejects.toThrow("not in the registry");
   });
 });

@@ -51,8 +51,7 @@ export function Titlebar(props: {
   workspace?: WorkspaceSummary;
   workspaces?: WorkspaceSummary[];
   onOpenShare?: () => void;
-  onNewWorkspace?: () => void;
-  onOpenFolder?: () => void;
+  onManageWorkspaces?: () => void;
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
   primarySidebar?: TitlebarPanelToggle;
@@ -131,31 +130,19 @@ export function Titlebar(props: {
                   </button>
                 </li>
               ))}
-              {props.onNewWorkspace || props.onOpenFolder ? (
+              {props.onManageWorkspaces ? (
                 <li role="presentation" className="mt-1 border-t border-line pt-1">
                   <button
                     type="button"
-                    data-testid="workspace-switcher-new-workspace"
+                    data-testid="workspace-switcher-manage"
                     onClick={() => {
                       setSwitcherOpen(false);
-                      props.onNewWorkspace?.();
+                      props.onManageWorkspaces?.();
                     }}
                     className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
                   >
                     <span className="w-3" aria-hidden />
-                    <span className="truncate">New workspace…</span>
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="workspace-switcher-open-folder"
-                    onClick={() => {
-                      setSwitcherOpen(false);
-                      props.onOpenFolder?.();
-                    }}
-                    className="titlebar-no-drag flex h-7 w-full items-center gap-1.5 rounded px-2 text-left text-[13px] text-muted hover:bg-panel-2 hover:text-ink"
-                  >
-                    <span className="w-3" aria-hidden />
-                    <span className="truncate">Open a folder…</span>
+                    <span className="truncate">Manage workspaces…</span>
                   </button>
                 </li>
               ) : null}

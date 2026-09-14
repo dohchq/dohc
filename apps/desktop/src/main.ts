@@ -1434,6 +1434,19 @@ function registerReservedPhysicalWorkspace(
   );
 }
 
+// Forget: close every handle the app holds on the workspace and drop its
+// registry row. The folder is untouched; opening it again re-adopts the
+// manifest and its identity.
+async function forgetWorkspace(workspaceId: string): Promise<void> {
+  const lease = workspaceAuthorities.acquire(workspaceId);
+  try {
+    await removePhysicalWorkspace(lease.binding);
+  } finally {
+    lease.release();
+  }
+  notifyRenderer();
+}
+
 function removePhysicalWorkspace(
   binding: DesktopWorkspaceAuthorityBinding,
   beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
@@ -3885,6 +3898,8 @@ function registerIpcHandlers(): void {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    forgetWorkspace,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -3895,16 +3910,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
     listWorkspaces,
-    forgetWorkspace: async (workspaceId) => {
-      const lease = workspaceAuthorities.acquire(workspaceId);
-      try {
-        await removePhysicalWorkspace(lease.binding);
-      } finally {
-        lease.release();
-      }
-      refreshNativeWorkspaceSurfaces();
-      notifyRenderer();
-    },
+    forgetWorkspace,
     stateDir,
     showItemInFolder: (path) => shell.showItemInFolder(path),
   });

@@ -5930,6 +5930,8 @@ export interface DohcDesktopBridge {
   attachWorkspaceFolder(
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
+  forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;

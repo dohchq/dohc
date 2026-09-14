@@ -7,8 +7,8 @@ import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 
-vi.mock("./DesktopFirstRun", () => ({
-  DesktopFirstRun: (props: {
+vi.mock("./WorkspaceManager", () => ({
+  WorkspaceManager: (props: {
     handoffStatus: ShareHandoffStatus;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;

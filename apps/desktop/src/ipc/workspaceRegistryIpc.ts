@@ -16,6 +16,7 @@ import {
   OpenWorkspaceRequestPayload,
   PickWorkspaceRootResult,
   SyncStatusResult,
+  WorkspaceIdPayload,
   WorkspaceRegistryResult,
   WorkspaceSummary,
 } from "./bridgeContract";
@@ -80,6 +81,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[]): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolder;
+  // Retires every open binding for the workspace, then removes its registry
+  // row. The folder on disk is left alone.
+  forgetWorkspace(workspaceId: string): Promise<void>;
+  showItemInFolder(path: string): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
   refreshNativeWorkspaceSurfaces(): void;
   desktopMarks: {
@@ -97,6 +102,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    forgetWorkspace,
+    showItemInFolder,
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -180,6 +187,23 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     registerPhysicalWorkspace(attached);
     refreshNativeWorkspaceSurfaces();
     return summary;
+  });
+
+  registerHandler(CHANNELS.forgetWorkspace, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    await forgetWorkspace(input.workspaceId);
+    refreshNativeWorkspaceSurfaces();
+  });
+
+  registerHandler(CHANNELS.revealWorkspaceFolder, (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    const workspace = workspaceSummaries().find(
+      (entry) => entry.workspaceId === input.workspaceId,
+    );
+    if (!workspace) throw new Error("That workspace is not in the registry.");
+    showItemInFolder(workspace.rootPath);
   });
 }
 

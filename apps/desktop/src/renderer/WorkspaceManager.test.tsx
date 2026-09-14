@@ -2,7 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DesktopFirstRun } from "./DesktopFirstRun";
+import { WorkspaceManager } from "./WorkspaceManager";
 
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/ice/dohc"),
@@ -28,7 +28,15 @@ const bridge = {
   listRelayShares: vi.fn(),
   retryShareHandoff: vi.fn(async () => undefined),
   dismissShareHandoff: vi.fn(async () => undefined),
+  forgetWorkspace: vi.fn(async () => undefined),
+  revealWorkspaceFolder: vi.fn(async () => undefined),
+  platform: "linux",
 };
+
+const KNOWN = [
+  { workspaceId: "ws-a", rootPath: "/home/ice/dohc/personal", kind: "personal" as const, mode: "local-first" as const },
+  { workspaceId: "ws-b", rootPath: "/home/ice/dohc/team", kind: "personal" as const, mode: "local-first" as const },
+];
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", bridge);
@@ -40,12 +48,15 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("first run", () => {
+describe("workspace manager", () => {
   it("places a browser share handoff ahead of the ordinary first-run card", async () => {
     const onDismissShareHandoff = vi.fn();
     render(
-      <DesktopFirstRun
-        onWorkspaceReady={() => {}}
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
         handoffStatus={{
           status: "waiting-for-sign-in",
           statusId: "status-test",
@@ -66,14 +77,14 @@ describe("first run", () => {
   });
 
   it("suggests ~/dohc as the workspace location", async () => {
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     expect(await screen.findByText("/home/ice/dohc/")).toBeTruthy();
     expect(screen.getByLabelText("Folder name")).toHaveProperty("value", "personal");
   });
 
   it("creates the folder under the name the user typed", async () => {
     const user = userEvent.setup();
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     const name = await screen.findByLabelText("Folder name");
     await user.clear(name);
     await user.type(name, "research{Enter}");
@@ -84,7 +95,7 @@ describe("first run", () => {
 
   it("refuses an empty or nested folder name", async () => {
     const user = userEvent.setup();
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     const name = await screen.findByLabelText("Folder name");
     const create = screen.getByRole("button", { name: /create workspace/i });
     await user.clear(name);
@@ -95,7 +106,7 @@ describe("first run", () => {
 
   it("lets the user choose another folder", async () => {
     const user = userEvent.setup();
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     await user.click(
       await screen.findByRole("button", { name: "Change location" }),
     );
@@ -106,7 +117,7 @@ describe("first run", () => {
   it("creates a personal workspace and hands it to the shell", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
-    render(<DesktopFirstRun onWorkspaceReady={onReady} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
     await user.click(
       await screen.findByRole("button", { name: /create workspace/i }),
     );
@@ -124,7 +135,7 @@ describe("first run", () => {
   it("reports default workspace root failures", async () => {
     bridge.getDefaultWorkspaceRoot.mockRejectedValueOnce(new Error("No home dir"));
 
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
 
     expect(await screen.findByText("No home dir")).toBeTruthy();
   });
@@ -132,7 +143,7 @@ describe("first run", () => {
   it("attaches an existing folder as a workspace", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
-    render(<DesktopFirstRun onWorkspaceReady={onReady} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
     await user.click(
       await screen.findByRole("button", { name: /open an existing folder/i }),
     );
@@ -145,7 +156,7 @@ describe("first run", () => {
   });
 
   it("never requires login and never renders auth fields", async () => {
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     await screen.findByText("/home/ice/dohc/");
     expect(screen.queryByLabelText(/email|password/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /sign in|log in|sign up/i }))
@@ -154,7 +165,7 @@ describe("first run", () => {
 
   it("offers joining a synced workspace, gated on sign-in", async () => {
     const user = userEvent.setup();
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     await screen.findByText("/home/ice/dohc/");
     await user.click(
       screen.getByTestId("first-run-join-synced"),
@@ -174,7 +185,7 @@ describe("first run", () => {
   });
 
   it("reads like a desktop app, not a marketing page", async () => {
-    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     await screen.findByText("/home/ice/dohc/");
     // No marketing tropes: pricing, testimonials, feature grids, sign-up CTAs.
     expect(
@@ -184,5 +195,50 @@ describe("first run", () => {
     expect(
       screen.getByRole("button", { name: /create workspace/i }),
     ).toBeTruthy();
+  });
+});
+
+describe("workspace manager with registered workspaces", () => {
+  it("lists them with their paths and opens one on click", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} onBack={() => {}} />,
+    );
+    const rows = await screen.findAllByTestId("workspace-manager-row");
+    expect(rows).toHaveLength(2);
+    expect(screen.getByText("/home/ice/dohc/team")).toBeTruthy();
+    await user.click(screen.getByText("team"));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-b" }));
+  });
+
+  it("forgets a workspace, refreshes, and says the folder was kept", async () => {
+    const user = userEvent.setup();
+    const onForgot = vi.fn(async () => [KNOWN[0]]);
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
+    expect(bridge.forgetWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-b" });
+    expect(onForgot).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
+  });
+
+  it("reveals a workspace folder from the row menu", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reveal in folder" }));
+    expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
+  });
+
+  it("shows no list and no back button on first run", async () => {
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await screen.findByText("/home/ice/dohc/");
+    expect(screen.queryByTestId("workspace-manager-row")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to workspace" })).toBeNull();
   });
 });

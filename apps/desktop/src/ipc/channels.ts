@@ -150,6 +150,8 @@ export const CHANNELS = {
   getDefaultShareRoot: "desktop:get-default-share-root",
   createLocalWorkspace: "desktop:create-local-workspace",
   attachWorkspaceFolder: "desktop:attach-workspace-folder",
+  forgetWorkspace: "desktop:forget-workspace",
+  revealWorkspaceFolder: "desktop:reveal-workspace-folder",
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
   createWorkspaceFolder: "desktop:create-workspace-folder",
