@@ -133,29 +133,31 @@ function WorkspaceRow(props: {
         <span className="truncate text-[13px] font-medium leading-5 text-ink">
           {workspaceName(props.workspace)}
         </span>
-        {/* One meta line: the path, and when it was last opened at the far
-            end in the same size and colour so it reads as part of the row. */}
-        <span className="flex items-baseline gap-3 text-[11px] leading-4 text-subtle">
-          <span className="min-w-0 flex-1 truncate font-mono">
-            {displayPath(props.workspace.rootPath)}
-          </span>
-          {props.workspace.lastOpenedAt !== undefined ? (
-            <time
-              dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
-              className="shrink-0 tabular-nums"
-            >
-              {openedLabel(props.workspace.lastOpenedAt)}
-            </time>
-          ) : null}
+        <span className="truncate font-mono text-[11px] leading-4 text-subtle">
+          {displayPath(props.workspace.rootPath)}
         </span>
       </button>
-      <div ref={menuRef} className="relative shrink-0">
+      {/* One slot at the end: when it was last opened at rest, the row menu
+          on hover, focus, or while open. Nothing else moves. */}
+      <div ref={menuRef} className="relative grid size-7 shrink-0 place-items-center">
+        {props.workspace.lastOpenedAt !== undefined ? (
+          <time
+            dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
+            className={`col-start-1 row-start-1 text-[11px] tabular-nums text-subtle transition-opacity ${
+              menuOpen ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
+            }`}
+          >
+            {openedLabel(props.workspace.lastOpenedAt)}
+          </time>
+        ) : null}
         <IconButton
           aria-label={`More for ${workspaceName(props.workspace)}`}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((open) => !open)}
-          className={menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"}
+          className={`col-start-1 row-start-1 ${
+            menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+          }`}
         >
           <MoreHorizontal size={14} aria-hidden />
         </IconButton>
