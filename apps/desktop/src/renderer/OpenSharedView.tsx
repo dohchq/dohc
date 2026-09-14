@@ -290,10 +290,9 @@ export function OpenSharedView(props: {
         <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
         {mounting ? (
           // Plain text, not a chip: there is nothing to change here.
-          <p className="m-0 flex h-9 items-center gap-2 px-0.5 text-[13px] text-muted">
+          <p className="m-0 flex h-9 items-center gap-2 px-0.5 text-[13px]">
             <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
             <code className="font-mono text-ink">shared-with-me{isWindows() ? "\\" : "/"}</code>
-            in this workspace
           </p>
         ) : (
           <FolderChip

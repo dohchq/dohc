@@ -131,21 +131,23 @@ function WorkspaceRow(props: {
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 flex-col text-left"
       >
-        <span className="flex items-baseline gap-2">
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-5 text-ink">
-            {workspaceName(props.workspace)}
+        <span className="truncate text-[13px] font-medium leading-5 text-ink">
+          {workspaceName(props.workspace)}
+        </span>
+        {/* One meta line: the path, and when it was last opened at the far
+            end in the same size and colour so it reads as part of the row. */}
+        <span className="flex items-baseline gap-3 text-[11px] leading-4 text-subtle">
+          <span className="min-w-0 flex-1 truncate font-mono">
+            {displayPath(props.workspace.rootPath)}
           </span>
           {props.workspace.lastOpenedAt !== undefined ? (
             <time
               dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
-              className="shrink-0 text-[11px] leading-4 text-subtle"
+              className="shrink-0 tabular-nums"
             >
               {openedLabel(props.workspace.lastOpenedAt)}
             </time>
           ) : null}
-        </span>
-        <span className="truncate font-mono text-[11px] leading-4 text-subtle">
-          {displayPath(props.workspace.rootPath)}
         </span>
       </button>
       <div ref={menuRef} className="relative shrink-0">
