@@ -1414,24 +1414,30 @@ function physicalWorkspaceRegistration(workspace: RegistryEntry) {
   };
 }
 
+// Register, then tell every window: a workspace created or attached from the
+// manager window must show up in the other windows' switchers at once.
 function registerPhysicalWorkspace(
   workspace: RegistryEntry,
 ): DesktopWorkspaceAuthorityBinding {
-  return workspaceAuthorities.registerBinding(
+  const binding = workspaceAuthorities.registerBinding(
     workspace,
     physicalWorkspaceRegistration(workspace),
   );
+  notifyRenderer();
+  return binding;
 }
 
 function registerReservedPhysicalWorkspace(
   reservation: WorkspaceAuthorityReservation,
   workspace: RegistryEntry,
 ): DesktopWorkspaceAuthorityBinding {
-  return workspaceAuthorities.registerReservedBinding(
+  const binding = workspaceAuthorities.registerReservedBinding(
     reservation,
     workspace,
     physicalWorkspaceRegistration(workspace),
   );
+  notifyRenderer();
+  return binding;
 }
 
 // Forget: close every handle the app holds on the workspace and drop its
