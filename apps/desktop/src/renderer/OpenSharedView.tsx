@@ -289,13 +289,12 @@ export function OpenSharedView(props: {
       <div className="flex flex-col gap-1.5">
         <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
         {mounting ? (
-          <div className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3">
+          // Plain text, not a chip: there is nothing to change here.
+          <p className="m-0 flex h-9 items-center gap-2 px-0.5 text-[13px] text-muted">
             <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-            <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">
-              shared-with-me{isWindows() ? "\\" : "/"}
-            </code>
-            <span className="shrink-0 text-[11px] text-subtle">This workspace</span>
-          </div>
+            <code className="font-mono text-ink">shared-with-me{isWindows() ? "\\" : "/"}</code>
+            in this workspace
+          </p>
         ) : (
           <FolderChip
             folder={folder ? displayPath(folder) : null}
