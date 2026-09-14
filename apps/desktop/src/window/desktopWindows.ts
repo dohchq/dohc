@@ -291,6 +291,48 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     await dependencies.rendererWorkspaceSessions.retireAfterCrash(sender);
   }
 
+  // One manager window at a time. It is not a workspace window: it never
+  // joins workspaceWindows, so quit and zoom logic ignore it.
+  let managerWindow: BrowserWindow | null = null;
+  function showOrCreateManagerWindow(): BrowserWindow {
+    if (managerWindow && !managerWindow.isDestroyed()) {
+      managerWindow.focus();
+      return managerWindow;
+    }
+    const window = createMainWindow({
+      beforeRendererReload: prepareAfterRendererCrash,
+      role: "manager",
+    });
+    window.on("closed", () => {
+      if (managerWindow === window) managerWindow = null;
+    });
+    managerWindow = window;
+    return window;
+  }
+
+  // A window for one workspace. Reuses a live window already showing it;
+  // otherwise creates one and activates the workspace in it once loaded.
+  async function openWorkspaceInWindow(
+    workspace: WorkspaceSummary,
+    isShowing: (window: BrowserWindow) => boolean,
+  ): Promise<BrowserWindow> {
+    const existing = workspaceWindows.allLive().find(isShowing);
+    if (existing) {
+      existing.focus();
+      return existing;
+    }
+    const window = trackWorkspaceWindow(
+      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
+    );
+    await new Promise<void>((resolve) => {
+      window.webContents.once("did-finish-load", () => resolve());
+    });
+    if (window.isDestroyed()) return window;
+    window.webContents.send(CHANNELS.workspaceActivated, workspace);
+    window.focus();
+    return window;
+  }
+
   async function showOrCreateMainWindow(): Promise<BrowserWindow> {
     const existing = targetWindow(undefined);
     if (existing) {
@@ -320,6 +362,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     prepareForRendererReload,
     prepareAfterRendererCrash,
     showOrCreateMainWindow,
+    showOrCreateManagerWindow,
+    openWorkspaceInWindow,
     get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
     setPreferredWorkspaceId(workspaceId: string): void { preferredWorkspaceId = workspaceId; },
     seedZoomLevel(zoomLevel: number): void { knownZoomLevel ??= zoomLevel; },

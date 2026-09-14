@@ -17,7 +17,7 @@ export function DesktopRoot() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [managing, setManaging] = useState(false);
+  const isManagerWindow = bridge().windowRole === "manager";
   const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
     null,
   );
@@ -193,16 +193,35 @@ export function DesktopRoot() {
       </div>
     );
   }
-  if (!workspace || managing) {
+  if (isManagerWindow) {
+    // The manager window: pick a workspace and it opens in its own window,
+    // then this one closes. Nothing else ever renders here.
+    return (
+      <WorkspaceManager
+        workspaces={workspaces}
+        current={null}
+        handoffStatus={shareHandoffStatus}
+        onDismissShareHandoff={dismissShareHandoff}
+        onShareHandoffOpened={dismissShareHandoff}
+        onForgot={refreshWorkspaceRegistry}
+        onOpenWorkspace={(next) => {
+          void bridge()
+            .openWorkspaceWindow({ workspaceId: next.workspaceId })
+            .then(() => bridge().closeThisWindow())
+            .catch(() => undefined);
+        }}
+      />
+    );
+  }
+  if (!workspace) {
     return (
       <>
         <WorkspaceManager
           workspaces={workspaces}
-          current={workspace}
+          current={null}
           handoffStatus={shareHandoffStatus}
           onDismissShareHandoff={dismissShareHandoff}
           onShareHandoffOpened={dismissShareHandoff}
-          onBack={workspace ? () => setManaging(false) : undefined}
           onForgot={refreshWorkspaceRegistry}
           onOpenWorkspace={(next) => {
             setWorkspaces((known) =>
@@ -211,10 +230,9 @@ export function DesktopRoot() {
                 : [...known, next],
             );
             setWorkspace(next);
-            setManaging(false);
           }}
         />
-        <DevPanel workspaceId={workspace?.workspaceId} />
+        <DevPanel />
       </>
     );
   }
@@ -231,7 +249,7 @@ export function DesktopRoot() {
       onDismissShareHandoff={dismissShareHandoff}
       onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
-      onManageWorkspaces={() => setManaging(true)}
+      onManageWorkspaces={() => void bridge().openWorkspaceManager().catch(() => undefined)}
       onSwitchWorkspace={(next) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.

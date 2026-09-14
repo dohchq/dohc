@@ -30,6 +30,10 @@ const bridge = {
   dismissShareHandoff: vi.fn(async () => undefined),
   forgetWorkspace: vi.fn(async () => undefined),
   revealWorkspaceFolder: vi.fn(async () => undefined),
+  openWorkspaceWindow: vi.fn(async () => undefined),
+  openWorkspaceManager: vi.fn(async () => undefined),
+  closeThisWindow: vi.fn(async () => undefined),
+  windowRole: "workspace",
   platform: "linux",
 };
 
@@ -203,7 +207,7 @@ describe("workspace manager with registered workspaces", () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
     render(
-      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} onBack={() => {}} />,
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} />,
     );
     const rows = await screen.findAllByTestId("workspace-manager-row");
     expect(rows).toHaveLength(2);
@@ -235,10 +239,9 @@ describe("workspace manager with registered workspaces", () => {
     expect(bridge.revealWorkspaceFolder).toHaveBeenCalledWith({ workspaceId: "ws-a" });
   });
 
-  it("shows no list and no back button on first run", async () => {
+  it("shows no list on first run", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
     await screen.findByText("/home/ice/dohc/");
     expect(screen.queryByTestId("workspace-manager-row")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Back to workspace" })).toBeNull();
   });
 });

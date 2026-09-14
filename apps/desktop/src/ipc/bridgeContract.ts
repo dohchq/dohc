@@ -5913,6 +5913,10 @@ export interface DohcDesktopBridge {
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
+  // Constant: which surface this window renders. "manager" is the workspace
+  // manager window; "workspace" is an ordinary window. Read from the load
+  // URL by the preload, never from the renderer.
+  windowRole: "workspace" | "manager";
   // Constant: true only when main launched with DOHC_DEV_TOOLS=1 in an
   // unpackaged build. The renderer shows the debug panel on it; every dev
   // channel is separately gated in main, so this is a hint, not authority.
@@ -5932,6 +5936,12 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSummary>;
   forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
   revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  // Opens (or focuses) a window for the workspace and leaves this window as
+  // it is. The manager window closes itself after.
+  openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
+  // Opens (or focuses) the workspace manager in its own window.
+  openWorkspaceManager(): Promise<void>;
+  closeThisWindow(): Promise<void>;
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;

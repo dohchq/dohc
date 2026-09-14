@@ -79,6 +79,7 @@ describe("DesktopRoot", () => {
     const calls: string[] = [];
     let handoffEvent: ((status: ShareHandoffStatus) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -116,6 +117,7 @@ describe("DesktopRoot", () => {
 
   it("keeps an idle handoff out of the ordinary first-run product", async () => {
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -138,6 +140,7 @@ describe("DesktopRoot", () => {
   it("dismisses a handoff by its visible identity and returns to the ordinary surface", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -169,6 +172,7 @@ describe("DesktopRoot", () => {
   it("acknowledges a completed handoff once by its visible identity", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -202,6 +206,7 @@ describe("DesktopRoot", () => {
     const dismissShareHandoff = vi.fn(() => dismissal.promise);
     let handoffEvent: ((status: ShareHandoffStatus) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -241,6 +246,7 @@ describe("DesktopRoot", () => {
     const registry = deferred<{ workspaces: Workspace[] }>();
     let activate: ((workspace: Workspace) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(() => registry.promise),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -332,6 +338,7 @@ describe("registry emptied under an open workspace", () => {
     let registry: { workspaces: typeof workspace[] } = { workspaces: [workspace] };
     let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => registry),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,

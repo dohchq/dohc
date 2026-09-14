@@ -3900,6 +3900,13 @@ function registerIpcHandlers(): void {
     createWorkspaceFolder,
     forgetWorkspace,
     showItemInFolder: (path) => shell.showItemInFolder(path),
+    openWorkspaceWindow: (workspace) =>
+      desktopWindows.openWorkspaceInWindow(workspace, (window) => {
+        const session = rendererWorkspaceSessions.current(window.webContents);
+        return session?.workspaceId === workspace.workspaceId;
+      }),
+    openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
+    closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,

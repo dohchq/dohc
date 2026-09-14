@@ -85,6 +85,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   // row. The folder on disk is left alone.
   forgetWorkspace(workspaceId: string): Promise<void>;
   showItemInFolder(path: string): void;
+  openWorkspaceWindow(workspace: WorkspaceSummary): Promise<unknown>;
+  openWorkspaceManager(): unknown;
+  closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
   refreshNativeWorkspaceSurfaces(): void;
   desktopMarks: {
@@ -104,6 +107,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     createWorkspaceFolder,
     forgetWorkspace,
     showItemInFolder,
+    openWorkspaceWindow,
+    openWorkspaceManager,
+    closeWindowOf,
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -194,6 +200,26 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const input = WorkspaceIdPayload.parse(payload);
     await forgetWorkspace(input.workspaceId);
     refreshNativeWorkspaceSurfaces();
+  });
+
+  registerHandler(CHANNELS.openWorkspaceWindow, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    const workspace = workspaceSummaries().find(
+      (entry) => entry.workspaceId === input.workspaceId,
+    );
+    if (!workspace) throw new Error("That workspace is not in the registry.");
+    await openWorkspaceWindow(workspace);
+  });
+
+  registerHandler(CHANNELS.openWorkspaceManager, (event) => {
+    assertTrustedSender(event);
+    openWorkspaceManager();
+  });
+
+  registerHandler(CHANNELS.closeThisWindow, (event) => {
+    assertTrustedSender(event);
+    closeWindowOf(event);
   });
 
   registerHandler(CHANNELS.revealWorkspaceFolder, (event, payload) => {

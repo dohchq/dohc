@@ -355,6 +355,7 @@ describe("desktop native menus", () => {
       prioritizePreferredWorkspace: f.windows.prioritizePreferredWorkspace,
       createWorkspaceFolder, registerPhysicalWorkspace: registry.register,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
+      openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });

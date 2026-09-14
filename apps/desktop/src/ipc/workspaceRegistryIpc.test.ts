@@ -40,6 +40,7 @@ async function registryHarness() {
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
     forgetWorkspace: forget, showItemInFolder: reveal,
+    openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });
@@ -58,7 +59,8 @@ describe("registered workspace registry handlers", () => {
       CHANNELS.pickWorkspaceRoot, CHANNELS.getWorkspaceRegistry, CHANNELS.getDefaultWorkspaceRoot,
       CHANNELS.getDefaultShareRoot,
       CHANNELS.createLocalWorkspace, CHANNELS.attachWorkspaceFolder,
-      CHANNELS.forgetWorkspace, CHANNELS.revealWorkspaceFolder,
+      CHANNELS.forgetWorkspace, CHANNELS.openWorkspaceWindow, CHANNELS.openWorkspaceManager,
+      CHANNELS.closeThisWindow, CHANNELS.revealWorkspaceFolder,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     expect(h.pick).not.toHaveBeenCalled();

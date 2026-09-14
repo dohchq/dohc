@@ -30,6 +30,8 @@ import {
   parseWindowState,
   planWindowPlacement,
   serializeWindowState,
+  MANAGER_WINDOW_STATE_FILE,
+  MANAGER_WINDOW_SIZE,
   WINDOW_STATE_FILE,
   type ChromeTheme,
 } from "./windowState";
@@ -81,8 +83,8 @@ export function navigationPolicy(): NavigationPolicy {
   return { httpOrigins: [], fileUrlPrefix: pathToFileURL(rendererDir).href };
 }
 
-function windowStateFile(): string {
-  return join(stateDir(), WINDOW_STATE_FILE);
+function windowStateFile(role: WindowRole = "workspace"): string {
+  return join(stateDir(), role === "manager" ? MANAGER_WINDOW_STATE_FILE : WINDOW_STATE_FILE);
 }
 
 const allowedLoopbackFrameOrigins = new Map<string, number>();
@@ -121,10 +123,10 @@ export function isAllowedLoopbackFrameUrl(targetUrl: string): boolean {
   return origin !== null && allowedLoopbackFrameOrigins.has(origin);
 }
 
-function loadPlacement() {
+function loadPlacement(role: WindowRole = "workspace") {
   let raw: string | null = null;
   try {
-    raw = readFileSync(windowStateFile(), "utf8");
+    raw = readFileSync(windowStateFile(role), "utf8");
   } catch {
     // First launch / unreadable state: centered default.
   }
@@ -136,7 +138,7 @@ function loadPlacement() {
   };
 }
 
-function trackWindowState(window: BrowserWindow): void {
+function trackWindowState(window: BrowserWindow, role: WindowRole = "workspace"): void {
   const persist = () => {
     if (window.isDestroyed()) return;
     const state = {
@@ -145,7 +147,7 @@ function trackWindowState(window: BrowserWindow): void {
       theme: chromeTheme,
     };
     try {
-      writeFileSync(windowStateFile(), serializeWindowState(state));
+      writeFileSync(windowStateFile(role), serializeWindowState(state));
     } catch {
       // Window state is a convenience; a read-only disk must not break the app.
     }
@@ -163,11 +165,17 @@ function trackWindowState(window: BrowserWindow): void {
   });
 }
 
+export type WindowRole = "workspace" | "manager";
+
 export function createMainWindow(options?: {
   beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
+  // The manager is a smaller window that renders only the workspace
+  // manager. It keeps its own bounds so it never fights the main window.
+  role?: WindowRole;
 }): BrowserWindow {
+  const role: WindowRole = options?.role ?? "workspace";
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
-  const placement = loadPlacement();
+  const placement = loadPlacement(role);
   // Native chrome paints the launch theme (persisted user choice, else the OS
   // preference) before any renderer JS — no light flash on dark launches.
   chromeTheme = placement.theme;
@@ -185,9 +193,9 @@ export function createMainWindow(options?: {
 
   const window = new BrowserWindow({
     show: false,
-    ...(placement.bounds ?? DEFAULT_WINDOW_SIZE),
-    minWidth: MIN_WINDOW_SIZE.width,
-    minHeight: MIN_WINDOW_SIZE.height,
+    ...(placement.bounds ?? (role === "manager" ? MANAGER_WINDOW_SIZE : DEFAULT_WINDOW_SIZE)),
+    minWidth: role === "manager" ? MANAGER_WINDOW_SIZE.width : MIN_WINDOW_SIZE.width,
+    minHeight: role === "manager" ? MANAGER_WINDOW_SIZE.height : MIN_WINDOW_SIZE.height,
     backgroundColor: palette[placement.theme].bg,
     ...(iconPath ? { icon: iconPath } : {}),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
@@ -209,7 +217,7 @@ export function createMainWindow(options?: {
   if (process.platform === "darwin" && iconPath) app.dock?.setIcon(iconPath);
 
   if (placement.isMaximized) window.maximize();
-  trackWindowState(window);
+  trackWindowState(window, role);
 
   // A crashed renderer reloads instead of leaving a permanently blank window
   // (crash-loop guarded) — see rendererCrashRecovery.ts.
@@ -243,10 +251,15 @@ export function createMainWindow(options?: {
   window.once("ready-to-show", () => window.show());
 
   const devServer = devServerUrl();
+  const query = role === "manager" ? { view: "manager" } : undefined;
   if (devServer) {
-    void window.loadURL(devServer);
+    const url = new URL(devServer);
+    if (query) url.searchParams.set("view", query.view);
+    void window.loadURL(url.toString());
   } else {
-    void window.loadFile(join(import.meta.dirname, "../renderer/index.html"));
+    void window.loadFile(join(import.meta.dirname, "../renderer/index.html"), {
+      ...(query ? { query } : {}),
+    });
   }
 
   return window;

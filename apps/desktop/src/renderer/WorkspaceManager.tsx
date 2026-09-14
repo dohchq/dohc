@@ -1,5 +1,5 @@
 import { DohcMark } from "@dohc/brand";
-import { ArrowLeft, FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
+import { FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
@@ -139,7 +139,6 @@ export function WorkspaceManager(props: {
   // to it; forgetting it drops to whatever remains.
   current: Workspace | null;
   onOpenWorkspace: (workspace: Workspace) => void;
-  onBack?: () => void;
   onForgot: () => Promise<unknown>;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
@@ -245,12 +244,7 @@ export function WorkspaceManager(props: {
       <div className="flex min-h-0 flex-1">
         {hasWorkspaces ? (
           <aside className="flex w-80 shrink-0 flex-col border-r border-line bg-panel">
-            <div className="flex h-11 items-center gap-1 px-3">
-              {props.onBack ? (
-                <IconButton aria-label="Back to workspace" onClick={props.onBack}>
-                  <ArrowLeft size={13} aria-hidden />
-                </IconButton>
-              ) : null}
+            <div className="flex h-11 items-center px-4">
               <span className="text-[13px] font-semibold text-ink">Workspaces</span>
             </div>
             <ul className="m-0 flex list-none flex-col gap-0.5 overflow-y-auto px-2 pb-2">
