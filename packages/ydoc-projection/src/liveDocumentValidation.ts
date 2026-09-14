@@ -289,9 +289,9 @@ export function createLiveMarkdownJournalValidator(
 ): (input: unknown) => LiveMarkdownJournalResult {
   const ownedPolicy = capturePolicy(policy)
 
-  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: true): LiveMarkdownJournalResult
-  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: false): ValidationOutcome
-  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: boolean): LiveMarkdownJournalResult | ValidationOutcome {
+  function validateAttempt(input: LiveMarkdownJournalInput, includeEvidence: boolean):
+    | { kind: 'accepted'; evidence?: LiveMarkdownJournalEvidence }
+    | { kind: 'refused'; failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'> } {
     const result = validateJournalCutForProjection({
       mode: 'journal-candidate', checkpoint: input.checkpoint, suffix: input.suffix, candidate: input.candidate,
     }, ownedPolicy)
@@ -302,7 +302,7 @@ export function createLiveMarkdownJournalValidator(
       const projected = projectAndFinalize(cut, topology)
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
-        if (!diagnose) return { kind: 'accepted' }
+        if (!includeEvidence) return { kind: 'accepted' }
         const stateUpdate = copyBytes(projected.finalized.stateUpdate)
         const markdownBytes = utf8.encode(projected.projectedMarkdown)
         const evidence: LiveMarkdownJournalEvidence = Object.freeze({
@@ -325,6 +325,16 @@ export function createLiveMarkdownJournalValidator(
         return Object.freeze({ kind: 'accepted', evidence })
       }
     }
+    return { kind: 'refused', failure }
+  }
+
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: true): LiveMarkdownJournalResult
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: false): ValidationOutcome
+  function validateCaptured(input: LiveMarkdownJournalInput, diagnose: boolean): LiveMarkdownJournalResult | ValidationOutcome {
+    // Let the completed cut become collectible before replaying its prefix.
+    const attempt = validateAttempt(input, diagnose)
+    if (attempt.kind === 'accepted') return attempt
+    const { failure } = attempt
     if (failure.stage.kind === 'call') return refusal(failure.reason, 'call')
     if (failure.stage.kind === 'input') {
       return refusal(failure.reason, failure.stage.role === 'candidate' ? 'candidate' : 'admitted-cut')
