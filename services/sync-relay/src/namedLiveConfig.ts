@@ -25,6 +25,7 @@ export function parseNamedLiveConfig(value: unknown) {
   const hostFields = ["maxClientVectorBytes", "maxSyncOutputBytes", "maxAppliedUpdateBytes", "maxSubmissionBytes", "maxAdmissionBytes"];
   const host = record(config.host, hostFields) as unknown as NamedFrameHostBounds;
   for (const number of Object.values(host)) positive(number);
+  if (host.maxSyncOutputBytes < 2 || host.maxAppliedUpdateBytes < 2) throw new TypeError("Invalid named live budget.");
   const validation = record(config.validation, ["maxStructVisits", "maxValueNodeVisits", "maxDecodedPayloadByteVisits", "maxStructClientGroupVisits",
     "maxDeleteClientGroupVisits", "maxDeleteIntervalVisits", "maxIndexOperations"]) as unknown as OrderedLiveUpdateCutPolicy;
   for (const number of Object.values(validation)) positive(number);

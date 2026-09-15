@@ -51,7 +51,8 @@ pub fn release_imported_owner_activation(
              AND (?4 IS NULL OR (a.version_id=?4 AND a.object_id=?5 AND a.lineage_claim_id=?6))
              AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions adopted
                  WHERE adopted.workspace_id=a.workspace_id AND adopted.main_version_id=a.version_id
-                 AND adopted.object_id=a.object_id) RETURNING full_state_digest",
+                 AND adopted.object_id=a.object_id AND adopted.lineage_claim_id=a.lineage_claim_id
+                 AND adopted.relay_database_namespace=a.relay_database_namespace) RETURNING full_state_digest",
                 params![
                     activation_id,
                     namespace,

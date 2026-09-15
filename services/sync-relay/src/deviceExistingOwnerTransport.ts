@@ -198,7 +198,10 @@ export function startExistingOwnerDeviceTransport(options: {
         const receipt = parseNativeRestoreFenceReceipt(value.receipt);
         if (!isDeepStrictEqual(receipt.operation, fence)) throw new Error("Native restore fence acknowledgement mismatch.");
         for (const [id, entry] of registrations) if (entry.binding.workspaceId === fence.oldBinding.workspaceId && entry.binding.mainVersionId === fence.oldBinding.mainVersionId && entry.binding.objectId === fence.oldBinding.objectId) {
-          clearTimeout(entry.handoffTimer); entry.stopChanges?.(); entry.stopChanges = undefined; registrations.delete(id);
+          const handoffActive = entry.handoffTimer !== undefined;
+          clearTimeout(entry.handoffTimer); entry.handoffTimer = undefined;
+          entry.adopting = false; entry.stopChanges?.(); entry.stopChanges = undefined; registrations.delete(id);
+          if (handoffActive) await entry.owner.finishHandoff(false).catch(() => undefined);
         }
         result = {status: "fenced", receipt};
       } else if (operation.method === "liveApplication.register") {

@@ -47,7 +47,7 @@ export function createNamedLiveTicketClient(options: {
         const result = parsed as Record<string, unknown>;
         parseLiveTicketToken(result.token);
         const token = result.token as string;
-        if (typeof result.expiresAtMs !== "number" || !Number.isSafeInteger(result.expiresAtMs) || result.expiresAtMs <= 0) return refusal();
+        if (typeof result.expiresAtMs !== "number" || !Number.isSafeInteger(result.expiresAtMs) || result.expiresAtMs <= Date.now()) return refusal();
         return Response.json({token, expiresAtMs: result.expiresAtMs}, {headers: {"cache-control": "private, no-store"}});
       } catch {return refusal();}
       finally {

@@ -2,7 +2,7 @@ import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {EngineClient,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
 import {connectDeviceHost,parseDeviceHostCredential,parseOwnerLiveSyncConfig,type ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
-import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
+import {DEVICE_CONTROL_PATH,parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 
 interface DesktopOwnerHostConfig {
   nativeConfigPath: string;
@@ -36,6 +36,11 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
     typeof input.nativeConfigPath !== "string" || !isAbsolute(input.nativeConfigPath) || typeof input.credentialPath !== "string" || !isAbsolute(input.credentialPath) ||
     typeof input.url !== "string" || !Array.isArray(input.workspaceIds) || !input.workspaceIds.length || input.workspaceIds.some((id: unknown) => typeof id !== "string" || !id) ||
     new Set(input.workspaceIds).size !== input.workspaceIds.length || !Number.isSafeInteger(input.reconnectDelayMs) || input.reconnectDelayMs < 1 || input.reconnectDelayMs > 2_147_483_647) throw new Error("Invalid private owner host configuration.");
+  let url: URL;
+  try {url = new URL(input.url);} catch {throw new Error("Invalid private owner host URL.");}
+  if (url.protocol !== "wss:" || url.username || url.password || url.pathname !== DEVICE_CONTROL_PATH || url.search || url.hash) {
+    throw new Error("Invalid private owner host URL.");
+  }
   const credentialBytes = readBoundedFile(input.credentialPath,16_384,"Owner host credential is too large.");
   const transport = input.transport;
   const control = parseDeviceControlLimits(input.control);
@@ -48,7 +53,7 @@ export function readDesktopOwnerHostConfig(path: string): DesktopOwnerHostConfig
     (transport.maxRestoreBytes !== undefined && (!Number.isSafeInteger(transport.maxRestoreBytes) || transport.maxRestoreBytes < 5 || transport.maxRestoreBytes > DEFAULT_MAX_BLOB_BYTES ||
       transport.maxRestoreBytes * 5 + transport.maxFrameBytes * 4 > transport.aggregateBytes))) throw new Error("Invalid private owner host transport budget.");
   const sync = parseOwnerLiveSyncConfig(transport.sync, transport.aggregateBytes - transport.maxFrameBytes * 3, transport.maxFrameBytes);
-  return {nativeConfigPath: input.nativeConfigPath,url: input.url,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
+  return {nativeConfigPath: input.nativeConfigPath,url: url.href,workspaceIds: input.workspaceIds,reconnectDelayMs: input.reconnectDelayMs,
     transport: {...transport, sync},credential: parseDeviceHostCredential(JSON.parse(credentialBytes.toString("utf8"))),control};
 }
 

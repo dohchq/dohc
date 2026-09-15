@@ -491,6 +491,29 @@ fn release_preserves_an_adopted_activation_source() {
 }
 
 #[test]
+fn release_is_not_blocked_by_an_adoption_in_another_lineage_or_namespace() {
+    for other_lineage in [false, true] {
+        let mut f = imported_fixture();
+        let captured = capture_imported(&mut f, 1_000_000).unwrap();
+        f.cut.adoption_id = captured.activation_id.clone();
+        f.adopt().unwrap();
+        f.store.write_with(&NoFaults, |tx| {
+            if other_lineage {
+                let lineage = dohc_engine_storage::put_binary_blob(tx, &[0, 0])?;
+                tx.execute("UPDATE live_owner_adoptions SET lineage_claim_id=?1,
+                    binding_json=json_set(binding_json,'$.lineageClaimId',?1)", [&lineage])
+            } else {
+                tx.execute("UPDATE live_owner_adoptions SET relay_database_namespace='other-namespace'", [])
+            }.map_err(write_sql)
+        }).unwrap();
+        release_imported_owner_activation(&mut f.store, "namespace", "workspace", &captured.activation_id,
+            Some((&f.key, &f.binding.lineage_claim_id)), &NoFaults).unwrap();
+        assert_eq!(f.store.table_row_count("ydoc_owner_activation_sources").unwrap(), 0);
+        assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1);
+    }
+}
+
+#[test]
 fn release_reclaims_only_an_unreferenced_captured_full_state() {
     for retain_second_capture in [false, true] {
         let mut f = imported_fixture();

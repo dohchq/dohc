@@ -60,6 +60,25 @@ it("refuses desktop cross-account, scope, Origin, cookie, and host changes", asy
   expect(await f.connect(ticket.token, "", {cookie: "account=reader"}).status).not.toBe(101);
   expect(await f.connect(ticket.token).status).toBe(101);
 });
+
+it("does not mint more desktop tickets when browser session capacity is full", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  const body = {shareId: scope.shareId, path: binding.currentPath};
+  for (let i = 0; i < 9; i++) expect((await f.post("/sync/live/desktop-open", body)).status).toBe(200);
+  expect(mint).toHaveBeenCalledTimes(9);
+  expect((await f.post("/sync/live/desktop-open", body)).status).toBe(404);
+  expect(mint).toHaveBeenCalledTimes(9);
+});
+
+it("releases a desktop session reservation when ticket minting refuses", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const body = {shareId: scope.shareId, path: binding.currentPath};
+  for (let i = 0; i < 10; i++) expect((await f.post("/sync/live/desktop-open", body)).status).toBe(404);
+  mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  expect((await f.post("/sync/live/desktop-open", body)).status).toBe(200);
+});
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -261,6 +280,10 @@ it("rejects missing provisioning budgets and uses the promoted journal validator
     const missing = { ...config } as Record<string, unknown>; delete missing[field]; expect(() => parseNamedLiveConfig(missing)).toThrow();
   }
   expect(() => parseNamedLiveConfig({ ...config, maxListeners: 1 })).toThrow();
+  for (const field of ["maxSyncOutputBytes", "maxAppliedUpdateBytes"]) {
+    expect(() => parseNamedLiveConfig({...config, host: {...bounds, [field]: 1}})).toThrow();
+    expect(() => parseNamedLiveConfig({...config, host: {...bounds, [field]: 2}})).not.toThrow();
+  }
 });
 
 it("keeps a cancelled authentication in its connection slot until it settles", async () => {
