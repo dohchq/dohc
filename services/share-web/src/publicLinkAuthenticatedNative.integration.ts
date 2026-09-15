@@ -171,14 +171,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const relayApp = createSyncRelayHandler({storage, publicEditRelease, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
       namedBrowserSessionLimits: capacity.namedSessions, resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
     let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
-    const relayRequests: {method: string; path: string; status: number; logResponse?: unknown}[] = [];
-    results.relayRequests = relayRequests;
     const relayHttp = serveFetchHandler({handler: async request => {
       const path = new URL(request.url).pathname;
       const response = await (path === "/sync/live/named-tickets" ? namedRoutes.handle(request) : path === "/sync/live/link-tickets" ? routes.handle(request)
         : ["/sync/live/link-session", "/sync/live/link-document"].includes(path) ? linkHttp(request) : relayApp(request));
-      relayRequests.push({method: request.method, path, status: response.status,
-        ...(request.method === "POST" && path === "/sync/workspace/log" ? {logResponse: await response.clone().json()} : {})}); return response;
+      return response;
     }, maxBodyBytes: url => url.pathname.startsWith("/sync/live/") ? capacity.requests.maxRequestBytes : capacity.ordinaryMaxRequestBytes,
       oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
@@ -510,13 +507,22 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         // the separate automatic-View case tests real ordinary replication.
         const bytes = readFileSync(join(workspace, path)), digest = hash(bytes);
         const originId = `settled-${document.objectId}`, recordedAtMs = Date.now();
+        const current = () => storage.readCurrentFileState({workspaceId: document.workspaceId, versionId: document.mainVersionId,
+          selectorPaths: [path], limit: 1}).files.find(file => file.path === path);
+        const previous = current();
+        expect(previous).toBeDefined();
+        const originSeq = storage.maxOriginSeq(document.workspaceId, originId) + 1;
+        if (previous!.blobSha256 !== digest) {
         storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: recordedAtMs});
         const published = await ownerRequest(`/sync/${document.workspaceId}/log`, {originId,
-          ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs,
-            payload: {objectId: document.objectId, momentId: originId, versionId: document.mainVersionId,
+          ops: [{originSeq, opKind: "moment.append", recordedAtMs,
+            payload: {objectId: document.objectId, momentId: `${originId}-${originSeq}`, versionId: document.mainVersionId,
               recordedAtMs, operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path,
+              payloadBeforePath: previous!.path, payloadBeforeBlobSha256: previous!.blobSha256,
               payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length}}]});
         expect(published.inserted).toBe(1);
+        }
+        expect(current()?.blobSha256).toBe(digest);
         results.restoreViewPublication = {kind: "fixture-relay-publication-of-native-file", objectId: document.objectId,
           path, blobSha256: digest, byteLength: bytes.length, automaticReplicationProven: false};
       },
@@ -588,7 +594,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     try {
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: proofPassed ? "PASS" : "FAIL", executable, sha256: expectedHash, admissionSha256: admissionDigest,
       scope: "Owner HTTP Edit and protected-cookie exchange; tiny controls; pinned browser baseline and small edits; distinct wire workload; pinned restart/stale/selector/access and restore recipe with runtime-derived continuation at C with C-1 Chromium receivers; mixed named/link presence; actual automatic service settlement and View DOM within five seconds from pre-receipt submission",
-      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Large pinned updates are wire-authored; Chromium receives and renders them through the production provider", "Transition stages use one active submitter and C-1 browser receivers", "Internal ordinary replication TLS; native sync uses the recorded owned-loopback transport seam"], results}, null, 2));
+      omissions: ["Owner UI creation control", "Private named158/160 rerun", "Throughput or latency guarantee beyond the separately admitted capacity", "Browser-restart draft recovery", "Large pinned updates are wire-authored; Chromium receives and renders them through the production provider", "Transition stages use one active submitter and C-1 browser receivers", "Restore continuation View uses fixture publication of the actual native file; automatic replication is tested separately", "Internal ordinary replication TLS; native sync uses the recorded owned-loopback transport seam"], results}, null, 2));
     } catch (error) {
       if (proofPassed) throw error;
       console.error("Could not retain public proof results after failure:", error);

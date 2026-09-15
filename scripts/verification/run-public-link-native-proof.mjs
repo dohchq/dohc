@@ -55,6 +55,7 @@ async function snapshot(){
 const releaseBytes=await verify(admission.publicRelease),release=JSON.parse(releaseBytes);
 assert.equal(release.publicEditGateGranted,true,'Public Edit release decision required');
 assert.ok(Number.isSafeInteger(release.admittedConcurrency)&&release.admittedConcurrency>=2,'At least two admitted sessions required');
+assert.ok(Number.isSafeInteger(release.ordinaryMaxRequestBytes)&&release.ordinaryMaxRequestBytes>0,'Finite ordinary replication request bound required');
 assert.equal(release.editor.provider.frames.receive.maxFrameBytes,release.frames.receive.maxFrameBytes);
 assert.ok(release.workload?.path && release.workload?.sha256,'Selected public workload manifest required');
 assert.ok(isAbsolute(release.workload.path),'Public workload manifest path must be absolute');
@@ -123,6 +124,7 @@ try{
  const continuation=proof.results.loadedTransitions.find(row=>row.name==='restore').continuation;
  assert.equal(continuation.kind,'runtime-derived-after-native-restore');assert.equal(continuation.preselectedCandidate,false);
  assert.equal(continuation.verdict,'PASS');assert.equal(continuation.editorWitnessVerified,true);assert.equal(continuation.viewWitnessVerified,true);
+ assert.equal(continuation.viewPublication,'fixture-relay-publication-of-native-file');assert.equal(continuation.automaticReplicationProven,false);
  assert.deepEqual(continuation.manifest,release.transitions);assert.equal(continuation.deliveryId,transitionManifest.cases.restore.continuation.deliveryId);
  assert.equal(continuation.recipe.sha256,transitionManifest.cases.restore.continuation.recipe.sha256);
  for(const pin of [continuation.restoredCheckpoint,continuation.candidate,continuation.projectedMarkdown,continuation.admissionReceipt])assert.equal((await verify(pin)).length,pin.byteLength);

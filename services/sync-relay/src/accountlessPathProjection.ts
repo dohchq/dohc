@@ -99,12 +99,14 @@ export function createAccountlessPathProjection(
     },
     projectPath,
     resolvePath: (path) => {
-      const validated = validateUserWritePath(path);
-      if (!validated.ok || validated.normalized !== path) return null;
-      if (roots.length === 0) return path;
-      const root = roots.find((entry) => path === entry.visiblePath || path.startsWith(`${entry.visiblePath}/`));
-      if (!root) return null;
-      const realPath = `${root.realPath}${path.slice(root.visiblePath.length)}`;
+      let realPath = path;
+      if (roots.length > 0) {
+        const root = roots.find((entry) => path === entry.visiblePath || path.startsWith(`${entry.visiblePath}/`));
+        if (!root) return null;
+        realPath = `${root.realPath}${path.slice(root.visiblePath.length)}`;
+      }
+      const validated = validateUserWritePath(realPath);
+      if (!validated.ok || validated.normalized !== realPath) return null;
       return projectPath(realPath) === path ? realPath : null;
     },
     projectPayload: (payload) => projectNestedPaths(payload, projectPath),

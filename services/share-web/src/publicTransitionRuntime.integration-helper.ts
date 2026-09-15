@@ -194,7 +194,8 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         if (restoredViewer && continuationEvidence) {
           await h.publishSettled(fixture.document, fixture.path);
           await browserExpect.poll(async () => hash(Buffer.from(await restoredViewer!.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(expected.viewText));
-          Object.assign(continuationEvidence, {viewWitnessVerified: true, verdict: "PASS"});
+          Object.assign(continuationEvidence, {viewWitnessVerified: true,
+            viewPublication: "fixture-relay-publication-of-native-file", automaticReplicationProven: false, verdict: "PASS"});
           writeFileSync(join(h.root, "restore-continuation", "result.json"), JSON.stringify(continuationEvidence, null, 2) + "\n", {flag: "wx"});
         }
       }

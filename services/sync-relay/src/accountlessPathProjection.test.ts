@@ -121,4 +121,13 @@ describe("accountless path projection", () => {
     expect(projection.resolvePath("clients/acme/report.md")).toBe("clients/acme/report.md");
     expect(projection.resolvePath("../report.md")).toBeNull();
   });
+
+  it("validates reserved names against the real workspace path", () => {
+    const projection = createAccountlessPathProjection({paths: ["docs/shared-with-me"], versionId: null, access: "edit"});
+    expect(projection.resolvePath("shared-with-me/a.md")).toBe("docs/shared-with-me/a.md");
+    expect(projection.resolvePath("shared-with-me/../a.md")).toBeNull();
+    expect(projection.resolvePath("shared-with-me/.dohc/a.md")).toBeNull();
+    const workspace = createAccountlessPathProjection({paths: [], versionId: null, access: "edit"});
+    expect(workspace.resolvePath("shared-with-me/a.md")).toBeNull();
+  });
 });
