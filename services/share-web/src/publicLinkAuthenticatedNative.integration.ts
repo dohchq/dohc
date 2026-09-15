@@ -171,13 +171,14 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const relayApp = createSyncRelayHandler({storage, publicEditRelease, linkKey, shareWebOrigin: audience, relayExchangeKey: exchangeKey,
       namedBrowserSessionLimits: capacity.namedSessions, resolveActor: createSessionActorResolver(relayAuth), ownerRestoreHost: () => active});
     let routes!: ReturnType<typeof createNamedLiveRoutes>, namedRoutes!: ReturnType<typeof createNamedLiveRoutes>, linkHttp!: ReturnType<typeof createLinkLiveHttp>;
-    const relayRequests: {method: string; path: string; status: number}[] = [];
+    const relayRequests: {method: string; path: string; status: number; logResponse?: unknown}[] = [];
     results.relayRequests = relayRequests;
     const relayHttp = serveFetchHandler({handler: async request => {
       const path = new URL(request.url).pathname;
       const response = await (path === "/sync/live/named-tickets" ? namedRoutes.handle(request) : path === "/sync/live/link-tickets" ? routes.handle(request)
         : ["/sync/live/link-session", "/sync/live/link-document"].includes(path) ? linkHttp(request) : relayApp(request));
-      relayRequests.push({method: request.method, path, status: response.status}); return response;
+      relayRequests.push({method: request.method, path, status: response.status,
+        ...(request.method === "POST" && path === "/sync/workspace/log" ? {logResponse: await response.clone().json()} : {})}); return response;
     }, maxBodyBytes: url => url.pathname.startsWith("/sync/live/") ? capacity.requests.maxRequestBytes : capacity.ordinaryMaxRequestBytes,
       oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
