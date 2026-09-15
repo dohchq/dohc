@@ -347,7 +347,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     }
     results.restore = {admittedConcurrency: capacity.admittedConcurrency, stalePartialRefused: true, oldTicketRefused: true, oldGrantRefused: true,
       revokedTicketCapacity, exactBefore: settledMarkdown, exactAfter: "Hello", proposalDigest: reviewed.result.proposalDigest};
-    const freshLink = await ownerRequest(`/sync/workspace/shares/${shareId}/links`, {access: "edit"});
+    // Restore retires the stopped share grant. Create the replacement from the
+    // current selector rather than trying to add a grant to that retired share.
+    const freshLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/a.md"], access: "edit"});
     const freshPeers = [];
     for (let index = 0; index < capacity.admittedConcurrency; index++) freshPeers.push(await openLink(freshLink.url, peers.length + index));
     const freshFirst = freshPeers[0]!;
