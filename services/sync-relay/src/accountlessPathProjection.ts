@@ -1,4 +1,5 @@
 import type { ShareSelector } from "./shareFilter";
+import { validateUserWritePath } from "@dohc/workspace-core";
 
 const PATH_FIELDS = new Set([
   "path",
@@ -16,6 +17,7 @@ interface ProjectionRoot {
 interface AccountlessPathProjection {
   selector: ShareSelector;
   projectPath(path: string): string | null;
+  resolvePath(path: string): string | null;
   projectPayload(payload: unknown): unknown | null;
 }
 
@@ -96,6 +98,15 @@ export function createAccountlessPathProjection(
       paths: roots.map((root) => root.visiblePath),
     },
     projectPath,
+    resolvePath: (path) => {
+      const validated = validateUserWritePath(path);
+      if (!validated.ok || validated.normalized !== path) return null;
+      if (roots.length === 0) return path;
+      const root = roots.find((entry) => path === entry.visiblePath || path.startsWith(`${entry.visiblePath}/`));
+      if (!root) return null;
+      const realPath = `${root.realPath}${path.slice(root.visiblePath.length)}`;
+      return projectPath(realPath) === path ? realPath : null;
+    },
     projectPayload: (payload) => projectNestedPaths(payload, projectPath),
   };
 }

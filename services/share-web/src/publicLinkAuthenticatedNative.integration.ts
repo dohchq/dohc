@@ -130,7 +130,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   const requests: {context: number; path: string; status: number}[] = [];
   const results: Record<string, unknown> = {};
   let proofPassed = false;
-  const protectedSecrets = new Set<string>(), publicBodies: Promise<string>[] = [];
+  const protectedSecrets = new Set<string>(), publicBodies: Promise<{body: string} | {error: unknown}>[] = [];
   try {
     const authHttp = serveFetchHandler({ handler: request => auth.handler(request), maxBodyBytes: () => 8192,
       oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
@@ -239,12 +239,20 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     async function openLink(url: string, index: number) {
       const context = await browser!.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 860}}); contexts.push(context);
       const page = await context.newPage(); page.on("pageerror", error => browserErrors.push(String(error)));
+      let exchangeBody: string | undefined;
+      // Retain the browser-visible body before the exchange redirects the page.
+      await page.route("**/api/exchange", async route => {
+        const response = await route.fetch(), body = await response.text();
+        exchangeBody = body; publicBodies.push(Promise.resolve({body}));
+        await route.fulfill({response, body});
+      });
       page.on("response", response => {const path = new URL(response.url()).pathname;
         if (path.startsWith("/api/")) {requests.push({context: index, path, status: response.status()});
-          if (path === "/api/exchange" || path.startsWith("/api/live/")) publicBodies.push(response.text());}});
+          if (path.startsWith("/api/live/")) publicBodies.push(response.text().then(body => ({body}), error => ({error})));}});
       const exchange = page.waitForResponse(response => new URL(response.url()).pathname === "/api/exchange");
       await page.goto(url); const response = await exchange; expect(response.status()).toBe(200);
-      const exchanged = await response.json(); expect(Object.keys(exchanged).sort()).toEqual(["ok", "session"]);
+      expect(exchangeBody).toBeDefined();
+      const exchanged = JSON.parse(exchangeBody!); expect(Object.keys(exchanged).sort()).toEqual(["ok", "session"]);
       const discriminator = exchanged.session as string;
       await browserExpect(page).toHaveURL(`${audience}/s/${discriminator}`);
       const cookies = await context.cookies(audience);
@@ -531,7 +539,10 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         await page.goto(url); expect((await exchange).status()).toBe(200); return {context, page};
       }});
     readPublicTransitionWorkload(capacity.transitions, capacity.admittedConcurrency);
-    const exposedBodies = await Promise.all(publicBodies);
+    const exposedBodies = (await Promise.all(publicBodies)).map(result => {
+      if ("error" in result) throw result.error;
+      return result.body;
+    });
     for (const secret of protectedSecrets) for (const body of exposedBodies) expect(body).not.toContain(secret);
     for (const context of contexts) for (const page of context.pages()) {
       const exposed = await page.evaluate(() => JSON.stringify({html: globalThis.document.documentElement.outerHTML, local: {...localStorage}, session: {...sessionStorage}, hash: location.hash, cookie: globalThis.document.cookie}));

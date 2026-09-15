@@ -34,6 +34,13 @@ it("resolves only the existing current Markdown object within the link selector"
   f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["elsewhere"], versionId: null}));
   expect((await f.handle(request())).status).toBe(404);
 });
+it("opens a selected file by its public path and refuses hidden paths and aliases", async () => {
+  const f = await fixture();
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs/a.md"], versionId: null}));
+  expect(await (await f.handle(request({discriminator, path: "a.md"}))).json()).toEqual({objectId: binding.objectId});
+  for (const path of ["docs/a.md", "a.md/../a.md", "./a.md", "/a.md", "a.md\\..\\a.md"])
+    expect((await f.handle(request({discriminator, path}))).status).toBe(404);
+});
 it("derives gateway authority only after ticket enrollment and refuses a different profile", async () => {
   const f = await fixture();
   const resolve = () => f.handle(request({discriminator}, "/sync/live/link-session"));

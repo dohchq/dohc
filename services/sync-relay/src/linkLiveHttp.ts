@@ -1,6 +1,8 @@
 import type {BinaryLike} from "node:crypto";
 import {readBoundedJson} from "@dohc/service-http";
 import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {createAccountlessPathProjection} from "./accountlessPathProjection";
+import {authorizeLinkShareAction} from "./shareAuthorization";
 import {hashRelayExchangeKey, verifyRelayExchangeKey} from "./linkSecurity";
 import {parseNamedLiveRouteLimits, type NamedLiveRouteLimits} from "./namedLiveRoutes";
 import type {SyncRelayStorage} from "./storage";
@@ -34,10 +36,14 @@ export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey:
       const body = (() => {
         if (document) {
           if (typeof value.path !== "string" || value.path.length > 1024 || !/\.md$/i.test(value.path)) return null;
-          const objectId = options.storage.objectIdAtPathInVersion({workspaceId: context.workspaceId, versionId: "main", path: value.path});
+          const authority = authorizeLinkShareAction({storage: options.storage, grantId: context.grantId, action: "live-edit"});
+          if (!authority.ok) return null;
+          const path = createAccountlessPathProjection(authority.effectiveSelector).resolvePath(value.path);
+          if (path === null) return null;
+          const objectId = options.storage.objectIdAtPathInVersion({workspaceId: context.workspaceId, versionId: "main", path});
           if (!objectId) return null;
           const current = options.storage.resolveLiveObjectHostBinding(context, objectId);
-          return current.kind === "current" && current.binding.currentPath === value.path ? {objectId} : null;
+          return current.kind === "current" && current.binding.currentPath === path ? {objectId} : null;
         }
         // Ticket minting has already enrolled this profile before a gateway can open.
         const principal = options.storage.getLinkPrincipalForGrantProfile(context.grantId, context.profileTokenHash);
