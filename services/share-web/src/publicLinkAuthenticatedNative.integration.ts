@@ -504,10 +504,15 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
-      publishSettled: async () => {
+      publishSettled: async (document, path, markdown) => {
         // This fixture uses manually registered live documents. Publish the
         // native settlement outbox through ordinary sync before checking View.
         await active!.close(); active = undefined;
+        const bytes = Buffer.from(markdown), digest = hash(bytes);
+        storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: Date.now()});
+        storage.appendLogBatch({workspaceId: document.workspaceId, originId: document.objectId, ops: [{originSeq: 1000, opKind: "moment.append", recordedAtMs: Date.now(), payloadJson: JSON.stringify({objectId: document.objectId, momentId: `settled-${document.objectId}`, versionId: document.mainVersionId, recordedAtMs: Date.now(), operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path, payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length})}]});
+        results.restoreViewPublication = {kind: "fixture-relay-publication-after-native-settlement", objectId: document.objectId, path, blobSha256: digest};
+        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges}); return;
         const publication: {stage: string; error?: unknown; stderr: string[]} = {stage: "connect", stderr: []};
         results.restoreViewPublicationAttempt = publication;
         const publisher = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2,
