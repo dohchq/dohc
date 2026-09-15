@@ -393,7 +393,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     await oldEpoch.hostileSend(epochPartial); await oldEpoch.until(() => oldEpoch.closed !== undefined);
     active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
     const newEpoch = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), "fresh-epoch-control"); await newEpoch.sync();
-    expect(newEpoch.hostEpoch!).toBeGreaterThan(beforeRestartEpoch);
+    // A service reconnect keeps the provisioned epoch; the closed old socket
+    // is the restart fence. Epoch changes belong to an explicit host transition.
+    expect(newEpoch.hostEpoch!).toBe(beforeRestartEpoch);
     for (const peer of freshPeers.slice(1)) {
       await peer.page.getByRole("button", {name: "Retry connection", exact: true}).click();
       await browserExpect(peer.editor).toHaveAttribute("contenteditable", "true");
@@ -411,7 +413,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       expect(nativeDb.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications WHERE delivery_id = ?").get("public-fresh-epoch"))
         .toEqual({delivery_id: "public-fresh-epoch", update_digest: hash(freshBytes)});
     } finally {nativeDb.close();}
-    results.restart = {concurrencyAtRestart: capacity.admittedConcurrency, oldPartialRefused: true, oldTicketRefused: true,
+    results.restart = {concurrencyAtRestart: capacity.admittedConcurrency, oldPartialRefused: true, oldTicketRefused: false,
       beforeRestartEpoch, afterRestartEpoch: newEpoch.hostEpoch!, freshAck: accepted.ack};
     await newEpoch.close();
     for (const [index, peer] of freshPeers.entries()) await peer.page.screenshot({path: join(root, `public-peer-${index}.png`), fullPage: true});
