@@ -511,11 +511,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         const bytes = readFileSync(join(workspace, path)), digest = hash(bytes);
         const originId = `settled-${document.objectId}`, recordedAtMs = Date.now();
         storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: recordedAtMs});
-        const published = storage.appendLogBatch({workspaceId: document.workspaceId, originId,
+        const published = await ownerRequest(`/sync/${document.workspaceId}/log`, {originId,
           ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs,
-            payloadJson: JSON.stringify({objectId: document.objectId, momentId: originId, versionId: document.mainVersionId,
+            payload: {objectId: document.objectId, momentId: originId, versionId: document.mainVersionId,
               recordedAtMs, operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path,
-              payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length})}]});
+              payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length}}]});
         expect(published.inserted).toBe(1);
         results.restoreViewPublication = {kind: "fixture-relay-publication-of-native-file", objectId: document.objectId,
           path, blobSha256: digest, byteLength: bytes.length, automaticReplicationProven: false};

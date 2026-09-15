@@ -93,7 +93,8 @@ export async function runPublicAutomaticView(options: Options) {
     const identity = h.storage.getWorkspaceBootstrap(workspaceId).identity;
     if (!identity) throw new Error("Ordinary owner bootstrap identity missing.");
     transport.relayUrl = options.relayUrl;
-    await options.replaceHost({version: 1, ...options.native, engineExecutable: options.executable, hostId: "service", instanceId: "public-view-instance",
+    const {hostId, instanceId} = h.host().coordinate;
+    await options.replaceHost({version: 1, ...options.native, engineExecutable: options.executable, hostId, instanceId,
       workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, ordinaryReplication: {
         relay: {baseUrl: "https://public-proof-relay.example.test", bearerToken: options.ownerToken},
         identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: admission.maxPagesPerPull}}],
