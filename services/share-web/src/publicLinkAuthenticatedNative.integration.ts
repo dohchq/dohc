@@ -497,6 +497,34 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+      publishSettled: async () => {
+        // This fixture uses manually registered live documents. Publish the
+        // native settlement outbox through ordinary sync before checking View.
+        await active!.close(); active = undefined;
+        const publisher = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2,
+          capabilities: ["core", "blobs"], connectTimeoutMs: routeLimits.upgradeTimeoutMs});
+        let id = 1;
+        try {
+          const opened = await publisher.sendRequest({id: id++, method: "workspace.open", params: {rootDir: workspace,
+            workspaceId: "workspace", captureMode: "none", relay: {baseUrl: relayUrl, bearerToken: ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: routeLimits.upgradeTimeoutMs});
+          const handle = (opened.result as {workspace: string}).workspace;
+          const rpc = async (method: string) => (await publisher.sendRequest({id: id++, workspace: handle, method,
+            params: {workspaceId: "workspace"}, deadlineMs: routeLimits.upgradeTimeoutMs})).result as Record<string, unknown>;
+          await rpc("sync.claim");
+          const pushes = [];
+          for (let page = 0; ; page++) {
+            expect(page).toBeLessThan(capacity.automaticView.maxPagesPerPull);
+            const pushed = await rpc("sync.push"); pushes.push(pushed);
+            expect(pushed.status).toBe("complete"); expect(pushed.refusals).toEqual([]);
+            expect(pushed.sharingDeclined).toEqual([]); expect(pushed.ownerAdmissionPending).toEqual([]);
+            if (pushed.hasMore === false) break;
+          }
+          results.restoreViewPublication = {kind: "explicit-native-ordinary-sync", pushes};
+        } finally {
+          publisher.close(); await publisher.waitForExit();
+          active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+        }
+      },
       listeners: () => frameChanges.captureCount(), allListeners: () => sharedChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
       interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
       register: async (id, checkpoint, markdown) => {
