@@ -513,14 +513,14 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         expect(previous).toBeDefined();
         const originSeq = storage.maxOriginSeq(document.workspaceId, originId) + 1;
         if (previous!.blobSha256 !== digest) {
-        storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: recordedAtMs});
-        const published = await ownerRequest(`/sync/${document.workspaceId}/log`, {originId,
-          ops: [{originSeq, opKind: "moment.append", recordedAtMs,
-            payload: {objectId: document.objectId, momentId: `${originId}-${originSeq}`, versionId: document.mainVersionId,
-              recordedAtMs, operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path,
-              payloadBeforePath: previous!.path, payloadBeforeBlobSha256: previous!.blobSha256,
-              payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length}}]});
-        expect(published.inserted).toBe(1);
+          storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: recordedAtMs});
+          const published = await ownerRequest(`/sync/${document.workspaceId}/log`, {originId,
+            ops: [{originSeq, opKind: "moment.append", recordedAtMs,
+              payload: {objectId: document.objectId, momentId: `${originId}-${originSeq}`, versionId: document.mainVersionId,
+                recordedAtMs, operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path,
+                payloadBeforePath: previous!.path, payloadBeforeBlobSha256: previous!.blobSha256,
+                payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length}}]});
+          expect(published.inserted).toBe(1);
         }
         expect(current()?.blobSha256).toBe(digest);
         results.restoreViewPublication = {kind: "fixture-relay-publication-of-native-file", objectId: document.objectId,

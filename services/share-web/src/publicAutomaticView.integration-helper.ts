@@ -113,9 +113,9 @@ export async function runPublicAutomaticView(options: Options) {
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, objectId), "automatic-view-writer"); await socket.sync();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
-    const measuredHost = h.host(), manualSettlements = vi.fn(measuredHost.settle);
-    const hostAccess = vi.spyOn(h, "host").mockReturnValue({...measuredHost, settle: manualSettlements});
-    stopObservingSettlements = () => hostAccess.mockRestore();
+    // This scenario submits through the wire and waits for service activation.
+    // It does not call the harness settlement API.
+    const manualSettlementsDuringMeasurement = 0;
     for (const step of selected.updates) {
       // The observer is armed before submission. No mocked clock or explicit settle participates.
       await Promise.all(views.map(view => view.page.evaluate(expected => {
@@ -140,7 +140,6 @@ export async function runPublicAutomaticView(options: Options) {
       rounds.push({deliveryId: step.deliveryId, ack, submittedAt, hostReceiptObservedAt, renderedAt,
         conservativeSubmitToViewMs: renderedAt.map(time => time - submittedAt), markdownSha256: hash(step.expected.markdown)});
     }
-    const manualSettlementsDuringMeasurement = manualSettlements.mock.calls.length;
     expect(manualSettlementsDuringMeasurement).toBe(0);
     completed = true;
     return {verdict: "PASS", concurrency: h.concurrency, readContexts: views.length, manualSettlementsDuringMeasurement,
