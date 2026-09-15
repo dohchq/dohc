@@ -57,13 +57,13 @@ export function createNamedDesktopLive(options: {
           const authority = authorizeNamedLiveEditShareGrant({ storage, actorUserId: actor.userId, grantId: grant.grantId });
           if (!authority.ok) continue;
           const context = { kind: "named" as const, userId: actor.userId, workspaceId: share.workspaceId, shareId, grantId: grant.grantId };
-          const ticket = await options.tickets.mint({ objectId }, context, signal);
-          signal.throwIfAborted(); check();
-          if (!ticket) continue;
-          if (storage.objectIdAtPathInVersion({workspaceId: share.workspaceId, versionId: "main", path: path.normalized}) !== objectId) return refuse();
           const session = sessions.create(context);
           if (!session) return refuse();
           created = session.discriminator;
+          const ticket = await options.tickets.mint({ objectId }, context, signal);
+          signal.throwIfAborted(); check();
+          if (!ticket) { sessions.remove(created); created = undefined; continue; }
+          if (storage.objectIdAtPathInVersion({workspaceId: share.workspaceId, versionId: "main", path: path.normalized}) !== objectId) return refuse();
           const body = JSON.stringify({ ...context, objectId, path: path.normalized, ...session, ticket, editorLimits });
           if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
           signal.throwIfAborted(); check();

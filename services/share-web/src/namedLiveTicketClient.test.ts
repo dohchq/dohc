@@ -1,9 +1,11 @@
 import {getCookies} from "better-auth/cookies";
-import {expect, it, vi} from "vitest";
+import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 const origin = "https://share.example.test", cookieName = getCookies({baseURL: origin}).sessionToken.name;
 const limits = {maxPendingRequests: 1, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 1000};
 const token = "ab".repeat(32), input = {discriminator: "abcdefghijkl", objectId: "object"};
+beforeEach(() => {vi.spyOn(Date, "now").mockReturnValue(1000);});
+afterEach(() => {vi.restoreAllMocks();});
 function request(body: unknown = input, cookie = `${cookieName}=account-secret; link-secret=not-forwarded`) {
   return new Request(`${origin}/api/live/named-ticket`, {method: "POST", body: JSON.stringify(body),
     headers: {host: "share.example.test", origin, cookie, "content-type": "application/json"}});
@@ -22,6 +24,11 @@ it("requests a ticket with the account cookie and returns only the parsed token"
 });
 it.each([{...input, userId: "forged"}, {...input, discriminator: "invalid"}, {...input, objectId: ""}])("refuses malformed ticket input", async value => {
   const f = fixture(); expect((await f.mint(request(value))).status).toBe(404); expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it.each([999, 1000])("refuses an already expired relay ticket (%s)", async expiresAtMs => {
+  const f = fixture();
+  f.fetchRelay.mockResolvedValueOnce(Response.json({token, expiresAtMs}));
+  expect((await f.mint(request())).status).toBe(404);
 });
 it("refuses link-only authentication and extra upstream authority data", async () => {
   const f = fixture(); expect((await f.mint(request(input, "link=only"))).status).toBe(404); expect(f.fetchRelay).not.toHaveBeenCalled();

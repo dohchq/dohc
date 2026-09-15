@@ -213,7 +213,13 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});
     await peer!.sendRequest({id: 21,method: "liveApplication.readOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
-    await expect(peer!.sendRequest({id: 22,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
+    await peer!.sendRequest({id: 22,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
+    const beforeFence = owner.finishHandoff.mock.calls.length;
+    singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
+    await peer!.sendRequest({id: 23,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}});
+    expect(owner.finishHandoff).toHaveBeenCalledTimes(beforeFence + 1);
+    expect(owner.finishHandoff).toHaveBeenLastCalledWith(false);
+    await expect(peer!.sendRequest({id: 24,method: "workspace.close",workspace: "ws-ordinary",params: {}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.map(call => call[0].method)).not.toContain("workspace.close");
     expect(singleton.close).not.toHaveBeenCalled();
   } finally { await transport.close(); peer?.close(); }

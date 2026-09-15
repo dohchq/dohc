@@ -15,7 +15,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(),"dohc-owner-host-config-")); roots.push(root);
   const path = join(root,"config.json"), credentialPath = join(root,"credential.json");
   const credential = {version:1,hostId:"host",instanceId:"instance",hostEpoch:1,secret:"A".repeat(43)};
-  const config = {version:1,nativeConfigPath:join(root,"native.json"),credentialPath,url:"wss://owner.test",workspaceIds:["workspace"],reconnectDelayMs:1000,
+  const config = {version:1,nativeConfigPath:join(root,"native.json"),credentialPath,url:"wss://owner.test/api/device-control",workspaceIds:["workspace"],reconnectDelayMs:1000,
     control:{maxConnections:2,maxHeaderBytes:4096,maxCredentialBytes:1024,maxPayloadBytes:4096,maxPendingBytes:2_000_000,
       maxFragments:16,maxBufferedChunks:16,handshakeTimeoutMs:1000,heartbeatIntervalMs:1000,heartbeatTimeoutMs:1000,closeTimeoutMs:1000},
     transport:{aggregateBytes:200_000_000,maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,maxFrameBytes:1_048_576,
@@ -24,6 +24,12 @@ function fixture() {
   const write = () => writeFileSync(path,JSON.stringify(config)); write();
   return {path,credentialPath,credential,config,write};
 }
+
+it.each(["invalid", "https://owner.test/api/device-control", "wss://owner.test/", "wss://user:secret@owner.test/api/device-control",
+  "wss://owner.test/api/device-control?secret=x", "wss://owner.test/api/device-control#fragment"])("rejects invalid owner endpoint %s before connecting", url => {
+  const f = fixture(); f.config.url = url; f.write();
+  expect(() => readDesktopOwnerHostConfig(f.path)).toThrow("Invalid private owner host URL");
+});
 
 it.each(["reconnectDelayMs","requestDeadlineMs"] as const)("rejects %s values that overflow a Node timer",field => {
   const f = fixture();

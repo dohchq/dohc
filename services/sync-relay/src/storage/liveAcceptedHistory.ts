@@ -26,6 +26,13 @@ const metadataColumns = "journal_cursor,relay_database_namespace,workspace_id,ma
 // Actual stored string lengths, independent of the cached accepted_metadata_bytes.
 const metadataLengths = ["relay_database_namespace", "workspace_id", "main_version_id", "object_id", "lineage_claim_id", "current_path", "selector_paths_json", "delivery_id", "update_digest", "principal_kind", "principal_id", "grant_id", "accepted_evidence_digest", "restore_operation_id", "validation_checkpoint_sha256"]
   .map(column => `COALESCE(length(CAST(${column} AS BLOB)),0)`).join("+");
+const provenanceLengths = "length(CAST(workspace_id AS BLOB))+length(CAST(main_version_id AS BLOB))+length(CAST(object_id AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+8*4";
+function chargeStoredMetadata(storage: StorageContext, where: string, params: unknown[], budget: RestoreHistoryBudget) {
+  const metadata = storage.db.prepare(`SELECT COALESCE(SUM(${metadataLengths}+8*7),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${where}`).get(...params)!;
+  const provenance = storage.db.prepare(`SELECT COALESCE(SUM(${provenanceLengths}),0) AS bytes FROM ${LIVE_JOURNAL_PROVENANCE}
+    WHERE journal_cursor IN (SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${where})`).get(...params)!;
+  budget.chargeBytes(authorityInteger(metadata.bytes) + authorityInteger(provenance.bytes));
+}
 function boundedMetadata(storage: StorageContext, document: LiveDocumentKey, cursor: number, budget: RestoreHistoryBudget) {
   const params = documentParams(document);
   const header = storage.db.prepare(`SELECT ${metadataLengths}+8*7 AS bytes FROM ${LIVE_JOURNAL_TABLE}
@@ -106,9 +113,10 @@ function captureAcceptedHistory(storage: StorageContext, input: {
     WHERE ${documentWhere} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT 4095`).all(...params, floor, through);
   require(headers.length <= 4094);
   budget.chargeEvents(headers.length);
-  if (header) budget.chargeBytes(authorityInteger(header.checkpoint_bytes, 1) + authorityInteger(header.update_bytes, 1) + authorityInteger(header.accepted_metadata_bytes, 1));
+  if (header) budget.chargeBytes(authorityInteger(header.checkpoint_bytes, 1) + authorityInteger(header.update_bytes, 1));
   else budget.chargeBytes(input.baseline.byteLength);
-  for (const row of headers) budget.chargeBytes(authorityInteger(row.update_bytes, 1) + authorityInteger(row.accepted_metadata_bytes, 1));
+  for (const row of headers) budget.chargeBytes(authorityInteger(row.update_bytes, 1));
+  chargeStoredMetadata(storage, `${documentWhere} AND journal_cursor>=? AND journal_cursor<=?`, [...params, floor, through], budget);
   let checkpoint = {cursor: 0, bytes: header ? input.baseline : new Uint8Array(input.baseline), digest: input.baselineDigest};
   let c: NativeRestoreHistoryProof["checkpoint"] = {eventCount: 0, terminal: null, binding: structuredClone(input.originBinding),
     stateDigest: input.baselineDigest, evidenceDigest: initialAcceptedHistoryDigest(namespace, document)};
@@ -175,7 +183,8 @@ function capturedHistoryDelivery(storage: StorageContext, input: {
   const header = storage.db.prepare(`SELECT length(update_bytes) AS bytes,COALESCE(length(validation_checkpoint_bytes),0) AS checkpoint_bytes,
     accepted_metadata_bytes FROM ${LIVE_JOURNAL_TABLE} WHERE delivery_id=? AND ${documentWhere}`).get(input.deliveryId,...documentParams(input.document));
   if (!header) return null;
-  budget.chargeBytes(authorityInteger(header.bytes, 1) + authorityInteger(header.checkpoint_bytes) + authorityInteger(header.accepted_metadata_bytes, 1));
+  budget.chargeBytes(authorityInteger(header.bytes, 1) + authorityInteger(header.checkpoint_bytes));
+  chargeStoredMetadata(storage, `delivery_id=? AND ${documentWhere}`, [input.deliveryId, ...documentParams(input.document)], budget);
   const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE delivery_id=? AND ${documentWhere}`).get(input.deliveryId,...documentParams(input.document))!;
   const row = decodeJournalRow(storage.db, raw); verifyContent(row); verifyJournalHistoryRow(storage.db, row);
   const {binding, receipt} = row.admitted.metadata.accepted;

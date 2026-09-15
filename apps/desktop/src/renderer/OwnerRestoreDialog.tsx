@@ -65,6 +65,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
   const request = useRequestSequence([workspaceId, path]), running = useRef(false), operation = useRef<OwnerRestoreStatus | null>(null);
+  const submitted = useRef<{operationId: string; proposalDigest: string} | null>(null);
   const current = (token: number) => request.isCurrent(token);
   async function perform(work: (token: number) => Promise<void>) {
     if (running.current) return;
@@ -95,7 +96,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; submitted.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
     void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -104,25 +105,33 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: operation.current!.operationId});
     if (!current(token)) return;
     operation.current = saved;
-    if (saved.proposalDigest) {await confirm(token, saved.proposalDigest); return;}
-    const prepared = await bridge().ownerRestore({workspaceId, action: "prepare", operationId: saved.operationId});
-    if (!current(token)) return;
-    operation.current = prepared.status;
-    if (prepared.result.kind !== "prepared") {setState({kind: "pending", message: "The restore is waiting for the host. Retry when it is available."}); return;}
+    if (saved.proposalDigest && submitted.current?.operationId === saved.operationId && submitted.current.proposalDigest === saved.proposalDigest) {
+      await confirm(token, saved.proposalDigest); return;
+    }
+    let proposalDigest = saved.proposalDigest;
+    if (!proposalDigest) {
+      const prepared = await bridge().ownerRestore({workspaceId, action: "prepare", operationId: saved.operationId});
+      if (!current(token)) return;
+      operation.current = prepared.status;
+      if (prepared.result.kind !== "prepared") {setState({kind: "pending", message: "The restore is waiting for the host. Retry when it is available."}); return;}
+      proposalDigest = prepared.result.proposalDigest;
+    }
     const checked = await bridge().ownerRestore({workspaceId, action: "review", operationId: saved.operationId});
     if (!current(token)) return;
     operation.current = checked.status;
     if (!checked.result || "kind" in checked.result) {setState({kind: "pending", message: "dohc could not prepare the full change review. Retry to review it again."}); return;}
-    if (checked.result.operationId !== saved.operationId || checked.result.proposalDigest !== prepared.result.proposalDigest) throw Error("The restore review changed. Retry to review it again.");
+    if (checked.result.operationId !== saved.operationId || checked.result.proposalDigest !== proposalDigest) throw Error("The restore review changed. Retry to review it again.");
     setState({kind: "review", review: checked.result});
   }
   async function confirm(token: number, proposalDigest: string) {
     const saved = operation.current!, release = await onBeforeRestore();
     try {
       if (!current(token)) return;
+      submitted.current = {operationId: saved.operationId, proposalDigest};
       const result = await bridge().ownerRestore({workspaceId, action: "confirm", operationId: saved.operationId, proposalDigest});
       if (!current(token)) return;
       operation.current = result.status;
+      if (result.result.kind === "review-required") submitted.current = null;
       if (result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest) {
         setState({kind: "complete"}); onRestored();
       } else setState({kind: "pending", message: result.result.kind === "review-required"

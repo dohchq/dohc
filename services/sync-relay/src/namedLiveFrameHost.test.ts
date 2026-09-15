@@ -94,6 +94,12 @@ async function setup(maxListeners = 4) {
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
+it.each(["maxSyncOutputBytes", "maxAppliedUpdateBytes"])("rejects %s below the native output minimum", async field => {
+  const f = await setup();
+  expect(() => captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    validate: f.validate, native: f.native, bounds: {...f.bounds, [field]: 1}})).toThrow("Invalid named native frame bound");
+  expect(f.peer.requests).toHaveLength(0);
+});
 it("uses the native atomic cut, excluding the diagnostic local head, and leaves the shared client running", async () => {
   const f = await setup();
   const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);

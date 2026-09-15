@@ -446,6 +446,87 @@ fn first_accepted_operation_over_budget_returns_configuration_error() {
 }
 
 #[test]
+fn kept_current_resolution_checks_each_heads_own_content() {
+    use crate::conflict_resolve_v1::*;
+    use dohc_engine_storage::hex_sha256;
+    let (_dir, store, _observed, checkpoint) = fixture();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let text = doc.project(ContentKind::Richdoc).unwrap().content;
+    let current = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "owner".into(),
+        latest_moment_id: "current".into(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: hex_sha256(text.as_bytes()),
+        byte_length: text.len() as i64,
+        updated_at_ms: 1,
+    });
+    let incoming = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "incoming-object".into(),
+        latest_moment_id: "incoming".into(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: hex_sha256(b"other device"),
+        byte_length: 12,
+        updated_at_ms: 2,
+    });
+    let payload = ConflictResolveV1 {
+        workspace_id: "ws".into(),
+        conflict_id: "conflict".into(),
+        chosen_from: ResolveChoiceV1::Current,
+        resolution: ResolutionV1::KeptCurrent,
+        target_version_id: "main".into(),
+        source_version_id: "peer".into(),
+        paths: vec!["owner.md".into()],
+        current: current.clone(),
+        incoming,
+        result: current,
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 3,
+            metadata: MetadataV1 {
+                origin: "sync".into(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: Some(0),
+            result_object_created_at_ms: Some(0),
+        },
+        effects: vec![],
+        lineage_transition: None,
+    };
+    let built = build_conflict_resolve_v1(payload.clone()).unwrap();
+    let mut op = envelope("local", 1, "conflict.resolve", built.value);
+    op.recorded_at_ms = 3;
+    assert_eq!(
+        owner_publication_prefix(&store, "ws", &[op], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+
+    let mut private = payload;
+    if let HeadV1::Present(head) = &mut private.current {
+        head.blob_sha256 = hex_sha256(b"private owner work");
+    }
+    private.result = private.current.clone();
+    let mut op = envelope(
+        "local",
+        2,
+        "conflict.resolve",
+        build_conflict_resolve_v1(private).unwrap().value,
+    );
+    op.recorded_at_ms = 3;
+    assert_eq!(
+        owner_publication_prefix(&store, "ws", &[op], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        0
+    );
+}
+
+#[test]
 fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() {
     use dohc_engine_collab::owner_outbox::publication::contains_observed_update_in;
     let (_dir, mut store, observed, checkpoint) = fixture();

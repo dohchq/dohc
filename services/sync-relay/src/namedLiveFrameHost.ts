@@ -96,6 +96,7 @@ function captureLiveFrameHost(options: {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid named native frame bound.");
   }
   if (native.deadlineMs > 0xffff_ffff) throw new TypeError("Invalid live host capture.");
+  if (bounds.maxSyncOutputBytes < 2 || bounds.maxAppliedUpdateBytes < 2) throw new TypeError("Invalid named native frame bound.");
   for (const field of ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "restoreFenceGeneration"] as const) {
     if (native.binding[field] !== binding[field]) throw new Error("Native registration binding changed.");
   }

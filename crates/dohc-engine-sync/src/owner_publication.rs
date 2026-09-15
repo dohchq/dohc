@@ -157,26 +157,29 @@ fn references(op: &ReplicationEnvelope) -> Result<Vec<Content>, SyncError> {
                 (&p.incoming, &p.source_version_id),
             ] {
                 if let Some(head) = head.present() {
-                    // Resolution carries predecessor/shadow state as well as its
-                    // result. Require every carrier digest against this owner.
-                    for digest in checked
-                        .text_blob_sha256s
-                        .iter()
-                        .chain(&checked.binary_blob_sha256s)
-                    {
+                    result.push(content(
+                        version,
+                        &head.object_id,
+                        &p.paths[head.path_ref],
+                        &head.blob_sha256,
+                        PublicationContentKind::Projection,
+                    ));
+                }
+            }
+            if let Some(successor) = p
+                .lineage_transition
+                .as_ref()
+                .and_then(|transition| transition.successor.as_ref())
+            {
+                if let Some(result_head) = p.result.present() {
+                    for digest in [
+                        &successor.update_blob_sha256,
+                        &successor.state_vector_blob_sha256,
+                    ] {
                         result.push(content(
-                            version,
-                            &head.object_id,
-                            &p.paths[head.path_ref],
-                            digest,
-                            PublicationContentKind::Projection,
-                        ));
-                    }
-                    for digest in &checked.ydoc_blob_sha256s {
-                        result.push(content(
-                            version,
-                            &head.object_id,
-                            &p.paths[head.path_ref],
+                            &p.target_version_id,
+                            &result_head.object_id,
+                            &p.paths[result_head.path_ref],
                             digest,
                             PublicationContentKind::Ydoc,
                         ));

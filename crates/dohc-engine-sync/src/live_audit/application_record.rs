@@ -263,6 +263,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         map.next_value_seed(RangesSeed {
             canonical: self.canonical,
             chain: &mut chain,
+            max_ranges: self.header.update_byte_length.saturating_sub(2) / 5,
         })?;
         end_fields(&mut map)?;
         self.canonical.update(b"]}");
@@ -279,6 +280,7 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
 struct RangesSeed<'a> {
     canonical: &'a mut Sha256,
     chain: &'a mut Sha256,
+    max_ranges: usize,
 }
 impl<'de> DeserializeSeed<'de> for RangesSeed<'_> {
     type Value = ();
@@ -293,8 +295,17 @@ impl<'de> Visitor<'de> for RangesSeed<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
         let mut previous: Option<LiveUpdateStructRange> = None;
+        let mut count = 0usize;
         let mut bytes = Vec::with_capacity(128);
         while let Some(range) = sequence.next_element::<LiveUpdateStructRange>()? {
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| serde::de::Error::custom("live audit range count overflow"))?;
+            if count > self.max_ranges {
+                return Err(serde::de::Error::custom(
+                    "live audit firstSeen range count exceeds update bound",
+                ));
+            }
             range
                 .validate_after(previous.as_ref())
                 .map_err(serde::de::Error::custom)?;
@@ -668,6 +679,33 @@ mod tests {
     use dohc_engine_collab::live_update_application::{
         LiveUpdateReceipt, ServerDerivedLiveUpdateAuthority,
     };
+
+    #[test]
+    fn first_seen_count_cannot_exceed_the_update_struct_bound() {
+        let ranges = r#"[{"clientId":1,"startClock":0,"endClock":1},{"clientId":2,"startClock":0,"endClock":1}]"#;
+        for (max_ranges, expected) in [(1, false), (2, true)] {
+            let mut canonical = Sha256::new();
+            let mut chain = Sha256::new();
+            let mut decoder = serde_json::Deserializer::from_str(ranges);
+            let result = RangesSeed {
+                canonical: &mut canonical,
+                chain: &mut chain,
+                max_ranges,
+            }
+            .deserialize(&mut decoder);
+            assert_eq!(result.is_ok(), expected);
+        }
+        let mut canonical = Sha256::new();
+        let mut chain = Sha256::new();
+        let mut decoder = serde_json::Deserializer::from_str("[]");
+        RangesSeed {
+            canonical: &mut canonical,
+            chain: &mut chain,
+            max_ranges: 0,
+        }
+        .deserialize(&mut decoder)
+        .unwrap();
+    }
 
     #[test]
     fn accepted_header_does_not_require_the_metadata_map_to_end() {

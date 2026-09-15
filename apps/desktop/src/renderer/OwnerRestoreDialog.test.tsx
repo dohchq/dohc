@@ -132,6 +132,32 @@ it("reopens a stopped operation for review without first admitting content", asy
   fireEvent.click(screen.getByRole("button", {name: "Retry"})); await screen.findByRole("button", {name: "Restore file"});
   expect(f.call.mock.calls.some(([input]) => input.action === "begin" || input.action === "confirm")).toBe(false);
 });
+it.each([false, true])("reviews a saved proposal before confirming after reopen (review fails first: %s)", async failFirst => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  let reviews = 0;
+  f.call.mockImplementation(async input => {
+    if (input.action === "options") return {...f.options,
+      pendingOperation: {operationId: "restore", phase: "native-fenced", proposalDigest}};
+    if (input.action === "status") return {...f.status(), phase: "native-fenced", proposalDigest};
+    if (input.action === "review" && ++reviews === 1 && failFirst) throw Error("Review unavailable.");
+    return original(input);
+  });
+  render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByText("Access stopped. Continue reviewing or finishing this restore.");
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  if (failFirst) {
+    await screen.findByText("Review unavailable.");
+    expect(f.call.mock.calls.some(([input]) => input.action === "confirm")).toBe(false);
+    fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  }
+  await screen.findByRole("button", {name: "Restore file"});
+  expect(screen.getByRole("textbox", {name: "File after restore"})).toHaveProperty("value", "Earlier text");
+  expect(f.call.mock.calls.some(([input]) => input.action === "confirm" || input.action === "prepare")).toBe(false);
+  expect(f.props.onBeforeRestore).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name: "Restore file"}));
+  await screen.findByText("File restored");
+  expect(f.call.mock.calls.filter(([input]) => input.action === "confirm")).toHaveLength(1);
+});
 it("releases the local restore pause when scope changes while it is acquiring", async () => {
   const f = fixture(), pause = deferred<typeof f.release>();
   f.props.onBeforeRestore.mockImplementation(() => pause.promise);
