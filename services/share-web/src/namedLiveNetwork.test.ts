@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
 import { getCookies } from "better-auth/cookies";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
@@ -31,7 +31,11 @@ const transport = { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectio
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
   maxDeleteClientGroupVisits: 10000, maxDeleteIntervalVisits: 10000, maxIndexOperations: 100000 };
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+beforeEach(() => {vi.spyOn(Date, "now").mockReturnValue(1000);});
+afterEach(async () => {
+  try { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }
+  finally { vi.restoreAllMocks(); }
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
