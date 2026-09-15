@@ -119,10 +119,19 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(capacity.maxChangeListeners), validate = createLiveMarkdownJournalValidator(validationPolicy);
   let released!: () => void;
   const noListeners = new Promise<void>(resolve => { released = resolve; });
+  let captureCount = 0;
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
     const remove = sharedChanges.subscribe(...args);
-    return () => { remove(); if (sharedChanges.listenerCount() === 0) released(); };
-  } };
+    // Each capture has one standing listener plus temporary document wake listeners.
+    const standing = args[1] === undefined;
+    if (standing) captureCount++;
+    let removed = false;
+    return () => {
+      if (removed) return; removed = true;
+      remove(); if (standing) captureCount--;
+      if (sharedChanges.listenerCount() === 0) released();
+    };
+  }, listenerCount: () => captureCount };
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
   const closes: (() => Promise<void>)[] = [], contexts: BrowserContext[] = [], upgrades: Promise<void>[] = [];
   let browser: Browser | undefined;
