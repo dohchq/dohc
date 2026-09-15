@@ -59,6 +59,7 @@ interface PublicProofAdmission {
   liveTickets: {retainedTicketsPerPrincipalGrant: number; expiredTicketCleanupBatchSize: number};
   maxRegistrations: number;
   maxChangeListeners: number;
+  ordinaryMaxRequestBytes: number;
   native: {settlement: unknown; restore: unknown; sync: unknown; ingress: unknown; client: unknown};
 }
 const admissionPath = process.env.DOHC_PUBLIC_PROOF_ADMISSION;
@@ -70,6 +71,7 @@ const capacity = JSON.parse(admissionBytes.toString()) as PublicProofAdmission;
 if (capacity.publicEditGateGranted !== true || !Number.isSafeInteger(capacity.admittedConcurrency) || capacity.admittedConcurrency < 2) {
   throw new Error("Public Edit release decision and at least two admitted sessions are required.");
 }
+if (!Number.isSafeInteger(capacity.ordinaryMaxRequestBytes) || capacity.ordinaryMaxRequestBytes < 1) throw new Error("Explicit ordinary HTTP request bound required.");
 const publicEditRelease = {version: 1} as const;
 const frames = capacity.frames, routeLimits = capacity.route, validationPolicy = capacity.validation;
 const workload = readPublicWorkload(capacity.workload, capacity.admittedConcurrency);
@@ -173,7 +175,8 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       const path = new URL(request.url).pathname;
       return path === "/sync/live/named-tickets" ? namedRoutes.handle(request) : path === "/sync/live/link-tickets" ? routes.handle(request)
         : ["/sync/live/link-session", "/sync/live/link-document"].includes(path) ? linkHttp(request) : relayApp(request);
-    }, maxBodyBytes: () => capacity.requests.maxRequestBytes, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
+    }, maxBodyBytes: url => url.pathname.startsWith("/sync/live/") ? capacity.requests.maxRequestBytes : capacity.ordinaryMaxRequestBytes,
+      oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`, hosts = new Set([new URL(relayUrl).host]);
