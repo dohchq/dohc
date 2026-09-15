@@ -25,7 +25,7 @@ export interface PublicTransitionHarness {
   assertTicketCapacity(grantId: string): unknown;
   host(): Awaited<ReturnType<typeof startServiceLiveHost>>;
   restart(): Promise<void>;
-  publishSettled(document: PublicTransitionFixture["document"], path: string, markdown: string): Promise<void>;
+  publishSettled(document: PublicTransitionFixture["document"], path: string): Promise<void>;
   listeners(): number;
   allListeners(): number;
   ownerRequest(path: string, body?: unknown): Promise<any>;
@@ -192,7 +192,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         const settled = await h.host().settle(fixture.document); expect(settled.materialized).toBe(true);
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
         if (restoredViewer && continuationEvidence) {
-          await h.publishSettled(fixture.document, fixture.path, expected.markdown);
+          await h.publishSettled(fixture.document, fixture.path);
           await browserExpect.poll(async () => hash(Buffer.from(await restoredViewer!.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(expected.viewText));
           Object.assign(continuationEvidence, {viewWitnessVerified: true, verdict: "PASS"});
           writeFileSync(join(h.root, "restore-continuation", "result.json"), JSON.stringify(continuationEvidence, null, 2) + "\n", {flag: "wx"});

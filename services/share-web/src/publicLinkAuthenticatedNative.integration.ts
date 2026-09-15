@@ -504,48 +504,21 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
-      publishSettled: async (document, path, markdown) => {
-        // This fixture uses manually registered live documents. Publish the
-        // native settlement outbox through ordinary sync before checking View.
-        await active!.close(); active = undefined;
-        const bytes = Buffer.from(markdown), digest = hash(bytes);
-        storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: Date.now()});
-        storage.appendLogBatch({workspaceId: document.workspaceId, originId: document.objectId, ops: [{originSeq: 1000, opKind: "moment.append", recordedAtMs: Date.now(), payloadJson: JSON.stringify({objectId: document.objectId, momentId: `settled-${document.objectId}`, versionId: document.mainVersionId, recordedAtMs: Date.now(), operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path, payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length})}]});
-        results.restoreViewPublication = {kind: "fixture-relay-publication-after-native-settlement", objectId: document.objectId, path, blobSha256: digest};
-        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges}); return;
-        const publication: {stage: string; error?: unknown; stderr: string[]} = {stage: "connect", stderr: []};
-        results.restoreViewPublicationAttempt = publication;
-        const publisher = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2,
-          capabilities: ["core", "blobs"], connectTimeoutMs: routeLimits.upgradeTimeoutMs,
-          onStderr: text => publication.stderr.push(text)});
-        let id = 1;
-        try {
-          publication.stage = "workspace.open";
-          const opened = await publisher.sendRequest({id: id++, method: "workspace.open", params: {rootDir: workspace,
-            workspaceId: "workspace", captureMode: "none", relay: {baseUrl: relayUrl, bearerToken: ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: routeLimits.upgradeTimeoutMs});
-          const handle = (opened.result as {workspace: string}).workspace;
-          const rpc = async (method: string) => {
-            publication.stage = method;
-            return (await publisher.sendRequest({id: id++, workspace: handle, method,
-              params: {workspaceId: "workspace"}, deadlineMs: routeLimits.upgradeTimeoutMs})).result as Record<string, unknown>;
-          };
-          await rpc("sync.claim");
-          const pushes = [];
-          for (let page = 0; ; page++) {
-            expect(page).toBeLessThan(capacity.automaticView.maxPagesPerPull);
-            const pushed = await rpc("sync.push"); pushes.push(pushed);
-            expect(pushed.status).toBe("complete"); expect(pushed.refusals).toEqual([]);
-            expect(pushed.sharingDeclined).toEqual([]); expect(pushed.ownerAdmissionPending).toEqual([]);
-            if (pushed.hasMore === false) break;
-          }
-          results.restoreViewPublication = {kind: "explicit-native-ordinary-sync", pushes};
-        } catch (error) {
-          publication.error = {message: String(error), ...(error && typeof error === "object" ? error : {})};
-          throw error;
-        } finally {
-          publisher.close(); await publisher.waitForExit();
-          active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
-        }
+      publishSettled: async (document, path) => {
+        // These documents are registered directly, without an ordinary owner
+        // history. Publish the actual native file through the fixture relay;
+        // the separate automatic-View case tests real ordinary replication.
+        const bytes = readFileSync(join(workspace, path)), digest = hash(bytes);
+        const originId = `settled-${document.objectId}`, recordedAtMs = Date.now();
+        storage.putBlob({workspaceId: document.workspaceId, sha256: digest, content: bytes, createdAtMs: recordedAtMs});
+        const published = storage.appendLogBatch({workspaceId: document.workspaceId, originId,
+          ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs,
+            payloadJson: JSON.stringify({objectId: document.objectId, momentId: originId, versionId: document.mainVersionId,
+              recordedAtMs, operation: "write", metadata: {origin: "sync"}, beforePresent: "present", path,
+              payloadAfterPath: path, payloadAfterBlobSha256: digest, payloadAfterContentKind: "text", payloadAfterByteLength: bytes.length})}]});
+        expect(published.inserted).toBe(1);
+        results.restoreViewPublication = {kind: "fixture-relay-publication-of-native-file", objectId: document.objectId,
+          path, blobSha256: digest, byteLength: bytes.length, automaticReplicationProven: false};
       },
       listeners: () => frameChanges.captureCount(), allListeners: () => sharedChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
       interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
