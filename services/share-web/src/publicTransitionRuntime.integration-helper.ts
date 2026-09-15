@@ -191,6 +191,9 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
         const settled = await h.host().settle(fixture.document); expect(settled.materialized).toBe(true);
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
         if (restoredViewer && continuationEvidence) {
+          // The accountless View page is a settled snapshot. Reload it after
+          // settlement before asserting the new projection.
+          await restoredViewer.reload();
           await browserExpect.poll(async () => hash(Buffer.from(await restoredViewer!.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(expected.viewText));
           Object.assign(continuationEvidence, {viewWitnessVerified: true, verdict: "PASS"});
           writeFileSync(join(h.root, "restore-continuation", "result.json"), JSON.stringify(continuationEvidence, null, 2) + "\n", {flag: "wx"});
