@@ -2519,7 +2519,7 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        if kind == SettlementKind::CollectionAdoption {
+        if kind == SettlementKind::CollectionAdoption || live_audit.is_some() {
             journal_moment_outbound_in_tx(
                 tx,
                 &key.workspace_id,

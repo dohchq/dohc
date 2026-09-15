@@ -879,6 +879,27 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     ));
     let ops = dohc_engine_sync::list_replication_ops(&source, "workspace", "owner-origin", -1, 500)
         .unwrap();
+    for settlement in [&second, &final_settlement] {
+        let moments: Vec<_> = ops
+            .iter()
+            .filter(|op| {
+                op.op_kind == "moment.append" && op.payload["momentId"] == settlement.moment_id
+            })
+            .collect();
+        assert_eq!(
+            moments.len(),
+            1,
+            "settled files must reach share viewers once"
+        );
+        assert_eq!(
+            moments[0].payload["payloadAfterBlobSha256"],
+            settlement.markdown_digest
+        );
+        assert_eq!(
+            moments[0].payload["payloadAfterPath"],
+            f.binding.current_path
+        );
+    }
     let settlements: Vec<_> = ops
         .iter()
         .filter(|op| op.op_kind == "live.audit.settlement")
