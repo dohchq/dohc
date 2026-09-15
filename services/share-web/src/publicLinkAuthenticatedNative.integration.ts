@@ -501,15 +501,22 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         // This fixture uses manually registered live documents. Publish the
         // native settlement outbox through ordinary sync before checking View.
         await active!.close(); active = undefined;
+        const publication: {stage: string; error?: unknown; stderr: string[]} = {stage: "connect", stderr: []};
+        results.restoreViewPublicationAttempt = publication;
         const publisher = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2,
-          capabilities: ["core", "blobs"], connectTimeoutMs: routeLimits.upgradeTimeoutMs});
+          capabilities: ["core", "blobs"], connectTimeoutMs: routeLimits.upgradeTimeoutMs,
+          onStderr: text => publication.stderr.push(text)});
         let id = 1;
         try {
+          publication.stage = "workspace.open";
           const opened = await publisher.sendRequest({id: id++, method: "workspace.open", params: {rootDir: workspace,
             workspaceId: "workspace", captureMode: "none", relay: {baseUrl: relayUrl, bearerToken: ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: routeLimits.upgradeTimeoutMs});
           const handle = (opened.result as {workspace: string}).workspace;
-          const rpc = async (method: string) => (await publisher.sendRequest({id: id++, workspace: handle, method,
-            params: {workspaceId: "workspace"}, deadlineMs: routeLimits.upgradeTimeoutMs})).result as Record<string, unknown>;
+          const rpc = async (method: string) => {
+            publication.stage = method;
+            return (await publisher.sendRequest({id: id++, workspace: handle, method,
+              params: {workspaceId: "workspace"}, deadlineMs: routeLimits.upgradeTimeoutMs})).result as Record<string, unknown>;
+          };
           await rpc("sync.claim");
           const pushes = [];
           for (let page = 0; ; page++) {
@@ -520,6 +527,9 @@ it("exercises public Edit through owner creation, exchange and native applicatio
             if (pushed.hasMore === false) break;
           }
           results.restoreViewPublication = {kind: "explicit-native-ordinary-sync", pushes};
+        } catch (error) {
+          publication.error = {message: String(error), ...(error && typeof error === "object" ? error : {})};
+          throw error;
         } finally {
           publisher.close(); await publisher.waitForExit();
           active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
