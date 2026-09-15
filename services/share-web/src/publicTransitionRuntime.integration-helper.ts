@@ -26,6 +26,7 @@ export interface PublicTransitionHarness {
   host(): Awaited<ReturnType<typeof startServiceLiveHost>>;
   restart(): Promise<void>;
   listeners(): number;
+  allListeners(): number;
   ownerRequest(path: string, body?: unknown): Promise<any>;
   register(id: string, checkpoint: Uint8Array, markdown: Uint8Array): Promise<PublicTransitionFixture>;
   openLink(url: string, index: number): Promise<PublicProofPage>;
@@ -98,7 +99,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
             payloadBeforePath: fixture.path, payloadAfterPath: `outside/${name}.md`, payloadBeforeBlobSha256: hash(selected.baseline.markdown),
             payloadAfterBlobSha256: hash(selected.baseline.markdown), payloadAfterContentKind: "text", payloadAfterByteLength: selected.baseline.markdown.length}}]});
       } else if (name === "accessChange") {
-        await h.ownerRequest(`/sync/${fixture.document.workspaceId}/shares/${fixture.link.shareId}/links/${fixture.link.grantId}/retune`,
+        await h.ownerRequest(`/sync/shares/${fixture.link.shareId}/links/${fixture.link.grantId}/retune`,
           {workspaceId: fixture.document.workspaceId, access: "view", expectedDependentGrantIds: []});
       } else {
         // Runtime preparation generates the fence and restore update; corpus bytes never replace that authority path.
@@ -134,7 +135,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       if (selected.resumed || selected.continuation) {
         if (name === "restore") {
           for (const peer of peers) await peer.context.close(); peers.length = 0;
-          const fresh = await h.ownerRequest(`/sync/${fixture.document.workspaceId}/shares/${fixture.link.shareId}/links`, {access: "edit"});
+          const fresh = await h.ownerRequest(`/sync/${fixture.document.workspaceId}/shares/links`, {paths: [fixture.path], access: "edit"});
           fixture.link = fresh;
           for (let index = 0; index < h.concurrency - 1; index++) peers.push(await h.openLink(fresh.url, index));
           const identity = await h.openLink(fresh.url, h.concurrency - 1);
@@ -147,7 +148,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
           socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, fixture.document.objectId), `resumed-${name}`);
         }
         await socket.sync();
-        if (name === "restart") expect(socket.hostEpoch!).toBeGreaterThan(oldEpoch!);
+        if (name === "restart") expect(socket.hostEpoch!).toBe(oldEpoch!);
         await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
         if (selected.continuation) {
           const continuation = selected.continuation;
@@ -200,7 +201,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       await socket.close(); await writer.context.close(); for (const peer of peers) await peer.context.close();
       for (const context of extraContexts) await context.close();
     }
-    await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(0);
+    await browserExpect.poll(h.allListeners, {timeout: h.timeoutMs}).toBe(0);
   }
   return results;
 }

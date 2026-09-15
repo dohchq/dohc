@@ -117,8 +117,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   writeFileSync(serviceConfig, JSON.stringify({version: 1, ...capacity.native, engineExecutable: executable,
     hostId: "service", instanceId: "instance", workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: capacity.maxRegistrations}]}));
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(capacity.maxChangeListeners), validate = createLiveMarkdownJournalValidator(validationPolicy);
-  let released!: () => void;
-  const noListeners = new Promise<void>(resolve => { released = resolve; });
   let captureCount = 0;
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
     const remove = sharedChanges.subscribe(...args);
@@ -129,7 +127,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     return () => {
       if (removed) return; removed = true;
       remove(); if (standing) captureCount--;
-      if (sharedChanges.listenerCount() === 0) released();
     };
   }, captureCount: () => captureCount };
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
@@ -413,7 +410,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       expect(nativeDb.prepare("SELECT delivery_id, update_digest FROM live_device_update_applications WHERE delivery_id = ?").get("public-fresh-epoch"))
         .toEqual({delivery_id: "public-fresh-epoch", update_digest: hash(freshBytes)});
     } finally {nativeDb.close();}
-    results.restart = {concurrencyAtRestart: capacity.admittedConcurrency, oldPartialRefused: true, oldTicketRefused: false,
+    results.restart = {concurrencyAtRestart: capacity.admittedConcurrency, oldPartialRefused: true,
       beforeRestartEpoch, afterRestartEpoch: newEpoch.hostEpoch!, freshAck: accepted.ack};
     await newEpoch.close();
     for (const [index, peer] of freshPeers.entries()) await peer.page.screenshot({path: join(root, `public-peer-${index}.png`), fullPage: true});
@@ -497,7 +494,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
-      listeners: () => frameChanges.captureCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
+      listeners: () => frameChanges.captureCount(), allListeners: () => sharedChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
       interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
       register: async (id, checkpoint, markdown) => {
         const path = `docs/${id}.md`, document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: id, lineageClaimId: hash(checkpoint)};
@@ -558,7 +555,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       const exposed = await page.evaluate(() => JSON.stringify({html: globalThis.document.documentElement.outerHTML, local: {...localStorage}, session: {...sessionStorage}, hash: location.hash, cookie: globalThis.document.cookie}));
       for (const secret of protectedSecrets) expect(exposed).not.toContain(secret);
     }
-    results.credentials = {protectedCookieProfiles: capacity.admittedConcurrency, protectedSecretsChecked: protectedSecrets.size, javascriptResponseBodiesChecked: exposedBodies.length, privateCredentialsExcluded: true};
+    results.credentials = {protectedCookieProfiles: capacity.admittedConcurrency, protectedSecretsChecked: protectedSecrets.size, javascriptResponseBodiesChecked: exposedBodies.length, privateCredentialsExcluded: true, requests};
     expect(browserErrors).toEqual([]); expect(hash(readFileSync(executable))).toBe(expectedHash);
     proofPassed = true;
   } finally {
