@@ -243,7 +243,10 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const shareId = created.shareId as string, grantId = created.grantId as string;
     browser = await chromium.launch({headless: true});
     async function openLink(url: string, index: number) {
-      const context = await browser!.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 860}}); contexts.push(context);
+      // Model independent clients at the trusted edge. The HTTP adapter used by
+      // this fixture does not have the deployment proxy that supplies this IP.
+      const context = await browser!.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 860},
+        extraHTTPHeaders: {"x-dohc-share-web-client-ip": `192.0.2.${contexts.length + 1}`}}); contexts.push(context);
       const page = await context.newPage(); page.on("pageerror", error => browserErrors.push(String(error)));
       let exchangeBody: string | undefined;
       // Retain the browser-visible body before the exchange redirects the page.
