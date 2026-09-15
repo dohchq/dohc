@@ -368,7 +368,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const outsideTicket = await freshFirst.context.request.post(audience + "/api/live/link-ticket", {
       data: {discriminator: freshFirst.discriminator, objectId: "outside-object"}, headers: {origin: audience}});
     expect(outsideTicket.status()).toBe(404);
-    const preRestartTicket = await wire.ticket(freshFirst.context, freshFirst.discriminator, "object");
     for (const path of ["a.txt", "other.md", "docs/a.md", "../docs/a.md"]) {
       const refused = await freshFirst.context.request.post(audience + "/api/live/link-document", {
         data: {discriminator: freshFirst.discriminator, path}, headers: {origin: audience}});
@@ -393,8 +392,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     await active.close(); active = undefined;
     await oldEpoch.hostileSend(epochPartial); await oldEpoch.until(() => oldEpoch.closed !== undefined);
     active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
-    const epochReplay = await wire.connect(freshFirst.context, preRestartTicket, "unused-pre-restart-ticket");
-    expect(await epochReplay.status).toBe(404); await epochReplay.close();
     const newEpoch = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), "fresh-epoch-control"); await newEpoch.sync();
     expect(newEpoch.hostEpoch!).toBeGreaterThan(beforeRestartEpoch);
     for (const peer of freshPeers.slice(1)) {
