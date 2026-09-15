@@ -253,15 +253,16 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         extraHTTPHeaders: {"x-dohc-share-web-client-ip": `192.0.2.${contexts.length + 1}`}}); contexts.push(context);
       const page = await context.newPage(); page.on("pageerror", error => browserErrors.push(String(error)));
       let exchangeBody: string | undefined;
-      // Retain the browser-visible body before the exchange redirects the page.
-      await page.route("**/api/exchange", async route => {
-        const response = await route.fetch(), body = await response.text();
-        exchangeBody = body; publicBodies.push(Promise.resolve({body}));
+      // Retain response bodies before navigation can discard Chromium's copy.
+      await page.route(url => url.pathname === "/api/exchange" || url.pathname.startsWith("/api/live/"), async route => {
+        const capture = (async () => {const response = await route.fetch(); return {response, body: await response.text()};})();
+        publicBodies.push(capture.then(({body}) => ({body}), error => ({error})));
+        const {response, body} = await capture;
+        if (new URL(route.request().url()).pathname === "/api/exchange") exchangeBody = body;
         await route.fulfill({response, body});
       });
       page.on("response", response => {const path = new URL(response.url()).pathname;
-        if (path.startsWith("/api/")) {requests.push({context: index, path, status: response.status()});
-          if (path.startsWith("/api/live/")) publicBodies.push(response.text().then(body => ({body}), error => ({error})));}});
+        if (path.startsWith("/api/")) requests.push({context: index, path, status: response.status()});});
       const exchange = page.waitForResponse(response => new URL(response.url()).pathname === "/api/exchange");
       await page.goto(url); const response = await exchange; expect(response.status()).toBe(200);
       expect(exchangeBody).toBeDefined();
