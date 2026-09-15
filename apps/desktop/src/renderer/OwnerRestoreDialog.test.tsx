@@ -158,6 +158,29 @@ it.each([false, true])("reviews a saved proposal before confirming after reopen 
   await screen.findByText("File restored");
   expect(f.call.mock.calls.filter(([input]) => input.action === "confirm")).toHaveLength(1);
 });
+it.each(["relay-admitted", "native-applied", "settled", "resumed"])("continues a confirmed %s restore after reopening", async phase => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(async input => {
+    if (input.action === "options") return {...f.options,
+      pendingOperation: {operationId: "restore", phase: "native-fenced", proposalDigest}};
+    if (input.action === "status") return {...f.status(), phase, proposalDigest};
+    if (input.action === "review") throw Error("An admitted restore cannot be reviewed again.");
+    return original(input);
+  });
+  const mounted = render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByRole("button", {name: "Retry"});
+  mounted.unmount();
+  f.call.mockClear();
+  render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByRole("button", {name: "Retry"});
+  expect(f.props.onBeforeRestore).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await screen.findByText("File restored");
+  expect(f.call.mock.calls.map(([input]) => input.action)).toEqual(["options", "status", "status", "confirm"]);
+  expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "confirm", operationId: "restore", proposalDigest});
+  expect(f.restored).toHaveBeenCalledTimes(1);
+  expect(f.release).toHaveBeenCalledTimes(1);
+});
 it("releases the local restore pause when scope changes while it is acquiring", async () => {
   const f = fixture(), pause = deferred<typeof f.release>();
   f.props.onBeforeRestore.mockImplementation(() => pause.promise);

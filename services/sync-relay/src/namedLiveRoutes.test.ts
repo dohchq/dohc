@@ -71,6 +71,24 @@ it("does not mint more desktop tickets when browser session capacity is full", a
   expect(mint).toHaveBeenCalledTimes(9);
 });
 
+it("returns a usable desktop session when ticket minting outlives its reservation", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+  const f = await fixture(limits, false, undefined, false, true);
+  const original = f.tickets.mint.bind(f.tickets);
+  vi.spyOn(f.tickets, "mint").mockImplementation(async (...args) => {
+    clock.mockReturnValue(61_000);
+    return original(...args);
+  });
+  const response = await f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  expect(response.status).toBe(200);
+  const session = await response.json() as {discriminator: string; expiresAtMs: number};
+  expect(session.expiresAtMs).toBe(121_000);
+  const request = new Request(`https://${relayHost}`, {headers: {authorization: "Bearer reader-token"}});
+  expect(await f.desktopAdmission!.resolve(request, session.discriminator)).toEqual(scope);
+  clock.mockReturnValue(121_000);
+  expect(await f.desktopAdmission!.resolve(request, session.discriminator)).toBeNull();
+});
+
 it("releases a desktop session reservation when ticket minting refuses", async () => {
   const f = await fixture(limits, false, undefined, false, true);
   const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
@@ -181,7 +199,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     }
     return { ws, status, received, until };
   }
-  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes };
+  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
 }
 
 it.each(["link", "desktop", "owner"])("shares total connection capacity with the %s route", async kind => {

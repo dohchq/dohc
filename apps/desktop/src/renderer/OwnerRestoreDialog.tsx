@@ -65,7 +65,6 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
   const request = useRequestSequence([workspaceId, path]), running = useRef(false), operation = useRef<OwnerRestoreStatus | null>(null);
-  const submitted = useRef<{operationId: string; proposalDigest: string} | null>(null);
   const current = (token: number) => request.isCurrent(token);
   async function perform(work: (token: number) => Promise<void>) {
     if (running.current) return;
@@ -96,7 +95,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; submitted.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
     void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -105,7 +104,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: operation.current!.operationId});
     if (!current(token)) return;
     operation.current = saved;
-    if (saved.proposalDigest && submitted.current?.operationId === saved.operationId && submitted.current.proposalDigest === saved.proposalDigest) {
+    const resumablePhase = saved.phase === "relay-admitted" || saved.phase === "native-applied" || saved.phase === "settled" || saved.phase === "resumed";
+    if (saved.proposalDigest && resumablePhase) {
       await confirm(token, saved.proposalDigest); return;
     }
     let proposalDigest = saved.proposalDigest;
@@ -127,11 +127,9 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     const saved = operation.current!, release = await onBeforeRestore();
     try {
       if (!current(token)) return;
-      submitted.current = {operationId: saved.operationId, proposalDigest};
       const result = await bridge().ownerRestore({workspaceId, action: "confirm", operationId: saved.operationId, proposalDigest});
       if (!current(token)) return;
       operation.current = result.status;
-      if (result.result.kind === "review-required") submitted.current = null;
       if (result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest) {
         setState({kind: "complete"}); onRestored();
       } else setState({kind: "pending", message: result.result.kind === "review-required"
