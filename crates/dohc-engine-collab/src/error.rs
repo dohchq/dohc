@@ -13,6 +13,9 @@ pub enum CollabError {
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
+    #[error("configured Y.Doc byte budget exceeded")]
+    ConfiguredByteBudgetExceeded,
+
     /// The update is valid Yjs v1 data, but one of its structural edit
     /// boundaries lands inside a multi-unit Unicode scalar. Yjs can represent
     /// that UTF-16 boundary while Rust strings cannot, so replay would diverge.
@@ -176,6 +179,12 @@ pub enum CollabError {
     #[error("local-only close would discard unsettled edits; settle before closing")]
     UnsettledClose,
 
+    #[error("owner delivery outbox is frozen for recovery")]
+    OwnerOutboxFrozen,
+
+    #[error("the document is stopped for restoration")]
+    RestoreFenced,
+
     /// The persisted lineage is structurally inconsistent (e.g. a referenced
     /// blob is missing, or a snapshot fails to reconstruct).
     #[error("corrupt Y.Doc lineage: {reason}")]
@@ -191,6 +200,7 @@ impl CollabError {
     pub fn code(&self) -> &'static str {
         match self {
             CollabError::MalformedUpdate { .. } => "malformed-update",
+            CollabError::ConfiguredByteBudgetExceeded => "configured-byte-budget-exceeded",
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
             CollabError::EmptyUpdate => "empty-update",
             CollabError::UpdateTooLarge { .. } => "update-too-large",
@@ -218,6 +228,8 @@ impl CollabError {
             CollabError::ObjectAliasCollision => "object-alias-collision",
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
+            CollabError::OwnerOutboxFrozen => "owner-outbox-frozen",
+            CollabError::RestoreFenced => "restore-fenced",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",
         }

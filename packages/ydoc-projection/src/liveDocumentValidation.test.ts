@@ -592,14 +592,23 @@ describe('real scratch finalization', () => {
   })
 })
 
-it('keeps the constructor and ordered policy outside package exports', async () => {
+it('keeps policy constructors outside root exports and pins explicit subpaths', async () => {
   const barrel = await import('./index.js')
   expect(barrel).not.toHaveProperty('createLiveMarkdownRegistrationValidator')
   expect(barrel).not.toHaveProperty('validateRegistrationCutForProjection')
   expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
   expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  expect(manifest.exports).toEqual({ '.': './src/index.ts', './image-src': './src/image-src.ts' })
+  expect(manifest.exports).toEqual({
+    '.': './src/index.ts',
+    './body-fragment': './src/body-fragment.ts',
+    './browser-editor': './src/browser-editor.ts',
+    './live-journal-validation': './src/live-journal-validation.ts',
+    './image-src': './src/image-src.ts',
+    './restore-proof': './src/liveRestoreProof.ts',
+    './named-live-provider': './src/namedLiveProvider.ts',
+    './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
+  })
 })
 
 
@@ -670,7 +679,7 @@ describe('private journal evidence and ownership', () => {
       if (withDeletedPrefix.kind === 'accepted') expect(withDeletedPrefix.evidence.stateUpdate).toEqual(continued.evidence.stateUpdate)
     } finally { reopened.destroy() }
   })
-  it('retains original ordered identities and only candidate ranges, with reusable finalized state', () => {
+  it('retains checkpoint and candidate identities with reusable finalized state', () => {
     const call = journalFixture([editText('first '), editText('second ')])
     const result = journal(call)
     expect(result.kind).toBe('accepted')
@@ -684,14 +693,17 @@ describe('private journal evidence and ownership', () => {
     expect(evidence.stateUpdateSha256).not.toBe(evidence.checkpointDigest)
     const originalRanges = Y.decodeUpdate(call.candidate).structs.map(struct => ({ clientId: struct.id.client, startClock: struct.id.clock, endClock: struct.id.clock + struct.length }))
     expect(evidence.candidate.ranges).toEqual(originalRanges)
+    const checkpointRanges = [...Y.decodeStateVector(Y.encodeStateVectorFromUpdate(call.checkpoint))]
+      .map(([clientId, endClock]) => ({ clientId, startClock: 0, endClock }))
+    expect(evidence.checkpointRanges).toEqual(checkpointRanges)
     const registered = createLiveMarkdownRegistrationValidator(fixturePolicy)(input(evidence.stateUpdate))
     expect(registered.kind).toBe('accepted')
     if (registered.kind === 'accepted') {
       expect(evidence.projectedMarkdownSha256).toBe(registered.evidence.projectedMarkdownSha256)
       expect(evidence.projectedMarkdownByteLength).toBe(registered.evidence.projectedMarkdownByteLength)
     }
-    expect(Object.keys(evidence).sort()).toEqual(['version', 'document', 'currentPath', 'checkpointDigest', 'suffixDigests', 'candidate', 'projectedMarkdownSha256', 'projectedMarkdownByteLength', 'stateUpdate', 'stateUpdateSha256', 'stateUpdateByteLength'].sort())
-    for (const record of [result, evidence, evidence.document, evidence.suffixDigests, evidence.candidate, evidence.candidate.ranges, ...evidence.candidate.ranges]) expect(Object.isFrozen(record)).toBe(true)
+    expect(Object.keys(evidence).sort()).toEqual(['version', 'document', 'currentPath', 'checkpointDigest', 'checkpointRanges', 'suffixDigests', 'candidate', 'projectedMarkdownSha256', 'projectedMarkdownByteLength', 'stateUpdate', 'stateUpdateSha256', 'stateUpdateByteLength'].sort())
+    for (const record of [result, evidence, evidence.document, evidence.checkpointRanges, ...evidence.checkpointRanges, evidence.suffixDigests, evidence.candidate, evidence.candidate.ranges, ...evidence.candidate.ranges]) expect(Object.isFrozen(record)).toBe(true)
     const original = evidence.stateUpdate
     evidence.stateUpdate.fill(255)
     call.checkpoint.fill(255); call.suffix[0].fill(255); call.candidate.fill(255)

@@ -6,6 +6,22 @@ import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 const MAX_OP_KIND_CHARS = 128;
 
+export const COLLECTION_CREATE_ORIGIN_PREFIX = "relay:collection-create:";
+
+export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
+  if (originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for relay collection creates");
+  }
+  for (const raw of rawOps) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const op = raw as Record<string, unknown>;
+    if (op.opKind !== "moment.append") continue;
+    const payload = op.payload as Record<string, unknown> | null;
+    const author = payload?.author as Record<string, unknown> | null;
+    if (author?.kind === "public") throw relayError("authorship_mismatch");
+  }
+}
+
 export function parseLogOp(value: unknown): SyncRelayLogInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw badRequest("each op must be a JSON object");

@@ -6,6 +6,7 @@ export const LIVE_DELIVERY_EDGES = "sync_relay_live_delivery_edges";
 export const LIVE_DELIVERY_HOSTS = "sync_relay_live_delivery_hosts";
 export const LIVE_DELIVERY_RESERVATIONS = "sync_relay_live_delivery_reservations";
 export const LIVE_DELIVERY_DOCUMENTS = "sync_relay_live_delivery_documents";
+export const LIVE_DELIVERY_OWNERS = "sync_relay_live_delivery_owners";
 const MARKER = "live-committed-delivery-v1";
 const SAFE = 9_007_199_254_740_991;
 const identifier = (name: string) =>
@@ -17,6 +18,18 @@ const integer = (name: string, minimum = 0) =>
 const digest = (name: string) =>
   `${name} TEXT NOT NULL CHECK (length(${name})=64 AND ${name} NOT GLOB '*[^0-9a-f]*')`;
 const objects = {
+  [LIVE_DELIVERY_OWNERS]: `CREATE TABLE ${LIVE_DELIVERY_OWNERS} (
+    ${identifier("relay_database_namespace")}, ${identifier("workspace_id")},
+    main_version_id TEXT NOT NULL CHECK (main_version_id='main'),
+    ${identifier("object_id")}, ${digest("lineage_claim_id")}, ${hostIdentifier("host_id")},
+    origin_json TEXT NOT NULL CHECK (json_valid(origin_json)),
+    tip_receipt_json TEXT NOT NULL CHECK (json_valid(tip_receipt_json)),
+    ${integer("tip_cursor")}, ${integer("tip_sequence")}, ${integer("tip_application_sequence")}, ${integer("accounted_bytes",1)},
+    CHECK (tip_application_sequence <= tip_sequence),
+    PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id),
+    FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id) REFERENCES ${LIVE_DELIVERY_DOCUMENTS}(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE,
+    FOREIGN KEY (host_id,workspace_id) REFERENCES ${LIVE_DELIVERY_HOSTS}(host_id,workspace_id)
+  ) STRICT`,
   [LIVE_DELIVERY_HOSTS]: `CREATE TABLE ${LIVE_DELIVERY_HOSTS} (
     ${hostIdentifier("host_id")}, ${identifier("workspace_id")},
     history_namespace TEXT CHECK (length(CAST(history_namespace AS BLOB)) BETWEEN 1 AND 512),
@@ -100,6 +113,7 @@ function assertSchema(db: SqliteDb): void {
   }
   for (const [table, expectedCount] of [
     [LIVE_DELIVERY_HOSTS, 1],
+    [LIVE_DELIVERY_OWNERS, 1],
     [LIVE_DELIVERY_DOCUMENTS, 1],
     [LIVE_DELIVERY_RESERVATIONS, 1],
     [LIVE_DELIVERY_BOOTSTRAPS, 4],

@@ -103,6 +103,7 @@ interface TestHarnessOptions {
     path: string,
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
+  sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
 }
 
 function rendererSession(
@@ -150,6 +151,7 @@ function harness(
     captureFor: () => capture,
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
+    sharedCaptureFor: options.sharedCaptureFor,
     resolveDocumentPath,
     onError,
   });
@@ -178,6 +180,105 @@ const openPayload = {
 };
 
 describe("engine Y.Doc IPC adapter", () => {
+  it("routes shared Markdown through the named provider and pauses when that host stops", async () => {
+    let live = true;
+    const shared = Object.assign(providerSession(), {liveWritable: () => live});
+    const open = vi.fn(async () => shared);
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: open})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    const opened = await h.ipc.open(sender, openPayload);
+    expect(opened.available).toBe(true);
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    const update = {sessionId: openPayload.sessionId, update: new Uint8Array([0, 0]), seq: 1, lineageGeneration: 1};
+    expect(h.ipc.applyUpdate(sender, update)).toEqual({accepted: true});
+    expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
+    live = false;
+    expect(h.ipc.applyUpdate(sender, {...update, seq: 2})).toEqual({accepted: false, reason: "read-only"});
+    expect(shared.applyLocalUpdate).toHaveBeenCalledOnce();
+    await h.ipc.shutdown();
+  });
+
+  it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("retires shared admission when the renderer switches workspaces", async () => {
+    const pending = deferred<EngineYDocSessionCapture | null>();
+    const entered = deferred<void>();
+    const shared = {openYDocSession: vi.fn(async () => providerSession())};
+    const h = harness(providerSession(), {sharedCaptureFor: () => {entered.resolve(); return pending.promise;}});
+    h.setReadOnly(true);
+    const opening = h.ipc.open(new FakeSender(7), openPayload);
+    await entered.promise;
+    h.retireSession();
+    pending.resolve(shared);
+    expect((await opening).available).toBe(false);
+    expect(shared.openYDocSession).not.toHaveBeenCalled();
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("lets the transport retire a stale owner when a durable change arrives", async () => {
+    let notify!: () => void;
+    const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
+      sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined)};
+    const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
+    await h.ipc.open(new FakeSender(7), openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "notes/a.md", selectorPaths: ["notes/a.md"], restoreFenceGeneration: 1});
+    const stop = vi.fn();
+    owner.onDurableLocalChange(() => {try {owner.assertCurrent();} catch {stop();}});
+    h.setGeneration(2);
+    expect(() => notify()).not.toThrow();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
+    const flush = deferred<void>();
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined)};
+    const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender,openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const payload = {sessionId: openPayload.sessionId,lineageGeneration: 1};
+    const prepared = owner.prepareHandoff(new AbortController().signal);
+    expect(sender.sent.at(-1)?.payload).toEqual(payload);
+    await expect(h.ipc.prepareOwnerHandoff(new FakeSender(9),payload)).rejects.toThrow();
+    await expect(h.ipc.prepareOwnerHandoff(sender,{...payload,lineageGeneration: 2})).rejects.toThrow();
+    let released = false;
+    const holding = h.ipc.prepareOwnerHandoff(sender,payload).then(() => { released = true; });
+    expect(nativeOwner.flush).toHaveBeenCalledOnce();
+    flush.resolve(); await prepared;
+    expect(released).toBe(false);
+    await owner.finishHandoff(true); await holding;
+    expect(released).toBe(true);
+    const updates = Array.from({length: 100}, (_, index) => new Uint8Array([index, 0]));
+    for (const update of updates) await owner.remoteApplied(update);
+    expect(nativeOwner.refresh).not.toHaveBeenCalled();
+    expect(nativeOwner.applyRemoteUpdate.mock.calls.map(([update]) => update)).toEqual(updates);
+    expect(nativeOwner.applyRemoteUpdate.mock.calls.reduce((bytes, [update]) => bytes + update.byteLength, 0)).toBe(200);
+    h.setGeneration(2);
+    expect(() => owner.assertCurrent()).toThrow();
+    await expect(owner.remoteApplied(new Uint8Array([0,0]))).rejects.toThrow();
+    expect(nativeOwner.applyRemoteUpdate).toHaveBeenCalledTimes(100);
+  });
+
+  it("releases a prepared renderer when relay acquisition is cancelled", async () => {
+    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined)};
+    const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
+    const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
+    const owner = h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
+    const signal = new AbortController();
+    const prepared = owner.prepareHandoff(signal.signal);
+    const holding = h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1});
+    await prepared;
+    signal.abort(new Error("disconnected"));
+    await holding;
+    await expect(h.ipc.prepareOwnerHandoff(sender,{sessionId: openPayload.sessionId,lineageGeneration: 1})).rejects.toThrow("not requested");
+  });
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();

@@ -65,6 +65,7 @@ ryu-js = "1.0.3"
 base64 = "0.23"
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["limits"] }
 # Integration tests need the library built with its test APIs.
 dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }

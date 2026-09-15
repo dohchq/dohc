@@ -2695,6 +2695,15 @@ fn prepare_local_lineage_in_tx(
     .map_err(|_| SyncError::InvalidInput {
         reason: "conflict.resolve Y.Doc coordinates are invalid",
     })?;
+    let bound: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if bound {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
     let Some(marker) =
         dohc_engine_collab::read_marker_in(tx, &key).map_err(map_local_collab_error)?
     else {

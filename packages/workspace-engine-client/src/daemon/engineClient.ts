@@ -4,9 +4,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, type AdmittedLiveUpdate } from "@dohc/live-session-contract";
+import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
+import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
+import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
@@ -16,7 +18,8 @@ const MAX_U32 = 0xffff_ffff;
 const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
-const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+export const NATIVE_RESTORE_STATUS = { prepare: "prepared", apply: "applied", settle: "settled", resume: "resumed" } as const;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
 // Global cap on chunks received by active streams. Unknown-length streams retain
 // those Buffers; known-length streams do not, but keep the same tiny-chunk flood
@@ -62,6 +65,58 @@ interface LiveApplicationRequest {
   deadlineMs: number;
 }
 
+export type OwnerYDocDeliveryRequest = Omit<LiveApplicationRequest, "registrationId">;
+export interface OwnerYDocDeliveryTarget { readonly binding: LiveObjectBinding; readonly relayDatabaseNamespace: string }
+export interface OwnerYDocDeliveryPosition { readonly revision: number; readonly acceptedCursor: number; readonly nativeHeadSequence: number }
+export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
+  readonly expectedRevision: number; readonly expectedNativeHeadSequence: number;
+  readonly previousAcceptedCursor: number; readonly journalCursor: number; readonly updateBytes: Uint8Array;
+}
+export interface OwnerYDocDeliveryReceipt { readonly deliveryId: string; readonly updateDigest: string; readonly journalCursor: number; readonly acceptingHostEpoch: number }
+export interface OwnerYDocDraftCursor { readonly mainVersionId:string; readonly objectId:string; readonly lineageClaimId:string }
+export interface OwnerYDocDraftDescriptor extends OwnerYDocDeliveryTarget, OwnerYDocDeliveryPosition {
+  readonly outboxId:string|null; readonly pendingBytes:number; readonly state:"active"|"sealed"|"quarantined"|null;
+}
+
+function ownerDraftCursor(value: OwnerYDocDraftCursor): OwnerYDocDraftCursor {
+  if (!value || Object.keys(value).sort().join()!=="lineageClaimId,mainVersionId,objectId") throw new TypeError("Invalid draft cursor.");
+  return {mainVersionId:parseLiveUpdateIdentifier(value.mainVersionId,"main version ID"),objectId:parseLiveUpdateIdentifier(value.objectId,"object ID"),lineageClaimId:parseLiveUpdateDigest(value.lineageClaimId)};
+}
+function ownerDraftDescriptor(value: unknown): OwnerYDocDraftDescriptor {
+  if (!value || typeof value!=="object" || Array.isArray(value) || Object.keys(value).sort().join()!=="acceptedCursor,binding,nativeHeadSequence,outboxId,pendingBytes,relayDatabaseNamespace,revision,state") throw new TypeError("Invalid draft descriptor.");
+  const row=value as OwnerYDocDraftDescriptor;
+  if (!Number.isSafeInteger(row.pendingBytes) || row.pendingBytes<0 || ![null,"active","sealed","quarantined"].includes(row.state) || (row.outboxId===null)!==(row.state===null)) throw new TypeError("Invalid draft queue state.");
+  return {...ownerDeliveryTarget(row),...ownerDeliveryPosition(row),outboxId:row.outboxId===null?null:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),pendingBytes:row.pendingBytes,state:row.state};
+}
+
+function ownerDeliveryTarget(target: OwnerYDocDeliveryTarget) {
+  const binding=parseLiveObjectBinding(target.binding);
+  return {binding: {...binding,selectorPaths:[...binding.selectorPaths]}, relayDatabaseNamespace: parseLiveUpdateIdentifier(target.relayDatabaseNamespace, "relay namespace")};
+}
+function ownerDeliveryPosition(value: unknown): OwnerYDocDeliveryPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Invalid owner delivery position.");
+  const row=value as OwnerYDocDeliveryPosition;
+  if (!Number.isSafeInteger(row.revision) || row.revision<1 || !Number.isSafeInteger(row.acceptedCursor) || row.acceptedCursor<0 || !Number.isSafeInteger(row.nativeHeadSequence) || row.nativeHeadSequence<0) throw new TypeError("Invalid owner delivery position.");
+  return {revision:row.revision,acceptedCursor:row.acceptedCursor,nativeHeadSequence:row.nativeHeadSequence};
+}
+
+export interface NativeAppliedPosition { readonly eventCount:number; readonly journalCursor:number; readonly evidenceDigest:string }
+function appliedPosition(value: unknown): NativeAppliedPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "eventCount,evidenceDigest,journalCursor") throw new TypeError("Invalid applied position.");
+  const row=value as NativeAppliedPosition;
+  if (!Number.isSafeInteger(row.eventCount) || row.eventCount<0 || !Number.isSafeInteger(row.journalCursor) || row.journalCursor<0 || (row.eventCount===0)!==(row.journalCursor===0)) throw new TypeError("Invalid applied position.");
+  return Object.freeze({eventCount:row.eventCount,journalCursor:row.journalCursor,evidenceDigest:parseLiveUpdateDigest(row.evidenceDigest)});
+}
+
+interface PrivateLiveOutput {
+  readonly maxBytes: number;
+  readonly status: "prepared" | "applied" | "settled" | "resumed" | "sync" | "update" | "state" | "draft" | "captured";
+  readonly allowEmpty?: boolean;
+  wireId?: number;
+  started: boolean;
+  blob?: CompletedBlob;
+}
+
 export interface LiveApplicationBootstrap {
   readonly bootstrapId: string;
   readonly bootstrapMomentId: string;
@@ -71,6 +126,21 @@ export interface LiveApplicationBootstrap {
   readonly projectedMarkdownDigest: string;
   readonly projectedMarkdownByteLength: number;
   readonly baselineBytes: Uint8Array;
+}
+
+/** Trusted main-process evidence acquired from the authenticated relay journal. */
+export interface LiveOwnerAdoptionCut {
+  readonly relayDatabaseNamespace: string;
+  readonly adoptionId: string;
+  readonly sourceMomentId: string;
+  readonly sourceDigest: string;
+  readonly sourceByteLength: number;
+  readonly baselineMomentRelaySequence: number;
+  readonly baselineRegisteredAtMs: number;
+  readonly expectedLocalSequence: number;
+  readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  readonly baselineBytes: Uint8Array;
+  readonly events: readonly AdmittedLiveUpdate[];
 }
 
 interface LiveApplicationBootstrapAck {
@@ -622,6 +692,7 @@ interface PendingRequest {
   readonly resolve: (response: Response) => void;
   readonly reject: (error: EngineClientError) => void;
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
+  readonly restoreOutput?: PrivateLiveOutput;
 }
 
 interface PendingBlob {
@@ -642,6 +713,209 @@ interface PendingBlob {
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
+  async ownerYDocListDrafts(request:OwnerYDocDeliveryRequest, input:{after:OwnerYDocDraftCursor|null;limit:number}, signal?:AbortSignal):Promise<{drafts:readonly OwnerYDocDraftDescriptor[];next:OwnerYDocDraftCursor|null}> {
+    if (!Number.isSafeInteger(input.limit) || input.limit<1 || input.limit>64) throw new TypeError("Invalid draft page size.");
+    const after=input.after===null?null:ownerDraftCursor(input.after),limit=input.limit;
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.listDrafts",16*1024*1024,()=>({params:{after:after&&{...after},limit},streams:[]}),signal);
+    const row=response.result as {drafts?:unknown;next?:OwnerYDocDraftCursor|null};
+    if (!row || Object.keys(row).sort().join()!=="drafts,next" || !Array.isArray(row.drafts) || row.drafts.length>limit) throw new TypeError("Invalid draft page.");
+    const drafts=row.drafts.map(ownerDraftDescriptor),next=row.next===null?null:ownerDraftCursor(row.next!);
+    if (next && (!drafts.length || next.mainVersionId!==drafts.at(-1)!.binding.mainVersionId || next.objectId!==drafts.at(-1)!.binding.objectId || next.lineageClaimId!==drafts.at(-1)!.binding.lineageClaimId)) throw new TypeError("Draft cursor differs from page.");
+    return {drafts,next};
+  }
+
+  async ownerYDocOpenDraft(request:OwnerYDocDeliveryRequest, input:{binding:LiveObjectBinding;expectedRevision:number}, signal?:AbortSignal):Promise<{draft:OwnerYDocDraftDescriptor;initialUpdate:Buffer}> {
+    const binding=parseLiveObjectBinding(input.binding),expectedRevision=input.expectedRevision;
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision<1) throw new TypeError("Invalid draft revision.");
+    const output:PrivateLiveOutput={status:"draft",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.openDraft",MAX_LIVE_UPDATE_BYTES+3*1024*1024,()=>({params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},expectedRevision},streams:[]}),signal,output);
+    if (Object.keys(response.result as object).sort().join()!=="byteLength,digest,draft,status,streamId") throw new TypeError("Invalid draft open response.");
+    const draft=ownerDraftDescriptor((response.result as Record<string,unknown>).draft);
+    if (JSON.stringify(draft.binding)!==JSON.stringify(binding) || draft.revision!==expectedRevision) throw new TypeError("Draft open differs from requested binding.");
+    return {draft,initialUpdate:output.blob!.bytes};
+  }
+
+  async ownerYDocAppendDraft(request:OwnerYDocDeliveryRequest, input:{binding:LiveObjectBinding;expectedRevision:number;appendKey:string;updateBytes:Uint8Array}, signal?:AbortSignal):Promise<OwnerYDocOutboxAppendResult> {
+    const binding=parseLiveObjectBinding(input.binding),expectedRevision=input.expectedRevision,appendKey=parseLiveUpdateIdentifier(input.appendKey,"append key");
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision<1 || input.updateBytes.byteLength<2 || input.updateBytes.byteLength>MAX_LIVE_UPDATE_BYTES) throw new TypeError("Invalid draft update.");
+    let digest="";
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.appendDraft",input.updateBytes.byteLength+3*1024*1024,()=>{
+      const bytes=Buffer.from(input.updateBytes),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      digest=createHash("sha256").update(bytes).digest("hex");
+      return {params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},expectedRevision,appendKey,streamId,byteLength:bytes.length,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    const row=response.result as unknown as OwnerYDocOutboxAppendResult;
+    if (!row || Object.keys(row).sort().join()!=="deliveryId,oldestEntryAtMs,outboxId,pendingBytes,sequence,state,updateDigest" || row.updateDigest!==digest || !["active","sealed"].includes(row.state)
+      || !Number.isSafeInteger(row.sequence) || row.sequence<1 || !Number.isSafeInteger(row.pendingBytes) || row.pendingBytes<1 || !Number.isSafeInteger(row.oldestEntryAtMs) || row.oldestEntryAtMs<0) throw new TypeError("Invalid draft append response.");
+    return {...row,outboxId:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),deliveryId:parseLiveUpdateIdentifier(row.deliveryId,"delivery ID")};
+  }
+
+  async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<
+    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor}
+  > {
+    const params=ownerDeliveryTarget(target);
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params,streams:[]}),signal);
+    const row=response.result as Record<string,unknown>;
+    if (row.status==="observed" && Object.keys(row).sort().join()==="draft,status") {
+      const draft=ownerDraftDescriptor(row.draft);
+      if (JSON.stringify(draft.binding)!==JSON.stringify(params.binding) || draft.relayDatabaseNamespace!==params.relayDatabaseNamespace) throw new TypeError("Owner enrollment target changed.");
+      return {status:"observed",draft};
+    }
+    if (row.status!=="capture" || Object.keys(row).sort().join()!=="captured,status") throw new TypeError("Invalid owner capture response.");
+    const captured=row.captured as {nativeHeadSequence:number;localStateDigest:string};
+    if (!captured || Object.keys(captured).sort().join()!=="localStateDigest,nativeHeadSequence" || !Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0) throw new TypeError("Invalid owner capture.");
+    return {status:"capture",captured:{nativeHeadSequence:captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(captured.localStateDigest)}};
+  }
+
+  async ownerYDocEnroll(request:OwnerYDocDeliveryRequest, input:OwnerYDocDeliveryTarget & {
+    captured:{nativeHeadSequence:number;localStateDigest:string};journalCursor:number;hostVector:Uint8Array;checkpoint:Uint8Array
+  }, signal?:AbortSignal):Promise<OwnerYDocDraftDescriptor> {
+    const target=ownerDeliveryTarget(input), captured={nativeHeadSequence:input.captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(input.captured.localStateDigest)};
+    if (!Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0 || !Number.isSafeInteger(input.journalCursor) || input.journalCursor<0 || input.hostVector.byteLength<1 || input.hostVector.byteLength>MAX_LIVE_UPDATE_BYTES || input.checkpoint.byteLength<2 || input.checkpoint.byteLength>MAX_LIVE_UPDATE_BYTES) throw new TypeError("Invalid owner enrollment cut.");
+    const byteLength=input.hostVector.byteLength+input.checkpoint.byteLength;
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.enroll",byteLength+3*1024*1024,()=>{
+      const bytes=Buffer.concat([input.hostVector,input.checkpoint],byteLength), digest=createHash("sha256").update(bytes).digest("hex"), streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      return {params:{...target,captured,journalCursor:input.journalCursor,hostVectorByteLength:input.hostVector.byteLength,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    if (Object.keys(response.result as object).join()!=="draft") throw new TypeError("Invalid owner enrollment response.");
+    const draft=ownerDraftDescriptor((response.result as Record<string,unknown>).draft);
+    if (JSON.stringify(draft.binding)!==JSON.stringify(target.binding) || draft.relayDatabaseNamespace!==target.relayDatabaseNamespace || draft.acceptedCursor!==input.journalCursor || draft.revision!==1) throw new TypeError("Owner enrollment differs from request.");
+    return draft;
+  }
+
+  async ownerYDocReadState(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition & {stateVector: Buffer}> {
+    const params=ownerDeliveryTarget(target);
+    const output:PrivateLiveOutput={status:"state",maxBytes:MAX_LIVE_UPDATE_BYTES,started:false};
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.readState",MAX_LIVE_UPDATE_BYTES+3*1024*1024,()=>({params,streams:[]}),signal,output);
+    if (Object.keys(response.result as object).sort().join()!=="acceptedCursor,byteLength,digest,nativeHeadSequence,revision,status,streamId") throw new TypeError("Invalid owner state response.");
+    return {...ownerDeliveryPosition(response.result),stateVector:output.blob!.bytes};
+  }
+
+  async ownerYDocApplyAcceptedFrame(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    return this.ownerYDocApply(request,input,undefined,signal);
+  }
+
+  async ownerYDocApplyInitialSync(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput & {readonly hostVector: Uint8Array}, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    return this.ownerYDocApply(request,input,input.hostVector,signal);
+  }
+
+  private async ownerYDocApply(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryApplyInput, vector: Uint8Array | undefined, signal?: AbortSignal): Promise<OwnerYDocDeliveryPosition> {
+    const target=ownerDeliveryTarget(input);
+    ownerDeliveryPosition({revision:input.expectedRevision,acceptedCursor:input.previousAcceptedCursor,nativeHeadSequence:input.expectedNativeHeadSequence});
+    if (!Number.isSafeInteger(input.journalCursor) || input.journalCursor<input.previousAcceptedCursor || (!vector && input.journalCursor===input.previousAcceptedCursor)
+      || input.updateBytes.byteLength<2 || input.updateBytes.byteLength>MAX_LIVE_UPDATE_BYTES
+      || (vector && (vector.byteLength<1 || vector.byteLength>MAX_LIVE_UPDATE_BYTES))) throw new TypeError("Invalid owner accepted input.");
+    const byteLength=input.updateBytes.byteLength+(vector?.byteLength??0);
+    const params={...target,expectedRevision:input.expectedRevision,expectedNativeHeadSequence:input.expectedNativeHeadSequence,
+      previousAcceptedCursor:input.previousAcceptedCursor,journalCursor:input.journalCursor,hostVectorByteLength:vector?.byteLength??null};
+    const response=await this.sendLiveUpload(request,vector?"ydoc.ownerDelivery.applyInitialSync":"ydoc.ownerDelivery.applyAcceptedFrame",byteLength+3*1024*1024,()=>{
+      const bytes=vector?Buffer.concat([vector,input.updateBytes],byteLength):Buffer.from(input.updateBytes);
+      const digest=createHash("sha256").update(bytes).digest("hex"),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Owner stream identifiers exhausted.");
+      return {params:{...params,streamId,byteLength,digest},streams:[{streamId,bytes,digest}]};
+    },signal);
+    if (Object.keys(response.result as object).sort().join()!=="acceptedCursor,nativeHeadSequence,revision") throw new TypeError("Invalid owner apply response.");
+    const position=ownerDeliveryPosition(response.result);
+    if (position.acceptedCursor!==input.journalCursor || position.revision!==(input.journalCursor===input.previousAcceptedCursor?input.expectedRevision:input.expectedRevision+1)) throw new TypeError("Owner apply position differs from request.");
+    return position;
+  }
+
+  async ownerYDocIsReceiptApplied(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryTarget & {readonly receipt:OwnerYDocDeliveryReceipt}, signal?: AbortSignal): Promise<boolean> {
+    const receipt={deliveryId:parseLiveUpdateIdentifier(input.receipt.deliveryId,"delivery ID"),updateDigest:parseLiveUpdateDigest(input.receipt.updateDigest),journalCursor:input.receipt.journalCursor,acceptingHostEpoch:input.receipt.acceptingHostEpoch};
+    if (!Number.isSafeInteger(receipt.journalCursor) || receipt.journalCursor<1 || !Number.isSafeInteger(receipt.acceptingHostEpoch) || receipt.acceptingHostEpoch<1) throw new TypeError("Invalid owner receipt.");
+    const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.isReceiptApplied",3*1024*1024,()=>({params:{...ownerDeliveryTarget(input),receipt},streams:[]}),signal);
+    const row=response.result as {applied?:unknown};
+    if (!row || typeof row.applied!=="boolean" || Object.keys(row).join()!=="applied") throw new TypeError("Invalid owner receipt response.");
+    return row.applied;
+  }
+
+  async captureOwnerActivation(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    path: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+    activationId?: string,
+  ): Promise<NativeOwnerActivation> {
+    if (typeof path !== "string" || path.length < 1 || path.length > 4096 || path.includes("\0") ||
+        !Number.isSafeInteger(maxBytes) || maxBytes < 4 || maxBytes > this.maxBlobBytes) {
+      throw new TypeError("Invalid owner activation capture bounds.");
+    }
+    if (activationId !== undefined && !/^ordinary-activation-[a-f0-9]{64}$/.test(activationId)) {
+      throw new TypeError("Invalid retained activation ID.");
+    }
+    const output: PrivateLiveOutput = { status: "captured", maxBytes, started: false };
+    const response = await this.sendLiveUpload(request, "liveApplication.captureOwnerActivation",
+      maxBytes + 3 * 1024 * 1024, () => ({ params: { path, maxBytes, ...(activationId === undefined ? {} : {activationId}) }, streams: [] }), signal, output);
+    return parseNativeOwnerActivation(response.result, output.blob!.bytes, path, maxBytes);
+  }
+  async openLiveAppliedSync(request:LiveApplicationRequest, clientVector:Uint8Array, bounds:{maxInputBytes:number;maxOutputBytes:number}, signal?:AbortSignal):Promise<{
+    binding:LiveObjectBinding;position:NativeAppliedPosition;observedLocalYDocHeadSequence:number;hostVector:Buffer;missingStateUpdate:Buffer;
+  }> {
+    const {maxInputBytes,maxOutputBytes}=bounds;
+    this.validateAppliedReadBounds(request,maxOutputBytes);
+    if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes<1 || maxInputBytes>this.maxBlobBytes || clientVector.byteLength<1 || clientVector.byteLength>maxInputBytes) throw new TypeError("Invalid sync vector bounds.");
+    const output:PrivateLiveOutput={status:"sync",maxBytes:maxOutputBytes,started:false};
+    const response=await this.sendLiveUpload(request,"liveApplication.syncOpen",clientVector.byteLength+maxOutputBytes+3*1024*1024,()=>{
+      const bytes=Buffer.from(clientVector),digest=createHash("sha256").update(bytes).digest("hex"),streamId=this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return {params:{registrationId:request.registrationId,streamId,byteLength:bytes.length,digest},streams:[{streamId,bytes,digest}]};
+    },signal,output);
+    const row=response.result as Record<string,unknown>,bytes=output.blob!.bytes;
+    if (Object.keys(row).sort().join()!=="binding,byteLength,digest,hostVectorByteLength,observedLocalYDocHeadSequence,position,status,streamId" ||
+      !Number.isSafeInteger(row.hostVectorByteLength) || (row.hostVectorByteLength as number)<1 || (row.hostVectorByteLength as number)>bytes.length-2 ||
+      !Number.isSafeInteger(row.observedLocalYDocHeadSequence) || (row.observedLocalYDocHeadSequence as number)<0) throw new TypeError("Invalid applied sync response.");
+    return {binding:parseLiveObjectBinding(row.binding),position:appliedPosition(row.position),observedLocalYDocHeadSequence:row.observedLocalYDocHeadSequence as number,
+      hostVector:bytes.subarray(0,row.hostVectorByteLength as number),missingStateUpdate:bytes.subarray(row.hostVectorByteLength as number)};
+  }
+  async readNextLiveApplied(request:LiveApplicationRequest, after:NativeAppliedPosition, maxOutputBytes:number, signal?:AbortSignal):Promise<{
+    position:NativeAppliedPosition;ack:LiveUpdateHostApplicationAck;updateBytes:Buffer;
+  }|null> {
+    this.validateAppliedReadBounds(request,maxOutputBytes);after=appliedPosition(after);
+    const output:PrivateLiveOutput={status:"update",allowEmpty:true,maxBytes:maxOutputBytes,started:false};
+    const response=await this.sendLiveUpload(request,"liveApplication.appliedRead",maxOutputBytes+3*1024*1024,
+      ()=>({params:{registrationId:request.registrationId,after:{...after}},streams:[]}),signal,output);
+    const row=response.result as Record<string,unknown>;
+    if (row.status==="empty") {
+      if (Object.keys(row).sort().join()!=="after,status" || JSON.stringify(appliedPosition(row.after))!==JSON.stringify(after)) throw new TypeError("Invalid empty applied read.");
+      return null;
+    }
+    if (Object.keys(row).sort().join()!=="ack,byteLength,digest,position,status,streamId") throw new TypeError("Invalid applied update response.");
+    const position=appliedPosition(row.position),ack=parseLiveUpdateHostApplicationAck(row.ack);
+    if (position.eventCount!==after.eventCount+1 || position.journalCursor<=after.journalCursor || ack.journalCursor!==position.journalCursor ||
+      !ack.applicationReplayed || ack.updateDigest!==output.blob!.sha256) throw new TypeError("Applied update differs from its requested position.");
+    return {position,ack,updateBytes:output.blob!.bytes};
+  }
+  private validateAppliedReadBounds(request:LiveApplicationRequest,maxOutputBytes:number):void {
+    if (!Number.isSafeInteger(request.registrationId) || request.registrationId<1 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes<2 || maxOutputBytes>this.maxBlobBytes) throw new TypeError("Invalid applied read bounds.");
+  }
+  /** Reads retained host application evidence from an authenticated registration. */
+  async readLiveApplicationAck(
+    request: LiveApplicationRequest,
+    identity: { readonly deliveryId: string; readonly updateDigest: string },
+    signal?: AbortSignal,
+  ): Promise<LiveUpdateHostApplicationAck | null> {
+    const { id, workspace, registrationId, deadlineMs } = request;
+    const deliveryId = parseLiveUpdateIdentifier(identity.deliveryId, "delivery ID");
+    const updateDigest = parseLiveUpdateDigest(identity.updateDigest);
+    if (!Number.isSafeInteger(registrationId) || registrationId < 1 || !Number.isSafeInteger(deadlineMs) || deadlineMs < 1) {
+      throw new TypeError("Invalid application ACK request.");
+    }
+    const response = await this.sendRequest({ id, workspace, method: "liveApplication.ack",
+      params: { registrationId, deliveryId, updateDigest }, deadlineMs }, signal);
+    const result = response.result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid application ACK response.");
+    const row = result as Record<string, unknown>;
+    if (row.status === "missing" && Object.keys(row).join() === "status") return null;
+    if (row.status !== "applied" || Object.keys(row).sort().join() !== "ack,status") throw new Error("Invalid application ACK response.");
+    const ack = parseLiveUpdateHostApplicationAck(row.ack);
+    if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || !ack.applicationReplayed) {
+      throw new Error("Application ACK does not match the requested delivery.");
+    }
+    return ack;
+  }
+
   private readonly decoder: FrameDecoder;
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
@@ -784,6 +1058,7 @@ export class EngineClient implements EngineTransport {
     request: Request,
     writeInput?: (wireId: number) => Promise<void>,
     signal?: AbortSignal,
+    restoreOutput?: PrivateLiveOutput,
   ): Promise<Response> {
     if (signal?.aborted) throw signal.reason;
     if (this.closed) {
@@ -802,6 +1077,7 @@ export class EngineClient implements EngineTransport {
     }
 
     const wireId = this.nextRequestId++;
+    if (restoreOutput) restoreOutput.wireId = wireId;
     const envelope = requestEnvelope(request, wireId);
     // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
@@ -824,13 +1100,20 @@ export class EngineClient implements EngineTransport {
     const deadlineMs = request.deadlineMs ?? null;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
+    const cancellationError = () => writeInput
+      ? new EngineClientError("closed", "Live application request was cancelled.")
+      : signal?.reason;
+    let cancellationSent = false;
     const abort = (): void => {
+      // Finish reserved input before cancelling so other requests retain valid framing.
+      if ((writeInput && !inputComplete) || cancellationSent) return;
       const pending = this.pending.get(wireId);
-      if (!pending) return;
+      if (!pending && !writeInput) return;
+      cancellationSent = true;
       this.pending.delete(wireId);
-      this.abandonedRequestIds.add(wireId);
-      if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
-      pending.reject(signal?.reason);
+      if (pending) this.abandonedRequestIds.add(wireId);
+      if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      pending?.reject(cancellationError());
       void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
     const response = new Promise<Response>((resolve, reject) => {
@@ -854,12 +1137,14 @@ export class EngineClient implements EngineTransport {
         callerId: request.id,
         resolve,
         reject,
+        ...(restoreOutput ? { restoreOutput } : {}),
         ...(deadlineTimer ? { deadlineTimer } : {}),
       });
       signal?.addEventListener("abort", abort, { once: true });
       writeTask = this.writeEnvelope(envelope).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
+        if (signal?.aborted) abort();
       });
       void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
@@ -878,9 +1163,10 @@ export class EngineClient implements EngineTransport {
     try {
       const result = await response;
       if (writeInput) await writeTask;
+      if (writeInput && signal?.aborted) throw cancellationError();
       return result;
     } catch (error: unknown) {
-      // A cancelled upload cannot leave a half-written stream on this connection.
+      // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
         if (!inputComplete) this.close();
         await writeTask.catch(() => undefined);
@@ -1054,12 +1340,85 @@ export class EngineClient implements EngineTransport {
     );
   }
 
+  async sendLiveOwnerAdoption(
+    request: LiveApplicationRequest & { sessionId: string },
+    cut: LiveOwnerAdoptionCut,
+    bounds: { maxBytes: number; maxEvents: number },
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!Number.isSafeInteger(bounds.maxBytes) || bounds.maxBytes < 1 || !Number.isSafeInteger(bounds.maxEvents) || bounds.maxEvents < 1 ||
+      cut.events.length > bounds.maxEvents || typeof request.sessionId !== "string" || !request.sessionId || request.sessionId.length > 256) {
+      throw new TypeError("Invalid owner adoption bounds.");
+    }
+    // Reserve before serialization or copying evidence. The caller already owns the cut.
+    return this.sendLiveUpload(request, "liveApplication.adoptOwner", bounds.maxBytes * 3, () => {
+      const { baselineBytes, events, ...header } = cut;
+      const fields: Buffer[] = [];
+      let length = 0;
+      const field = (value: Uint8Array): void => {
+        if (value.byteLength > MAX_U32 || length + 4 + value.byteLength > bounds.maxBytes) throw new TypeError("Owner adoption byte limit exceeded.");
+        const prefix = Buffer.alloc(4);
+        prefix.writeUInt32LE(value.byteLength);
+        fields.push(prefix, Buffer.from(value));
+        length += 4 + value.byteLength;
+      };
+      field(Buffer.from(JSON.stringify({ ...header, eventCount: events.length })));
+      field(baselineBytes);
+      for (const event of events) {
+        field(Buffer.from(JSON.stringify(event.metadata)));
+        field(event.updateBytes);
+      }
+      const bytes = Buffer.concat(fields, length);
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      const streamId = this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { registrationId: request.registrationId, sessionId: request.sessionId, streamId, byteLength: bytes.length, digest },
+        streams: [{ streamId, bytes, digest }] };
+    }, signal);
+  }
+
+  /** Bounded forwarding between the authenticated device bridge and its existing daemon. */
+  async forwardLiveOwnerAdoption(
+    request: LiveApplicationRequest & { sessionId: string }, bytes: Uint8Array, maxBytes: number, signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || bytes.byteLength < 1 || bytes.byteLength > maxBytes || !request.sessionId || request.sessionId.length > 256) throw new TypeError("Invalid owner adoption forwarding bounds.");
+    return this.sendLiveUpload(request, "liveApplication.adoptOwner", bytes.byteLength + 3 * 1024 * 1024, () => {
+      const captured = Buffer.from(bytes), digest = createHash("sha256").update(captured).digest("hex"), streamId = this.nextLiveStreamId++;
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { registrationId: request.registrationId, sessionId: request.sessionId, streamId, byteLength: captured.length, digest }, streams: [{ streamId, bytes: captured, digest }] };
+    }, signal);
+  }
+
+  /** Private provisioned-host transport. Evidence is already serialized by its budgeted owner. */
+  async sendLiveRestore(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    operation: "prepare" | "apply" | "settle" | "resume",
+    bytes: Uint8Array,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<{ response: Response; bytes: Buffer }> {
+    const status = NATIVE_RESTORE_STATUS[operation];
+    if (!status || !Number.isSafeInteger(maxBytes) || maxBytes < 5 || maxBytes > this.maxBlobBytes ||
+      bytes.byteLength < 5 || bytes.byteLength > maxBytes) throw new TypeError("Invalid native restore bounds.");
+    const output: PrivateLiveOutput = { maxBytes, status, started: false };
+    const response = await this.sendLiveUpload(request, `liveApplication.${operation}Restore`,
+      bytes.byteLength + maxBytes + 3 * 1024 * 1024, () => {
+        const captured = Buffer.from(bytes);
+        const digest = createHash("sha256").update(captured).digest("hex");
+        const streamId = this.nextLiveStreamId++;
+        if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+        return { params: { streamId, byteLength: captured.length, digest, maxOutputBytes: maxBytes }, streams: [{ streamId, bytes: captured, digest }] };
+      }, signal, output);
+    return { response, bytes: output.blob!.bytes };
+  }
+
   private async sendLiveUpload(
-    request: LiveApplicationRequest,
+    request: Omit<LiveApplicationRequest, "registrationId"> & { registrationId?: number },
     method: string,
     charge: number,
     prepare: () => LiveUpload,
     signal?: AbortSignal,
+    restoreOutput?: PrivateLiveOutput,
   ): Promise<Response> {
     if (
       !this.liveConfig ||
@@ -1074,8 +1433,8 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      !Number.isSafeInteger(request.registrationId) ||
-      request.registrationId < 1 ||
+      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||
       request.deadlineMs > MAX_U32
@@ -1083,7 +1442,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Invalid live application request.");
     }
     if (
-      this.liveUploads >= this.liveConfig.maxUploads ||
+      !Number.isSafeInteger(charge) || charge < 1 || this.liveUploads >= this.liveConfig.maxUploads ||
       charge > this.liveConfig.aggregateBytes - this.liveUploadBytes
     ) {
       throw new TypeError("Private live application upload capacity is full.");
@@ -1092,41 +1451,29 @@ export class EngineClient implements EngineTransport {
     this.liveUploads += 1;
     let stopped = false;
     let uploaded = false;
-    let uploadWireId: number | undefined;
     const abort = (): void => {
       stopped = true;
       if (!uploaded) this.close();
-      else if (uploadWireId !== undefined) {
-        const pending = this.pending.get(uploadWireId);
-        if (!pending) return;
-        this.pending.delete(uploadWireId);
-        this.abandonedRequestIds.add(uploadWireId);
-        if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);
-        pending.reject(
-          new EngineClientError(
-            "closed",
-            "Live application request was cancelled.",
-          ),
-        );
-        // A retired daemon may suppress the reply. Settle locally before sending cancel.
-        void this.writeEnvelope({ type: "cancel", id: uploadWireId }).catch(
-          () => undefined,
-        );
-      }
     };
     // The reply timer ends when a response arrives. Keep the upload deadline
     // through the final drain so an early reply cannot strand retained input.
     const uploadDeadline = setTimeout(abort, request.deadlineMs);
-    signal?.addEventListener("abort", abort, { once: true });
 
     try {
       const upload = prepare();
+      const outgoing: Request = {
+        id: request.id, workspace: request.workspace, method, deadlineMs: request.deadlineMs,
+        idempotencyKey: null, params: upload.params,
+      };
+      if (upload.streams.length === 0) {
+        // No partial input stream exists. Cancelling this read must preserve the shared client.
+        clearTimeout(uploadDeadline);
+        return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
+      }
       const writeInput = async (wireId: number): Promise<void> => {
-        uploadWireId = wireId;
         const current = (): void => {
           if (
             stopped ||
-            signal?.aborted ||
             !this.pending.has(wireId) ||
             this.closed
           ) {
@@ -1171,19 +1518,20 @@ export class EngineClient implements EngineTransport {
       };
 
       return await this.sendRequestWithInput(
-        {
-          id: request.id,
-          workspace: request.workspace,
-          method,
-          deadlineMs: request.deadlineMs,
-          idempotencyKey: null,
-          params: upload.params,
-        },
+        outgoing,
         writeInput,
+        signal,
+        restoreOutput,
       );
     } finally {
       clearTimeout(uploadDeadline);
-      signal?.removeEventListener("abort", abort);
+      if (restoreOutput?.wireId !== undefined) {
+        for (const [streamId, stream] of this.blobStreams) {
+          if (stream.start.requestId !== restoreOutput.wireId) continue;
+          this.releaseBlobStream(streamId, stream);
+          this.abandonedBlobStreamIds.add(streamId);
+        }
+      }
       this.liveUploadBytes -= charge;
       this.liveUploads -= 1;
     }
@@ -1559,6 +1907,14 @@ export class EngineClient implements EngineTransport {
       );
     }
     const announcedBytes = start.totalBytes ?? null;
+    const restoreOutput = pendingEntry.restoreOutput;
+    if (restoreOutput) {
+      if (restoreOutput.started || start.streamId !== start.requestId || announcedBytes === null ||
+        announcedBytes > restoreOutput.maxBytes || typeof start.sha256 !== "string") {
+        throw new BlobStreamError("invalid-blob-start", "Native restore output violates its reserved bounds.");
+      }
+      restoreOutput.started = true;
+    }
     if (
       announcedBytes !== null &&
       this.bufferedBlobBytes + announcedBytes > this.maxBlobBytes
@@ -1690,6 +2046,11 @@ export class EngineClient implements EngineTransport {
       sha256: stream.start.sha256,
       bytes,
     };
+    const restoreOutput = this.pending.get(stream.start.requestId)?.restoreOutput;
+    if (restoreOutput) {
+      restoreOutput.blob = blob;
+      return;
+    }
     for (const handler of this.blobHandlers) {
       try {
         handler(blob);
@@ -1707,6 +2068,15 @@ export class EngineClient implements EngineTransport {
         "protocol-error",
         `Received response for unknown request ${response.id}.`,
       );
+    }
+    if (pending.restoreOutput) {
+      const { blob, status } = pending.restoreOutput;
+      const result = response.result as Record<string, unknown> | null;
+      const empty = pending.restoreOutput.allowEmpty && result?.status === "empty" && !blob && !pending.restoreOutput.started;
+      if (!empty && (!blob || !result || result.status !== status || result.streamId !== blob.streamId ||
+        result.byteLength !== blob.bytes.length || result.digest !== blob.sha256)) {
+        throw new EngineClientError("protocol-error", "Native restore response does not match its completed output.");
+      }
     }
     this.pending.delete(response.id);
     if (pending.deadlineTimer) clearTimeout(pending.deadlineTimer);

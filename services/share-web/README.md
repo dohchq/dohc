@@ -1,7 +1,7 @@
 # share-web
 
-This service is the public browser boundary for share links. It exchanges a
-fragment secret with the sync relay, stores the returned relay capability in a
+This service is the public browser boundary for share links. For public links,
+it exchanges a fragment secret with the sync relay, stores the returned relay capability in a
 bounded in-memory session, and sends only an HttpOnly session cookie to the
 browser.
 
@@ -17,6 +17,29 @@ Production operators must set four values:
   expose it to the browser.
 
 `DOHC_SHARE_WEB_PORT` defaults to `1790`.
+
+## App publication storage
+
+Set `DOHC_RELAY_APP_PUBLICATIONS=1` on the relay to enable immutable app publications.
+Leave it unset or set it to `0` to keep these routes unavailable.
+Invalid values stop the relay before it opens storage.
+
+This enables authenticated owners to publish, list, inspect, and withdraw app builds.
+Link holders can read a publication within their current share grant when the
+relay also has `DOHC_RELAY_LINK_KEY` configured.
+The setting does not enable public Edit or app collection writes.
+For app collection responses, also set `DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT`
+on the relay to a positive integer. This limits accepted creates over each grant's lifetime.
+Leave it unset or set it to `0` to disable collection access. Owners must approve each app's collection capability.
+Disabling collection access still lets owners revoke an existing approval.
+Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
+`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
+registrable domain. App launch stays off when the app domain is unset. Setting
+it without a public origin stops share-web at startup.
+
+Limits are shared with the desktop: 512 source files, 32 MiB per bundle,
+20 MiB per blob, and 256 KiB for the complete publication request.
+Withdrawal stops future authorized access. It cannot delete copies already received.
 
 ## Public origin and proxy
 
@@ -45,6 +68,45 @@ If the relay is unavailable or sends an invalid response to an authenticated
 viewer request, `share-web` returns a generic 503 without relay details or
 stale shared content. Restore the relay; the viewer can retry while its
 in-memory session remains valid.
+
+## Public Edit release
+
+Public Edit stays disabled unless both services receive `DOHC_PUBLIC_EDIT_RELEASE`
+as the exact JSON marker `{"version":1}`. Unknown versions and extra fields are rejected.
+Keep this variable unset until the deployment's calibration and required public proofs are admitted.
+The marker carries no budgets; existing explicit profiles still supply every limit.
+
+Share-web requires `DOHC_SHARE_WEB_LINK_LIVE_LIMITS`, the exact public HTTPS origin,
+and relay exchange configuration. The relay requires `DOHC_RELAY_LINK_LIVE=1`,
+complete named live/session/ticket profiles, and its configured document host.
+A service host must be configured and started. A device host also requires
+configured device delivery and owner admission. An absent or incompatible marker
+on either service prevents a successful public Edit exchange.
+
+Edit links cover existing live Markdown documents on the main version.
+Pinned versions cannot receive Edit links. The desktop obtains supported access
+levels from authenticated relay inventory; the relay revalidates mutations.
+Disabling release blocks Edit creation, widening, rotation, exchange, and renewal.
+Owners can still narrow or revoke an existing Edit link.
+
+## Named browser invitations
+
+The owner can copy a browser invitation for direct named Edit access to live paths.
+The relay builds `/s/edit/<encoded-grantId>` from `DOHC_RELAY_SHARE_WEB_ORIGIN` when named browser sessions are configured.
+This URL identifies the invitation. The recipient must sign in with the invited account; knowing the URL grants no access.
+Issuing the invitation does not check whether the editor or document host is available.
+
+Browser editing requires configuration on both services:
+
+- On the relay, set `DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_RELAY_SHARE_WEB_ORIGIN`, and `DOHC_RELAY_EXCHANGE_KEY`.
+  Enable `DOHC_RELAY_NAMED_LIVE_CONFIG` and `DOHC_RELAY_NAMED_LIVE_HOSTS` with the existing link key and a configured native document host.
+- On share-web, set `DOHC_SHARE_WEB_AUTH_URL` and `DOHC_SHARE_WEB_PUBLIC_ORIGIN` with the matching public Host and relay exchange key.
+  Set `DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS`, and `DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS`.
+
+The named session, live transport, and editor settings have no default budgets.
+Share-web refuses editor requests when its named editor is unconfigured.
+Live browser editing covers shared Markdown files. Other files retain their existing sharing permissions and change-submission flow.
+Desktop share codes remain available when browser invitations are unconfigured.
 
 ## Storage and recovery
 
@@ -236,13 +298,29 @@ Each proof covers settlement and restart recovery. The device proof also covers 
 Results and process logs remain in `.agent-artifacts/configured-hosts`.
 The command does not build Rust or select a default executable.
 
-## Reserved later-phase deployment work
+## App domains
+
+Use a separate registrable domain for apps. For example, a viewer at
+`https://share.example.com` can use `DOHC_SHARE_WEB_APP_DOMAIN=example.net`.
+Set the domain without a scheme, port, or wildcard. Subdomains of the viewer's
+registrable domain are refused.
+
+Point wildcard DNS for `*.example.net` at the share-web proxy and install a
+matching wildcard TLS certificate. Forward those requests to the same share-web
+instance as the viewer. Preserve the exact Host header and use HTTPS on port 443.
+Keep `DOHC_SHARE_WEB_PUBLIC_HOSTS` limited to the viewer's exact hosts.
+App routing separately accepts a 48-character lowercase hexadecimal label under
+the configured app domain and checks its server-issued launch binding.
+Unknown launches refuse access, even when the hostname has that shape.
+
+Do not share cookies or cached responses across app hosts. The proxy must preserve
+`Set-Cookie`, `Cache-Control`, `Content-Security-Policy`, and origin isolation headers.
+Restarting share-web ends app sessions; recipients reopen the share link to launch again.
 
 Phase 4 must define and test reverse-proxy WebSocket timeouts before browser
-live editing ships. Phase 5 app publications require a separate registrable
-domain from the viewer. They also require their own exact Host allowlist,
-wildcard DNS, and wildcard TLS policy. Do not place app origins on subdomains
-of the viewer's registrable domain.
+live editing ships.
+
+## Development
 
 Set `DOHC_SHARE_WEB_DEV=1` only with `NODE_ENV=development` or
 `NODE_ENV=test`. Production startup fails when the viewer build is missing.

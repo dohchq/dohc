@@ -11,7 +11,7 @@ import {
   DaemonRefusalError,
   isYdocUnsettledCloseRefusal,
 } from "../live/daemonLiveAdapter";
-import type { Request } from "../protocol";
+import type { JsonValue, Request } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
@@ -21,6 +21,7 @@ import {
   YdocResyncNeededError,
   YdocSessionQuarantinedError,
   YdocLiveAdapter,
+  YdocOwnerDraftPendingError,
   isWellFormedUtf16,
   type EngineTransport,
 } from "./ydocLiveAdapter";
@@ -38,6 +39,183 @@ import {
 const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
+
+it("keeps owner draft durability distinct from native settlement and preserves it on close", async () => {
+  const engine = new YdocLoopbackEngine();
+  const path = "notes/owner.md";
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path, content: "seed", contentKind: "richdoc"});
+  const seedAdapter = new YdocLiveAdapter(engine);
+  const seed = await seedAdapter.openSession({workspace: WORKSPACE,versionId:VERSION,path,contentKind:"richdoc"});
+  engine.markSessionReplicated(seed.sessionId);
+  const objectId = seed.objectId;
+  await seed.close({settle:false});
+  seedAdapter.dispose();
+  let revision = 1;
+  let accepted = false;
+  const descriptor = () => ({
+    binding: {workspaceId:"workspace",mainVersionId:VERSION,objectId,lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0},
+    relayDatabaseNamespace:"relay",revision,acceptedCursor:accepted ? 1 : 0,nativeHeadSequence:1,
+    outboxId:"outbox",pendingBytes:accepted ? 0 : 20,state:"active",
+  });
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      const response = await engine.sendRequest(request);
+      if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
+        return {...response,result:{...response.result as Record<string, JsonValue>,lineageClaimId:"a".repeat(64),ownerDraft:descriptor()}};
+      }
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        return {...response,result:{lineageClaimId:"a".repeat(64),ownerDraft:{outboxId:"outbox",sequence:2,deliveryId:"delivery",updateDigest:"b".repeat(64),pendingBytes:40,state:"active"}}};
+      }
+      return response;
+    },
+  };
+  const scheduler = settleScheduler();
+  const onSettled = vi.fn();
+  const onSettleError = vi.fn();
+  const provider = await openEngineYdocProviderSession({transport,workspace:WORKSPACE,versionId:VERSION,path,contentKind:"richdoc",onRemoteUpdate:()=>undefined,onSettled,onSettleError,scheduleSettle:scheduler.schedule});
+  const update = richdocUpdate(provider.initialUpdate,"pending edit");
+  await provider.applyLocalUpdate(update);
+  await expect(provider.settleNow()).rejects.toBeInstanceOf(YdocOwnerDraftPendingError);
+  expect(onSettled).not.toHaveBeenCalled();
+  expect(onSettleError.mock.calls.at(-1)?.[0]).toMatchObject({draft:{pendingBytes:40}});
+  expect(engine.requests.filter(request=>request.method===YDOC_METHOD.settle)).toHaveLength(0);
+  // An accepted echo can contain no new Yjs bytes. Its descriptor still
+  // changes the save status, without claiming local Markdown settlement.
+  accepted = true;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1,
+    payload: {sessionId: provider.nativeOwner!.sessionId, resyncRequired: true}});
+  await drain();
+  expect(scheduler.armed).toHaveLength(1);
+  scheduler.fire();
+  await vi.waitFor(() => expect(onSettleError.mock.calls.at(-1)?.[0]).toMatchObject({draft:{pendingBytes:0,acceptedCursor:1}}));
+  expect(onSettled).not.toHaveBeenCalled();
+  expect(engine.requests.filter(request=>request.method===YDOC_METHOD.settle)).toHaveLength(0);
+  await provider.close();
+  expect(engine.activeSessionIds()).toHaveLength(0);
+  revision = 2;
+  const reopened = await openEngineYdocProviderSession({transport,workspace:WORKSPACE,versionId:VERSION,path,contentKind:"richdoc",onRemoteUpdate:()=>undefined,scheduleSettle:scheduler.schedule});
+  expect(ydocProjection.yDocToMarkdown(reopened.doc)).toContain("pending edit");
+  await expect(reopened.settleNow()).rejects.toMatchObject({draft:{revision:2}});
+  await reopened.close();
+});
+
+it("resyncs a native invalidation into an open provider without losing its durable local edit", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const adapter = new YdocLiveAdapter({
+    ...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}}
+      : event)),
+  });
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  await session.applyLocalTextEdit({root: "plainText", index: 4, insert: " local"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, Y.encodeStateAsUpdate(session.doc));
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  let resolveUpdate!: () => void;
+  const updated = new Promise<void>(resolve => {resolveUpdate = resolve;});
+  session.onRemoteUpdate(() => {if (session.doc.getText("plainText").toString() === "remote seed local") resolveUpdate();});
+  const errors: YdocResyncNeededError[] = []; session.onResyncNeeded(error => errors.push(error));
+  engine.applyRemoteUpdate(session.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await updated;
+  expect(errors.map(error => error.reason)).toEqual(["native-state-changed"]);
+  expect(engine.sessionText(session.sessionId)).toBe("remote seed local");
+  expect(session.doc.getText("plainText").toString()).toBe("remote seed local");
+  expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(1);
+  const before = engine.requests.length;
+  engine.emitEvent({name: YDOC_EVENT.remoteUpdate, seq: 100, sessionGeneration: 1, payload: {sessionId: "closed-other-session", resyncRequired: true}});
+  expect(engine.requests).toHaveLength(before);
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
+it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as const)("handles a refused invalidation resync: %s", async (mode) => {
+  const engine = seedPlaintextEngine("seed"), scheduler = settleScheduler();
+  const transient = mode === "recover" || mode === "close" || mode === "close-during-retry";
+  const refusal = new DaemonRefusalError({code: transient ? "OVERLOADED" : "INVALID_PARAMS",
+    message: mode === "terminal" ? "owner-outbox-parent-mismatch" : "live-settlement-capacity",
+    retry: transient ? "afterBackoff" : "no"}, new Error("daemon response"));
+  let resyncs = 0;
+  let releaseRetry!: () => void;
+  const heldRetry = new Promise<void>(resolve => {releaseRetry = resolve;});
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) {
+        if (++resyncs === 1) throw refusal;
+        if (mode === "close-during-retry") await heldRetry;
+      }
+      return engine.sendRequest(request);
+    },
+  };
+  const errors: unknown[] = [];
+  const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, onSessionError: error => errors.push(error), scheduleSettle: scheduler.schedule});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(errors).toEqual([refusal]); expect(resyncs).toBe(1);
+  expect(provider.doc.getText("plainText").toString()).toBe("seed");
+  if (!transient) {
+    expect(scheduler.armed).toHaveLength(0);
+    await provider.evict();
+  } else {
+    expect(scheduler.armed).toHaveLength(1);
+    if (mode === "close") {
+      await provider.evict(); expect(scheduler.armed).toHaveLength(0); expect(resyncs).toBe(1);
+    } else if (mode === "close-during-retry") {
+      scheduler.fire(); await drain(); expect(resyncs).toBe(2);
+      const closing = provider.close({settle: false}); await drain();
+      expect(engine.activeSessionIds()).toHaveLength(1);
+      releaseRetry(); await closing; expect(engine.activeSessionIds()).toHaveLength(0);
+    } else {
+      scheduler.fire(); await drain();
+      expect(resyncs).toBe(2); expect(provider.doc.getText("plainText").toString()).toBe("remote seed");
+      await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(11, " local")));
+      expect(engine.sessionText(provider.nativeOwner!.sessionId)).toBe("remote seed local");
+      await provider.close();
+    }
+  }
+  peer.destroy();
+});
+
+it("resyncs an invalidation queued as the previous state finishes applying", async () => {
+  const engine = seedPlaintextEngine("seed");
+  const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event))});
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, session.initialUpdate);
+  const firstVector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "first ");
+  const firstUpdate = Y.encodeStateAsUpdate(peer, firstVector), secondVector = Y.encodeStateVector(peer);
+  peer.getText("plainText").insert(0, "second "); const secondUpdate = Y.encodeStateAsUpdate(peer, secondVector);
+  let queued = false;
+  session.onRemoteUpdate(() => {if (!queued) {queued = true; queueMicrotask(() => engine.applyRemoteUpdate(session.sessionId, secondUpdate));}});
+  engine.applyRemoteUpdate(session.sessionId, firstUpdate); await drain();
+  expect(engine.sessionText(session.sessionId)).toBe("second first seed");
+  expect(session.doc.getText("plainText").toString()).toBe("second first seed");
+  await session.applyLocalTextEdit({root: "plainText", index: 17, insert: " local"});
+  peer.destroy(); await session.close(); adapter.dispose();
+});
+
+it("shares one pending native resync between concurrent callers", async () => {
+  const engine = seedPlaintextEngine("seed");
+  let release!: () => void, resyncs = 0;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync) {resyncs++; await held;}
+      return engine.sendRequest(request);
+    }});
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const first = session.resync(), second = session.resync();
+  await drain(); expect(resyncs).toBe(1);
+  release(); expect(await first).toEqual(await second);
+  await session.resync(); expect(resyncs).toBe(2);
+  await session.close(); adapter.dispose();
+});
 
 function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   const engine = new YdocLoopbackEngine();
@@ -121,6 +299,47 @@ function richdocUpdate(initialUpdate: Uint8Array, text: string): Uint8Array {
   body.insert(0, [paragraph]);
   return Y.encodeStateAsUpdate(mirror, before);
 }
+
+it("forwards committed owner deltas without resync or journaling, while daemon gaps still resync", async () => {
+  const original = "x".repeat(131_072);
+  const engine = seedPlaintextEngine(original);
+  let forward = true;
+  const remote = vi.fn(), gaps = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
+    workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
+  });
+  const owner = provider.nativeOwner!;
+  const durableChanges = vi.fn();
+  const stopDurableChanges = owner.onDurableLocalChange(durableChanges);
+  const recordedBeforeDelivery = engine.recordedUpdates.length;
+  const mirror = new Y.Doc(); Y.applyUpdate(mirror,provider.initialUpdate);
+  let deltaBytes = 0;
+  try {
+    for (let index = 0; index < 100; index++) {
+      const before = Y.encodeStateVector(mirror);
+      mirror.getText("plainText").insert(original.length + index,"!");
+      const update = Y.encodeStateAsUpdate(mirror,before); deltaBytes += update.length;
+      forward = false; engine.applyRemoteUpdate(owner.sessionId,update);
+      await owner.applyRemoteUpdate(update);
+      forward = true; engine.emitRemoteUpdate(owner.sessionId,update,{seq: index + 1});
+    }
+    expect(provider.doc.getText("plainText").toString()).toBe(original + "!".repeat(100));
+    expect(remote).toHaveBeenCalledTimes(100);
+    expect(durableChanges).not.toHaveBeenCalled();
+    stopDurableChanges();
+    expect(deltaBytes).toBeLessThan(10_000);
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(0);
+    expect(engine.recordedUpdates).toHaveLength(recordedBeforeDelivery);
+    const update = plaintextUpdate(Y.encodeStateAsUpdate(mirror),text => text.insert(text.length,"gap"));
+    engine.applyRemoteUpdate(owner.sessionId,update,{seq: 102});
+    await expect.poll(() => provider.doc.getText("plainText").toString()).toBe(original + "!".repeat(100) + "gap");
+    expect(gaps).toHaveBeenCalledOnce();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(1);
+  } finally {await provider.close({settle: false}); mirror.destroy();}
+  await expect(owner.applyRemoteUpdate(new Uint8Array([0,0]))).rejects.toThrow("closed");
+});
 
 describe("scene artifact seed admission", () => {
   it("forwards the first-generation intent and disables it for a replay generation", async () => {
@@ -629,7 +848,7 @@ describe("YdocLiveAdapter", () => {
       text.delete(0, 1);
       text.insert(0, "x");
     });
-    expect(result?.seq).toBe(1);
+    expect(result).toMatchObject({ seq: 1 });
     expect(session.doc.getText("plainText").toString()).toBe("xabc");
     expect(engine.recordedUpdates).toHaveLength(1);
 
@@ -1615,9 +1834,12 @@ describe("YdocLiveAdapter", () => {
     // engine never received. The resend asks durable state what is missing.
     const { provider, settled, scheduler, journaled } =
       await openAgainstABusyJournal("typed while the store was busy", 2);
+    const durableChanges = vi.fn();
+    const stopDurableChanges = provider.nativeOwner!.onDurableLocalChange(durableChanges);
 
     // The caller still hears the truth about its own update.
     await expect(journaled).rejects.toThrow("engine-store-busy");
+    expect(durableChanges).not.toHaveBeenCalled();
     expect(settled).toEqual([]);
 
     // The ladder's rung: resend, then settle.
@@ -1628,6 +1850,8 @@ describe("YdocLiveAdapter", () => {
     expect(settled).toHaveLength(1);
     // The assertion a call count cannot make.
     expect(settled[0]?.content).toContain("typed while the store was busy");
+    expect(durableChanges).toHaveBeenCalledTimes(1);
+    stopDurableChanges();
 
     await provider.close({ settle: false });
   });
@@ -2969,8 +3193,8 @@ describe("YdocLiveAdapter", () => {
     engine.emitRemoteUpdate(firstSession.sessionId, firstRemote);
     engine.emitRemoteUpdate(secondSession.sessionId, secondRemote);
 
-    expect(firstRecord?.seq).toBe(1);
-    expect(secondRecord?.seq).toBe(1);
+    expect(firstRecord).toMatchObject({ seq: 1 });
+    expect(secondRecord).toMatchObject({ seq: 1 });
     expect(engine.events.map((event) => event.seq)).toEqual([1, 1]);
 
     await firstSession.close({ settle: true });
@@ -4601,4 +4825,36 @@ describe("no-edit settle skip", () => {
       content: "prior edit seeded body",
     });
   });
+});
+
+it("notifies durable owner observers only after commit and preserves lost-response recovery", async () => {
+  const engine = seedPlaintextEngine();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => {release = resolve;});
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  let loseResponse = true;
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.recordUpdate && loseResponse) {
+        entered(); await blocked;
+        await engine.sendRequest(request); loseResponse = false;
+        throw new Error("committed response lost");
+      }
+      return engine.sendRequest(request);
+    },
+  };
+  const adapter = new YdocLiveAdapter(transport);
+  const session = await adapter.openSession({workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext"});
+  const changed = vi.fn(() => {expect(engine.sessionText(session.sessionId)).toBe("durable");});
+  const stop = session.onDurableLocalChange(changed);
+  try {
+    const recorded = session.applyLocalTextEdit({root: "plainText", index: 0, insert: "durable"});
+    await started; expect(changed).not.toHaveBeenCalled();
+    release(); await recorded;
+    expect(changed).toHaveBeenCalledTimes(1); expect(engine.recordedUpdates).toHaveLength(1);
+    stop(); stop();
+    await session.applyLocalTextEdit({root: "plainText", index: 7, insert: "!"});
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {release(); await session.close(); adapter.dispose();}
 });

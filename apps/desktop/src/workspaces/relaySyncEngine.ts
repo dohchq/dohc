@@ -6,6 +6,7 @@ import {
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type SharingDeclined,
+  type OwnerAdmissionPending,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -67,6 +68,7 @@ export interface CloudSyncSnapshot {
   conflictCount: number;
   authExpired: boolean;
   sharingDeclined: SharingDeclined[];
+  ownerAdmissionPending?: OwnerAdmissionPending[];
   syncFailing?: boolean;
 }
 
@@ -94,6 +96,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let authExpired = false;
   let syncFailing = false;
   let sharingDeclined: SharingDeclined[] = [];
+  let ownerAdmissionPending: OwnerAdmissionPending[] = [];
   let stopped = false;
   let consecutiveFailures = 0;
   let nextBackoffMs = initialBackoffMs;
@@ -149,6 +152,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   async function doPass(): Promise<void> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
+    let passOwnerPending = ownerAdmissionPending;
+    const push = async () => {
+      const result = await operations.push();
+      passSharingDeclined.push(...result.sharingDeclined);
+      passOwnerPending = result.ownerAdmissionPending;
+    };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
       async (materializePage) => {
@@ -156,7 +165,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // a fresh join must never append ops before it has the remote state.
         if (!bootstrapPass) {
           try {
-            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+            await push();
           } catch (error) {
             if (!(error instanceof RelayOriginDivergedError)) throw error;
             // The local engine.db was restored-from-older or cloned, so its
@@ -164,7 +173,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
             // onto a fresh origin — preserving local-only work as conflicts where
             // it clashes, never dropping it — then push under the fresh origin.
             await operations.recoverOrigin();
-            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+            await push();
           }
         }
         try {
@@ -176,7 +185,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           // and retry the pass instead of backing off against the same page.
           await operations.recoverOrigin();
           if (!bootstrapPass) {
-            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+            await push();
           }
           return operations.pull(materializePage);
         }
@@ -215,11 +224,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       ? await options.countOpenConflicts()
       : conflictCount + pullResult.conflictsOpened;
     sharingDeclined = nextSharingDeclined;
-    pendingChangeCount = Math.max(0, pendingChangeCount - beforePending);
+    ownerAdmissionPending = passOwnerPending;
+    pendingChangeCount = Math.max(ownerAdmissionPending.length, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
     consecutiveFailures = 0;
     nextBackoffMs = initialBackoffMs;
     setSyncFailing(false);
+    if (ownerAdmissionPending.length > 0) scheduleBackoff();
     // The bootstrap pull done, immediately queue the first normal pass so
     // local identity/journal ops reconcile without waiting for an edit.
     if (bootstrapPass && !stopped && !authExpired && debounceTimer === undefined) {
@@ -276,6 +287,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         pendingChangeCount,
         conflictCount,
         authExpired,
+        ownerAdmissionPending: ownerAdmissionPending.map(pending => ({...pending})),
         sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         ...(syncFailing ? { syncFailing: true } : {}),
       };

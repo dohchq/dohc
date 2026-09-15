@@ -51,6 +51,82 @@ struct YdocUpdatePayload {
     is_base_state: bool,
 }
 
+pub(crate) const LIVE_UNADMITTED_UPDATE: &str = "ordinary update has no native live admission";
+
+// Historical audit imports never populate either native binding table.
+fn live_ordinary_classification(
+    conn: &Connection,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    update: &[u8],
+) -> Result<Option<bool>, SyncError> {
+    let bound: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if !bound {
+        return Ok(None);
+    }
+    if payload.content_kind != "richdoc" {
+        return Ok(Some(false));
+    }
+    if let Some(contained) =
+        dohc_engine_collab::owner_outbox::publication::contains_observed_update_in(
+            conn,
+            key,
+            &payload.path,
+            &payload.lineage_claim_id,
+            update,
+        )
+        .unwrap_or(Some(false))
+    {
+        return Ok(Some(contained));
+    }
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM live_device_application_bindings b
+           WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND b.object_id=?3
+             AND b.lineage_claim_id=?4 AND b.current_path=?5 AND (
+               EXISTS(SELECT 1 FROM live_device_update_applications a
+                 WHERE a.relay_database_namespace=b.relay_database_namespace AND a.workspace_id=b.workspace_id
+                   AND a.main_version_id=b.main_version_id AND a.object_id=b.object_id
+                   AND a.lineage_claim_id=?4 AND a.update_digest=?6 AND a.current_path=?5)
+               OR EXISTS(SELECT 1 FROM live_device_bootstraps a
+                 WHERE a.relay_database_namespace=b.relay_database_namespace AND a.workspace_id=b.workspace_id
+                   AND a.main_version_id=b.main_version_id AND a.object_id=b.object_id
+                   AND a.lineage_claim_id=?4 AND a.baseline_digest=?6)))
+",
+        params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id,payload.path,payload.update_blob_sha256],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    Ok(Some(applied))
+}
+
+pub(crate) fn retain_refused_ydoc_blob(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    origin: &str,
+    sequence: i64,
+) -> Result<(), SyncError> {
+    let changed = tx.execute(
+        "INSERT OR IGNORE INTO replication_refused_ydoc_blobs
+         SELECT workspace_id,origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256')
+         FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND op_kind='ydoc.update'",
+        params![workspace,origin,sequence],
+    ).map_err(SyncError::persist)?;
+    if changed == 0 {
+        let retained: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+            params![workspace,origin,sequence],|row|row.get(0),
+        ).map_err(SyncError::corrupt)?;
+        if !retained {
+            return Err(local_corruption("refused live update coordinate is absent"));
+        }
+    }
+    Ok(())
+}
+
 fn valid_lineage_claim_id(value: &str) -> bool {
     value.len() == 64
         && value
@@ -582,6 +658,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
 /// it and every later row remain queued until the session is removed and the
 /// ordinary full drain can replace the lineage. This prevents settle/resync
 /// from changing the durable generation underneath a still-live editor.
+/// Native live bindings classify old coordinates without replacing the lineage.
 pub fn drain_deferred_ydoc_for_live_session(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -714,16 +791,34 @@ fn drain_deferred_ydoc(
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
-        if let DeferredDrainMode::Live(expected_claim_id) = mode
-            && Some(lineage_claim_id.as_str()) != expected_claim_id
-        {
-            break;
-        }
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
             .ok_or(SyncError::BlobInvalid)?;
+        let live_classification =
+            store.read_with(|conn| live_ordinary_classification(conn, key, &payload, &bytes))?;
+        if let DeferredDrainMode::Live(expected_claim_id) = mode
+            && Some(lineage_claim_id.as_str()) != expected_claim_id
+            && live_classification.is_none()
+        {
+            break;
+        }
         if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
             return Err(SyncError::BlobInvalid);
+        }
+        if let Some(echo) = live_classification {
+            if echo {
+                drained_coordinates.push((origin_id, origin_seq));
+            } else {
+                refusals.push(refuse_deferred_ydoc(
+                    store,
+                    key,
+                    &origin_id,
+                    origin_seq,
+                    LIVE_UNADMITTED_UPDATE,
+                    faults,
+                )?);
+            }
+            continue;
         }
         if payload.is_base_state {
             // A base can replace the lineage while reusing durable coordinates.
@@ -1093,6 +1188,11 @@ fn refuse_deferred_ydoc(
     let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
     match store.write_with(faults, |tx| {
         crate::apply::persist_refusal(tx, &refusal)?;
+        if refusal.reason.message() == LIVE_UNADMITTED_UPDATE {
+            retain_refused_ydoc_blob(tx, &key.workspace_id, origin_id, origin_seq)?;
+            tx.execute("UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![key.workspace_id,origin_id,origin_seq]).map_err(SyncError::persist)?;
+        }
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \
              WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
@@ -1204,11 +1304,73 @@ pub enum ResultingHead<'a> {
     BinaryOrAbsent,
 }
 
+/// A folder move must check durable owner bindings, including owners that
+/// have never queued an update. Closing a session does not end adoption.
+pub fn ensure_no_adopted_owner_under_path(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<(), SyncError> {
+    let adopted: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+         WHERE workspace_id=?1 AND main_version_id=?2
+           AND (json_extract(binding_json,'$.currentPath')=?3
+             OR substr(json_extract(binding_json,'$.currentPath'),1,length(?3)+1)=?3||'/'))",
+            params![workspace_id, version_id, path],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if adopted {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    Ok(())
+}
+
+fn ensure_adopted_owner_binding_unchanged(
+    conn: &Connection,
+    key: &DocKey,
+    resulting_path: Option<&str>,
+) -> Result<(), SyncError> {
+    let changes_binding: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3
+           AND (?4 IS NULL OR json_extract(binding_json,'$.currentPath') IS NOT ?4))",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                resulting_path
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if changes_binding {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    Ok(())
+}
+
+fn require_unfenced_lineage(conn: &Connection, key: &DocKey) -> Result<(), SyncError> {
+    dohc_engine_collab::live_update_application::require_restore_open(conn, key).map_err(|error| {
+        match error {
+            CollabError::RestoreFenced => SyncError::InvalidInput {
+                reason: "live document is stopped",
+            },
+            other => map_collab_hard_error(other),
+        }
+    })
+}
+
 pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
+    ensure_adopted_owner_binding_unchanged(tx, key, None)?;
+    require_unfenced_lineage(tx, key)?;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -1470,6 +1632,8 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     match resulting {
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
+            ensure_adopted_owner_binding_unchanged(tx, &complete.key, Some(path))?;
+            require_unfenced_lineage(tx, &complete.key)?;
             let Some((marker, doc)) = complete.state.as_ref() else {
                 return Ok(());
             };
@@ -1480,6 +1644,9 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                 let projection =
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
+                    // An adopted owner cannot accept an ordinary rewrite.
+                    // Retain this moment instead of waiting for that rewrite.
+                    ensure_adopted_owner_binding_unchanged(tx, &complete.key, None)?;
                     if marker.content_kind == ContentKind::Scene {
                         // The origin of an external scene edit retires its
                         // lineage instead of emitting a Markdown rewrite (a
@@ -1565,6 +1732,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     journal: bool,
 ) -> Result<(), SyncError> {
     let key = &complete.key;
+    ensure_adopted_owner_binding_unchanged(tx, key, Some(path))?;
+    require_unfenced_lineage(tx, key)?;
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(());
     };
@@ -2033,13 +2202,14 @@ pub fn project_and_write_in_tx(
         .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
         tx.execute(
-            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5, path = ?6              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 snapshot.blob_sha256,
                 now_ms,
+                path,
             ],
         )
         .map_err(SyncError::persist)?;
@@ -2090,7 +2260,7 @@ pub fn project_and_write_in_tx(
     // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
-        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6, path = ?7          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
         params![
             key.workspace_id,
             key.version_id,
@@ -2098,6 +2268,7 @@ pub fn project_and_write_in_tx(
             result.moment.moment_order,
             projected_sha,
             now_ms,
+            path,
         ],
     )
     .map_err(SyncError::persist)?;
@@ -2166,8 +2337,8 @@ pub fn apply_ydoc_envelope(
     }
     let key = match DocKey::new(
         envelope.workspace_id.clone(),
-        payload.version_id,
-        payload.object_id,
+        payload.version_id.clone(),
+        payload.object_id.clone(),
     ) {
         Ok(key) => key,
         Err(_) => {
@@ -2216,6 +2387,35 @@ pub fn apply_ydoc_envelope(
             reason: "pulled ydoc.update is missing its relay sequence",
         });
     };
+    if let Some(echo) =
+        store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
+    {
+        return crate::apply::apply_envelope_with_mutation_outcome(
+            store,
+            envelope,
+            faults,
+            |tx, _| {
+                if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
+                    return Err(SyncError::RetryableState {
+                        reason: "native live binding changed",
+                    });
+                }
+                if echo {
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("native-live-content-echo"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                } else {
+                    Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                        reason: LIVE_UNADMITTED_UPDATE.into(),
+                    })
+                }
+            },
+        );
+    }
     if leases.is_live(&key) {
         // Full durable validation before admission: byte caps, abort-safe
         // prevalidation, and the replay-parity gate — replayed on top of the
@@ -3445,6 +3645,10 @@ fn validate_retryable_ydoc_identity(
 
 fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
+        CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
+        CollabError::RestoreFenced => SyncError::RetryableState {
+            reason: "live document is stopped",
+        },
         CollabError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),
     }

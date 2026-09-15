@@ -594,6 +594,7 @@ where
         tx,
         write,
         false,
+        None,
         Some(PreparedTextWrite {
             object_id: resolved.object_id.clone(),
             before,
@@ -1315,7 +1316,38 @@ pub fn write_text_in_tx(
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, false, None)
+    write_normalized_text_in_tx(tx, input, false, None, None)
+}
+
+/// Copy a stored text preimage forward without changing its object identity.
+pub fn write_history_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+    restore_before_moment_id: &str,
+) -> Result<WriteResult, DomainError> {
+    validate_moment_id(restore_before_moment_id)?;
+    let source = get_moment(tx, &input.workspace_id, restore_before_moment_id)?.ok_or(
+        DomainError::InvalidInput {
+            reason: "history moment is unavailable",
+        },
+    )?;
+    let normalized = normalized_write_input(input.into())?;
+    if source.version_id != input.version_id
+        || source.path != normalized.path
+        || source.operation == MomentOp::Rename
+        || source.sync_record_only
+        || !source.before_present
+        || source.before_content_kind != "text"
+        || source.before_blob_sha256.as_deref() != Some(text_blob_sha256(&input.text).as_str())
+        || input.metadata_origin != "restore"
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "history restore does not match its preimage",
+        });
+    }
+    let mut normalized = normalized;
+    normalized.object_id = &source.object_id;
+    write_normalized_text_in_tx(tx, normalized, false, Some(&source), None)
 }
 
 /// Persist a text projection inside the caller's transaction.
@@ -1338,13 +1370,14 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx(tx, input, true, None)
+    write_normalized_text_in_tx(tx, input, true, None, None)
 }
 
 fn write_normalized_text_in_tx(
     tx: &Transaction<'_>,
     input: ProjectedWriteText<'_>,
     allow_preallocated_object: bool,
+    history_source: Option<&MomentRecord>,
     prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
     let ws = input.workspace_id;
@@ -1377,6 +1410,14 @@ fn write_normalized_text_in_tx(
             author_json,
         ],
     );
+    let payload_hash = if let Some(source) = history_source {
+        hash_request_fields(
+            input.request_id,
+            &[payload_hash.as_bytes(), source.moment_id.as_bytes()],
+        )
+    } else {
+        payload_hash
+    };
     if let Some(request_id) = input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -1413,6 +1454,15 @@ fn write_normalized_text_in_tx(
         Some(prepared) => prepared,
         None => {
             let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
+            if history_source.is_some()
+                && existing_object
+                    .as_deref()
+                    .is_some_and(|id| id != input.object_id)
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "history restore path belongs to another object",
+                });
+            }
             let before = match &existing_object {
                 Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
                 None => {
@@ -1424,7 +1474,12 @@ fn write_normalized_text_in_tx(
                     if object_exists(tx, ws, input.object_id)? {
                         let bare_preallocation = allow_preallocated_object
                             && !object_has_any_binding(tx, ws, input.object_id)?;
-                        if !bare_preallocation {
+                        let dormant_history_object = history_source.is_some()
+                            && !tx.query_row(
+                                "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                                params![ws, input.version_id, input.object_id], |row| row.get::<_, bool>(0),
+                            ).map_err(DomainError::sql_corrupt)?;
+                        if !bare_preallocation && !dormant_history_object {
                             return Err(DomainError::InvalidInput {
                                 reason: "object_id is already bound to another object",
                             });

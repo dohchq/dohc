@@ -2,7 +2,7 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { parseStoredAnyShareSelectorJson } from "./shareFilter";
+import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
   SyncRelayShareWithGrantRow,
   SyncRelayShareGrantRow,
@@ -32,10 +32,19 @@ function storedSelectorKind(
 
 export function createShareSummaries(
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
+  namedBrowserOrigin?: string,
 ) {
-  const shareSummaryBase = (row: SyncRelayShareWithGrantRow): Record<string, unknown> => {
+  const namedBrowserInvitation = (grantId: string, selector: StoredAnyShareSelector, access: string) => {
+    const effective = effectiveShareSelector(selector, access);
+    return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
+      ? { browserInvitationUrl: `${namedBrowserOrigin}/s/edit/${encodeURIComponent(grantId)}` }
+      : {};
+  };
+  const shareSummaryBase = (
+    row: SyncRelayShareWithGrantRow,
+    storedSelector = parseStoredAnyShareSelectorJson(row.share.selectorJson),
+  ): Record<string, unknown> => {
     const { share, grant } = row;
-    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     // This serialization boundary is the one authority that decides whether
     // stored selector and grant access form a readable row. Every listing
     // caller gets the same damage classification.
@@ -82,12 +91,16 @@ export function createShareSummaries(
         ? await lookupUserEmail(grant.principalUserId)
         : null
       : grant.principalEmail;
+    const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
-      ...shareSummaryBase(row),
+      ...shareSummaryBase(row, selector),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
       revokedAtMs: grant.revokedAtMs,
+      ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
+        (grant.principalKind === "user" || grant.principalKind === "email")
+        ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
     };
   };
 
@@ -216,6 +229,7 @@ export function createShareSummaries(
   };
 
   return {
+    namedBrowserInvitation,
     grantedShareSummary,
     receivedShareSummary,
     linkGrantBody,

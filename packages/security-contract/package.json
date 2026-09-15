@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",
     "./engine-path-floor": "./src/enginePathFloor.ts",

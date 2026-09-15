@@ -383,7 +383,7 @@ fn assert_remote_cache_matches_cold(
 }
 
 #[test]
-fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
+fn remote_frontier_fold_retains_an_identity_covered_by_delete() {
     let (_warm_scratch, _warm_path, mut warm_store) = open_store();
     let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
@@ -431,13 +431,13 @@ fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
     );
     assert_eq!(
         warm_cache.frontier_fact_counts_for_test(&key),
-        Some((1, 0, 2))
+        Some((2, 0, 2))
     );
     assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
 }
 
 #[test]
-fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
+fn remote_frontier_fold_retains_a_string_run_across_a_mid_run_delete() {
     let (_warm_scratch, _warm_path, mut warm_store) = open_store();
     let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
@@ -480,13 +480,13 @@ fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
     );
     assert_eq!(
         warm_cache.frontier_fact_counts_for_test(&key),
-        Some((4, 0, 2))
+        Some((5, 0, 2))
     );
     assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
 }
 
 #[test]
-fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
+fn remote_frontier_fold_retains_a_deleted_scalar_interior() {
     let (_warm_scratch, _warm_path, mut warm_store) = open_store();
     let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
@@ -534,7 +534,7 @@ fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
     );
     assert_eq!(
         warm_cache.frontier_fact_counts_for_test(&key),
-        Some((0, 0, 2))
+        Some((2, 1, 2))
     );
     assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
 }
@@ -611,7 +611,7 @@ fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
     );
     assert_eq!(
         warm_cache.frontier_fact_counts_for_test(&key),
-        Some((1, 0, 2))
+        Some((3, 0, 2))
     );
     assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
 }

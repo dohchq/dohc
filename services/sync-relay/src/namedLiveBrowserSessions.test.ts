@@ -9,8 +9,8 @@ vi.mock("node:crypto", async importOriginal => {
   return { ...original, randomBytes: vi.fn(original.randomBytes) };
 });
 
-const alice = { userId: "alice", workspaceId: "workspace", shareId: "share-alice", grantId: "grant-alice" };
-const bob = { userId: "bob", workspaceId: "workspace", shareId: "share-bob", grantId: "grant-bob" };
+const alice = { kind: "named" as const, userId: "alice", workspaceId: "workspace", shareId: "share-alice", grantId: "grant-alice" };
+const bob = { kind: "named" as const, userId: "bob", workspaceId: "workspace", shareId: "share-bob", grantId: "grant-bob" };
 
 function fixture(overrides: { maxSessions?: number; retentionMs?: number; now?: () => number } = {}) {
   let time = 100;

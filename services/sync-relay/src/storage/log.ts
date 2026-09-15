@@ -26,12 +26,19 @@ export function appendLogBatch(storage: StorageContext, input: {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
-    for (const op of input.ops) {
-      if (typeof op.recordedAtMs !== "number" || !Number.isSafeInteger(op.recordedAtMs)) {
-        throw new Error("recordedAtMs must be an integer in the safe wire range");
+    return storage.tx(() => appendLogBatchInTransaction(storage, input));
+  }
+
+/** Internal append for callers already holding the relay write transaction. */
+export function appendLogBatchInTransaction(storage: StorageContext, input: {
+  workspaceId: string;
+  originId: string;
+  ops: SyncRelayLogInput[];
+  guard?: (context: AppendLogBatchGuardContext) => void;
+}): AppendLogBatchResult {
+      for (const op of input.ops) {
+        if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
       }
-    }
-    return storage.tx(() => {
       // Authorization re-verification under the write lock (see the interface
       // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
       // by another writer is either already visible here (guard throws, batch
@@ -202,7 +209,6 @@ export function appendLogBatch(storage: StorageContext, input: {
         );
       }
       return { inserted, skipped, currentMaxOriginSeq: currentMax };
-    });
   }
 
 export function maxOriginSeq(storage: StorageContext, workspaceId: string, originId: string): number {

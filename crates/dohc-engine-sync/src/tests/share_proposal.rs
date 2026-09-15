@@ -134,6 +134,7 @@ fn share_proposal_submit_offers_nothing_below_edit_level() {
                 &proposal_grant(access),
                 "submit-1",
                 &NoFaults,
+                0,
             )
             .expect("submit");
         assert_eq!(
@@ -210,6 +211,7 @@ fn share_proposal_submit_keeps_changes_inside_the_grant() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -276,6 +278,7 @@ fn share_proposal_submit_consolidates_repeated_edits_to_one_change() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -344,6 +347,7 @@ fn share_proposal_submit_carries_a_rename_and_an_edit_as_one_change() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(outcome.submitted, 1);
@@ -406,6 +410,7 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("first submit");
     assert_eq!(first.submitted, 1);
@@ -437,6 +442,7 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-2",
             &NoFaults,
+            0,
         )
         .expect("second submit");
     assert_eq!(
@@ -491,6 +497,7 @@ fn share_proposal_submit_uploads_blobs_before_the_ops() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(outcome.submitted, 2);
@@ -553,6 +560,7 @@ fn share_proposal_submit_proposes_only_file_moments() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -590,6 +598,7 @@ fn share_proposal_submit_drops_a_half_stated_base() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(outcome.submitted, 1);
@@ -649,6 +658,7 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -717,6 +727,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("an over-limit recipient must still be able to send");
     assert_eq!(
@@ -738,6 +749,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-2",
             &NoFaults,
+            0,
         )
         .expect("second submit");
     assert_eq!(
@@ -846,6 +858,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
             &grant,
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("first submit");
     assert_eq!(first.submitted, crate::MAX_SHARE_PROPOSAL_OPS);
@@ -858,6 +871,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
             &grant,
             "submit-2",
             &NoFaults,
+            0,
         )
         .expect("second submit");
 
@@ -933,6 +947,7 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -993,6 +1008,7 @@ fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_no
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -1059,6 +1075,7 @@ fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("dropping more files than the bound must not fail the submit");
     assert_eq!(
@@ -1089,6 +1106,7 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
             &proposal_grant(crate::ShareAccess::Edit),
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -1180,6 +1198,7 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
             &granted,
             "submit-1",
             &NoFaults,
+            0,
         )
         .expect("submit");
     assert_eq!(
@@ -1409,4 +1428,30 @@ fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
         dohc_engine_storage::hex_sha256(b"v1"),
         "a conflicted accept must leave the granter's content untouched",
     );
+}
+
+#[test]
+fn proposal_never_uploads_or_advances_past_unadmitted_native_owner_content() {
+    let (_dir, mut store, _observed, _checkpoint) = super::owner_publication::fixture();
+    let text = "private pending projection";
+    seed_blob(&mut store, text);
+    journal_local_moment(
+        &mut store,
+        &local_moment_payload("private", "owner", "write", None, "owner.md", text),
+        10,
+    );
+    let grant = ShareGrant {
+        paths: vec!["owner.md".into()],
+        version_id: None,
+        access: crate::ShareAccess::Edit,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let result = client.submit_share_proposal(
+        &mut store, "ws", "share", &grant, "submit", &NoFaults, 1_000_000,
+    );
+    assert!(
+        matches!(result,Err(RelayError::Local(reason)) if reason.starts_with("owner-admission-pending:"))
+    );
+    assert!(client.transport().blob_uploads.lock().unwrap().is_empty());
+    assert_eq!(proposal_scan_position(&store, "share"), None);
 }

@@ -48,6 +48,64 @@ fn text_sha(text: &str) -> String {
     hex_sha256(text.as_bytes())
 }
 
+#[test]
+fn public_create_author_survives_replay_and_payload_export() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["---\nanswer: Lisbon\n---\n"]);
+    let mut payload = absent_text_payload(
+        "accepted-create",
+        "response-object",
+        "poll/response.md",
+        "---\nanswer: Lisbon\n---\n",
+    );
+    let author = json!({"kind":"public", "principalId":"public-holder", "grantId":"grant"});
+    payload["author"] = author.clone();
+    let op = envelope("relay:collection-create:grant", 0, "ws", payload);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &op, &NoFaults).expect("accept"),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    apply_moment_envelope(&mut store, &op, &NoFaults).expect("idempotent replay");
+    store
+        .write_with(&NoFaults, |tx| {
+            let count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id='accepted-create'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let (exported, _) =
+                crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
+            assert_eq!(exported["author"], author);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn public_author_is_refused_from_an_ordinary_origin() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["answer"]);
+    let mut payload = absent_text_payload(
+        "forged-public",
+        "forged-object",
+        "poll/response.md",
+        "answer",
+    );
+    payload["author"] = json!({"kind":"public", "principalId":"holder", "grantId":"grant"});
+    let result = apply_moment_envelope(
+        &mut store,
+        &envelope("device-origin", 0, "ws", payload),
+        &NoFaults,
+    )
+    .expect("refusal is recorded");
+    assert!(
+        matches!(result.primary, ApplyDisposition::Refused(ref refusal) if matches!(refusal.reason, RefusalReason::InvalidInput { ref reason } if reason == "public moment author requires a relay collection origin"))
+    );
+}
+
 fn hydrate_texts(store: &mut EngineStore, texts: &[&str]) {
     store
         .read_with(|tx| {
@@ -423,6 +481,248 @@ fn present_text_payload(
         "beforeLatestMomentId": before_head,
         "beforeMetadata": {"origin": "api"}
     })
+}
+
+fn stopped_binary_moment() -> (
+    ScratchDir,
+    EngineStore,
+    ReplicationEnvelope,
+    dohc_engine_collab::owner_outbox::OwnerOutboxAppendResult,
+    Vec<u8>,
+) {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    use dohc_engine_collab::live_update_application::{
+        NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin,
+    };
+    use dohc_engine_collab::owner_outbox::{self, OwnerOutboxAppendInput, OwnerOutboxLimits};
+    let (scratch, mut store) = test_store();
+    crate::adopt_join_identity(
+        &mut store,
+        "ws",
+        "local-peer",
+        "epoch",
+        "stream",
+        1_000,
+        &NoFaults,
+    )
+    .expect("joined workspace identity");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "shared.md".into(),
+                text: "current".into(),
+                moment_id: "current-moment".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 100,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("real current moment");
+    let binding = LiveObjectBinding {
+        workspace_id: "ws".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: "lineage".into(),
+        current_path: "shared.md".into(),
+        selector_paths: vec!["shared.md".into()],
+        restore_fence_generation: 0,
+    };
+    let bytes = vec![0xff, 0x00, 0xfe, 0x01];
+    let outbox = owner_outbox::append(
+        &mut store,
+        "ws",
+        OwnerOutboxAppendInput {
+            binding: LiveObjectBinding {
+                object_id: "other".into(),
+                current_path: "other.md".into(),
+                selector_paths: vec!["other.md".into()],
+                ..binding.clone()
+            },
+            base_update: b"different base".to_vec(),
+            append_key: "other-update".into(),
+            update: bytes.clone(),
+            limits: OwnerOutboxLimits {
+                max_pending_bytes: 10_000,
+                max_pending_age_ms: 10_000,
+            },
+            created_at_ms: 1_000,
+        },
+    )
+    .expect("independent outbox owns the shared digest");
+    let operation = NativeRestoreFence {
+        operation_id: "restore".into(),
+        relay_database_namespace: "relay".into(),
+        old_binding: binding,
+        host_id: "host".into(),
+        new_fence: 1,
+        origin: RestoreDeliveryOrigin::Bootstrap {
+            id: "bootstrap".into(),
+        },
+        terminal: None,
+        applied_sequence: 0,
+    };
+    let receipt = NativeRestoreFenceReceipt {
+        operation: operation.clone(),
+        local_head_sequence: 0,
+        recorded_at_ms: 1_001,
+    };
+    store.read_with(|conn| conn.execute(
+        "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','object','relay','restore',?1,?2)",
+        params![serde_json::to_string(&operation).unwrap(), serde_json::to_string(&receipt).unwrap()],
+    )).expect("seed the durable stopped-lineage guard");
+    let mut payload = present_text_payload(
+        "refused-moment",
+        "object",
+        "write",
+        "shared.md",
+        "shared.md",
+        "current",
+        "current-moment",
+        "unused",
+    );
+    payload["payloadAfterBlobSha256"] = json!(hex_sha256(&bytes));
+    payload["payloadAfterContentKind"] = json!("binary");
+    payload["payloadAfterByteLength"] = json!(bytes.len());
+    payload["author"] =
+        json!({"kind":"agent","agentId":"original-agent","onBehalfOf":"original-owner"});
+    (
+        scratch,
+        store,
+        envelope("original-peer", 0, "ws", payload),
+        outbox,
+        bytes,
+    )
+}
+
+#[test]
+fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
+    use dohc_engine_collab::owner_outbox::{self, OwnerDeliveryReceipt};
+    let (_scratch, mut store, op, outbox, bytes) = stopped_binary_moment();
+    let db = store.database_path().to_owned();
+    let before = snapshot(&store, "object");
+    let result = apply_moment_envelope(&mut store, &op, &NoFaults).unwrap();
+    assert!(
+        matches!(result.primary, ApplyDisposition::Refused(ReplicationRefusal {
+        reason: RefusalReason::InvalidInput { ref reason }, ..
+    }) if reason == "live document is stopped")
+    );
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "original-peer").unwrap(),
+        0
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    let ack = owner_outbox::acknowledge(
+        &mut store,
+        "ws",
+        &outbox.outbox_id,
+        &[OwnerDeliveryReceipt {
+            delivery_id: outbox.delivery_id,
+            update_digest: outbox.update_digest,
+            journal_cursor: 1,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .expect("unrelated outbox can release its ownership");
+    assert_eq!(ack.pending_bytes, 0);
+    assert_eq!(
+        store.get_binary_blob(&hex_sha256(&bytes)).unwrap(),
+        Some(bytes.clone())
+    );
+    let (refusals, report) =
+        crate::apply::claim_pending_refusals(&mut store, "ws", &NoFaults).unwrap();
+    assert_eq!(refusals.len(), 1);
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &crate::RelayCursor {
+            cursor: 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            refusal_report_id: report,
+        },
+        &NoFaults,
+        3_000,
+    )
+    .expect("report commit");
+    drop(store);
+    let mut store = EngineStore::open(&db, 4_000).unwrap();
+    store.read_with(|conn| {
+        let saved: (String, String, i64, i64, i64) = conn.query_row(
+            "SELECT payload_json,apply_disposition,recorded_at_ms,imported,origin_seq FROM replication_log WHERE workspace_id='ws' AND origin_id='original-peer' AND origin_seq=0",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+        )?;
+        assert_eq!(serde_json::from_str::<Value>(&saved.0).unwrap(), op.payload);
+        assert_eq!((saved.1, saved.2, saved.3, saved.4), ("refused".into(), op.recorded_at_ms, 1, 0));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |r| r.get::<_,i64>(0))?, 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM replication_refused_moment_blobs", [], |r| r.get::<_,i64>(0))?, 3);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM moments WHERE moment_id='refused-moment'", [], |r| r.get::<_,i64>(0))?, 0);
+        assert!(conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [hex_sha256(&bytes)]).is_err());
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
+    assert_eq!(
+        store.get_binary_blob(&hex_sha256(&bytes)).unwrap(),
+        Some(bytes)
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Skipped
+    ));
+    assert_eq!(snapshot(&store, "object"), before);
+}
+
+#[test]
+fn stopped_moment_retention_failure_does_not_ack_or_commit_refusal() {
+    let (_scratch, mut store, op, _outbox, _bytes) = stopped_binary_moment();
+    let before = snapshot(&store, "object");
+    store.read_with(|conn| conn.execute_batch(
+        "CREATE TEMP TRIGGER reject_retention BEFORE INSERT ON replication_refused_moment_blobs WHEN NEW.role='payload-after' BEGIN SELECT RAISE(ABORT,'retention unavailable'); END;"
+    )).unwrap();
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "original-peer").unwrap(),
+        -1
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    store
+        .read_with(|conn| {
+            for table in [
+                "replication_refused_moment_blobs",
+                "replication_pending_refusals",
+                "replication_log",
+            ] {
+                assert_eq!(
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))?,
+                    0
+                );
+            }
+            conn.execute_batch("DROP TRIGGER reject_retention")?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "original-peer").unwrap(),
+        0
+    );
 }
 
 fn snapshot(store: &EngineStore, object_id: &str) -> Option<(String, String, String, String)> {

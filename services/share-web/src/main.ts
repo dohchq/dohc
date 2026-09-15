@@ -9,6 +9,8 @@ import {
 } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
+import {createLiveGateway} from "./liveGateway";
+import {createNamedLiveRelayRoute, namedLiveGatewayRequest} from "./namedLiveRelayRoute";
 import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
@@ -35,7 +37,8 @@ try {
   );
 }
 
-const { handle: handler } = createShareWebApplication({
+const application = createShareWebApplication({
+  appLaunch: config.appLaunch,
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
@@ -43,11 +46,15 @@ const { handle: handler } = createShareWebApplication({
   viewerAssetsDir,
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
+  namedLiveTickets: config.namedLiveGatewayLimits !== undefined,
+  namedRecipientBrowserLimits: config.namedRecipientBrowserLimits,
+  linkLive: config.linkLive,
+  publicEditRelease: config.publicEditRelease,
 });
 
 const server = serveFetchHandler({
-  handler,
-  maxBodyBytes: url => url.pathname === "/api/live/named-session" && config.namedBrowserSessionLimits
+  handler: application.handle,
+  maxBodyBytes: url => ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,
@@ -75,8 +82,36 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION, and relay settings.");
   }
 }
+let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
+if (config.namedLiveGatewayLimits) {
+  namedGateway = createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
+    limits: config.namedLiveGatewayLimits,
+    resolveSession(request, discriminator, signal) {
+      const authenticated = namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal);
+      return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : Promise.resolve(null);
+    },
+    openHostRoute: createNamedLiveRelayRoute({relayUrl: config.relayUrl, publicOrigin: config.accountAuth!.publicOrigin,
+      exchangeKey: config.relayExchangeKey!, handshakeTimeoutMs: config.namedLiveGatewayLimits.upgradeTimeoutMs}),
+  });
+  process.once("SIGINT", namedGateway.close);
+  process.once("SIGTERM", namedGateway.close);
+  server.once("close", namedGateway.close);
+}
+const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
+  path: "/api/live/link", limits: config.linkLive.gateway, resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute}) : undefined;
+if (linkGateway) {
+  process.once("SIGINT", linkGateway.close); process.once("SIGTERM", linkGateway.close); server.once("close", linkGateway.close);
+}
+if (deviceControl || namedGateway || linkGateway) server.on("upgrade", (request, socket, head) => {
+  if (request.url?.startsWith("/api/live/link?")) {
+    if (linkGateway) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
+  } else
+  if (request.url?.startsWith("/api/live?")) {
+    if (namedGateway) void namedGateway.handleUpgrade(request, socket, head); else socket.destroy();
+  } else if (deviceControl) deviceControl.handleUpgrade(request, socket, head);
+  else socket.destroy();
+});
 if (deviceControl) {
-  server.on("upgrade", deviceControl.handleUpgrade);
   process.once("SIGINT", deviceControl.close);
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);

@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::HashSet;
 
+pub(super) mod restore;
+
 /// Immutable projection coverage. Filesystem status belongs to its materialization job.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +16,8 @@ pub struct LiveSettlementResult {
     pub moment_id: String,
     pub markdown_digest: String,
     pub materialized: bool,
+    /// The service must request collection reconciliation after this commit.
+    pub collection_reconcile_required: bool,
 }
 
 pub struct LiveSettlementAudit {
@@ -23,12 +27,14 @@ pub struct LiveSettlementAudit {
     previous_cursor: i64,
     terminal_cursor: i64,
     previous_sequence: i64,
-    sequence: i64,
+    pub(super) sequence: i64,
     receipts: Vec<ReceiptIdentity>,
     interval_digest: String,
     bootstrap_moment: String,
     bootstrap_digest: String,
     first: bool,
+    restore: Option<Box<restore::RestoreAudit>>,
+    replay_anchor: Option<restore::PriorAnchor>,
 }
 
 fn audit_error(error: ApplicationError) -> StorageError {
@@ -46,6 +52,11 @@ impl LiveSettlementAudit {
         moment: &str,
         markdown: &str,
     ) -> Result<bool, StorageError> {
+        if let Some(restore) = &self.restore {
+            return restore
+                .covers_projection(conn, self, moment, markdown)
+                .map_err(audit_error);
+        }
         let b = &self.binding;
         let registration = Registration {
             workspace_id: b.workspace_id.clone(),
@@ -101,48 +112,76 @@ impl LiveSettlementAudit {
         vector: &str,
         now_ms: i64,
     ) -> Result<String, StorageError> {
+        if let Some(restore) = &self.restore {
+            restore
+                .verify(tx, self, markdown, vector)
+                .map_err(audit_error)?;
+        } else {
+            let corrupt = || StorageError::StateCorrupt { source: None };
+            let b = &self.binding;
+            let registration = Registration {
+                workspace_id: b.workspace_id.clone(),
+                namespace: self.namespace.clone(),
+                coordinate: self.coordinate.clone(),
+                binding: b.clone(),
+                live: true,
+            };
+            require_workspace(tx, &registration).map_err(audit_error)?;
+            if !read_binding(tx, &registration)
+                .map_err(audit_error)?
+                .is_some_and(|(binding, coordinate, available)| {
+                    available && binding == *b && coordinate == self.coordinate
+                })
+            {
+                return Err(corrupt());
+            }
+            let latest = latest_receipt(tx, &registration).map_err(audit_error)?;
+            if latest.as_ref().map_or(0, |receipt| receipt.journal_cursor) != self.terminal_cursor {
+                return Err(corrupt());
+            }
+            let receipts = read_interval(
+                tx,
+                &registration,
+                self.previous_cursor,
+                self.terminal_cursor,
+                self.receipts.len(),
+            )
+            .map_err(audit_error)?;
+            if receipts != self.receipts {
+                return Err(corrupt());
+            }
+            let observed: i64 = tx.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0)).map_err(StorageError::persist_public)?;
+            if observed != self.sequence {
+                return Err(corrupt());
+            }
+        }
         let corrupt = || StorageError::StateCorrupt { source: None };
         let b = &self.binding;
-        let registration = Registration {
-            workspace_id: b.workspace_id.clone(),
-            namespace: self.namespace.clone(),
-            coordinate: self.coordinate.clone(),
-            binding: b.clone(),
-            live: true,
-        };
-        require_workspace(tx, &registration).map_err(audit_error)?;
-        if !read_binding(tx, &registration)
-            .map_err(audit_error)?
-            .is_some_and(|(binding, coordinate, available)| {
-                available && binding == *b && coordinate == self.coordinate
-            })
-        {
-            return Err(corrupt());
-        }
-        let latest = latest_receipt(tx, &registration).map_err(audit_error)?;
-        if latest.as_ref().map_or(0, |receipt| receipt.journal_cursor) != self.terminal_cursor {
-            return Err(corrupt());
-        }
-        let receipts = read_interval(
-            tx,
-            &registration,
-            self.previous_cursor,
-            self.terminal_cursor,
-            self.receipts.len(),
-        )
-        .map_err(audit_error)?;
-        if receipts != self.receipts {
-            return Err(corrupt());
-        }
-        let observed: i64 = tx.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0)).map_err(StorageError::persist_public)?;
-        if observed != self.sequence {
-            return Err(corrupt());
-        }
         let matches_projection: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.latest_moment_id=?5 AND s.blob_sha256=?6 AND d.path=?4 AND d.lineage_claim_id=?7 AND d.last_settled_sha=?6)",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,moment,markdown,b.lineage_claim_id],|row|row.get(0)).map_err(StorageError::persist_public)?;
         if !matches_projection {
             return Err(corrupt());
+        }
+        if let Some(anchor) = &self.replay_anchor {
+            let held = Registration {
+                workspace_id: b.workspace_id.clone(),
+                namespace: self.namespace.clone(),
+                coordinate: self.coordinate.clone(),
+                binding: b.clone(),
+                live: true,
+            };
+            if restore::restored_origin(tx, &held)
+                .map_err(audit_error)?
+                .as_ref()
+                != Some(anchor)
+                || anchor.moment != moment
+                || anchor.markdown != markdown
+                || anchor.vector != vector
+            {
+                return Err(corrupt());
+            }
+            return Ok(anchor.id.clone());
         }
         let identities = serde_json::to_vec(&(
             &self.namespace,
@@ -158,9 +197,10 @@ impl LiveSettlementAudit {
         ))
         .map_err(StorageError::persist_public)?;
         let id = format!("live-settlement-{}", hex_sha256(&identities));
+        let operation = self.restore.as_ref().map(|restore| restore.operation_id());
         let existing: Option<(String,String,String,String,i64,i64)> = tx.query_row(
-            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor],
+            "SELECT settlement_id,moment_id,markdown_digest,interval_digest,application_count,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND restore_operation_id IS ?7 AND settlement_kind=?8 AND binding_json=?9 AND source_state_vector_digest=?10",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,operation,if operation.is_some() {"restore"} else {"ordinary"},serde_json::to_string(b).map_err(StorageError::persist_public)?,vector],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional().map_err(StorageError::persist_public)?;
         if let Some((saved, saved_moment, saved_markdown, saved_interval, count, sequence)) =
             existing
@@ -176,9 +216,9 @@ impl LiveSettlementAudit {
             }
             return Ok(id);
         }
-        tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
-                serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms]).map_err(StorageError::persist_public)?;
+                serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
         Ok(id)
     }
 
@@ -191,13 +231,20 @@ impl LiveSettlementAudit {
     ) -> LiveSettlementResult {
         LiveSettlementResult {
             settlement_id,
-            previous_cursor: self.previous_cursor,
+            previous_cursor: self
+                .replay_anchor
+                .as_ref()
+                .map_or(self.previous_cursor, |anchor| anchor.previous_cursor),
             terminal_cursor: self.terminal_cursor,
-            application_count: self.receipts.len(),
+            application_count: self
+                .replay_anchor
+                .as_ref()
+                .map_or(self.receipts.len(), |anchor| anchor.application_count),
             local_ydoc_sequence: self.sequence,
             moment_id,
             markdown_digest,
             materialized,
+            collection_reconcile_required: false,
         }
     }
 }
@@ -234,7 +281,16 @@ where
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
-        let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+        let owner_origin = adoption::read_origin(conn,&held)?;
+        let restored_origin = restore::restored_origin(conn,&held)?;
+        let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &restored_origin {
+            (origin.binding.clone(),origin.moment.clone(),origin.markdown.clone(),origin.cursor,origin.sequence)
+        } else if let Some(origin) = &owner_origin {
+            (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
+        } else {
+            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+            (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
+        };
         validate_historical_binding(&original_binding,b)?;
         let latest = latest_receipt(conn,&held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
@@ -242,10 +298,11 @@ where
         let previous: Option<(i64,i64,i64,i64)> = conn.query_row("SELECT previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(read_sql)?;
         let (previous_cursor,previous_sequence) = match previous {
+            Some((_,end,_,end_sequence)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence),
             Some((start,end,start_sequence,_)) if end == terminal_cursor => (start,start_sequence),
             Some((_,end,_,end_sequence)) if end < terminal_cursor => (end,end_sequence),
             Some(_) => return Err(ApplicationError::Corrupt),
-            None => (0,0),
+            None => (origin_cursor,origin_sequence),
         };
         let receipts = read_interval(conn,&held,previous_cursor,terminal_cursor,max_applications)?;
         let mut sequences=HashSet::new();
@@ -258,14 +315,15 @@ where
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
         Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:marker.head_update_seq,receipts,interval_digest,
-            bootstrap_moment:bootstrap.bootstrap_moment_id,bootstrap_digest:bootstrap.projected_markdown_digest,first:previous.is_none() && last_settled.is_none() })
+            bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
+            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
 
 type ReceiptIdentity = (String, String, i64, i64, i64, String);
 
-fn validate_historical_binding(
+pub(super) fn validate_historical_binding(
     historical: &LiveObjectBinding,
     current: &LiveObjectBinding,
 ) -> Result<(), ApplicationError> {
@@ -289,14 +347,22 @@ fn validate_historical_binding(
     Ok(())
 }
 
-fn latest_receipt(
+pub(super) fn latest_receipt(
     conn: &Connection,
     registration: &Registration,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let b = &registration.binding;
-    conn.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
+    let applied: Option<LiveUpdateReceipt> = conn.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
         params![registration.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-        |row| Ok(LiveUpdateReceipt { delivery_id:row.get(0)?,update_digest:row.get(1)?,journal_cursor:row.get(2)?,accepting_host_epoch:row.get(3)? })).optional().map_err(read_sql)
+        |row| Ok(LiveUpdateReceipt { delivery_id:row.get(0)?,update_digest:row.get(1)?,journal_cursor:row.get(2)?,accepting_host_epoch:row.get(3)? })).optional().map_err(read_sql)?;
+    let adopted = adoption::read_origin(conn, registration)?.and_then(|origin| origin.terminal);
+    match (applied, adopted) {
+        (Some(applied), Some(adopted)) if applied.journal_cursor <= adopted.journal_cursor => {
+            Ok(Some(adopted))
+        }
+        (Some(applied), _) => Ok(Some(applied)),
+        (None, adopted) => Ok(adopted),
+    }
 }
 
 fn read_interval(

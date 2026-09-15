@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import {
   VERSIONED_METHOD,
   YDOC_METHOD,
+  YdocOwnerDraftPendingError,
   openEngineYdocProviderSession,
   type EngineTransport,
   type Event,
@@ -478,6 +479,28 @@ it("reports file-locked, not error, for a lock refusal", async () => {
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
+});
+
+it.each([
+  [0, "active", 1, "saved-to-host"],
+  [0, null, 1, "saved-to-host"],
+  [1, "active", 1, "pending-share"],
+  [0, "active", 0, "pending-share"],
+  [0, "quarantined", 1, "pending-share"],
+  [0, "sealed", 1, "pending-share"],
+] as const)("reports owner pending=%s state=%s cursor=%s as %s", async (pendingBytes, state, acceptedCursor, expected) => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined, onSaveState: value => states.push(value)});
+  settleRefusal = new YdocOwnerDraftPendingError({
+    binding: {workspaceId: WORKSPACE_ID, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: PATH, selectorPaths: [PATH], restoreFenceGeneration: 0},
+    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor, nativeHeadSequence: 1,
+    outboxId: state === null ? null : "outbox", pendingBytes, state,
+  });
+  await expect(session.settleNow()).rejects.toBe(settleRefusal);
+  expect(states.at(-1)).toBe(expected);
+  expect(captureErrors).not.toContain(`ydoc settle of ${PATH}`);
+  settleRefusal = null;
+  await session.close({settle: false});
 });
 
 // The other busy thing needs the other answer. A busy engine database

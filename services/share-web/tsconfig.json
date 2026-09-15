@@ -1,5 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "lib": ["DOM", "DOM.Iterable", "ES2022", "ES2024.String"] },
   "include": [
     "e2e/**/*.ts",
     "playwright.config.ts",

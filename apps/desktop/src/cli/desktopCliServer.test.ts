@@ -110,6 +110,17 @@ const joined: JoinedSharedChannel = {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
+    const f = fixture();
+    const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));
+    f.dependencies.ownerAppPublication = publish;
+    const context = await f.create().openCliWorkspace(f.workspace);
+    const request = { action: "cancel" as const, workspaceId: f.workspace.workspaceId, approvalId: "00000000-0000-4000-8000-000000000001" };
+    expect(await context.appPublication!(request)).toEqual({ kind: "cancelled" });
+    await f.authorities.invalidate(f.workspace.workspaceId);
+    await expect(context.appPublication!(request)).rejects.toThrow("attachment changed");
+    expect(publish).toHaveBeenCalledOnce();
+  });
   it.each(["missing", "different root"])("rejects a %s registry request before activity admission", async (reason) => {
     const f = fixture();
     const request = reason === "missing" ? { ...f.workspace, workspaceId: "missing" }

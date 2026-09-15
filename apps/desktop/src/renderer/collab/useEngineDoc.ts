@@ -79,6 +79,7 @@ export type UseEngineDoc = {
   // Main could no longer resolve the live file at the path the renderer read.
   // The caller replaces the stale document instead of recreating the file.
   documentUnavailable: boolean;
+  liveHostUnavailable: boolean;
   // The open did not land and a session for this document may still be the
   // engine's. Same no-downgrade rule as notInVersion: the caller
   // stays read-only, states the reason, and offers a retry (bump retryKey),
@@ -235,6 +236,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     saveError: settled?.saveError ?? null,
     notInVersion,
     documentUnavailable,
+    liveHostUnavailable: outcome?.kind === "live-host-unavailable",
     engineMayHoldDocument,
     artifactAssetsInvalid,
     deletedWhileEditing,

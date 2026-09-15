@@ -7,18 +7,18 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
+    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/stage-plugin-tools.mjs && node scripts/stage-app-compiler.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
     "build:cli": "node scripts/build-cli-bin.mjs",
     "build:engine": "node scripts/build-workspace-engine.mjs",
-    "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
+    "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-plugin-tools.mjs && node scripts/stage-app-compiler.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:settings": "node ../../scripts/verification/verify.mjs e2e --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
-    "test": "vitest run && node --test scripts/dev.test.mjs scripts/stage-plugin-tools.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs",
+    "test": "vitest run && node --test scripts/dev.test.mjs scripts/stage-plugin-tools.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs",
     "test:e2e": "node ../../scripts/verification/verify.mjs e2e",
     "capture:ui-audit": "node scripts/capture-ui-audit.mjs",
     "test:apps:e2e": "node ../../scripts/verification/verify.mjs e2e --grep @apps",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -68,12 +68,14 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "@types/ws": "8.18.1"
   },
   "dependencies": {
     "@dohc/cli": "workspace:*",
     "@dohc/collection-views": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
+    "@dohc/sync-relay": "workspace:*",
     "@dohc/sdk": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",
@@ -99,6 +101,8 @@
     "y-prosemirror": "^1.3.7",
     "y-protocols": "^1.0.7",
     "yjs": "13.6.30",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "ws": "8.21.3",
+    "@dohc/service-http": "workspace:*"
   }
 }

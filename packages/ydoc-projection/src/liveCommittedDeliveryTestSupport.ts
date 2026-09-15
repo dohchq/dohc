@@ -15,6 +15,7 @@ import {
   openSyncRelayStorage,
   type LiveUpdateJournalCommitInput,
   type LiveHostConnectionCoordinate,
+  type LiveTicketStoragePolicy,
 } from "../../../services/sync-relay/src/storage.js";
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
@@ -88,7 +89,7 @@ function validated(
     registeredAtMs: 10,
   };
 }
-function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean } = {}, configuredHost: LiveHostConnectionCoordinate = host) {
+function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean; liveTickets?: LiveTicketStoragePolicy; linkDiscussionPrincipalLimit?: number } = {}, configuredHost: LiveHostConnectionCoordinate = host) {
   const root = mkdtempSync(join(tmpdir(), "dohc-baseline-storage-"));
   roots.push(root);
   const path = join(root, "volume", "relay.sqlite");
@@ -180,6 +181,8 @@ export function registered(
     journalPolicy?: typeof policy;
     host?: LiveHostConnectionCoordinate;
     deployment?: boolean;
+    liveTickets?: LiveTicketStoragePolicy;
+    linkDiscussionPrincipalLimit?: number;
   } = {},
 ) {
   const f = fixture(options, options.host),
@@ -249,7 +252,7 @@ export function registered(
               version: validation.evidence.version,
               document: validation.evidence.document,
               currentPath: validation.evidence.currentPath,
-              checkpointDigest: validation.evidence.checkpointDigest,
+              checkpointDigest: validation.evidence.checkpointDigest, checkpointRanges: validation.evidence.checkpointRanges,
               suffixDigests: validation.evidence.suffixDigests,
               candidate: validation.evidence.candidate,
               ...state,

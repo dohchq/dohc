@@ -40,7 +40,17 @@ export interface PullWorkspaceFromRelayResult {
   nextCursor: number;
 }
 
+export interface OwnerAdmissionPending {
+  workspaceId: string;
+  originId: string;
+  originSeq: number;
+  versionId: string;
+  objectId: string;
+  path: string;
+}
+
 export interface PushWorkspaceToRelayResult {
+  ownerAdmissionPending: OwnerAdmissionPending[];
   pushed: number;
   originsPushed: string[];
   sharingDeclined: SharingDeclined[];

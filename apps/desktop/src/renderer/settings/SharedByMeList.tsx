@@ -48,6 +48,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
   const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
+  const [copiedInvitationGrantId, setCopiedInvitationGrantId] = useState<string | null>(null);
   const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
   // Which row is asking before it discards. Ending a share settles what the
   // recipient still has waiting, so the count is shown before the click.
@@ -107,11 +108,23 @@ export function SharedByMeList(props: { workspaceId: string }) {
   }
 
   async function copyCode(share: RelayShareGrantedRow) {
+    const token = loadToken.current();
     try {
       await bridge().writeClipboardText({ text: share.shareCode });
-      setCopiedShareId(share.shareId);
+      if (loadToken.isCurrent(token)) setCopiedShareId(share.shareId);
     } catch {
       // Non-fatal; the row keeps its copy affordance.
+    }
+  }
+
+  async function copyInvitation(share: RelayShareGrantedRow) {
+    if (!share.browserInvitationUrl) return;
+    const token = loadToken.current();
+    try {
+      await bridge().writeClipboardText({ text: share.browserInvitationUrl });
+      if (loadToken.isCurrent(token)) setCopiedInvitationGrantId(share.grantId);
+    } catch {
+      // The row keeps its copy control for retry.
     }
   }
 
@@ -143,9 +156,10 @@ export function SharedByMeList(props: { workspaceId: string }) {
         const waiting = load.openChanges.get(share.shareId) ?? null;
         return (
         <li
-          key={share.shareId}
+          key={share.grantId}
           data-testid="shared-by-me-row"
           data-share-id={share.shareId}
+          data-grant-id={share.grantId}
           data-revoked={share.revokedAtMs !== null || undefined}
           className="flex items-center gap-2 bg-panel px-2.5 py-2"
         >
@@ -182,6 +196,13 @@ export function SharedByMeList(props: { workspaceId: string }) {
           ) : null}
           {share.revokedAtMs === null ? (
             <>
+              {share.selector && share.browserInvitationUrl && (
+                <button type="button" data-testid="shared-by-me-copy-invitation"
+                  onClick={() => void copyInvitation(share)}
+                  className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink">
+                  {copiedInvitationGrantId === share.grantId ? "Browser invitation copied" : "Copy browser invitation"}
+                </button>
+              )}
               {/* No code to hand out for a row the relay cannot read: the
                   recipient's own open would refuse it. Ending the share
                   stays available — the reverse path must not disappear. */}

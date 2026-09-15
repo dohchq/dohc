@@ -478,6 +478,35 @@ describe("CLI socket server", () => {
     expect(calls.writes).toBe(0);
   });
 
+  it("routes app publication through the authenticated owning workspace without renderer access", async () => {
+    let accepted: unknown;
+    context.appPublication = async request => { accepted = request; return { kind: "cancelled" }; };
+    const request = { action: "cancel" as const, workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" };
+    expect(await invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request })).toEqual({ kind: "cancelled" });
+    expect(accepted).toEqual(request);
+    accepted = undefined;
+    await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
+    expect(accepted).toBeUndefined();
+    context.readOnly = true;
+    await expect(invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
+    expect(accepted).toBeUndefined();
+  });
+
+  it("routes response listing and undo through authenticated owner attachment", async () => {
+    const calls:unknown[]=[];
+    context.ownerAppResponses = async request => {
+      calls.push(request);
+      return request.action==="list"?{action:"list",acceptances:[],nextAcceptanceId:null}:{action:"undo",items:[],nextCursor:null};
+    };
+    const request={action:"list" as const,workspaceId:WORKSPACE_ID,grantId:"g",limit:100};
+    expect(await invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request})).toEqual({action:"list",acceptances:[],nextAcceptanceId:null});
+    expect(await invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request:{...request,action:"undo",operationId:"undo-a"}})).toEqual({action:"undo",items:[],nextCursor:null});
+    await expect(invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"elsewhere"}})).rejects.toThrow("owning workspace");
+    context.readOnly=true;
+    await expect(invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
+    expect(calls).toHaveLength(2);
+  });
+
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
     if (process.platform !== "win32") ctx.skip();
     if (!server) ctx.skip();

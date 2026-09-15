@@ -1,6 +1,9 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
+import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
+import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
+import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
-import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
+import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   hasEngineIgnoredSegment,
   WORKSPACE_KINDS,
@@ -1178,6 +1181,8 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.
+  ownerAdmissionPending: z.array(z.object({workspaceId: z.string(), originId: z.string(), originSeq: z.number().int().nonnegative(),
+    versionId: z.string(), objectId: z.string(), path: PATH_STRING})).optional(),
   sharingDeclined: z
     .array(
       z.object({
@@ -1258,6 +1263,7 @@ export const EngineMomentRecord = z.object({
   // derives the display name (cloud email or the run's onBehalfOf label) —
   // the renderer only formats it as "<User Name>'s agent".
   agentAuthorName: z.string().min(1).max(500).optional(),
+  publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -3822,6 +3828,7 @@ const RelayShareGrantedRowBase = z.object({
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
+  browserInvitationUrl: z.string().url().max(4096).optional(),
 });
 
 export const RelayShareGrantedRow = z.union([
@@ -3894,6 +3901,8 @@ export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
 export const CreateRelayShareResult = z.object({
   shareId: OPAQUE_ID,
+  grantId: OPAQUE_ID,
+  browserInvitationUrl: z.string().url().max(4096).optional(),
   shareCode: z.string().min(1).max(4096),
   recipientEmail: EMAIL_STRING,
 });
@@ -3904,7 +3913,7 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
-const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment"]);
+const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment", "edit"]);
 
 // The main process creates the share and its first link together. The
 // renderer must name the exact public level; there is no default at this
@@ -3923,7 +3932,7 @@ export const CreateRelayShareLinkPayload = z.union([
       workspaceId: WORKSPACE_ID,
       paths: z.never().optional(),
       versionId: z.string().min(1).max(128),
-      access: RELAY_SHARE_LINK_ACCESS,
+      access: z.enum(["view", "comment"]),
     })
     .strict(),
 ]);
@@ -4022,6 +4031,7 @@ export type RelayShareLinkIndependentGrant = z.infer<
 >;
 
 export const ListRelayShareLinksResult = z.object({
+  supportedLinkAccess: z.union([z.tuple([z.literal("view"), z.literal("comment")]), z.tuple([z.literal("view"), z.literal("comment"), z.literal("edit")])]),
   links: z.array(RelayShareLinkRow).max(1000),
   independentGrants: z.array(RelayShareLinkIndependentGrant).max(1000),
   nextCursor: RELAY_SHARE_LINK_CURSOR.optional(),
@@ -4081,13 +4091,13 @@ export const RelayShareLinkRotateResponse = z.object({
 
 export const RelayShareLinkRetuneWidenResponse = z.object({
   ok: z.literal(true),
-  access: z.literal("comment"),
+  access: SHARE_ACCESS.refine((access) => shareAccessRank(access) > shareAccessRank("view")),
   url: RELAY_SHARE_LINK_URL,
 });
 
 export const RelayShareLinkRetuneNarrowResponse = z.object({
   ok: z.literal(true),
-  access: z.literal("view"),
+  access: SHARE_ACCESS,
   url: z.never().optional(),
 });
 
@@ -5716,6 +5726,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // Main could no longer resolve the live file at the path the renderer read.
   // The caller must not recreate it through the writable plain editor.
   documentUnavailable: z.boolean().optional(),
+  liveHostUnavailable: z.boolean().optional(),
   // The open did not land, and a session for this document may still be the
   // engine's. It is raised by an open that hit its retry deadline while the
   // engine was unreachable, an open whose refusal could not release its
@@ -5822,6 +5833,11 @@ export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
 export const CloseEngineYDocSessionPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
 });
+export const EngineYDocOwnerHandoff = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  lineageGeneration: z.number().int().positive(),
+}).strict();
+export type EngineYDocOwnerHandoff = z.infer<typeof EngineYDocOwnerHandoff>;
 export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessionPayload>;
 
 export const EngineYDocRemoteUpdateEvent = z.object({
@@ -5873,6 +5889,9 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
+  publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
+  ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
@@ -6400,6 +6419,8 @@ export interface DohcDesktopBridge {
   acknowledgeEngineYDocLineageReplacement(
     payload: AcknowledgeEngineYDocLineageReplacementPayload,
   ): Promise<AcknowledgeEngineYDocLineageReplacementResult>;
+  prepareEngineYDocOwnerHandoff(payload: EngineYDocOwnerHandoff): Promise<void>;
+  onEngineYDocOwnerHandoff(listener: (event: EngineYDocOwnerHandoff) => void): () => void;
   // Settle + close the session in main (releases the single-canonical
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;

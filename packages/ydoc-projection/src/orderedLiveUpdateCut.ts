@@ -100,6 +100,7 @@ export type ValidatedLiveUpdateCut =
   | (AcceptedCutCommon & {
       readonly mode: 'journal-candidate'
       readonly checkpointDigest: string
+      readonly checkpointRanges: readonly LiveUpdateStructRange[]
       readonly suffixDigests: readonly string[]
       readonly candidate: ValidatedCutInputEvidence
     })
@@ -2466,12 +2467,14 @@ function retireSpans(
 ): LiveSpan[] {
   const result: LiveSpan[] = []
   for (const span of spans) {
-    result.push(...subtractFromSpan(
+    for (const fragment of subtractFromSpan(
       span,
       deletes.get(span.clientId) ?? [],
       budget,
       stage,
-    ))
+    )) {
+      result.push(fragment)
+    }
   }
   return stableSort(result, rangeCompare, budget, stage)
 }
@@ -2686,7 +2689,9 @@ class ReplayFrontier {
       ], budget, stage)
       const additions: LiveSpan[] = []
       for (const span of candidates) {
-        additions.push(...subtractFromSpan(span, blocked, budget, stage))
+        for (const fragment of subtractFromSpan(span, blocked, budget, stage)) {
+          additions.push(fragment)
+        }
       }
       this.live.set(
         clientId,
@@ -3621,6 +3626,7 @@ function validateCut(
         usage: acceptedUsage,
         finishAfterProjection,
         checkpointDigest: (inputEvidence[0] as ValidatedCutInputEvidence).updateDigest,
+        checkpointRanges: frozenInputEvidence((inputEvidence[0] as ValidatedCutInputEvidence).updateDigest, (inputEvidence[0] as ValidatedCutInputEvidence).ranges).ranges,
         suffixDigests: Object.freeze(
           inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
         ),

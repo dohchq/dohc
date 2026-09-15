@@ -1,9 +1,9 @@
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/host-control";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES } from "@dohc/live-session-contract/live-object-binding";
+import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
-import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS } from "./liveCommittedDeliverySchema";
+import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 
 const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const parameters = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
@@ -46,9 +46,15 @@ function reserveLiveDeliveryBaseline(storage: StorageContext, document: LiveDocu
   const row = storage.db.prepare(`SELECT baseline_moment_relay_seq,registered_at_ms,baseline_digest,length(baseline_bytes) AS baseline_length,baseline_projected_sha256,baseline_projected_byte_length FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...parameters(document));
   integrity(row);
   const binding = { ...document, currentPath: path, selectorPaths: [path], restoreFenceGeneration: maximum };
-  const amount = bytes([identifier, identifier, identifier, ...parameters(document), hostId, JSON.stringify(binding),
+  const bootstrap = bytes([identifier, identifier, identifier, ...parameters(document), hostId, JSON.stringify(binding),
     row.baseline_moment_relay_seq, row.registered_at_ms, row.baseline_digest, row.baseline_length,
     row.baseline_projected_sha256, row.baseline_projected_byte_length]) + acknowledgementBytes;
+  const terminalReceipt = {deliveryId: identifier,updateDigest: "a".repeat(64),journalCursor: maximum,acceptingHostEpoch: maximum};
+  const origin = {relayDatabaseNamespace: identifier,adoptionId: identifier,sourceMomentId: identifier,sourceDigest: "a".repeat(64),sourceByteLength: maximum,
+    baselineMomentRelaySequence: maximum,baselineRegisteredAtMs: maximum,expectedLocalSequence: maximum,terminalReceipt,bindingDigest: "a".repeat(64),
+    originEvidenceDigest: "a".repeat(64),originEventCount: maximum,originHistoryEvidenceDigest: "a".repeat(64),originalBinding:{...binding,selectorPaths:Array.from({length:LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT},()=>path)}};
+  const owner = bytes([identifier,...parameters(document),hostId,JSON.stringify(origin),JSON.stringify(terminalReceipt),maximum,maximum,maximum]);
+  const amount = Math.max(bootstrap,owner);
   reserve(storage, document, hostId, 0, amount);
 }
 function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumentKey, hostId: string, row: Record<string, unknown>): void {
@@ -84,6 +90,7 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
   if (!known) {
     integrity(fundNewHost || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
+    integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId,hostId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
     const overhead = bytes([hostId, workspaceId, identifier, maximum, maximum]);
     charge(storage, workspaceId, overhead);
@@ -103,7 +110,9 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     integrity(bootstrap.length <= 1);
     const reserved = storage.db.prepare(`SELECT journal_cursor,reserved_bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document), hostId);
     const cursors = new Set(reserved.map(row => Number(row.journal_cursor)));
-    if (!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) {
+    const owner = storage.db.prepare(`SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document),hostId);
+    integrity(owner.length <= 1 && !(owner.length && bootstrap.length));
+    if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
         integrity(documentSequence > fundedDocument);
         reserveLiveDeliveryBaseline(storage, document, hostId);
@@ -115,7 +124,7 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     for (const event of events) {
       const cursor = Number(event.journal_cursor);
       journalHighWater = Math.max(journalHighWater, cursor);
-      if (acknowledged.has(cursor)) { integrity(!cursors.has(cursor)); continue; }
+      if (acknowledged.has(cursor) || (owner[0] && cursor <= Number(owner[0].tip_cursor))) { integrity(!cursors.has(cursor)); continue; }
       if (!cursors.has(cursor)) {
         integrity(cursor > fundedCursor);
         reserveLiveDeliveryEvent(storage, document, hostId, event);

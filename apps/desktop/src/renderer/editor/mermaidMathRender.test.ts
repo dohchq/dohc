@@ -40,6 +40,13 @@ beforeAll(() => {
   });
 });
 
+// Load the real Mermaid and KaTeX packages before the bounded assertion starts.
+// The assertion still exercises Mermaid's real lazy flowchart render and
+// KaTeX output; this keeps cold module evaluation outside its 15-second budget.
+beforeAll(async () => {
+  await Promise.all([import("mermaid"), import("katex")]);
+}, 30_000);
+
 afterAll(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();

@@ -1226,6 +1226,29 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(access(join(test.rootPath, "notes/a.md"))).rejects.toThrow();
   });
 
+  it("keeps the file and its session when live delete preflight refuses before trash", async () => {
+    const trashItem = vi.fn(async () => undefined);
+    const test = await harness({ trashItem });
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
+    const markDeleted = vi.fn();
+    await openYDoc(test, "notes/a.md", markDeleted);
+    test.setCapture({
+      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
+      settleAndCloseLiveSessionsForPath: vi.fn(async () => {
+        throw new Error("dohc could not delete notes. This action is unavailable for shared live files.");
+      }),
+    });
+    await expect(test.owner.deletePath(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "notes",
+    })).rejects.toThrow("dohc could not delete notes.");
+    expect(trashItem).not.toHaveBeenCalled();
+    expect(markDeleted).not.toHaveBeenCalled();
+    expect(await readFile(join(test.rootPath, "notes/a.md"), "utf8")).toBe("text\n");
+    await expect(access(join(test.rootPath, ".dohc/trash"))).rejects.toThrow();
+  });
+
   it("does not mark a Y.Doc deleted when both recovery paths fail", async () => {
     const test = await harness({
       trashItem: async () => {

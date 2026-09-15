@@ -118,10 +118,12 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // open, and dohc kept that edit instead of overwriting it.
 // None is ever inferred — main pushes all of them from real outcomes.
 export type EngineDocSaveState =
+  | "saved-to-host"
   | "saved"
   | "saving"
   | "error"
   | "file-locked"
+  | "pending-share"
   | "read-only"
   | "changed-on-disk"
   | "deleted";
@@ -165,6 +167,7 @@ type EngineDocOpenOutcome =
   // distinct user states and retry rules behind one flag.
   | { kind: "not-in-version" }
   | { kind: "document-unavailable" }
+  | { kind: "live-host-unavailable" }
   | { kind: "engine-may-hold-document" }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
@@ -211,6 +214,7 @@ function makeTransport(
           ? { lineageGeneration: result.lineageGeneration }
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
+        ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
@@ -221,6 +225,14 @@ function makeTransport(
     },
     readArtifactAsset(descriptor) {
       return bridge().readEngineYDocArtifactAsset({ sessionId, descriptor });
+    },
+    adoptOwner(generation) {
+      return bridge().prepareEngineYDocOwnerHandoff({sessionId,lineageGeneration: generation});
+    },
+    onOwnerHandoff(listener) {
+      return bridge().onEngineYDocOwnerHandoff(event => {
+        if (event.sessionId === sessionId) listener(event.lineageGeneration);
+      });
     },
     stageLocalUpdate() {
       if (writesRefused.current) return null;
@@ -410,6 +422,7 @@ function createEngineDocSession(
   let deletionPending = false;
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
+  let pendingSavedState: "saved" | "saved-to-host" = "saved";
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -490,7 +503,7 @@ function createEngineDocSession(
       !writesRefused.current &&
       pendingSavedSeq >= localSeq.current
     ) {
-      reportSaveState("saved");
+      reportSaveState(pendingSavedState);
     }
     pendingSavedSeq = null;
   };
@@ -918,18 +931,21 @@ function createEngineDocSession(
       releaseBinding();
       return;
     }
-    if (event.state === "saved") {
+    if (event.state === "saved" || event.state === "saved-to-host") {
       if (deliveryPending) {
         // Batches or unacknowledged deliveries are still outstanding — a
         // settle that raced ahead of them must not vouch for the mirror.
-        pendingSavedSeq = Math.max(pendingSavedSeq ?? 0, event.seq);
+        if (pendingSavedSeq === null || event.seq >= pendingSavedSeq) {
+          pendingSavedSeq = event.seq;
+          pendingSavedState = event.state;
+        }
         return;
       }
-      if (event.seq >= localSeq.current) reportSaveState("saved");
+      if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
     pendingSavedSeq = null;
-    if (event.state === "file-locked") {
+    if (event.state === "file-locked" || event.state === "pending-share") {
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
@@ -1174,6 +1190,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.liveHostUnavailable) {
+              setOutcome({ kind: "live-host-unavailable" });
             } else if (bound.documentUnavailable) {
               setOutcome({ kind: "document-unavailable" });
             } else if (bound.artifactAssetsInvalid) {

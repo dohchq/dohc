@@ -225,6 +225,9 @@ pub(crate) fn journal_pending_conflict_bundle_in_tx(
     workspace_id: &str,
     bundle_order: i64,
 ) -> Result<(), SyncError> {
+    if crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
+        return Ok(());
+    }
     let parent: Option<(String, i64)> = tx
         .query_row(
             "SELECT conflict_id, format_version \

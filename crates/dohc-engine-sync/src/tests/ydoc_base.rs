@@ -1616,6 +1616,88 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 }
 
 #[test]
+fn imported_richdoc_base_binds_its_verified_path_before_owner_enrollment() {
+    for existing_head in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_replication_version(&mut engine, "main", "main");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Shared truth")
+            .unwrap();
+        let markdown = doc
+            .project(dohc_engine_collab::ContentKind::Richdoc)
+            .unwrap()
+            .content;
+        if existing_head {
+            engine.write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','owner-object',1)", []).map_err(SyncError::persist)?;
+                dohc_engine_domain::write_projected_text_in_tx(tx, &dohc_engine_domain::WriteText {
+                    workspace_id:"ws".into(), version_id:"main".into(), object_id:"owner-object".into(),
+                    path:"notes/owner.md".into(), text:markdown.clone(), moment_id:"original".into(),
+                    metadata_origin:"local-file".into(), metadata_summary:None, metadata_correlation_id:None,
+                    author_json:None, now_ms:1_500, request_id:None,
+                }).map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+                Ok::<_,SyncError>(())
+            }).unwrap();
+        }
+        let bytes = doc.encode_full_state();
+        let sha = engine.put_binary_blob(&bytes).unwrap();
+        let op = envelope(
+            "owner-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId":"main","objectId":"owner-object","path":"notes/owner.md", "contentKind":"richdoc",
+                "updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true
+            }),
+        );
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "owner-object").unwrap();
+        let binding = dohc_engine_collab::LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "owner-object".into(),
+            lineage_claim_id: sha,
+            current_path: "notes/owner.md".into(),
+            selector_paths: vec!["notes".into()],
+            restore_fence_generation: 0,
+        };
+        for _ in 0..2 {
+            let outcome =
+                apply_ydoc_envelope(&mut engine, &mut cache, &op, &NoFaults, &NoLiveLeases)
+                    .unwrap();
+            assert!(outcome.refusals.is_empty());
+            let marker = dohc_engine_collab::read_marker(&engine, &key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(marker.path.as_deref(), Some("notes/owner.md"));
+            assert_eq!(
+                marker.head_update_seq, 0,
+                "enrollment does not require an artificial local edit"
+            );
+            let captured = engine
+                .read_with(|conn| {
+                    dohc_engine_collab::owner_outbox::enrollment::capture_in(conn, &binding)
+                })
+                .unwrap();
+            assert_eq!(captured.native_head_sequence, 0);
+            let mut wrong = binding.clone();
+            wrong.current_path = "notes/other.md".into();
+            assert!(
+                engine
+                    .read_with(
+                        |conn| dohc_engine_collab::owner_outbox::enrollment::capture_in(
+                            conn, &wrong
+                        )
+                    )
+                    .is_err()
+            );
+            assert_eq!(engine.table_row_count("moments").unwrap(), 1);
+            assert_eq!(engine.table_row_count("conflicts").unwrap(), 0);
+        }
+    }
+}
+
+#[test]
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already
     // equal the base's projection fast-forwards silently.

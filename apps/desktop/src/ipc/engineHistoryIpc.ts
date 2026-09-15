@@ -21,7 +21,7 @@ import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 // (onBehalfOf "local" -> the cloud email or "You"; anything else is already
 // a user-facing label).
 export type EngineMomentAuthorNamer = (
-  author: NonNullable<VersionedTextMomentSummary["author"]>,
+  author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>,
 ) => string;
 
 export async function listEngineMomentsForIpc(
@@ -63,9 +63,10 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
-    ...(moment.author !== undefined
+    ...(moment.author?.kind === "agent"
       ? { agentAuthorName: agentAuthorDisplayName(moment.author) }
       : {}),
+    ...(moment.author?.kind === "public" ? { publicAuthor: moment.author } : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),

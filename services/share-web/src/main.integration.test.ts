@@ -109,6 +109,25 @@ afterEach(async () => {
 
 describe("share-web Node request adapter", () => {
   it.each([
+    ["malformed JSON", "{", "FATAL:"],
+    ["wrong version", '{"version":2}', "Public Edit release must be exactly"],
+    ["extra key", '{"version":1,"extra":true}', "Public Edit release must be exactly"],
+    ["missing live profile", '{"version":1}', "Public Edit release requires configured link live limits"],
+  ])("refuses the public Edit release at production startup: %s", async (_label, publicEditRelease, reason) => {
+    await expect(startShareWeb({nodeEnv: "production", devMode: false,
+      relayExchangeKey: "production-startup-test-exchange-key-at-least-32", publicEditRelease,
+    })).rejects.toThrow(reason);
+  });
+
+  it("keeps public Edit routes closed without a release marker", async () => {
+    const server = await startShareWeb({devMode: false});
+    for (const path of ["/api/live/link-document", "/api/live/link-ticket"]) {
+      const response = await sendHttpRequest(server.port, path, {method: "POST", headers: {host: PUBLIC_HOST}});
+      expect(response.statusCode).toBe(404);
+      await readResponse(response);
+    }
+  });
+  it.each([
     ["with development mode enabled", true],
     ["with development mode disabled", false],
   ] as const)(
@@ -645,6 +664,8 @@ describe("share-web Node request adapter", () => {
 async function startShareWeb(
   options: {
     devMode?: boolean;
+    nodeEnv?: "test" | "production";
+    publicEditRelease?: string;
     relayExchangeKey?: string;
     relayUrl?: string;
     shutdownGracePeriodMs?: number;
@@ -660,6 +681,9 @@ async function startShareWeb(
     options.viewerAssetsDir ?? (await createViewerAssets(true));
   const env = { ...process.env };
   delete env.DOHC_SHARE_WEB_DEV;
+  delete env.DOHC_PUBLIC_EDIT_RELEASE;
+  delete env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS;
+  if (options.publicEditRelease !== undefined) env.DOHC_PUBLIC_EDIT_RELEASE = options.publicEditRelease;
   delete env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
@@ -694,7 +718,7 @@ async function startShareWeb(
     {
       env: {
         ...env,
-        NODE_ENV: "test",
+        NODE_ENV: options.nodeEnv ?? "test",
         DOHC_SHARE_WEB_RELAY_URL: relayUrl,
         DOHC_SHARE_WEB_PUBLIC_RELAY_URL: relayUrl,
         DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,

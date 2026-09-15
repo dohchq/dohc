@@ -22,7 +22,7 @@ type ReceivedShareState =
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
-  | { kind: "ready"; shareId: string; shareCode: string };
+  | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean };
 
 function HandoffCard(props: {
   title: string;
@@ -80,7 +80,8 @@ export function ShareHandoffSurface(props: {
         if (!lookupRequest.isCurrent(request)) return;
         setReceivedShare(
           result.found
-            ? { kind: "ready", shareId, shareCode: result.share.shareCode }
+            ? { kind: "ready", shareId, shareCode: result.share.shareCode, liveEditing: result.share.access === "edit" && result.share.selector !== null &&
+              (result.share.selector.versionId === null || result.share.selector.versionId === "main") }
             : { kind: "missing", shareId },
         );
       })
@@ -188,6 +189,7 @@ export function ShareHandoffSurface(props: {
     return (
       <OpenSharedView
         key={receivedShare.shareId}
+        liveEditing={receivedShare.liveEditing}
         resolvedShare={{
           shareId: receivedShare.shareId,
           shareCode: receivedShare.shareCode,

@@ -318,6 +318,21 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             ],
         )
         .map_err(SyncError::persist)?;
+        if let Admission::Refused(refusal) = &admission
+            && envelope.op_kind == "moment.append"
+            && matches!(
+                refusal.reason.message(),
+                "live document is stopped" | "live document binding is still active"
+            )
+        {
+            crate::moment_apply::retain_refused_moment_blobs(tx, envelope)?;
+        }
+        if let Admission::Refused(refusal) = &admission
+            && envelope.op_kind == "ydoc.update"
+            && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
+        {
+            crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+        }
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
@@ -339,6 +354,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
 
 fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
+        SyncError::LiveDocumentBindingActive => Some(RefusalReason::InvalidInput {
+            reason: "live document binding is still active".to_owned(),
+        }),
         SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput {
             reason: (*reason).to_owned(),
         }),
@@ -354,7 +372,17 @@ fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         SyncError::UnsupportedOperation => Some(RefusalReason::InvalidInput {
             reason: "operation kind is not supported by this client".to_owned(),
         }),
-        _ => None,
+        SyncError::Storage(_)
+        | SyncError::SequenceGap
+        | SyncError::CoordinateDiverged
+        | SyncError::RetryableState { .. }
+        | SyncError::ProjectionTooLarge { .. }
+        | SyncError::ShareBoundaryViolation
+        | SyncError::ShareVersionMismatch { .. }
+        | SyncError::ShareVersionUnusable { .. }
+        | SyncError::BlobInvalid
+        | SyncError::BlobTooLarge { .. }
+        | SyncError::FaultCrash => None,
     }
 }
 

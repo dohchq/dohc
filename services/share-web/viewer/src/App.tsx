@@ -1,3 +1,5 @@
+import { OpenSharedApp } from "./OpenSharedApp";
+import { PublishedApps } from "./PublishedApps";
 import {
   Component,
   lazy,
@@ -13,6 +15,7 @@ import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
+import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import {
   RETRY_BUDGET_MS,
   RETRY_INITIAL_MS,
@@ -348,7 +351,7 @@ function viewMeta(value: unknown): ViewMeta | null {
   const selectorRecord = selector as Record<string, unknown>;
   const access = record.access;
   if (
-    (access !== "view" && access !== "comment") ||
+    (access !== "view" && access !== "comment" && access !== "edit") ||
     selectorRecord.access !== access ||
     !Array.isArray(selectorRecord.paths) ||
     selectorRecord.paths.some((path) => typeof path !== "string") ||
@@ -435,7 +438,7 @@ async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta
 }
 
 function accessLabel(access: ShareAccess): string {
-  return access === "comment" ? "Comment" : "View";
+  return access === "edit" ? "Edit" : access === "comment" ? "Comment" : "View";
 }
 
 function metaAtAccess(meta: ViewMeta, access: ShareAccess): ViewMeta {
@@ -449,9 +452,8 @@ function metaAtAccess(meta: ViewMeta, access: ShareAccess): ViewMeta {
 }
 
 function retainNarrowedAccess(current: ViewMeta, incoming: ViewMeta): ViewMeta {
-  return current.access === "view"
-    ? metaAtAccess(incoming, "view")
-    : incoming;
+  const ranks = {view: 0, comment: 1, edit: 2};
+  return ranks[current.access] < ranks[incoming.access] ? metaAtAccess(incoming, current.access) : incoming;
 }
 
 function scrubFragment(): void {
@@ -482,7 +484,7 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
     }
-    history.replaceState(null, "", `/s/${body.session}`);
+    history.replaceState(null, "", `/s/${body.session}${location.search}`);
     return body.session;
   }
   if (location.hash) scrubFragment();
@@ -995,6 +997,7 @@ function OpenInDohc(props: { session: string }) {
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [selectedPath, setSelectedPath] = useState("");
+  const [editing, setEditing] = useState<{discriminator: string; path: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
   const refreshReadyStateRef = useRef<
     (() => Promise<ReadyState | null>) | null
@@ -1012,10 +1015,7 @@ export function App() {
     (session: string, access: ShareAccess): void => {
       const previous = readyStateRef.current;
       if (!previous || previous.session !== session) return;
-      const meta = metaAtAccess(
-        previous.meta,
-        previous.meta.access === "view" ? "view" : access,
-      );
+      const meta = retainNarrowedAccess(previous.meta, metaAtAccess(previous.meta, access));
       if (meta === previous.meta) return;
       const nextState = { ...previous, meta };
       readyStateRef.current = nextState;
@@ -1222,6 +1222,10 @@ export function App() {
     };
   }, [readySession]);
 
+  if (editing) return <LinkDocumentEditor key={`${editing.discriminator}:${editing.path}`} {...editing}
+    available={state.status === "ready" && state.session === editing.discriminator && state.meta.access === "edit" &&
+      state.meta.effectiveSelector.versionId === null && state.files.some(file => file.path === editing.path)}
+    onClose={() => setEditing(null)} />;
   if (state.status === "refused") return <Unavailable />;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
   const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
@@ -1235,9 +1239,13 @@ export function App() {
         </div>
         <div className="header-actions">
           <span className="badge">{accessLabel(state.meta.access)}</span>
+          {state.meta.access === "edit" && state.meta.effectiveSelector.versionId === null && selected?.contentKind === "text" && /\.md$/i.test(selected.path) &&
+            <button className="handoff-button primary" onClick={() => setEditing({discriminator: state.session, path: selected.path})}>Edit file</button>}
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
+      {new URLSearchParams(location.search).has("app") && <OpenSharedApp key={state.session} session={state.session} publicationId={new URLSearchParams(location.search).get("app") ?? ""} />}
+      <PublishedApps session={state.session}/>
       <Freshness
         lastSettledAtMs={state.meta.lastSettledAtMs}
         lastSettledKnown={state.meta.lastSettledKnown}

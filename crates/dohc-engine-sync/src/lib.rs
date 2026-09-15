@@ -19,9 +19,14 @@ mod error;
 mod file_search;
 mod hydration;
 mod journal;
+mod live_audit;
 mod model;
 mod moment_apply;
 mod outbound;
+mod owner_publication;
+pub use owner_publication::{
+    OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
+};
 mod path_policy;
 mod relay;
 mod router;
@@ -58,6 +63,10 @@ pub use journal::{
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
     record_share_view_identity, workspace_journals_file_moments_in_tx,
     workspace_replicates_with_relay_in_tx,
+};
+pub use live_audit::{
+    journal_live_base_in_tx, journal_live_event_in_tx, journal_live_event_or_defer_in_tx,
+    journal_live_settlement_in_tx,
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
@@ -98,10 +107,10 @@ pub use ydoc_apply::{
     YdocDrainResult, YdocLineageReplacement, apply_ydoc_envelope,
     complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
     drain_deferred_ydoc_for_key_holding_cleanup, drain_deferred_ydoc_for_live_session,
-    fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object, project_and_write_in_tx,
-    project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
-    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
-    validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
+    ensure_no_adopted_owner_under_path, fold_resolution_into_ydoc_in_tx,
+    open_sync_conflict_for_object, project_and_write_in_tx, project_ydoc_with_store,
+    reconcile_imported_resulting_head_in_tx, reconcile_local_resulting_head_in_tx,
+    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,

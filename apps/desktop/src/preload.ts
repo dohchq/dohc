@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
+import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
+import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
@@ -32,6 +35,7 @@ import {
   DesktopUserSettingsResult,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
+  EngineYDocOwnerHandoff,
   EngineYDocSaveStateEvent,
   ExplorerMenuCommand,
   ListPluginsResult,
@@ -366,8 +370,15 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
   listRelayShareLinks: (payload) =>
     ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
+  ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
+    const request = OwnerRestoreRequest.parse(payload);
+    return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
+  },
   retuneRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
+  publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
+    await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
+  ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>
@@ -672,6 +683,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
   acknowledgeEngineYDocLineageReplacement: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
+  prepareEngineYDocOwnerHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocPrepareOwnerHandoff, payload),
+  onEngineYDocOwnerHandoff: (listener) =>
+    onEvent(CHANNELS.engineYDocOwnerHandoff, EngineYDocOwnerHandoff, listener),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
   onEngineYDocRemoteUpdate: (listener) =>

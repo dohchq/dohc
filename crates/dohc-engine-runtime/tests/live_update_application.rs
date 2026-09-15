@@ -110,6 +110,46 @@ fn ack(
     }
 }
 struct Crash(FaultPoint);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_read_uses_current_actor_registration_and_retains_original_sequence() {
+    use dohc_engine_collab::live_update_application::LiveApplicationAckIdentity;
+    let (_scratch, _db, _supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let source = Ydoc::wire();
+    let update = event("ack-one", 1, "one", source.plaintext_insert(0, "one"));
+    let identity = LiveApplicationAckIdentity {
+        delivery_id: "ack-one".into(),
+        update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+    };
+    assert!(handle.read_ack(identity.clone()).await.unwrap().is_none());
+    let mut expected = ack(handle
+        .apply(update, Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
+    expected.application_replayed = true;
+    handle
+        .apply(
+            event("ack-two", 2, "one", source.plaintext_insert(3, " two")),
+            Arc::new(NoFaults),
+            100_000_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.read_ack(identity.clone()).await.unwrap(),
+        Some(expected.clone())
+    );
+    let foreign = owner
+        .register("relay-A".into(), coordinate("connection"), binding("two"))
+        .await
+        .unwrap();
+    assert!(foreign.read_ack(identity.clone()).await.is_err());
+    owner.retire();
+    assert!(handle.read_ack(identity.clone()).await.is_err());
+    let (_replacement, fresh) = registered(&actor).await;
+    assert_eq!(fresh.read_ack(identity).await.unwrap(), Some(expected));
+}
 impl FaultInjector for Crash {
     fn poll(&self, point: FaultPoint) -> FaultAction {
         if point == self.0 {
@@ -174,7 +214,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
             } else {
                 Arc::new(NoFaults)
             };
-            let result = handle.apply(update.clone(), faults).await;
+            let result = handle.apply(update.clone(), faults, 100_000_000).await;
             if cursor == 64 && mode == "fold-error" {
                 assert!(matches!(
                     result,
@@ -192,6 +232,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
                         DocKey::new("workspace", "main", "one").unwrap(),
                         Some(binding("one").lineage_claim_id),
                         tokio_util::sync::CancellationToken::new(),
+                        None,
                     )
                     .await
                     .unwrap();
@@ -202,6 +243,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
                 DocKey::new("workspace", "main", "one").unwrap(),
                 Some(binding("one").lineage_claim_id),
                 tokio_util::sync::CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -225,7 +267,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
         assert_eq!(count("ydoc_updates"), if folded { 0 } else { 64 });
         for (index, update) in deliveries.iter().enumerate() {
             let replay = ack(handle
-                .apply(update.clone(), Arc::new(NoFaults))
+                .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
                 .await
                 .unwrap());
             assert!(replay.application_replayed);
@@ -242,7 +284,7 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
             duplicate_bytes.metadata.accepted.receipt.delivery_id = "delivery-65".into();
             duplicate_bytes.metadata.accepted.receipt.journal_cursor = 65;
             let applied = ack(handle
-                .apply(duplicate_bytes, Arc::new(NoFaults))
+                .apply(duplicate_bytes, Arc::new(NoFaults), 100_000_000)
                 .await
                 .unwrap());
             assert!(!applied.application_replayed);
@@ -267,7 +309,11 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
         let (_next_owner, next) = registered(&restarted).await;
         for update in deliveries {
             assert!(
-                ack(next.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed
+                ack(next
+                    .apply(update, Arc::new(NoFaults), 100_000_000)
+                    .await
+                    .unwrap())
+                .application_replayed
             );
         }
         supervisor.close(&db).unwrap();
@@ -313,7 +359,11 @@ async fn failed_close_or_replacement_retains_durable_invalidation_for_retry() {
         for (handle, object) in [(&one, "one"), (&two, "two")] {
             assert!(matches!(
                 handle
-                    .apply(event("retired", 1, object, vec![0, 0]), Arc::new(NoFaults))
+                    .apply(
+                        event("retired", 1, object, vec![0, 0]),
+                        Arc::new(NoFaults),
+                        100_000_000
+                    )
                     .await,
                 Err(RuntimeError::ActorUnavailable)
             ));
@@ -330,7 +380,11 @@ async fn failed_close_or_replacement_retains_durable_invalidation_for_retry() {
             .await
             .unwrap();
         ack(live
-            .apply(event("recovered", 1, "one", vec![0, 0]), Arc::new(NoFaults))
+            .apply(
+                event("recovered", 1, "one", vec![0, 0]),
+                Arc::new(NoFaults),
+                100_000_000,
+            )
             .await
             .unwrap());
         next.close().await.unwrap();
@@ -349,30 +403,54 @@ async fn documents_use_the_actor_writer_and_owner_replacement_retires_captured_h
         .unwrap();
     let first = event("one", 1, "one", Ydoc::wire().plaintext_insert(0, "first"));
     let second = event("two", 2, "two", Ydoc::wire().plaintext_insert(0, "second"));
-    ack(one.apply(first.clone(), Arc::new(NoFaults)).await.unwrap());
-    ack(two.apply(second.clone(), Arc::new(NoFaults)).await.unwrap());
+    ack(one
+        .apply(first.clone(), Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
+    ack(two
+        .apply(second.clone(), Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
     let replacement = owner
         .register("relay-A".into(), coordinate("connection"), binding("one"))
         .await
         .unwrap();
     assert_eq!(
-        one.apply(first.clone(), Arc::new(NoFaults)).await.unwrap(),
+        one.apply(first.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap(),
         ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
     );
-    assert!(ack(two.apply(second.clone(), Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    assert!(
+        ack(two
+            .apply(second.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap())
+        .application_replayed
+    );
     let (next_owner, next) = registered(&actor).await;
     assert!(matches!(
-        replacement.apply(first.clone(), Arc::new(NoFaults)).await,
+        replacement
+            .apply(first.clone(), Arc::new(NoFaults), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
     assert!(matches!(
-        two.apply(second, Arc::new(NoFaults)).await,
+        two.apply(second, Arc::new(NoFaults), 100_000_000).await,
         Err(RuntimeError::ActorUnavailable)
     ));
-    assert!(ack(next.apply(first.clone(), Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    assert!(
+        ack(next
+            .apply(first.clone(), Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap())
+        .application_replayed
+    );
     drop(next_owner);
     assert!(matches!(
-        next.clone().apply(first, Arc::new(NoFaults)).await,
+        next.clone()
+            .apply(first, Arc::new(NoFaults), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
     supervisor.close(&db).unwrap();
@@ -400,10 +478,14 @@ async fn identical_strings_cannot_redirect_an_old_handle_after_restart_or_new_su
         "one",
         Ydoc::wire().plaintext_insert(0, "durable"),
     );
-    let original = ack(old.apply(update.clone(), Arc::new(NoFaults)).await.unwrap());
+    let original = ack(old
+        .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
     let restarted = supervisor.restart(&db, 5).unwrap();
     assert!(matches!(
-        old.apply(update.clone(), Arc::new(NoFaults)).await,
+        old.apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
     assert!(matches!(
@@ -413,7 +495,10 @@ async fn identical_strings_cannot_redirect_an_old_handle_after_restart_or_new_su
         Err(RuntimeError::ActorUnavailable)
     ));
     let (_new_owner, new) = registered(&restarted).await;
-    let replay = ack(new.apply(update.clone(), Arc::new(NoFaults)).await.unwrap());
+    let replay = ack(new
+        .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+        .await
+        .unwrap());
     assert!(replay.application_replayed);
     assert_eq!(replay.local_ydoc_sequence, original.local_ydoc_sequence);
     assert_eq!(replay.accepting_host_epoch, 1);
@@ -432,11 +517,16 @@ async fn identical_strings_cannot_redirect_an_old_handle_after_restart_or_new_su
     let other = other_supervisor.open(&db, 8).unwrap().actor;
     let (_other_owner, live) = registered(&other).await;
     assert!(matches!(
-        new.apply(update.clone(), Arc::new(NoFaults)).await,
+        new.apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
     assert_eq!(
-        ack(live.apply(update, Arc::new(NoFaults)).await.unwrap()).local_ydoc_sequence,
+        ack(live
+            .apply(update, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap())
+        .local_ydoc_sequence,
         original.local_ydoc_sequence
     );
     other_supervisor.close(&db).unwrap();
@@ -458,13 +548,13 @@ async fn workspace_conflicts_and_storage_failures_keep_their_typed_errors() {
     ));
     let update = event("same", 1, "one", vec![0, 0]);
     ack(handle
-        .apply(update.clone(), Arc::new(NoFaults))
+        .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
         .await
         .unwrap());
     let mut conflict = update;
     conflict.metadata.accepted.received_at_ms += 1;
     let error = handle
-        .apply(conflict, Arc::new(NoFaults))
+        .apply(conflict, Arc::new(NoFaults), 100_000_000)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -475,7 +565,11 @@ async fn workspace_conflicts_and_storage_failures_keep_their_typed_errors() {
     owner.close().await.unwrap();
     assert!(matches!(
         handle
-            .apply(event("late", 2, "one", vec![0, 0]), Arc::new(NoFaults))
+            .apply(
+                event("late", 2, "one", vec![0, 0]),
+                Arc::new(NoFaults),
+                100_000_000
+            )
             .await,
         Err(RuntimeError::ActorUnavailable)
     ));
@@ -543,20 +637,25 @@ async fn dependencies_and_commit_crashes_recover_through_the_real_actor() {
             let update = event("dependent", 2, "one", dependent);
             assert_eq!(
                 handle
-                    .apply(update.clone(), Arc::new(NoFaults))
+                    .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
                     .await
                     .unwrap(),
                 ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
             );
             ack(handle
-                .apply(event("first", 1, "one", first), Arc::new(NoFaults))
+                .apply(
+                    event("first", 1, "one", first),
+                    Arc::new(NoFaults),
+                    100_000_000,
+                )
                 .await
                 .unwrap());
             assert!(matches!(
                 handle
                     .apply(
                         update.clone(),
-                        Arc::new(Crash(FaultPoint::StorageAfterCommitBeforeAck))
+                        Arc::new(Crash(FaultPoint::StorageAfterCommitBeforeAck)),
+                        100_000_000
                     )
                     .await,
                 Err(RuntimeError::LiveApplication(ApplicationError::Interrupted))
@@ -564,10 +663,18 @@ async fn dependencies_and_commit_crashes_recover_through_the_real_actor() {
             let restarted = supervisor.restart(&db, 5).unwrap();
             let (_new_owner, new) = registered(&restarted).await;
             assert!(matches!(
-                handle.apply(update.clone(), Arc::new(NoFaults)).await,
+                handle
+                    .apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+                    .await,
                 Err(RuntimeError::ActorUnavailable)
             ));
-            assert!(ack(new.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+            assert!(
+                ack(new
+                    .apply(update, Arc::new(NoFaults), 100_000_000)
+                    .await
+                    .unwrap())
+                .application_replayed
+            );
             supervisor.close(&db).unwrap();
             let store = EngineStore::open(&db, 6).unwrap();
             assert_eq!(
@@ -619,7 +726,7 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
     let in_flight = tokio::spawn({
         let handle = handle.clone();
         let update = update.clone();
-        async move { handle.apply(update, held).await }
+        async move { handle.apply(update, held, 100_000_000).await }
     });
     at_commit.await.unwrap();
     let mut oversized = event(
@@ -629,12 +736,12 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
         vec![0; dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1],
     );
     oversized.metadata.accepted.receipt.update_digest = "a".repeat(64);
-    let mut oversized = Box::pin(handle.apply(oversized, Arc::new(NoFaults)));
+    let mut oversized = Box::pin(handle.apply(oversized, Arc::new(NoFaults), 100_000_000));
     let oversized_result =
         std::future::poll_fn(|context| std::task::Poll::Ready(oversized.as_mut().poll(context)))
             .await;
     let later = event("queued", 2, "one", vec![0, 0]);
-    let mut queued = Box::pin(handle.apply(later, Arc::new(NoFaults)));
+    let mut queued = Box::pin(handle.apply(later, Arc::new(NoFaults), 100_000_000));
     assert!(
         std::future::poll_fn(|context| std::task::Poll::Ready(
             queued.as_mut().poll(context).is_pending()
@@ -655,7 +762,13 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
     ));
     assert!(matches!(queued.await, Err(RuntimeError::ActorUnavailable)));
     let (_new_owner, current) = registered(&actor).await;
-    assert!(ack(current.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    assert!(
+        ack(current
+            .apply(update, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap())
+        .application_replayed
+    );
     supervisor.close(&db).unwrap();
     let store = EngineStore::open(&db, 5).unwrap();
     assert_eq!(
@@ -667,6 +780,101 @@ async fn owner_drop_suppresses_a_committed_ack_and_a_queued_request() {
 }
 
 struct PanicCommit;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_preparation_reservation_survives_cancellation_and_owner_retirement() {
+    use dohc_engine_collab::live_update_application::{
+        NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestorePoint,
+        NativeRestorePreparation, RestoreDeliveryOrigin,
+    };
+    struct Reservation(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (_scratch, db, supervisor, actor) = fixture();
+    let (owner, handle) = registered(&actor).await;
+    let (entered, at_commit) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let held = Arc::new(HoldCommit {
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(wait),
+    });
+    let in_flight = tokio::spawn(async move {
+        handle
+            .apply(event("held", 1, "one", vec![0, 0]), held, 100_000_000)
+            .await
+    });
+    at_commit.await.unwrap();
+    // The writer must reject this queued operation after retirement before reading its fence.
+    let input = NativeRestorePreparation {
+        fence: NativeRestoreFenceReceipt {
+            operation: NativeRestoreFence {
+                operation_id: "restore".into(),
+                relay_database_namespace: "relay-A".into(),
+                old_binding: binding("one"),
+                host_id: "host".into(),
+                new_fence: 8,
+                origin: RestoreDeliveryOrigin::Bootstrap {
+                    id: "bootstrap".into(),
+                },
+                terminal: None,
+                applied_sequence: 0,
+            },
+            local_head_sequence: 0,
+            recorded_at_ms: 1,
+        },
+        point: NativeRestorePoint {
+            journal_cursor: 0,
+            receipt_digest: binding("one").lineage_claim_id,
+            markdown_digest: hex_sha256(b""),
+            projection_digest: hex_sha256(b""),
+        },
+    };
+    let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut queued = Box::pin(owner.prepare_restore(
+        input.clone(),
+        coordinate("connection"),
+        1_000_000,
+        100,
+        Arc::new(NoFaults),
+        Arc::new(Reservation(disposed.clone())),
+    ));
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(queued.as_mut().poll(cx).is_pending()))
+            .await
+    );
+    drop(queued);
+    assert!(!disposed.load(std::sync::atomic::Ordering::SeqCst));
+    owner.retire();
+    release.send(()).unwrap();
+    assert!(matches!(
+        in_flight.await.unwrap(),
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    let _replacement = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    assert!(disposed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        owner
+            .prepare_restore(
+                input,
+                coordinate("connection"),
+                1_000_000,
+                100,
+                Arc::new(NoFaults),
+                Arc::new(())
+            )
+            .await,
+        Err(RuntimeError::ActorUnavailable)
+    ));
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 5).unwrap();
+    assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disposal() {
@@ -688,7 +896,7 @@ async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disp
         let handle = handle.clone();
         async move {
             handle
-                .apply(event("held", 1, "one", vec![0, 0]), held)
+                .apply(event("held", 1, "one", vec![0, 0]), held, 100_000_000)
                 .await
         }
     });
@@ -699,6 +907,7 @@ async fn a_cancelled_caller_keeps_queued_input_memory_reserved_until_writer_disp
         event("queued", 2, "one", vec![0, 0]),
         Arc::new(NoFaults),
         Some(reservation),
+        100_000_000,
     ));
     assert!(
         std::future::poll_fn(|context| std::task::Poll::Ready(
@@ -739,15 +948,23 @@ async fn worker_panic_retires_owner_and_rolls_back_before_restart() {
     let (_owner, old) = registered(&actor).await;
     let update = event("panic", 1, "one", Ydoc::wire().plaintext_insert(0, "x"));
     assert!(matches!(
-        old.apply(update.clone(), Arc::new(PanicCommit)).await,
+        old.apply(update.clone(), Arc::new(PanicCommit), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
     let restarted = supervisor.restart(&db, 3).unwrap();
     let (_new_owner, new) = registered(&restarted).await;
     assert!(matches!(
-        old.apply(update.clone(), Arc::new(NoFaults)).await,
+        old.apply(update.clone(), Arc::new(NoFaults), 100_000_000)
+            .await,
         Err(RuntimeError::ActorUnavailable)
     ));
-    assert!(!ack(new.apply(update, Arc::new(NoFaults)).await.unwrap()).application_replayed);
+    assert!(
+        !ack(new
+            .apply(update, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap())
+        .application_replayed
+    );
     supervisor.close(&db).unwrap();
 }

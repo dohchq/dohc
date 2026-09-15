@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import {readFileSync} from "node:fs";
 import { PassThrough } from "node:stream";
 import { afterEach, expect, it, vi } from "vitest";
 import type { DeviceLiveHostConfig } from "./deviceLiveHostConfig";
@@ -10,7 +11,7 @@ const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn }));
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });
 
-it("uses the native grace twice, drains stdout, and escalates when EOF and TERM are ignored", async () => {
+it.each([false, true])("forwards explicit sync config (%s) and uses the native grace twice when EOF and TERM are ignored", async enabled => {
   vi.useFakeTimers();
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
@@ -28,7 +29,9 @@ it("uses the native grace twice, drains stdout, and escalates when EOF and TERM 
     done();
   } } as unknown as WebSocket;
   const limits = { maxPayloadBytes: 4096, maxPendingBytes: 8192, closeTimeoutMs: 1 } as Parameters<typeof startDeviceNativeTransport>[0]["limits"];
-  const config = { engineExecutable: process.execPath, workspaces: [], ingress: {}, maxQueuedBytes: 100_000,
+  const sync = enabled ? {policy: {maxClientVectorBytes: 1024, maxHostVectorBytes: 4096,
+    maxOutputBytes: 1_000_000, maxReadBytes: 10_000_000}, workingReserveBytes: 16_777_216} : undefined;
+  const config = { engineExecutable: process.execPath, workspaces: [], ingress: {}, maxQueuedBytes: 100_000, sync,
     shutdownGraceMs: 1000 } as unknown as DeviceLiveHostConfig;
   const transport = startDeviceNativeTransport({ ws, limits, config, stop() {}, start: {
     type: "liveHost.start", version: 1, relayNamespace: "relay", authToken: "A".repeat(43),
@@ -36,6 +39,9 @@ it("uses the native grace twice, drains stdout, and escalates when EOF and TERM 
     receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 },
   } });
   await ready;
+  const options = spawn.mock.calls[0]![2];
+  const saved = JSON.parse(readFileSync(options.env.DOHC_ENGINE_LIVE_HOST_CONFIG, "utf8"));
+  expect(saved.sync).toEqual(sync);
   const closed = transport.close();
   await vi.advanceTimersByTimeAsync(1);
   expect(child.kill).not.toHaveBeenCalled();

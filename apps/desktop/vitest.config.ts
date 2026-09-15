@@ -1,4 +1,6 @@
 import { availableParallelism } from "node:os";
+import { createRequire } from "node:module";
+import { dirname } from "node:path";
 import { defineConfig } from "vitest/config";
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
@@ -6,9 +8,15 @@ import { defineConfig } from "vitest/config";
 // constraint rather than the CPU — so a bigger machine must not buy more
 // contention. Evidence and the failure modes are on #392.
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
+const require = createRequire(import.meta.url);
 
 // e2e/ runs under Playwright (playwright.config.ts), never vitest.
 export default defineConfig({
+  // Source-backed examples outside this package use the same React instance as their desktop tests.
+  resolve: { alias: {
+    react: dirname(require.resolve("react/package.json")),
+    "react-dom": dirname(require.resolve("react-dom/package.json")),
+  } },
   test: {
     include: ["src/**/*.test.{ts,tsx}", "plugins/**/src/**/*.test.ts"],
     css: { include: [/[?&]raw(?:&|$)/] },

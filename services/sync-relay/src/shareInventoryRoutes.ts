@@ -1,4 +1,5 @@
 import { jsonResponse } from "@dohc/service-http";
+import type {PublicEditRelease} from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
 import { cursorCodec } from "./requestInputs";
 import { resolveReceivedShareAuthority, selectorTargetsBlockedChannel, type AuthorizedShareAction } from "./shareAuthorization";
@@ -29,6 +30,7 @@ export function createShareInventoryRoutes(
   receivedShareSummary: ReturnType<typeof createShareSummaries>["receivedShareSummary"],
   independentGrantSummary: ReturnType<typeof createShareSummaries>["independentGrantSummary"],
   linkInventorySummary: ReturnType<typeof createShareSummaries>["linkInventorySummary"],
+  publicEditRelease?: PublicEditRelease,
 ) {
   async function respondToShareInventory(
     request: Request,
@@ -168,6 +170,7 @@ export function createShareInventoryRoutes(
       ok: true,
       links,
       independentGrants,
+      supportedLinkAccess: publicEditRelease ? ["view", "comment", "edit"] : ["view", "comment"],
       ...(independentGrantPage.nextCursor
         ? {
             nextIndependentGrantCursor:

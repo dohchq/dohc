@@ -33,9 +33,11 @@ pub(crate) struct PendingCursor {
     pub(super) handle: WorkspaceHandle,
     pub(crate) workspace_id: String,
     pub(super) cursor: IssuedCursor,
+    pub(super) materialization_paths: Vec<dohc_engine_sync::MomentMaterializationChange>,
+    pub(super) materialized: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RelayOpenParams {
     base_url: String,
@@ -174,6 +176,7 @@ fn relay_cursor_json(cursor: &RelayCursor) -> Value {
 fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
     match outcome {
         SyncPassOutcome::Complete {
+            owner_admission_pending,
             pushed,
             fetched,
             has_more,
@@ -189,6 +192,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             record_facts: _,
         } => json!({
             "status": "complete",
+            "ownerAdmissionPending":owner_admission_pending,
             "pushed": pushed,
             "fetched": fetched,
             "hasMore": has_more,
@@ -463,6 +467,8 @@ impl EngineService {
                     handle: handle.clone(),
                     workspace_id: workspace_id.to_owned(),
                     cursor,
+                    materialization_paths: Vec::new(),
+                    materialized: false,
                 },
             );
             return Ok(json!({ "kind": wire_kind, "token": token }));
@@ -510,6 +516,16 @@ impl EngineService {
         operation: RelayOperation,
         label: &str,
     ) -> Result<RelayOperationOutcome, WireError> {
+        let reservation = if matches!(
+            operation,
+            RelayOperation::Push { .. } | RelayOperation::SubmitShareProposal { .. }
+        ) {
+            self.relay_sync_admission()
+                .map(|(_, admission)| admission.reserve())
+                .transpose()?
+        } else {
+            None
+        };
         let cancellation = OperationCancellation::new(ctx);
         Self::read_under_ctx(
             &cancellation,
@@ -519,6 +535,7 @@ impl EngineService {
                 operation,
                 self.leases.scoped(&open.root),
                 cancellation.token(),
+                reservation,
             ),
         )
         .await
@@ -540,6 +557,9 @@ impl EngineService {
                 RelayOperation::Push {
                     workspace_id: open.workspace_id.clone(),
                     now_ms: now_ms()?,
+                    max_read_bytes: self
+                        .relay_sync_admission()
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "sync.push",
             )
@@ -605,12 +625,90 @@ impl EngineService {
             }) => Some(IssuedCursor::Relay(cursor.clone())),
             _ => None,
         };
+        let materialization_paths = match &outcome {
+            RelayOperationOutcome::Sync(
+                SyncPassOutcome::Complete { changed_paths, .. }
+                | SyncPassOutcome::CrashedAfterApply { changed_paths, .. },
+            ) => changed_paths.clone(),
+            _ => Vec::new(),
+        };
         let mut result = relay_outcome_json(outcome)?;
         if let Some(cursor) = pending {
-            result["pendingCursor"] =
-                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+            let issued = self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+            let token = issued["token"]
+                .as_str()
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
+            lock(&self.pending_cursors)
+                .get_mut(token)
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "issued cursor disappeared"))?
+                .materialization_paths = materialization_paths;
+            result["pendingCursor"] = issued;
         }
         Ok(result)
+    }
+
+    pub(super) async fn sync_materialize_pending_cursor(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CommitCursorParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, _) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let PendingCursorParams::Relay { token } = params.pending_cursor else {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "ordinary materialization requires relay cursor",
+            ));
+        };
+        let paths = {
+            let mut pending = lock(&self.pending_cursors);
+            let issued = pending
+                .get_mut(&token)
+                .filter(|issued| {
+                    issued.handle == *bound_handle
+                        && issued.workspace_id == open.workspace_id
+                        && matches!(issued.cursor, IssuedCursor::Relay(_))
+                })
+                .ok_or_else(|| {
+                    WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor")
+                })?;
+            issued.materialized = false;
+            issued.materialization_paths.clone()
+        };
+        let cancellation = OperationCancellation::new(ctx);
+        let _apply = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.materializePendingCursor")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        open.actor
+            .materialize_relay_page(
+                open.workspace_id.clone(),
+                open.root.clone(),
+                paths,
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                cancellation.token(),
+            )
+            .await
+            .map_err(crate::rpc::error::map_runtime)?;
+        if cancellation.token.is_cancelled() {
+            return Err(cancellation.interruption("sync.materializePendingCursor"));
+        }
+        if !Arc::ptr_eq(&open, &self.open(Some(bound_handle))?) {
+            return Err(workspace_unavailable());
+        }
+        let mut pending = lock(&self.pending_cursors);
+        let issued = pending
+            .get_mut(&token)
+            .filter(|issued| {
+                issued.handle == *bound_handle && issued.workspace_id == open.workspace_id
+            })
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor"))?;
+        issued.materialized = true;
+        Ok(json!({"materialized": true}))
     }
 
     pub(super) async fn sync_commit_cursor(
@@ -626,6 +724,20 @@ impl EngineService {
             PendingCursorParams::Relay { token } => (PendingCursorKind::Relay, token),
             PendingCursorParams::ShareView { token } => (PendingCursorKind::ShareView, token),
         };
+        if self.configured_live_host.get().is_some()
+            && !lock(&self.pending_cursors)
+                .get(&token)
+                .is_some_and(|issued| {
+                    issued.handle == *bound_handle
+                        && issued.workspace_id == open.workspace_id
+                        && issued.materialized
+                })
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "ordinary cursor materialization is incomplete",
+            ));
+        }
         let issued = self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let operation = match issued {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
@@ -947,6 +1059,9 @@ impl EngineService {
                     share_id: params.share_id,
                     granted,
                     submit_id: params.submit_id,
+                    max_read_bytes: self
+                        .relay_sync_admission()
+                        .map_or(0, |(policy, _)| policy.max_read_bytes),
                 },
                 "share.proposal.submit",
             )
@@ -1024,6 +1139,7 @@ mod tests {
     #[test]
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
+            owner_admission_pending: Vec::new(),
             pushed: 0,
             fetched: 500,
             has_more: true,

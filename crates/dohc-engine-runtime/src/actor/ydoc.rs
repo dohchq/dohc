@@ -50,8 +50,10 @@ pub struct YdocOpenState {
     /// The text head's blob sha at open time (None for an absent head) —
     /// the session's settle preimage expectation until its first settle.
     pub head_blob_sha256: Option<String>,
+    pub owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     pub lineage_existing: bool,
     pub lineage_claim_id: Option<String>,
+    pub restore_generation: Option<i64>,
     pub seed_content: Option<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
@@ -167,6 +169,337 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    pub async fn owner_ydoc_prepare_enrollment(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        namespace: String,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentPreparation,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::enrollment::prepare_in(conn, &binding, &namespace)
+            }))
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_enroll(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::enrollment::OwnerEnrollmentInput,
+        limits: dohc_engine_collab::OwnerOutboxLimits,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            cache.remove(&key);
+            Ok(
+                match store.write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::owner_outbox::enrollment::enroll_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        &limits,
+                        now_ms,
+                    )
+                }) {
+                    Ok(TxnOutcome::Committed(result)) => Ok(result),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_draft_for_key(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<
+        Result<
+            Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(conn, &key)
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_list_drafts(
+        &self,
+        workspace_id: String,
+        after: Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftCursor>,
+        limit: usize,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::list_drafts_in(
+                    conn,
+                    &workspace_id,
+                    after.as_ref(),
+                    limit,
+                )
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_open_draft(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        revision: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerDraftSnapshot, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(dohc_engine_collab::owner_outbox::draft::open_draft_cached(
+                store, cache, &binding, revision,
+            ))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_append_draft(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                dohc_engine_collab::owner_outbox::draft::append_draft_cached(
+                    store,
+                    cache,
+                    &workspace_id,
+                    input,
+                    &NoFaults,
+                ),
+            )
+        })
+        .await
+    }
+
+    /// Main-owned authenticated feed only. A delivery ACK never calls this method.
+    pub async fn owner_ydoc_apply_accepted(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.owner_ydoc_apply_ordered(workspace_id, input, None, now_ms, token, reservation)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_apply_initial_sync(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        host_vector: Vec<u8>,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.owner_ydoc_apply_ordered(
+            workspace_id,
+            input,
+            Some(host_vector),
+            now_ms,
+            token,
+            reservation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn owner_ydoc_apply_ordered(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        host_vector: Option<Vec<u8>>,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameResult,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            cache.remove(&key);
+            let result = store.write_with(&NoFaults, |tx| {
+                if let Some(vector) = &host_vector {
+                    dohc_engine_collab::owner_outbox::accepted::apply_sync_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        vector,
+                        now_ms,
+                    )
+                } else {
+                    dohc_engine_collab::owner_outbox::accepted::apply_frame_in_tx(
+                        tx,
+                        &workspace_id,
+                        &input,
+                        now_ms,
+                    )
+                }
+            });
+            let result = match result {
+                Ok(TxnOutcome::Committed(result)) => Ok(result),
+                Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                Err(error) => Err(error),
+            };
+            if result.is_ok() {
+                dohc_engine_collab::maybe_compact(
+                    store,
+                    &key,
+                    dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+                    &NoFaults,
+                    now_ms,
+                )?;
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    /// Main-owned accepted position used to resume the ordered native feed.
+    pub async fn owner_ydoc_accepted_state(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        relay_database_namespace: String,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedState, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::accepted::read_state_in(
+                    conn,
+                    &binding,
+                    &relay_database_namespace,
+                )
+            }))
+        })
+        .await
+    }
+
+    /// Local containment check for the current observed binding, never host authority.
+    pub async fn owner_ydoc_is_receipt_applied(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        relay_database_namespace: String,
+        receipt: OwnerDeliveryReceipt,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<bool, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::accepted::is_receipt_applied_in(
+                    conn,
+                    &binding,
+                    &relay_database_namespace,
+                    &receipt,
+                )
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_outbox_append(
         &self,
         workspace_id: String,
@@ -354,11 +687,12 @@ impl ActorHandle {
         attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
-        seed_source_sha256: Option<String>,
+        seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
         request_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocAppend, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_record_update_on_store(
@@ -373,12 +707,13 @@ impl ActorHandle {
                 attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
-                seed_source_sha256,
+                seed_source,
                 request_id,
                 true,
                 now_ms,
                 faults.as_ref(),
                 &token,
+                restore_generation,
             )
         })
         .await
@@ -398,6 +733,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_settle_on_store(
@@ -418,6 +754,8 @@ impl ActorHandle {
                 &token,
                 None,
                 None,
+                restore_generation,
+                SettlementKind::Document,
             )
         })
         .await
@@ -428,6 +766,7 @@ impl ActorHandle {
         key: DocKey,
         expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
+        restore_generation: Option<i64>,
     ) -> Result<YdocResyncState, RuntimeError> {
         self.run(move |store, cache| {
             ydoc_resync_on_store(
@@ -436,6 +775,7 @@ impl ActorHandle {
                 &key,
                 expected_lineage_claim_id.as_deref(),
                 &token,
+                restore_generation,
             )
         })
         .await
@@ -1078,6 +1418,9 @@ pub(super) fn ydoc_open_state_on_store(
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
+    let restore_generation = store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, &key)
+    })?;
     // An open sync conflict on this object freezes the open as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
     // serving it would put the editor on the very side the conflict
@@ -1167,6 +1510,7 @@ pub(super) fn ydoc_open_state_on_store(
     // read side-effect-free for the foreign key.
     let mut record_facts = Vec::new();
     if drain_deferred
+        && restore_generation.is_none()
         && expected_key_matches
         && dohc_engine_collab::read_marker(store, &key)?
             .is_some_and(|marker| marker.regime == Regime::Replicated)
@@ -1324,6 +1668,12 @@ pub(super) fn ydoc_open_state_on_store(
         Vec::new()
     };
     Ok(YdocOpenState {
+        owner_seed_source: head.as_ref().map(|snapshot| {
+            dohc_engine_collab::owner_base_source::OwnerSeedSource {
+                moment_id: snapshot.latest_moment_id.clone(),
+                blob_sha256: snapshot.blob_sha256.clone(),
+            }
+        }),
         head_blob_sha256: head_sha,
         key,
         content_kind,
@@ -1331,6 +1681,7 @@ pub(super) fn ydoc_open_state_on_store(
         initial_update,
         lineage_existing,
         lineage_claim_id,
+        restore_generation,
         seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
@@ -1353,12 +1704,13 @@ pub(super) fn ydoc_record_update_on_store(
     attribution: Option<ChangeAttribution>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
-    seed_source_sha256: Option<String>,
+    seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     request_id: Option<String>,
     claim_triggers: bool,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    restore_generation: Option<i64>,
 ) -> Result<YdocAppend, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -1403,13 +1755,28 @@ pub(super) fn ydoc_record_update_on_store(
             // timed-out-commit seed retry dedupes inside the guard instead of
             // refusing seed-onto-existing-lineage.
             ensure_parent_row: true,
+            restore_generation,
             require_empty_lineage,
-            seed_source_sha256: seed_source_sha256.as_deref(),
+            seed_source_sha256: seed_source
+                .as_ref()
+                .map(|source| source.blob_sha256.as_str()),
             request_id: request_id.as_deref(),
         },
         faults,
         now_ms,
         |tx, outcome, update_sha| {
+            dohc_engine_collab::owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &journal_key,
+                &journal_path,
+                outcome.seq,
+                update,
+                now_ms,
+            )?;
+            if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &journal_key)? {
+                outcome.emit_outbound = false;
+                return Ok(());
+            }
             // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
@@ -1426,7 +1793,18 @@ pub(super) fn ydoc_record_update_on_store(
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
                 reason: format!("outbound ydoc.update base origination failed: {error}"),
             })? {
-                dohc_engine_sync::BaseOrigination::Originated { .. } => true,
+                dohc_engine_sync::BaseOrigination::Originated { base_snapshot_sha } => {
+                    if let Some(source) = &seed_source {
+                        dohc_engine_collab::owner_base_source::retain_owner_base_source_in_tx(
+                            tx,
+                            &journal_key,
+                            &journal_path,
+                            &base_snapshot_sha,
+                            source,
+                        )?;
+                    }
+                    true
+                }
                 dohc_engine_sync::BaseOrigination::Declined(reason) => {
                     sharing_declined = Some(reason);
                     false
@@ -1647,6 +2025,12 @@ fn settled_collection_record_id_mismatch(
         .map_err(RuntimeError::from)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettlementKind {
+    Document,
+    CollectionAdoption,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ydoc_settle_on_store(
     store: &mut EngineStore,
@@ -1666,9 +2050,21 @@ pub(super) fn ydoc_settle_on_store(
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+    restore_generation: Option<i64>,
+    kind: SettlementKind,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if live_audit.is_none() {
+        store.read_with(|conn| {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
+            dohc_engine_collab::live_update_application::require_restore_generation(
+                conn,
+                key,
+                restore_generation,
+            )
+        })?;
     }
     // Refuse to settle a lineage that has no durable state: projecting a
     // fresh doc would be the empty string, and the projected write below
@@ -1724,7 +2120,8 @@ pub(super) fn ydoc_settle_on_store(
             // rows stay queued for the next pull, open, settle, or close,
             // which all emit; the later drain applies and projects the
             // remote content over whatever the pass settled.
-            if drain_deferred && marker.regime == Regime::Replicated {
+            if drain_deferred && restore_generation.is_none() && marker.regime == Regime::Replicated
+            {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
                     doc_cache,
@@ -1956,13 +2353,21 @@ pub(super) fn ydoc_settle_on_store(
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
-                audit.record_in_tx(
+                let id = audit.record_in_tx(
                     tx,
                     &current.latest_moment_id,
                     &current.blob_sha256,
                     &projection.source_state_vector_sha256,
                     now_ms,
+                )?;
+                dohc_engine_sync::journal_live_settlement_in_tx(
+                    tx,
+                    &audit.binding().workspace_id,
+                    &id,
+                    now_ms,
                 )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(id)
             })?;
             if matches!(recorded, TxnOutcome::Crashed { .. }) {
                 return Err(RuntimeError::OperationCrashed);
@@ -2018,6 +2423,21 @@ pub(super) fn ydoc_settle_on_store(
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
+        if live_audit.is_none() {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
+                |_| DomainError::InvalidInput {
+                    reason: "owner-outbox-frozen",
+                },
+            )?;
+            dohc_engine_collab::live_update_application::require_restore_generation(
+                tx,
+                key,
+                restore_generation,
+            )
+            .map_err(|_| DomainError::InvalidInput {
+                reason: "live-restore-fenced",
+            })?;
+        }
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
             return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
@@ -2099,6 +2519,14 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
+        if kind == SettlementKind::CollectionAdoption || live_audit.is_some() {
+            journal_moment_outbound_in_tx(
+                tx,
+                &key.workspace_id,
+                &result.moment.moment_id,
+                result.deduped,
+            )?;
+        }
         // The settle marker commits atomically with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the
@@ -2137,13 +2565,20 @@ pub(super) fn ydoc_settle_on_store(
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
         if let Some(audit) = live_audit {
-            audit.record_in_tx(
+            let id = audit.record_in_tx(
                 tx,
                 &result.moment.moment_id,
                 &result.snapshot.blob_sha256,
                 &source_state_vector_sha256,
                 now_ms,
             )?;
+            dohc_engine_sync::journal_live_settlement_in_tx(
+                tx,
+                &audit.binding().workspace_id,
+                &id,
+                now_ms,
+            )
+            .map_err(StorageError::persist_public)?;
         }
         Ok((result, prior_marker))
     })?;
@@ -2283,10 +2718,18 @@ fn ydoc_resync_on_store(
     key: &DocKey,
     expected_lineage_claim_id: Option<&str>,
     token: &CancellationToken,
+    restore_generation: Option<i64>,
 ) -> Result<YdocResyncState, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::require_restore_generation(
+            conn,
+            key,
+            restore_generation,
+        )
+    })?;
     // Resync is the staleness recovery path: an envelope acked-but-deferred
     // because this session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
@@ -2302,6 +2745,7 @@ fn ydoc_resync_on_store(
         .as_ref()
         .is_some_and(|marker| marker.regime == Regime::Replicated)
         && observed_lineage_claim_id == expected_lineage_claim_id
+        && restore_generation.is_none()
     {
         drain_deferred_ydoc_for_live_session_rpc(
             store,
@@ -2378,6 +2822,18 @@ fn ydoc_close_session_on_store(
     // every outcome, including a mid-close crash, leaves no entry behind.
     doc_cache.remove(key);
     doc_cache.unpin(key);
+    let restore_generation = match store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, key)
+    }) {
+        Ok(generation) => generation,
+        Err(dohc_engine_collab::CollabError::RestoreFenced) => {
+            return Ok(YdocCloseSessionOutcome {
+                outcome: None,
+                record_facts: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(YdocCloseSessionOutcome {
             outcome: None,
@@ -2412,7 +2868,7 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
     let mut record_facts = Vec::new();
-    if marker.regime == Regime::Replicated {
+    if marker.regime == Regime::Replicated && restore_generation.is_none() {
         // The drain projects internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it. The drain holds its queue-row cleanup

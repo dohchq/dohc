@@ -56,6 +56,7 @@ const VERSIONED_TEXT_STORE_ERROR_CODES = [
   "duplicate-id",
   "file-too-large",
   "file-not-found",
+  "object-identity-mismatch",
   "fork-base-not-found",
   "invalid-input",
   "invalid-metadata",
@@ -134,6 +135,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -229,6 +231,7 @@ function authorFromWire(author: MomentRecord["author"]): MomentAuthor | undefine
       "Engine moment contains corrupt author provenance.",
     );
   }
+  if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -515,6 +518,7 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
 }
 
 function adapterAuthor(author: MomentAuthor): AgentAuthor {
+  if (author.kind !== "agent") throw new VersionedTextStoreError("invalid-input", "Public authorship can only arrive through relay replication.");
   return {
     kind: "agent",
     agentId: author.agentId,
@@ -800,6 +804,9 @@ export function createCaptureLiveStores(
       return value === null ? null : snapshotFromWire(value);
     },
 
+    checkMove: (input: { workspaceId: string; versionId: string; path: string }) =>
+      runRead(async (adapter) => await adapter.checkMove(input)),
+
     async listTextFileMetadata(input: {
       workspaceId: string;
       versionId: string;
@@ -824,6 +831,7 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       text: string;
+      restoreBeforeMomentId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentAuthor;
       momentId?: string;
@@ -903,6 +911,8 @@ export function createCaptureLiveStores(
       workspaceId: string;
       versionId: string;
       path: string;
+      expectedObjectId?: string;
+      requestId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentAuthor;
       momentId?: string;

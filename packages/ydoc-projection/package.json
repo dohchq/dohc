@@ -4,7 +4,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./image-src": "./src/image-src.ts"
+    "./body-fragment": "./src/body-fragment.ts",
+    "./browser-editor": "./src/browser-editor.ts",
+    "./live-journal-validation": "./src/live-journal-validation.ts",
+    "./image-src": "./src/image-src.ts",
+    "./restore-proof": "./src/liveRestoreProof.ts",
+    "./named-live-provider": "./src/namedLiveProvider.ts",
+    "./named-live-browser-transport": "./src/namedLiveBrowserTransport.ts"
   },
   "scripts": {
     "test": "vitest run",

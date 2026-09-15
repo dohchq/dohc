@@ -301,13 +301,13 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     for index in 0..2_001 {
         let text = format!("blob-{index}");
         let sha256 = hex_sha256(text.as_bytes());
-        snapshots.push(json!({"blobSha256": sha256}));
+        snapshots.push(json!({"objectId": format!("object-{index}"), "path": format!("file-{index}.md"), "blobSha256": sha256}));
         blobs.push((sha256, text));
     }
     seed_identity_with_kind(
         &mut engine,
         "version.create",
-        &json!({"forkSnapshots": snapshots}),
+        &json!({"forkVersionId": "fork-version", "forkSnapshots": snapshots}),
     );
     engine
         .write_with(&NoFaults, |transaction| {
@@ -385,7 +385,7 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
         .expect("push workspace");
     assert!(matches!(
         outcome,
@@ -420,7 +420,7 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
         .expect_err("ahead relay must diverge");
     assert_eq!(error, RelayError::OriginDiverged);
     assert_eq!(
@@ -495,7 +495,7 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
         }
     });
     let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
         .expect("rewind retry");
     assert!(matches!(
         outcome,
@@ -570,6 +570,7 @@ fn push_rewind_is_durable_before_a_failed_retry() {
             "ws",
             &NoFaults,
             1_000,
+            0,
         ),
         Err(RelayError::ServerInternal)
     );

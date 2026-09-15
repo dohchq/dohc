@@ -1,4 +1,5 @@
 import { errorMessage } from "./workspaceError";
+import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,
@@ -43,6 +44,7 @@ import {
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
+  YdocOwnerDraftPendingError,
   type EngineStoreRefusal,
   type CollectionPendingAdoptionCursor,
   type CollectionPendingAdoptionsPage,
@@ -97,6 +99,20 @@ export {
 
 function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
   return path === pathOrPrefix || path.startsWith(`${pathOrPrefix}/`);
+}
+
+function liveDocumentMutationRefusal(
+  error: unknown,
+  path: string,
+  action: "move" | "delete" | "restore",
+): Error | null {
+  if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
+    return null;
+  }
+  return new Error(
+    `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
+    { cause: error },
+  );
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -299,6 +315,8 @@ export interface WorkspaceVersionConflictResolveOutcome {
 // the handle releases — distinct from "error" so the surface can say
 // what blocks the disk and that no user action is needed.
 export type EngineYDocSaveState =
+  | "saved-to-host"
+  | "pending-share"
   | "settling"
   | "saved"
   | "error"
@@ -527,6 +545,7 @@ export interface WorkspaceEngineCapture {
   // write is not re-captured. Undo = call again with the returned
   // restoredMomentId.
   restoreFileToBeforeMoment(momentId: string): Promise<WorkspaceEngineRestoreResult>;
+  undoAcceptedAppResponse(input: AppResponseUndoSelection): Promise<Omit<AppResponseUndoResult,"acceptanceId">>;
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
@@ -718,6 +737,10 @@ function isLineageChangedCause(error: unknown): boolean {
  * no longer depends on where the failure was raised.
  */
 function settleFailureSaveState(error: unknown): EngineYDocSaveState {
+  if (error instanceof YdocOwnerDraftPendingError) {
+    return error.draft.pendingBytes === 0 && (error.draft.state === "active" || error.draft.state === null) && error.draft.acceptedCursor > 0
+      ? "saved-to-host" : "pending-share";
+  }
   if (isFileLockedRefusal(error)) return "file-locked";
   if (isEngineStoreBusyRefusal(error)) return "settling";
   return "error";
@@ -2161,6 +2184,23 @@ export function createWorkspaceEngineCapture(
     const openedLineage = current.lineage;
 
     const restartSafeSession: RestartSafeYDocSession = {
+      get nativeOwner() {
+        const captured = current;
+        if (!captured?.nativeOwner || closed) return undefined;
+        const owner = captured.nativeOwner;
+        const assertCurrent = () => {
+          if (current !== captured || closed) throw closedError();
+        };
+        return {
+          sessionId: owner.sessionId,
+          onDurableLocalChange: (handler: () => void) => {
+            assertCurrent();
+            return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
+          },
+          flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
+          applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
+        };
+      },
       get doc() {
         if (canonicalDoc === null) throw closedError();
         return canonicalDoc;
@@ -3374,7 +3414,9 @@ export function createWorkspaceEngineCapture(
           if (typeof error === "object" && error !== null) {
             settleFailureTokens.set(error, token);
           }
-          onError(`ydoc settle of ${input.path}`, error);
+          if (!(error instanceof YdocOwnerDraftPendingError)) {
+            onError(`ydoc settle of ${input.path}`, error);
+          }
           reportSaveState(settleFailureSaveState(error), token);
         };
         let entry: LiveYDocSession | null = null;
@@ -4322,6 +4364,7 @@ export function createWorkspaceEngineCapture(
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
         return {
+          get nativeOwner() { return session.nativeOwner; },
           get doc() {
             return session.doc;
           },
@@ -4389,6 +4432,18 @@ export function createWorkspaceEngineCapture(
       const match = (p: string) =>
         pathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        // Refuse before teardown, then recheck under the removal reservation
+        // because an owner handoff can finish while its session closes.
+        const ensureDeleteAllowed = async (): Promise<void> => {
+          try {
+            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix });
+          } catch (error) {
+            throw liveDocumentMutationRefusal(error, pathOrPrefix, "delete") ?? error;
+          }
+        };
+        await ensureDeleteAllowed();
         await settleAndCloseLiveYDocSessions(
           match,
           "Saved latest edits before removing the file",
@@ -4396,8 +4451,6 @@ export function createWorkspaceEngineCapture(
         const suspended = suspendDetachedDebts(match);
         // Held from here until the finisher reports the outcome, so a debt
         // registered inside the window cannot settle the path mid-delete.
-        // Nothing after this line can throw, so the finisher is the
-        // only closer this seam needs.
         const closeRemovalWindow = openRemovalWindow({
           match,
           operation: "delete",
@@ -4407,7 +4460,7 @@ export function createWorkspaceEngineCapture(
         // to the chain, so no task can observe a half-decided outcome — but
         // the rule is the same one the move seam needs, and stating it once is
         // cheaper than re-deriving it per seam.
-        return (removed: boolean) => {
+        const finish = (removed: boolean) => {
           if (removed) {
             // Rescan — the snapshot is not the whole set. The disk delete
             // runs off the capture chain, so an open of this path can land on
@@ -4423,6 +4476,13 @@ export function createWorkspaceEngineCapture(
           }
           closeRemovalWindow();
         };
+        try {
+          await ensureDeleteAllowed();
+        } catch (error) {
+          finish(false);
+          throw error;
+        }
+        return finish;
       });
     },
 
@@ -5059,102 +5119,163 @@ export function createWorkspaceEngineCapture(
           throw new Error("A rename can't be restored directly.");
         }
         const path = moment.path;
-        const correlationId = `restore-${createId()}`;
-        // Capture the file's latest disk state first so a restore can never
-        // destroy an edit the engine has not recorded yet — the pre-restore
-        // content stays one moment back in history.
-        const disk = await readDiskTextState(rootPath, path);
-        if (disk.kind === "unreadable") {
-          throw new Error(`Could not read the current ${path} on disk.`);
-        }
-        if (disk.kind === "untracked-content") {
-          throw new Error(
-            `Only engine-owned files can be restored — ${path} is no longer capturable.`,
-          );
-        }
-        const saveMetadata: ActorNeutralWriteMetadata = {
-          origin: "local-file",
-          summary: "Saved latest edits",
-          correlationId,
-        };
-        if (disk.kind === "text" || disk.kind === "binary") {
-          await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
-        } else {
-          // Confirmed absent: reconcile the deletion so engine and disk agree
-          // before the restore moment is recorded.
-          await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
-        }
-        const target = moment.payload.before;
-        const metadata: ActorNeutralWriteMetadata = {
-          origin: "restore",
-          summary: `Restored ${path}`,
-          correlationId,
-        };
-        const current = await engine.readTextFile({
-          workspaceId,
-          versionId: activeVersionId,
-          path,
-        });
-        if (target) {
-          if (
-            current &&
-            (target.contentKind === "binary"
-              ? current.contentKind === "binary" && current.sha256 === target.sha256
-              : current.contentKind !== "binary" && current.text === target.text)
-          ) {
-            // Already in the pre-moment state. Returning the same moment id
-            // keeps undo a no-op (undoing an idempotent restore restores the
-            // identical state again).
-            return { restored: "text" as const, restoredMomentId: momentId, path };
+        try {
+          const correlationId = `restore-${createId()}`;
+          // Capture the file's latest disk state first so a restore can never
+          // destroy an edit the engine has not recorded yet — the pre-restore
+          // content stays one moment back in history.
+          const disk = await readDiskTextState(rootPath, path);
+          if (disk.kind === "unreadable") {
+            throw new Error(`Could not read the current ${path} on disk.`);
           }
-          const result =
-            target.contentKind === "binary"
-              ? await (async () => {
-                  const bytes = await engine.readBinaryBlob({
-                    workspaceId,
-                    sha256: target.sha256 ?? "",
-                  });
-                  if (!bytes) {
-                    throw new Error(`Binary content for ${path} is no longer available.`);
-                  }
-                  return engine.writeBinaryFile({
+          if (disk.kind === "untracked-content") {
+            throw new Error(
+              `Only engine-owned files can be restored — ${path} is no longer capturable.`,
+            );
+          }
+          const saveMetadata: ActorNeutralWriteMetadata = {
+            origin: "local-file",
+            summary: "Saved latest edits",
+            correlationId,
+          };
+          if (disk.kind === "text" || disk.kind === "binary") {
+            await writeIfChanged(engine, activeVersionId, path, disk, saveMetadata);
+          } else {
+            // Confirmed absent: reconcile the deletion so engine and disk agree
+            // before the restore moment is recorded.
+            await deleteIfTracked(engine, activeVersionId, path, saveMetadata);
+          }
+          const target = moment.payload.before;
+          const metadata: ActorNeutralWriteMetadata = {
+            origin: "restore",
+            summary: `Restored ${path}`,
+            correlationId,
+          };
+          const current = await engine.readTextFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path,
+          });
+          if (target) {
+            if (
+              current &&
+              (target.contentKind === "binary"
+                ? current.contentKind === "binary" && current.sha256 === target.sha256
+                : current.contentKind !== "binary" && current.text === target.text)
+            ) {
+              // Already in the pre-moment state. Returning the same moment id
+              // keeps undo a no-op (undoing an idempotent restore restores the
+              // identical state again).
+              return { restored: "text" as const, restoredMomentId: momentId, path };
+            }
+            const result =
+              target.contentKind === "binary"
+                ? await (async () => {
+                    const bytes = await engine.readBinaryBlob({
+                      workspaceId,
+                      sha256: target.sha256 ?? "",
+                    });
+                    if (!bytes) {
+                      throw new Error(`Binary content for ${path} is no longer available.`);
+                    }
+                    return engine.writeBinaryFile({
+                      workspaceId,
+                      versionId: activeVersionId,
+                      path,
+                      bytes,
+                      metadata,
+                    });
+                  })()
+                : await engine.writeTextFile({
                     workspaceId,
                     versionId: activeVersionId,
                     path,
-                    bytes,
+                    text: target.text,
+                    restoreBeforeMomentId: momentId,
                     metadata,
                   });
-                })()
-              : await engine.writeTextFile({
-                  workspaceId,
-                  versionId: activeVersionId,
-                  path,
-                  text: target.text,
-                  metadata,
-                });
-          await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
+            await materialize([await materializeWriteForSnapshot(engine, result.snapshot)], policy);
+            return {
+              restored: "text" as const,
+              restoredMomentId: result.moment.id,
+              path,
+            };
+          }
+          // The moment created the file: restoring to before it removes it.
+          if (!current) {
+            return { restored: "deleted" as const, restoredMomentId: momentId, path };
+          }
+          const result = await engine.deleteTextFile({
+            workspaceId,
+            versionId: activeVersionId,
+            path,
+            metadata,
+          });
+          await materialize([{ kind: "delete", path }], policy);
           return {
-            restored: "text" as const,
+            restored: "deleted" as const,
             restoredMomentId: result.moment.id,
             path,
           };
+        } catch (error) {
+          throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }
-        // The moment created the file: restoring to before it removes it.
-        if (!current) {
-          return { restored: "deleted" as const, restoredMomentId: momentId, path };
+      });
+    },
+
+    undoAcceptedAppResponse(input) {
+      return enqueueResult("remove app response", async () => {
+        const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
+        if(versionId!==input.versionId)return {status:"conflict" as const};
+        await engine.flushCapture?.();
+        const creation=await engine.getMoment({workspaceId,momentId:input.momentId});
+        if(!creation || creation.workspaceId!==workspaceId || creation.objectId!==input.objectId || creation.versionId!==versionId ||
+            creation.operation!=="write" || creation.syncRecordOnly || creation.payload.before!==null ||
+            creation.path!==input.path || creation.path!==`${input.collectionPath}/${input.acceptanceId}.md` ||
+            creation.author?.kind!=="public" || creation.author.principalId!==input.publicPrincipalId || creation.author.grantId!==input.grantId) return {status:"conflict" as const};
+        let page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100});
+        const lastKnownPath=page.moments[0]?.path??input.path;
+        let previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
+        while(!previous && page.nextBeforeMomentOrder!==null) {
+          page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100,beforeMomentOrder:page.nextBeforeMomentOrder});
+          previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
         }
-        const result = await engine.deleteTextFile({
-          workspaceId,
-          versionId: activeVersionId,
-          path,
-          metadata,
-        });
-        await materialize([{ kind: "delete", path }], policy);
-        return {
-          restored: "deleted" as const,
-          restoredMomentId: result.moment.id,
-          path,
-        };
+        const files=await listTextFileMetadata(engine,versionId);
+        const current=files.find(file=>file.objectId===input.objectId);
+        // A completed retry must never remove an object the owner restored later.
+        if(previous && current)return {status:"deleted" as const,momentId:previous.id};
+        if(previous && !current) {
+          if(files.some(file=>file.path===previous.path))return {status:"deleted" as const,momentId:previous.id};
+          const deleted=await engine.getMoment({workspaceId,momentId:previous.id});
+          const disk=await readDiskTextState(rootPath,previous.path);
+          if(disk.kind==="text") {
+            if(!deleted?.payload.before || deleted.payload.before.text!==disk.text)return {status:"conflict" as const};
+            await materialize([{kind:"delete",path:previous.path}],await readPolicyForTask());
+          } else if(disk.kind!=="absent")return {status:"conflict" as const};
+          return {status:"deleted" as const,momentId:previous.id};
+        }
+        if(!current) {
+          for(const path of new Set([input.path,lastKnownPath])) {
+            if(!files.some(file=>file.path===path) && (await readDiskTextState(rootPath,path)).kind!=="absent")return {status:"conflict" as const};
+          }
+          return {status:"already-absent" as const};
+        }
+        if(!current.path.startsWith(input.collectionPath+"/") || current.path.slice(input.collectionPath.length+1).includes("/")) return {status:"conflict" as const};
+        const policy=await readPolicyForTask(),path=current.path;
+        const disk=await readDiskTextState(rootPath,path);
+        if(disk.kind!=="text")return {status:"conflict" as const};
+        const snapshot=await engine.readTextFile({workspaceId,versionId,path});
+        if(!snapshot || snapshot.objectId!==input.objectId || snapshot.text!==disk.text)return {status:"conflict" as const};
+        try {
+          const result=await engine.deleteTextFile({workspaceId,versionId,path,expectedObjectId:input.objectId,requestId:input.requestId,
+            metadata:{origin:"api",summary:"Removed app response",correlationId:input.requestId}});
+          await materialize([{kind:"delete",path}],policy);
+          return {status:"deleted" as const,momentId:result.moment.id};
+        } catch(error) {
+          const reason=error && typeof error==="object" ? ("code" in error?error.code:"message" in error?error.message:undefined):undefined;
+          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active")return {status:"conflict" as const};
+          throw error;
+        }
       });
     },
 
@@ -5529,6 +5650,16 @@ export function createWorkspaceEngineCapture(
       // payment is the one payment this move needs to land.
       let closeRemovalWindow: () => void = () => undefined;
       return enqueueResult("prepare rename", async () => {
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const ensureMoveAllowed = async (): Promise<void> => {
+          try {
+            await engine.checkMove({ workspaceId, versionId, path: fromPath });
+          } catch (error) {
+            throw liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
+          }
+        };
+        await ensureMoveAllowed();
         // PREFIX, not just exact endpoint: this method also serves directory
         // moves, so a live session or a detached debt for `dir/note.md`
         // rides a move of `dir`. Left unvacated/undrained, either can
@@ -5652,6 +5783,9 @@ export function createWorkspaceEngineCapture(
           operation: "move",
           inProgress: `dohc is still moving ${fromPath}.`,
         });
+        // A handoff can finish while its session is closing. Recheck before
+        // handing a disk move to the caller, including the folder fallback.
+        await ensureMoveAllowed();
         const policy = await readPolicyForTask();
         // THE OUTCOME, then the window — the one rule every finisher here
         // follows. It serves both moves that leave nothing to undo: the ones
@@ -5677,8 +5811,6 @@ export function createWorkspaceEngineCapture(
         if (!toCheck.ok || toCheck.normalized !== toPath) {
           return finishWithoutRollback;
         }
-        const engine = await engineStore();
-        const versionId = await activeVersionIdOf(engine);
         const disk = await readDiskTextState(rootPath, fromPath);
         if (disk.kind !== "text") return finishWithoutRollback;
         try {
@@ -5699,9 +5831,9 @@ export function createWorkspaceEngineCapture(
             },
           });
         } catch (error) {
-          // Best-effort coordination: an engine refusal (for example the
-          // destination already tracked) must never block the disk rename —
-          // the watcher's plain capture takes over.
+          const refusal = liveDocumentMutationRefusal(error, fromPath, "move");
+          if (refusal) throw refusal;
+          // Other engine refusals can fall back to the watcher's capture.
           onError(`prepare rename of ${fromPath}`, error);
           return finishWithoutRollback;
         }

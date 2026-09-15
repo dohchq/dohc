@@ -1,5 +1,5 @@
 import { jsonResponse, type TokenBucketLimiter } from "@dohc/service-http";
-import type { LinkExchangeResult } from "@dohc/security-contract";
+import type { LinkExchangeResult, PublicEditRelease } from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
@@ -26,7 +26,7 @@ import {
   authorizeLinkShareAction,
   type AuthorizedShareAction,
 } from "./shareAuthorization";
-import type { ShareSelector } from "./shareFilter";
+import {isLiveEditShareSelector, type ShareSelector} from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 
 export function createLinkCredentialRoutes(
@@ -61,6 +61,7 @@ export function createLinkCredentialRoutes(
   linkRedeemRateLimiter: TokenBucketLimiter,
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
+  publicEditRelease?: PublicEditRelease,
 ) {
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
     if (!linkKey) throw invalidLinkCapability();
@@ -138,7 +139,7 @@ export function createLinkCredentialRoutes(
       if (
         !authorized.ok ||
         authorized.grant.generation !== found.credential.generation ||
-        !isPublicLinkAccess(authorized.grant.access)
+        (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
       ) {
         return refused();
       }
@@ -221,7 +222,7 @@ export function createLinkCredentialRoutes(
     if (
       !authorized.ok ||
       authorized.grant.generation !== current.session.generation ||
-      !isPublicLinkAccess(authorized.grant.access)
+      (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
     ) {
       throw invalidLinkCapability();
     }
@@ -302,7 +303,8 @@ export function createLinkCredentialRoutes(
               fresh.grantId === capability.grantId &&
               fresh.generation === capability.generation &&
               fresh.access === capability.access &&
-              isPublicLinkAccess(fresh.access)
+              isPublicLinkAccess(fresh.access, publicEditRelease) &&
+              (fresh.access !== "edit" || isLiveEditShareSelector(fresh.effectiveSelector))
             );
           } catch {
             return false;
@@ -364,14 +366,16 @@ export function createLinkCredentialRoutes(
           return (
             authorized.ok &&
             authorized.grant.grantId === storedCode.grantId &&
-            isPublicLinkAccess(authorized.grant.access)
+            authorized.grant.generation === storedCode.generation &&
+            isPublicLinkAccess(authorized.grant.access, publicEditRelease) &&
+            (authorized.grant.access !== "edit" || isLiveEditShareSelector(authorized.effectiveSelector))
           );
         } catch {
           return false;
         }
       },
     });
-    if (!result.ok) return refused();
+    if (!result.ok || !isPublicLinkAccess(result.grant.access, publicEditRelease)) return refused();
     return jsonResponse({
       ok: true,
       shareId: result.shareId,

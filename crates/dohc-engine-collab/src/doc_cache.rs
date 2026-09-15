@@ -253,6 +253,7 @@ enum GateScratchAdvance {
 #[derive(Default)]
 pub struct WriterDocCache {
     entries: HashMap<DocKey, CacheEntry>,
+    owner_drafts: HashMap<DocKey, crate::owner_outbox::draft::CachedOwnerDraft>,
     /// Keys of currently open live sessions: evicted last. Order-only state —
     /// a leaked pin (a session that never closes cleanly) affects eviction
     /// preference, never correctness.
@@ -268,6 +269,25 @@ pub struct WriterDocCache {
 }
 
 impl WriterDocCache {
+    pub(crate) fn take_owner_draft(
+        &mut self,
+        key: &DocKey,
+    ) -> Option<crate::owner_outbox::draft::CachedOwnerDraft> {
+        self.owner_drafts.remove(key)
+    }
+
+    pub(crate) fn put_owner_draft(
+        &mut self,
+        key: DocKey,
+        mut draft: crate::owner_outbox::draft::CachedOwnerDraft,
+    ) {
+        self.entries.remove(&key);
+        self.tick.set(self.tick.get() + 1);
+        draft.last_used = self.tick.get();
+        self.owner_drafts.insert(key, draft);
+        self.evict_to_budget();
+    }
+
     pub fn new() -> Self {
         WriterDocCache::default()
     }
@@ -796,6 +816,9 @@ impl WriterDocCache {
         if self.entries.remove(key).is_some() {
             self.removes += 1;
         }
+        if self.owner_drafts.remove(key).is_some() {
+            self.removes += 1;
+        }
     }
 
     fn evict_gate_scratch(&mut self, key: &DocKey) {
@@ -809,8 +832,9 @@ impl WriterDocCache {
 
     /// Drop every entry. Always safe.
     pub fn clear(&mut self) {
-        self.removes += self.entries.len() as u64;
+        self.removes += (self.entries.len() + self.owner_drafts.len()) as u64;
         self.entries.clear();
+        self.owner_drafts.clear();
     }
 
     /// Mark `key` as an open live session: its entry is evicted last.
@@ -819,7 +843,9 @@ impl WriterDocCache {
         // torn down without a close) cannot grow it unboundedly.
         if self.pinned.len() >= 256 {
             let entries = &self.entries;
-            self.pinned.retain(|pinned| entries.contains_key(pinned));
+            let drafts = &self.owner_drafts;
+            self.pinned
+                .retain(|pinned| entries.contains_key(pinned) || drafts.contains_key(pinned));
         }
         self.pinned.insert(key.clone());
     }
@@ -968,23 +994,38 @@ impl WriterDocCache {
     }
 
     fn total_bytes(&self) -> usize {
-        self.entries.values().map(|entry| entry.approx_bytes).sum()
+        self.entries
+            .values()
+            .map(|entry| entry.approx_bytes)
+            .chain(self.owner_drafts.values().map(|entry| entry.approx_bytes))
+            .sum()
     }
 
     /// LRU eviction under the entry cap and byte budget; pinned (live-session)
     /// entries evict last, but the caps hold absolutely.
     fn evict_to_budget(&mut self) {
-        while self.entries.len() > self.max_entries() || self.total_bytes() > self.max_total_bytes()
+        while self.entries.len() + self.owner_drafts.len() > self.max_entries()
+            || self.total_bytes() > self.max_total_bytes()
         {
             let victim = self
                 .entries
                 .iter()
-                .min_by_key(|(key, entry)| (self.pinned.contains(*key), entry.last_used.get()))
-                .map(|(key, _)| key.clone());
-            let Some(victim) = victim else {
+                .map(|(key, entry)| (key, entry.last_used.get(), false))
+                .chain(
+                    self.owner_drafts
+                        .iter()
+                        .map(|(key, entry)| (key, entry.last_used, true)),
+                )
+                .min_by_key(|(key, tick, _)| (self.pinned.contains(*key), *tick))
+                .map(|(key, _, owner)| (key.clone(), owner));
+            let Some((victim, owner)) = victim else {
                 return;
             };
-            self.entries.remove(&victim);
+            if owner {
+                self.owner_drafts.remove(&victim);
+            } else {
+                self.entries.remove(&victim);
+            }
             self.removes += 1;
         }
     }

@@ -169,13 +169,18 @@ const OPTIONAL_SECRET_METADATA = ["summary", "correlationId"] as const;
 // handle; keeping the inventory exhaustive makes a new method fail typecheck
 // until its wire shape is stated here too.
 const VERSIONED_PARAM_SHAPES = {
+  [VERSIONED_METHOD.textCaptureSources]: {
+    requiredStrings: ["versionId"],
+    optionalJson: ["paths", "bounds"],
+  },
   [VERSIONED_METHOD.textWrite]: {
     requiredStrings: ["versionId", "path", "text"],
-    optionalStrings: WRITE_OPTIONAL_STRINGS,
+    optionalStrings: [...WRITE_OPTIONAL_STRINGS, "restoreBeforeMomentId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
+  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"] },
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },
@@ -187,7 +192,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: MUTATION_OPTIONAL_STRINGS,
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS,"expectedObjectId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
   },
@@ -1152,6 +1157,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textWrite(state, workspace, params, parsedTextWrite!);
       case VERSIONED_METHOD.textRead:
         return this.textRead(state, workspace, params);
+      case VERSIONED_METHOD.textCheckMove:
+        return { allowed: true };
       case VERSIONED_METHOD.textReadBlob:
         return this.textReadBlob(state, params);
       case VERSIONED_METHOD.binaryWrite:
@@ -1249,7 +1256,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
       this.version(state, versionId);
     }
     const requestId = parsed.requestId;
-    const objectId = parsed.objectId ??
+    const restoreBeforeMomentId = serdeOptionalParamString(params, "restoreBeforeMomentId");
+    const historySource = restoreBeforeMomentId === undefined ? undefined : state.moments.get(restoreBeforeMomentId);
+    if (restoreBeforeMomentId !== undefined && (!historySource || origin !== "restore" ||
+        historySource.wire.versionId !== versionId || historySource.wire.path !== path ||
+        historySource.wire.operation === "rename" || historySource.wire.syncRecordOnly ||
+        historySource.before?.contentKind !== "text" || historySource.before.text !== text)) {
+      throw new Error("invalid-input");
+    }
+    const objectId = historySource?.wire.objectId ?? parsed.objectId ??
       (requestId !== undefined
         ? this.generatedWriteId("object", requestId, parsed.path)
         : knownVersion?.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
@@ -1315,6 +1330,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     if (momentId === undefined) this.assertFreshMoment(state, resolvedMomentId);
     const before = version.files.get(path);
+    if (historySource && ((before && before.objectId !== objectId) ||
+        [...version.files.entries()].some(([boundPath, file]) => boundPath !== path && file.objectId === objectId))) {
+      throw new Error("invalid-input");
+    }
     // The daemon binds the input object id to new paths only — an existing
     // head keeps its identity (store.rs existing_object.unwrap_or).
     const effectiveObjectId = before?.objectId ?? objectId;
@@ -1712,6 +1731,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, path);
+    if(params.expectedObjectId!==undefined && params.expectedObjectId!==null && before.objectId!==params.expectedObjectId)throw new Error("object-identity-mismatch");
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -2768,6 +2788,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataSummary: params.summary ?? null,
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
+      restoreBeforeMomentId: params.restoreBeforeMomentId ?? null,
     });
   }
 
@@ -2828,6 +2849,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataSummary: params.summary ?? null,
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
+      ...(params.expectedObjectId!=null?{expectedObjectId:params.expectedObjectId}:{}),
     });
   }
 

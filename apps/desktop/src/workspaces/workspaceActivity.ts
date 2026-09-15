@@ -174,6 +174,7 @@ export function createWorkspaceActivity(
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
+      ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       syncFailing: snap?.syncFailing ?? false,
       liveSessionsGeneration,
     };

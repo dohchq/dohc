@@ -1,4 +1,6 @@
 import { jsonResponse } from "@dohc/service-http";
+import type {PublicEditRelease} from "@dohc/security-contract";
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
@@ -26,13 +28,13 @@ function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
   return `${shareWebOrigin}/s/#${secret}`;
 }
 
-function validatePublicLinkAccess(value: unknown): "view" | "comment" {
+function validatePublicLinkAccess(value: unknown, release?: PublicEditRelease): "view" | "comment" | "edit" {
   const validation = validateFileShareAccess(value);
   if (!validation.ok) {
     throw relayError(validation.code, validation.message);
   }
-  if (!isPublicLinkAccess(validation.access)) {
-    throw relayError("invalid_access", 'access must be "view" or "comment"');
+  if (!isPublicLinkAccess(validation.access, release)) {
+    throw relayError("invalid_access", release ? 'access must be "view", "comment", or "edit"' : 'access must be "view" or "comment"');
   }
   return validation.access;
 }
@@ -70,7 +72,15 @@ export function createShareGrantRoutes(
   linkGrantBody: ReturnType<typeof createShareSummaries>["linkGrantBody"],
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
+  namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
+  publicEditRelease?: PublicEditRelease,
 ) {
+  const requireEditableSelector = (access: string, selectorJson: string) => {
+    const selector = parseStoredAnyShareSelectorJson(selectorJson);
+    if (access === "edit" && (!selector || "kind" in selector || selector.versionId !== null)) {
+      throw relayError("invalid_access", "Edit links require files on the main version.");
+    }
+  };
   // The share and an active grant of `kind` on it, when the actor owns both
   // the share and its workspace right now. Anything else is a generic 404.
   function requireOwnedGrant(
@@ -130,6 +140,8 @@ export function createShareGrantRoutes(
         actor,
       );
       requireShareWorkspace(share, workspaceId);
+      validatePublicLinkAccess(grant.access, publicEditRelease);
+      requireEditableSelector(grant.access, share.selectorJson);
       const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
         "workspaceId",
         "expectedDependentGrantIds",
@@ -148,6 +160,8 @@ export function createShareGrantRoutes(
             actor,
           );
           requireShareWorkspace(current.share, workspaceId);
+          validatePublicLinkAccess(current.grant.access, publicEditRelease);
+          requireEditableSelector(current.grant.access, current.share.selectorJson);
         },
         mintCredential: () => {
           secret = newLinkBearer();
@@ -185,14 +199,15 @@ export function createShareGrantRoutes(
         actor,
       );
       requireShareWorkspace(share, workspaceId);
-      if (!isPublicLinkAccess(grant.access)) throw notFound();
+      if (!["view", "comment", "edit"].includes(grant.access)) throw notFound();
       const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
         "workspaceId",
         "access",
         "expectedDependentGrantIds",
       ]);
-      const access = validatePublicLinkAccess(input.access);
-      const widening = grant.access === "view" && access === "comment";
+      const access = validatePublicLinkAccess(input.access, publicEditRelease);
+      requireEditableSelector(access, share.selectorJson);
+      const widening = shareAccessRank(access) > shareAccessRank(grant.access);
       if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
       let secret: string | null = null;
       const result = storage.retuneShareGrant({
@@ -384,7 +399,7 @@ export function createShareGrantRoutes(
       ) {
         throw badRequest("A link accepts only access, paths, and versionId.");
       }
-      const access = validatePublicLinkAccess(input.access);
+      const access = validatePublicLinkAccess(input.access, publicEditRelease);
       const validation = validateShareSelector({
         paths: input.paths,
         versionId: input.versionId,
@@ -393,6 +408,7 @@ export function createShareGrantRoutes(
         throw relayError(validation.code, validation.message);
       }
       const selector = validation.selector;
+      requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();
       const grantId = newGrantId();
       const createdAtMs = nowMs();
@@ -448,7 +464,7 @@ export function createShareGrantRoutes(
       if (Object.keys(input).some((key) => key !== "access")) {
         throw badRequest("A link accepts only access.");
       }
-      const access = validatePublicLinkAccess(input.access);
+      const access = validatePublicLinkAccess(input.access, publicEditRelease);
       const share = storage.getShare(route.shareId);
       const selector = share
         ? parseStoredAnyShareSelectorJson(share.selectorJson)
@@ -463,6 +479,7 @@ export function createShareGrantRoutes(
       ) {
         throw notFound();
       }
+      requireEditableSelector(access, share.selectorJson);
       const secret = newLinkBearer();
       const grantId = newGrantId();
       const createdAtMs = nowMs();
@@ -593,6 +610,7 @@ export function createShareGrantRoutes(
           selector,
           access,
           grantId,
+          ...namedBrowserInvitation(grantId, selector, access),
           generation: 1,
           createdAtMs,
         });
@@ -647,6 +665,7 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
+        ...namedBrowserInvitation(grantId, selector, access),
         generation: 1,
         createdAtMs,
       });

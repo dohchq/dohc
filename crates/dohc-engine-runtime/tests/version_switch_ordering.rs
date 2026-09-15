@@ -92,6 +92,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
             3,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record ydoc update");

@@ -17,6 +17,14 @@ function request(rawHeaders = headers, url = target, method = "GET") {
 }
 
 describe("live gateway raw request validation", () => {
+  it("isolates the configured public link route and snapshots its path", () => {
+    const config: Parameters<typeof createLiveGatewayRequestParser>[0] = {publicHosts: new Set(["share.example.test"]), publicOrigin: origin, path: "/api/live/link"};
+    const link = createLiveGatewayRequestParser(config); config.path = "/api/live";
+    expect(link(request(headers, `/api/live/link?session=${session}`))).toEqual({session, ticketToken: token});
+    expect(link(request())).toBeNull();
+    expect(parse(request(headers, `/api/live/link?session=${session}`))).toBeNull();
+    expect(link(request(headers, `/api/live/link?session=${session}&ticket=${token}`))).toBeNull();
+  });
   it("returns only the session discriminator and unchanged ticket credential", () => {
     expect(parse(request())).toEqual({ session, ticketToken: token });
     expect(parse(request(["hOsT", "SHARE.EXAMPLE.TEST", ...headers.slice(2)]))).toEqual({ session, ticketToken: token });

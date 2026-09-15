@@ -14,6 +14,8 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/live-session-contract",
   "@dohc/sdk",
   "@dohc/security-contract",
+  "@dohc/service-http",
+  "@dohc/sync-relay",
   "@dohc/workspace-core",
   "@dohc/workspace-contracts",
   "@dohc/workspace-engine-client",
@@ -24,6 +26,7 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/cli",
   "@dohc/live-session-contract",
   "@dohc/workspace-contracts",
   "@dohc/workspace-core",

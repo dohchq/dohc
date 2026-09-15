@@ -229,6 +229,7 @@ fn apply_remote_update_in_transaction(
     ),
     CollabError,
 > {
+    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -295,6 +296,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES

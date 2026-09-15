@@ -38,8 +38,28 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "live_audit_base_publications",
+    "live_audit_bases",
+    "live_audit_base_conflicts",
+    "live_audit_record_manifests",
+    "live_audit_pending_exports",
+    "live_audit_settlements",
+    "live_audit_settlement_publications",
+    "live_audit_settlement_conflicts",
+    "live_audit_record_chunks",
+    "live_audit_events",
+    "live_audit_event_publications",
+    "live_audit_event_conflicts",
+    "live_accepted_updates",
+    "live_accepted_checkpoints",
+    "live_restore_fences",
+    "ydoc_owner_applied_frames",
+    "ydoc_owner_bindings",
+    "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "ydoc_owner_base_sources",
+    "ydoc_owner_activation_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -124,6 +144,8 @@ const REQUIRED_TABLES: &[&str] = &[
     // R10 replication, relay, and share cursors.
     "sync_identity",
     "replication_log",
+    "replication_refused_moment_blobs",
+    "replication_refused_ydoc_blobs",
     "replication_pending_refusals",
     "replication_peers",
     "sync_relay_cursors",
@@ -387,6 +409,13 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
+            "live_accepted_updates",
+            "live_accepted_checkpoints",
+            "live_restore_fences",
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_application_bindings",
             "live_device_update_applications",
@@ -415,7 +444,12 @@ mod tests {
 
     #[test]
     fn current_schema_rejects_missing_owner_outbox_tables() {
-        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+        for table in [
+            "owner_ydoc_outboxes",
+            "owner_ydoc_outbox_entries",
+            "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
+        ] {
             let directory =
                 dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
             let path = directory.path().join("store.sqlite");

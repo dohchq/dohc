@@ -14,6 +14,36 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod accepted;
+pub mod draft;
+pub mod enrollment;
+mod native_source;
+pub mod publication;
+pub(crate) use native_source::retain_native_source;
+pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
+
+pub fn has_adopted_owner_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+) -> Result<bool, crate::CollabError> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
+        .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+}
+
+/// Bound owners settle through the admitted host cut, including after their
+/// pending queue drains. Ordinary settlement carries no accepted audit cut.
+pub fn require_ordinary_settlement(
+    conn: &Connection,
+    key: &crate::DocKey,
+) -> Result<(), crate::CollabError> {
+    draft::require_ordinary_write(conn, key)?;
+    if has_adopted_owner_in(conn, key)? {
+        return Err(crate::CollabError::OwnerOutboxFrozen);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
     #[error("owner Y.Doc outbox input is invalid: {0}")]
@@ -38,14 +68,15 @@ pub enum OwnerOutboxError {
     Storage(#[from] StorageError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerOutboxLimits {
     pub max_pending_bytes: i64,
     pub max_pending_age_ms: i64,
 }
 
 impl OwnerOutboxLimits {
-    fn validate(&self) -> Result<(), OwnerOutboxError> {
+    pub fn validate(&self) -> Result<(), OwnerOutboxError> {
         if self.max_pending_bytes <= 0 || self.max_pending_age_ms <= 0 {
             return Err(OwnerOutboxError::InvalidInput(
                 "outbox limits must be finite positive wire integers",
@@ -160,7 +191,8 @@ pub enum OwnerOutboxPageResult {
     ReadChanged,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerDeliveryReceipt {
     pub delivery_id: String,
     pub update_digest: String,
@@ -201,17 +233,81 @@ pub fn append(
     workspace_id: &str,
     input: OwnerOutboxAppendInput,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| append_in_tx(tx, workspace_id, input))?;
+    committed(outcome)
+}
+
+pub fn append_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: OwnerOutboxAppendInput,
+) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+    require_workspace(workspace_id, &input.binding.workspace_id)?;
+    let key = crate::DocKey::new(
+        &input.binding.workspace_id,
+        &input.binding.main_version_id,
+        &input.binding.object_id,
+    )
+    .map_err(|_| OwnerOutboxError::InvalidInput("invalid document identity"))?;
+    draft::require_ordinary_write(tx, &key).map_err(map_restore_error)?;
+    let current = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
+        .map_err(map_restore_error)?;
+    if current
+        .as_ref()
+        .is_some_and(|binding| binding != &input.binding)
+    {
+        return Err(OwnerOutboxError::Frozen);
+    };
+    append_with_retained_base(tx, workspace_id, input, None)
+}
+
+fn append_with_retained_base(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: OwnerOutboxAppendInput,
+    retained_base: Option<(String, i64)>,
+) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
         .normalized()
         .map_err(OwnerOutboxError::InvalidInput)?;
     require_workspace(workspace_id, &binding.workspace_id)?;
     input.limits.validate()?;
+    // The private retained-base path already read these controls in this transaction.
+    if retained_base.is_none() {
+        let adopted: Option<(String, i64, i64)> = tx.query_row(
+        "SELECT binding_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(read_sql)?;
+        if let Some((saved_binding, bytes, age)) = adopted {
+            let saved: LiveObjectBinding =
+                serde_json::from_str(&saved_binding).map_err(|_| OwnerOutboxError::Corrupt)?;
+            let key = crate::DocKey::new(
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+            )
+            .map_err(|_| OwnerOutboxError::Corrupt)?;
+            let authorized =
+                crate::live_update_application::restore_fence::resumed_binding(tx, &key)
+                    .map_err(map_restore_error)?
+                    .unwrap_or(saved);
+            if authorized != binding {
+                return Err(OwnerOutboxError::ParentMismatch);
+            }
+            if input.limits.max_pending_bytes != bytes || input.limits.max_pending_age_ms != age {
+                return Err(OwnerOutboxError::InvalidInput(
+                    "append limits differ from persisted owner adoption",
+                ));
+            }
+        }
+    }
     validate_identifier(
         &input.append_key,
         "append key must be non-empty and bounded",
     )?;
-    if input.base_update.is_empty() || input.update.is_empty() {
+    if (input.base_update.is_empty() && retained_base.is_none()) || input.update.is_empty() {
         return Err(OwnerOutboxError::InvalidInput(
             "base and update bytes must not be empty",
         ));
@@ -222,82 +318,88 @@ pub fn append(
         ));
     }
 
-    let base_update_digest = hex_sha256(&input.base_update);
+    let (base_update_digest, base_byte_length) = retained_base.clone().unwrap_or_else(|| {
+        (
+            hex_sha256(&input.base_update),
+            input.base_update.len() as i64,
+        )
+    });
     let update_digest = hex_sha256(&input.update);
     let binding_json = binding_json(&binding)?;
     let outbox_id = outbox_id(&binding, &base_update_digest, &binding_json);
 
-    let outcome = store.write_with(&NoFaults, |tx| {
-        let durable_main_version_id = tx
-            .query_row(
-                "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
-                [&binding.workspace_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(read_sql)?;
-        if durable_main_version_id.as_deref() != Some(binding.main_version_id.as_str()) {
-            return Err(OwnerOutboxError::MainVersionMismatch);
-        }
+    let durable_main_version_id = tx
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+            [&binding.workspace_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if durable_main_version_id.as_deref() != Some(binding.main_version_id.as_str()) {
+        return Err(OwnerOutboxError::MainVersionMismatch);
+    }
 
-        if let Some((
-            existing_outbox_id,
-            sequence,
-            delivery_id,
-            existing_update_digest,
-            result_pending_bytes,
-            result_oldest_entry_at_ms,
-            result_state,
-        )) = tx
-            .query_row(
-                "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
+    if let Some((
+        existing_outbox_id,
+        sequence,
+        delivery_id,
+        existing_update_digest,
+        result_pending_bytes,
+        result_oldest_entry_at_ms,
+        result_state,
+    )) = tx
+        .query_row(
+            "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
                  result_oldest_entry_at_ms,result_state \
                  FROM owner_ydoc_outbox_entries WHERE append_key=?1",
-                [&input.append_key],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(read_sql)?
+            [&input.append_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(read_sql)?
+    {
+        let parent = read_parent(tx, &existing_outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
+        if parent.binding != binding
+            || parent.base_update_digest != base_update_digest
+            || existing_update_digest != update_digest
         {
-            let parent = read_parent(tx, &existing_outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
-            if parent.binding != binding
-                || parent.base_update_digest != base_update_digest
-                || existing_update_digest != update_digest
-            {
-                return Err(OwnerOutboxError::AppendKeyMismatch);
-            }
-            return Ok(OwnerOutboxAppendResult {
-                outbox_id: parent.outbox_id,
-                sequence,
-                delivery_id,
-                update_digest: existing_update_digest,
-                pending_bytes: result_pending_bytes,
-                oldest_entry_at_ms: result_oldest_entry_at_ms,
-                state: OwnerOutboxState::parse(&result_state)?,
-            });
+            return Err(OwnerOutboxError::AppendKeyMismatch);
         }
+        return Ok(OwnerOutboxAppendResult {
+            outbox_id: parent.outbox_id,
+            sequence,
+            delivery_id,
+            update_digest: existing_update_digest,
+            pending_bytes: result_pending_bytes,
+            oldest_entry_at_ms: result_oldest_entry_at_ms,
+            state: OwnerOutboxState::parse(&result_state)?,
+        });
+    }
 
-        let parent = find_parent_for_binding(tx, &binding)?;
-        let parent = match parent {
-            Some(parent) => {
-                if parent.binding != binding || parent.base_update_digest != base_update_digest {
-                    return Err(OwnerOutboxError::ParentMismatch);
-                }
-                parent
+    let parent = find_parent_for_binding(tx, &binding)?;
+    let parent = match parent {
+        Some(parent) => {
+            if parent.binding != binding || parent.base_update_digest != base_update_digest {
+                return Err(OwnerOutboxError::ParentMismatch);
             }
-            None => {
+            parent
+        }
+        None => {
+            if retained_base.is_none() {
                 put_binary_blob_with_sha(tx, &input.base_update, &base_update_digest)?;
-                tx.execute(
+            }
+            tx.execute(
                     "INSERT INTO owner_ydoc_outboxes \
                      (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
                       current_path,selector_paths_json,restore_fence_generation,\
@@ -315,79 +417,175 @@ pub fn append(
                             .map_err(|_| OwnerOutboxError::InvalidInput("selector paths are not serializable"))?,
                         binding.restore_fence_generation,
                         base_update_digest,
-                        i64::try_from(input.base_update.len()).map_err(|_| OwnerOutboxError::InvalidInput("base update is too large"))?,
+                        base_byte_length,
                         input.created_at_ms,
                     ],
                 )
                 .map_err(write_sql)?;
-                read_parent(tx, &outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?
-            }
-        };
-
-        if parent.state != OwnerOutboxState::Active {
-            return Err(OwnerOutboxError::Frozen);
+            read_parent(tx, &outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?
         }
-        let byte_length = i64::try_from(input.update.len())
-            .map_err(|_| OwnerOutboxError::InvalidInput("update is too large"))?;
-        let pending_bytes = parent
+    };
+
+    if parent.state != OwnerOutboxState::Active {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    let byte_length = i64::try_from(input.update.len())
+        .map_err(|_| OwnerOutboxError::InvalidInput("update is too large"))?;
+    let pending_bytes =
+        parent
             .pending_bytes
             .checked_add(byte_length)
-            .ok_or(OwnerOutboxError::InvalidInput("pending byte count overflow"))?;
-        let oldest_entry_at_ms = parent.oldest_entry_at_ms.unwrap_or(input.created_at_ms);
-        let age_ms = input.created_at_ms.saturating_sub(oldest_entry_at_ms);
-        let next_state = if pending_bytes >= input.limits.max_pending_bytes
-            || age_ms >= input.limits.max_pending_age_ms
-        {
-            OwnerOutboxState::Sealed
-        } else {
-            OwnerOutboxState::Active
-        };
-        let delivery_id = delivery_id(&parent.outbox_id, parent.next_sequence, &update_digest);
-        put_binary_blob_with_sha(tx, &input.update, &update_digest)?;
-        tx.execute(
-            "INSERT INTO owner_ydoc_outbox_entries \
+            .ok_or(OwnerOutboxError::InvalidInput(
+                "pending byte count overflow",
+            ))?;
+    let oldest_entry_at_ms = parent.oldest_entry_at_ms.unwrap_or(input.created_at_ms);
+    let age_ms = input.created_at_ms.saturating_sub(oldest_entry_at_ms);
+    let next_state = if pending_bytes >= input.limits.max_pending_bytes
+        || age_ms >= input.limits.max_pending_age_ms
+    {
+        OwnerOutboxState::Sealed
+    } else {
+        OwnerOutboxState::Active
+    };
+    let delivery_id = delivery_id(&parent.outbox_id, parent.next_sequence, &update_digest);
+    put_binary_blob_with_sha(tx, &input.update, &update_digest)?;
+    tx.execute(
+        "INSERT INTO owner_ydoc_outbox_entries \
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state) \
              VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10)",
-            params![
-                parent.outbox_id,
-                parent.next_sequence,
-                input.append_key,
-                delivery_id,
-                update_digest,
-                byte_length,
-                input.created_at_ms,
-                pending_bytes,
-                oldest_entry_at_ms,
-                next_state.as_str(),
-            ],
-        )
-        .map_err(write_sql)?;
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3,\
-             next_sequence=?4,state=?5 WHERE outbox_id=?1",
-            params![
-                parent.outbox_id,
-                pending_bytes,
-                oldest_entry_at_ms,
-                parent.next_sequence + 1,
-                next_state.as_str(),
-            ],
-        )
-        .map_err(write_sql)?;
-
-        Ok(OwnerOutboxAppendResult {
-            outbox_id: parent.outbox_id,
-            sequence: parent.next_sequence,
+        params![
+            parent.outbox_id,
+            parent.next_sequence,
+            input.append_key,
             delivery_id,
             update_digest,
+            byte_length,
+            input.created_at_ms,
             pending_bytes,
             oldest_entry_at_ms,
-            state: next_state,
-        })
-    })?;
-    committed(outcome)
+            next_state.as_str(),
+        ],
+    )
+    .map_err(write_sql)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3,\
+             next_sequence=?4,state=?5 WHERE outbox_id=?1",
+        params![
+            parent.outbox_id,
+            pending_bytes,
+            oldest_entry_at_ms,
+            parent.next_sequence + 1,
+            next_state.as_str(),
+        ],
+    )
+    .map_err(write_sql)?;
+
+    Ok(OwnerOutboxAppendResult {
+        outbox_id: parent.outbox_id,
+        sequence: parent.next_sequence,
+        delivery_id,
+        update_digest,
+        pending_bytes,
+        oldest_entry_at_ms,
+        state: next_state,
+    })
+}
+
+/// Called only by the ordinary local append transaction. Remote applications
+/// use their own receipt ledger and never enter this path.
+pub fn append_adopted_local_update_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &crate::DocKey,
+    path: &str,
+    sequence: i64,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<(), crate::CollabError> {
+    use crate::CollabError;
+    let map = |error: OwnerOutboxError| match error {
+        OwnerOutboxError::Frozen => CollabError::OwnerOutboxFrozen,
+        OwnerOutboxError::Storage(error) => CollabError::Storage(error),
+        error => CollabError::Corrupt {
+            reason: format!("adopted owner outbox: {error}"),
+        },
+    };
+    let marker = crate::durable::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let Some(lineage) = marker.lineage_claim_id else {
+        if has_adopted_owner_in(tx, key)? {
+            return Err(CollabError::OwnerOutboxFrozen);
+        }
+        return Ok(());
+    };
+    let saved: Option<(String, i64, i64, String)> = tx
+        .query_row(
+            "SELECT binding_json,max_pending_bytes,max_pending_age_ms,adoption_id FROM live_owner_adoptions
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![key.workspace_id, key.version_id, key.object_id, lineage],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(read_sql)
+        .map_err(map)?;
+    let Some((binding_json, max_pending_bytes, max_pending_age_ms, adoption_id)) = saved else {
+        if has_adopted_owner_in(tx, key)? {
+            return Err(CollabError::OwnerOutboxFrozen);
+        }
+        return Ok(());
+    };
+    let original: LiveObjectBinding =
+        serde_json::from_str(&binding_json).map_err(|_| map(OwnerOutboxError::Corrupt))?;
+    let binding = crate::live_update_application::restore_fence::resumed_binding(tx, key)?
+        .unwrap_or(original);
+    if binding.workspace_id != key.workspace_id
+        || binding.main_version_id != key.version_id
+        || binding.object_id != key.object_id
+        || binding.lineage_claim_id != lineage
+        || binding.current_path != path
+        || marker.path.as_deref() != Some(path)
+    {
+        return Err(map(OwnerOutboxError::ParentMismatch));
+    }
+    // Adoption authenticated these immutable bytes. Each keystroke needs only
+    // their retained metadata; loading and hashing the full base scales with
+    // document size instead of edit size.
+    let base_byte_length: i64 = tx
+        .query_row(
+            "SELECT byte_length FROM binary_blobs WHERE sha256=?1 AND byte_length=length(bytes)",
+            [&lineage],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)
+        .map_err(map)?
+        .filter(|length| *length > 0)
+        .ok_or_else(|| map(OwnerOutboxError::Corrupt))?;
+    let source = native_source::read_native_update_source(tx, &binding, &adoption_id, sequence)
+        .map_err(map)?;
+    if source.update_digest != hex_sha256(update) {
+        return Err(map(OwnerOutboxError::Corrupt));
+    }
+    let append_key = source.append_key().map_err(map)?;
+    let result = append_with_retained_base(
+        tx,
+        &key.workspace_id,
+        OwnerOutboxAppendInput {
+            binding,
+            base_update: Vec::new(),
+            append_key,
+            update: update.to_vec(),
+            limits: OwnerOutboxLimits {
+                max_pending_bytes,
+                max_pending_age_ms,
+            },
+            created_at_ms: now_ms,
+        },
+        Some((lineage, base_byte_length)),
+    )
+    .map_err(map)?;
+    retain_native_source(tx, &result, &source).map_err(map)?;
+    Ok(())
 }
 
 pub fn read_pending(
@@ -499,6 +697,9 @@ pub fn read_pending_page(
         let tx = conn.unchecked_transaction().map_err(read_sql)?;
         let parent = read_parent(&tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        if parent.base_blob_digest != parent.base_update_digest {
+            return Err(OwnerOutboxError::Corrupt);
+        }
         let base_length: i64 = tx.query_row(
             "SELECT base_byte_length FROM owner_ydoc_outboxes WHERE outbox_id=?1",
             [outbox_id], |row| row.get(0),
@@ -551,14 +752,13 @@ pub fn read_pending_page(
                     [outbox_id], |row| row.get(0),
                 ).map_err(read_sql)?;
                 header["pendingEntryCount"] = count.into();
+                header["firstEntryCursor"] = serde_json::to_value(next_entry(0)?)
+                    .map_err(|_| OwnerOutboxError::Corrupt)?;
                 let bytes = page_json(&header)?;
                 let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                 (total, digest, bytes, following_part(Base))
             }
             Base => {
-                if parent.base_blob_digest != parent.base_update_digest {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
                 let bytes = slice_blob(&tx, &parent.base_blob_digest, base_length, cursor.offset, max_bytes)?;
                 (base_length, parent.base_update_digest, bytes, next_entry(0)?)
             }
@@ -659,7 +859,11 @@ pub fn acknowledge(
     if receipts.is_empty() {
         return Err(OwnerOutboxError::InvalidInput("receipts must not be empty"));
     }
+    let mut delivery_ids = BTreeSet::new();
     for receipt in receipts {
+        if !delivery_ids.insert(&receipt.delivery_id) {
+            return Err(OwnerOutboxError::ReceiptMismatch);
+        }
         validate_identifier(
             &receipt.delivery_id,
             "delivery id must be non-empty and bounded",
@@ -680,8 +884,11 @@ pub fn acknowledge(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        if parent.state == OwnerOutboxState::Quarantined {
-            return Err(OwnerOutboxError::Frozen);
+        if parent.state == OwnerOutboxState::Quarantined { return Err(OwnerOutboxError::Frozen); }
+        let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
+        if observed && accepted::check_release_in(tx, &parent, receipts)? {
+            return Ok(OwnerOutboxAcknowledgeResult {acknowledged: receipts.len() as i64,
+                pending_bytes: parent.pending_bytes, oldest_entry_at_ms: parent.oldest_entry_at_ms});
         }
         let mut statement = tx
             .prepare(
@@ -714,6 +921,12 @@ pub fn acknowledge(
             .iter()
             .map(|(_, _, digest, _)| digest.clone())
             .collect::<BTreeSet<_>>();
+        if observed {
+            for receipt in receipts {
+                tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
+                    params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+            }
+        }
         let acknowledged = tx
             .execute(
                 "UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL \
@@ -741,10 +954,12 @@ pub fn acknowledge(
             )
             .map_err(read_sql)?;
         tx.execute(
-            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3 WHERE outbox_id=?1",
+            "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
+             state=CASE WHEN state='sealed' AND ?2=0 THEN 'active' ELSE state END WHERE outbox_id=?1",
             params![outbox_id, pending_bytes, oldest_entry_at_ms],
         )
         .map_err(write_sql)?;
+        if observed { accepted::prune_in(tx, &parent.binding)?; }
         Ok(OwnerOutboxAcknowledgeResult {
             acknowledged: i64::try_from(receipts.len())
                 .map_err(|_| OwnerOutboxError::InvalidInput("too many receipts"))?,
@@ -808,12 +1023,13 @@ fn find_parent_for_binding(
          base_blob_digest,state,pending_bytes,oldest_entry_at_ms,next_sequence,\
          quarantine_reason,observed_binding_json \
          FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 \
-         AND object_id=?3 AND lineage_claim_id=?4",
+         AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
         params![
             binding.workspace_id,
             binding.main_version_id,
             binding.object_id,
             binding.lineage_claim_id,
+            binding.restore_fence_generation,
         ],
         parent_from_row,
     )
@@ -904,7 +1120,11 @@ fn binding_json(binding: &LiveObjectBinding) -> Result<String, OwnerOutboxError>
         .map_err(|_| OwnerOutboxError::InvalidInput("binding is not serializable"))
 }
 
-fn outbox_id(binding: &LiveObjectBinding, base_digest: &str, binding_json: &str) -> String {
+pub(crate) fn outbox_id(
+    binding: &LiveObjectBinding,
+    base_digest: &str,
+    binding_json: &str,
+) -> String {
     let identity = format!(
         "{}\0{}\0{}",
         binding.workspace_id, binding_json, base_digest
@@ -912,7 +1132,7 @@ fn outbox_id(binding: &LiveObjectBinding, base_digest: &str, binding_json: &str)
     format!("owner-outbox-{}", hex_sha256(identity.as_bytes()))
 }
 
-fn delivery_id(outbox_id: &str, sequence: i64, update_digest: &str) -> String {
+pub(crate) fn delivery_id(outbox_id: &str, sequence: i64, update_digest: &str) -> String {
     let identity = format!("{outbox_id}\0{sequence}\0{update_digest}");
     format!("owner-delivery-{}", hex_sha256(identity.as_bytes()))
 }
@@ -947,6 +1167,16 @@ fn read_sql(error: rusqlite::Error) -> OwnerOutboxError {
 
 fn write_sql(error: rusqlite::Error) -> OwnerOutboxError {
     OwnerOutboxError::Storage(StorageError::persist_public(error))
+}
+
+fn map_restore_error(error: crate::CollabError) -> OwnerOutboxError {
+    match error {
+        crate::CollabError::RestoreFenced | crate::CollabError::OwnerOutboxFrozen => {
+            OwnerOutboxError::Frozen
+        }
+        crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
+        _ => OwnerOutboxError::Corrupt,
+    }
 }
 
 #[cfg(test)]
@@ -1071,6 +1301,70 @@ mod tests {
         let header: serde_json::Value = serde_json::from_slice(&parts[0].2).expect("header");
         assert_eq!(header["pendingBytes"], expected.pending_bytes);
         assert_eq!(header["pendingEntryCount"], 2);
+    }
+
+    #[test]
+    fn header_entry_cursor_skips_base_and_tracks_acknowledged_prefixes() {
+        let (_dir, mut store) = store("owner-delivery-head");
+        let mut entry = input("first", b"a", 1);
+        entry.base_update = vec![17; 1_048_576];
+        let appended = append(&mut store, "workspace-1", entry.clone()).expect("first");
+        entry.append_key = "second".to_owned();
+        append(&mut store, "workspace-1", entry.clone()).expect("second");
+        entry.append_key = "third".to_owned();
+        append(&mut store, "workspace-1", entry).expect("third");
+        let pending = read_pending(&store, "workspace-1", &appended.outbox_id).expect("reference");
+        let mut stale_cursor = None;
+        for (index, sequence) in [(0, 1), (2, 3)] {
+            let header = page(&store, &appended.outbox_id, None, 4096);
+            assert_eq!(hex_sha256(&header.bytes), header.digest);
+            let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("header");
+            assert_eq!(raw["baseByteLength"], 1_048_576);
+            assert_eq!(
+                header.next_cursor.as_ref().expect("base").part,
+                OwnerOutboxReadPart::Base
+            );
+            let first: OwnerOutboxReadCursor =
+                serde_json::from_value(raw["firstEntryCursor"].clone()).expect("first entry");
+            assert_eq!(first.snapshot, header.cursor.snapshot);
+            assert_eq!(
+                (first.part, first.sequence, first.offset),
+                (OwnerOutboxReadPart::EntryHeader, sequence, 0)
+            );
+            if let Some(stale) = stale_cursor.take() {
+                assert!(matches!(
+                    read_pending_page(
+                        &store,
+                        "workspace-1",
+                        &appended.outbox_id,
+                        Some(stale),
+                        4096
+                    ),
+                    Ok(OwnerOutboxPageResult::ReadChanged)
+                ));
+            }
+            let entry_header = page(&store, &appended.outbox_id, Some(first.clone()), 4096);
+            let update = page(&store, &appended.outbox_id, entry_header.next_cursor, 4096);
+            assert_eq!(update.cursor.part, OwnerOutboxReadPart::Update);
+            assert_eq!(update.bytes, b"a");
+            assert_eq!(hex_sha256(&update.bytes), update.digest);
+            assert!(header.bytes.len() + entry_header.bytes.len() + update.bytes.len() < 4096);
+            stale_cursor = Some(first);
+            acknowledge(
+                &mut store,
+                "workspace-1",
+                &appended.outbox_id,
+                &pending.entries[index..(index + 2).min(pending.entries.len())]
+                    .iter()
+                    .map(receipt)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("ack head");
+        }
+        let header = page(&store, &appended.outbox_id, None, 4096);
+        let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("empty header");
+        assert_eq!(raw["pendingEntryCount"], 0);
+        assert!(raw["firstEntryCursor"].is_null());
     }
 
     #[test]
@@ -1572,7 +1866,7 @@ mod tests {
             let id = appended.outbox_id;
             let pending = read_pending(&store, "workspace-1", &id).expect("in-flight prefix");
             let in_flight_receipt = receipt(&pending.entries[0]);
-            let sealed = append(&mut store, "workspace-1", second).expect("limit append");
+            let sealed = append(&mut store, "workspace-1", second.clone()).expect("limit append");
             assert_eq!(sealed.state, OwnerOutboxState::Sealed);
 
             let acknowledged = acknowledge(&mut store, "workspace-1", &id, &[in_flight_receipt])
@@ -1592,6 +1886,37 @@ mod tests {
                 append(&mut store, "workspace-1", input("key-3", b"three", 21)),
                 Err(OwnerOutboxError::Frozen)
             ));
+            acknowledge(
+                &mut store,
+                "workspace-1",
+                &id,
+                &[receipt(&pending.entries[0])],
+            )
+            .expect("final sealed receipt");
+            drop(store);
+            let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("reopen drained");
+            let drained = read_pending(&store, "workspace-1", &id).expect("drained");
+            assert_eq!(drained.state, OwnerOutboxState::Active);
+            assert_eq!(drained.pending_bytes, 0);
+            assert_eq!(drained.oldest_entry_at_ms, None);
+            assert!(drained.entries.is_empty());
+            assert_eq!(drained.base_update, pending.base_update);
+            let replay = append(&mut store, "workspace-1", second.clone()).expect("append replay");
+            assert_eq!(replay.delivery_id, sealed.delivery_id);
+            assert!(read_pending(&store, "workspace-1", &id)
+                .expect("after replay")
+                .entries
+                .is_empty());
+            let mut third = input("key-3", b"three", 21);
+            third.limits = second.limits.clone();
+            let next = append(&mut store, "workspace-1", third).expect("append after sealed drain");
+            assert_eq!(next.outbox_id, id);
+            assert_eq!(next.sequence, 3);
+            assert_eq!(next.state, OwnerOutboxState::Active);
+            let mut fourth = input("key-4", b"x", 31);
+            fourth.limits = second.limits;
+            let resealed = append(&mut store, "workspace-1", fourth).expect("seal again");
+            assert_eq!(resealed.state, OwnerOutboxState::Sealed);
         }
     }
 

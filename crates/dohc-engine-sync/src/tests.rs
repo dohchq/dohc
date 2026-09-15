@@ -105,6 +105,96 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     Ok(())
 }
 
+#[test]
+fn live_binding_refusal_rolls_back_mutation_persists_acks_and_allows_next_envelope() {
+    let (_scratch, _path, mut engine) = open_store();
+    let text = "refused peer edit";
+    let digest = dohc_engine_storage::hex_sha256(text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![digest, text.len() as i64, text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let refused = envelope(
+        "adopted-owner-peer",
+        0,
+        "moment.append",
+        json!({
+            "momentId":"refused-peer-moment", "versionId":"main", "objectId":"peer-object",
+            "objectCreatedAtMs":1, "path":"peer.md", "recordedAtMs":2000, "operation":"write",
+            "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+            "payloadAfterBlobSha256":digest, "payloadAfterPath":"peer.md",
+            "metadata":{"origin":"sync"}, "beforePresent":"absent"
+        }),
+    );
+    let outcome = apply_envelope_with(&mut engine, &refused, &NoFaults, |tx, op| {
+        insert_probe(tx, op)?;
+        Err::<(), _>(SyncError::LiveDocumentBindingActive)
+    })
+    .expect("binding refusal must not abort the pull");
+    let ApplyDisposition::Refused(refusal) = outcome.primary else {
+        panic!("expected a persisted refusal");
+    };
+    assert_eq!(
+        refusal.reason.message(),
+        "live document binding is still active"
+    );
+    let (mutations, refusals, journaled): (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM blobs WHERE sha256='adopted-owner-peer'", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id='adopted-owner-peer' AND origin_seq=0 AND reason_message='live document binding is still active'", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='adopted-owner-peer' AND origin_seq=0", [], |row| row.get(0))?,
+            ))
+        })
+        .expect("committed refusal and rolled back mutation");
+    assert_eq!((mutations, refusals, journaled), (0, 1, 1));
+    let retained: String = engine.read_with(|conn| conn.query_row(
+        "SELECT text_sha256 FROM replication_refused_moment_blobs WHERE workspace_id='ws' AND origin_id='adopted-owner-peer' AND origin_seq=0 AND role='payload-after'",
+        [], |row|row.get(0),
+    )).expect("refused moment retains its source blob");
+    assert_eq!(retained, digest);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "adopted-owner-peer").expect("ack"),
+        0
+    );
+    assert_eq!(
+        apply_envelope_with(
+            &mut engine,
+            &refused,
+            &NoFaults,
+            |_, _| -> Result<(), SyncError> {
+                panic!("redelivery must not rerun the refused mutation")
+            }
+        )
+        .expect("redelivery")
+        .primary,
+        ApplyDisposition::Skipped,
+    );
+    let mut next = envelope(
+        "adopted-owner-peer",
+        1,
+        "moment.append",
+        refused.payload.clone(),
+    );
+    next.payload["momentId"] = json!("next-peer-moment");
+    assert_eq!(
+        apply_envelope_with(&mut engine, &next, &NoFaults, insert_probe)
+            .expect("next envelope")
+            .primary,
+        ApplyDisposition::Applied(())
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "adopted-owner-peer").expect("next ack"),
+        1
+    );
+}
+
 fn reaction_payload(state: &str, emoji: &str, at_ms: i64, author_id: &str) -> serde_json::Value {
     json!({
         "reactionId": format!("reaction-{author_id}"),
@@ -133,7 +223,7 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 }
 
 #[derive(Default)]
-struct FakeRelay {
+pub(crate) struct FakeRelay {
     pushes: Mutex<Vec<PushRequest>>,
     pull: Mutex<Option<PullResponse>>,
 }
@@ -786,6 +876,7 @@ fn version_create_with_shipped_snapshots(
 
 // Keep child modules after assert_invalid_refusal so they inherit its macro scope.
 mod chat;
+mod owner_publication;
 mod recover;
 mod relay_pull;
 mod secret;
@@ -796,3 +887,4 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_restore;

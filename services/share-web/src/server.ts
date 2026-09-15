@@ -1,3 +1,9 @@
+import { createAppLaunchHandler } from "./appLaunch";
+import { createAppDiscovery } from "./appDiscovery";
+import type { AppLaunchConfig } from "./appLaunchConfig";
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
+import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
@@ -7,6 +13,8 @@ import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
+import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
+import {createLinkLiveClient} from "./linkLiveClient";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -61,6 +69,8 @@ type RefreshAttempt =
   | { status: "unavailable" };
 
 export interface CreateShareWebApplicationOptions {
+  appLaunch?: AppLaunchConfig;
+  publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
@@ -75,6 +85,9 @@ export interface CreateShareWebApplicationOptions {
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  namedLiveTickets?: boolean;
+  namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
+  linkLive?: {publicOrigin: string; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
 }
 
 export type LinkBrowserMaterial =
@@ -84,6 +97,7 @@ export type LinkBrowserMaterial =
 export interface ShareWebApplication {
   handle(request: Request): Promise<Response>;
   resolveNamedBrowserSession(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null>;
+  linkLive?: ReturnType<typeof createLinkLiveClient>;
   resolveLinkBrowserMaterial(
     discriminator: string,
     cookie: string | null,
@@ -565,9 +579,10 @@ function profileCookie(discriminator: string, secret: string): string {
 function parsedRelaySession(
   value: unknown,
   nowMs: number,
+  release?: PublicEditRelease,
 ): { grantId: string; capabilityToken: string; expiresAtMs: number } | null {
   const relaySession = asRecord(value);
-  if (!relaySession) return null;
+  if (!relaySession || (relaySession.access === "edit" && !release)) return null;
   const grantId = relaySession.grantId;
   const capabilityToken = relaySession.capabilityToken;
   const expiresAtMs = relaySession.capabilityExpiresAtMs;
@@ -762,12 +777,28 @@ export function createShareWebApplication({
   accountAuth,
   fetchAuth,
   namedBrowserSessionLimits,
+  namedLiveTickets,
+  namedRecipientBrowserLimits,
+  linkLive: linkLiveConfig,
+  publicEditRelease: releaseInput,
+  appLaunch: appLaunchConfig,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  const publicEditRelease = parsePublicEditRelease(releaseInput);
+  if (publicEditRelease && !linkLiveConfig) throw new TypeError("Public Edit release requires configured link live limits.");
   if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
     throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
   }
   const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
+  if (namedLiveTickets && !namedBrowser) throw new TypeError("Named live tickets require named browser sessions.");
+  const namedTickets = namedLiveTickets ? createNamedLiveTicketClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!, fetchRelay,
+  }) : undefined;
+  if (namedRecipientBrowserLimits && !namedTickets) throw new TypeError("Named recipient editing requires named live tickets.");
+  const namedDocuments = namedRecipientBrowserLimits ? createNamedRecipientDocumentsClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!,
+    browserLimits: namedRecipientBrowserLimits, fetchRelay,
   }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
@@ -791,6 +822,9 @@ export function createShareWebApplication({
     MAX_ACTIVITY_HOLDS_PER_GRANT,
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
+  if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
+  const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
+    limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
 
   function readBrowserSession(discriminator: string, cookies: Map<string, string>): {
     discriminator: string;
@@ -820,9 +854,11 @@ export function createShareWebApplication({
     if (relative.includes("..") || relative.includes("\\")) return refused();
     try {
       const bytes = await readFile(join(viewerAssetsDir, relative));
-      return response(bodyBuffer(bytes), {
+      const result = response(bodyBuffer(bytes), {
         headers: { "content-type": contentTypeForAsset(relative) },
       });
+      if (relative === "index.html" && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
+      return result;
     } catch {
       return refused();
     }
@@ -874,6 +910,7 @@ export function createShareWebApplication({
           const refreshed = parsedRelaySession(
             await relayResponse.json(),
             nowMs(),
+            publicEditRelease,
           );
           if (!refreshed || refreshed.grantId !== authenticated.session.grantId) {
             return { status: "unavailable" };
@@ -960,14 +997,37 @@ export function createShareWebApplication({
     }
   }
 
+  if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host)) throw new TypeError("App viewer origin must be an exact configured public Host.");
+  const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
+  const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
   const handle = async (request: Request): Promise<Response> => {
+    if (appLaunch?.matches(request)) return appLaunch.handle(request);
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+    if (pathname === "/api/apps") return discoverApps(request);
+
+    if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
+      if (!linkLive) return refused();
+      const result = await linkLive.handle(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
 
     if (pathname === "/api/live/named-session") {
       if (!namedBrowser) return refused();
       const result = await namedBrowser.bootstrap(request);
       return response(result.body, { status: result.status, headers: result.headers });
+    }
+
+    if (pathname === "/api/live/named-ticket") {
+      if (!namedTickets) return refused();
+      const result = await namedTickets(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
+    if (pathname === "/api/live/named-documents") {
+      if (!namedDocuments) return refused();
+      const result = await namedDocuments(request);
+      return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname.startsWith("/api/account/")) {
@@ -1003,7 +1063,7 @@ export function createShareWebApplication({
           }),
         );
         if (relayResponse.status !== 200) return refused();
-        const exchanged = parsedRelaySession(await relayResponse.json(), nowMs());
+        const exchanged = parsedRelaySession(await relayResponse.json(), nowMs(), publicEditRelease);
         if (!exchanged) return refused();
         const discriminator = linkDiscriminator(exchanged.grantId);
         const token = newSessionToken();
@@ -1350,7 +1410,7 @@ export function createShareWebApplication({
 
     return refused();
   };
-  return { handle, resolveLinkBrowserMaterial,
+  return { handle, resolveLinkBrowserMaterial, ...(linkLive ? {linkLive} : {}),
     resolveNamedBrowserSession: (request, discriminator) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null) };
 }
 

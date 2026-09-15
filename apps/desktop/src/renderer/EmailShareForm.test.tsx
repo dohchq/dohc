@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmailShareForm } from "./EmailShareForm";
@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   bridgeMock.createRelayShare.mockResolvedValue({
     shareId: "share-1",
+    grantId: "grant-1",
     shareCode: SHARE_CODE,
     recipientEmail: "friend@dohc.test",
   });
@@ -52,9 +53,42 @@ describe("EmailShareForm", () => {
     });
     const code = await screen.findByTestId("share-code");
     expect(code.textContent).toBe(SHARE_CODE);
+    expect(screen.queryByTestId("share-browser-invitation-copy")).toBeNull();
 
     await user.click(screen.getByTestId("share-code-copy"));
     expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: SHARE_CODE });
+  });
+
+  it("copies the exact server invitation and retains the desktop code", async () => {
+    const invitation = "https://share.example.test/s/edit/exact-grant";
+    bridgeMock.createRelayShare.mockResolvedValue({shareId: "share-1", grantId: "exact-grant", shareCode: SHARE_CODE,
+      recipientEmail: "friend@dohc.test", browserInvitationUrl: invitation});
+    const user = userEvent.setup();
+    render(<EmailShareForm workspaceId="ws-1" target={{kind: "paths", paths: ["docs"]}} visible onDone={() => {}}/>);
+    await user.click(screen.getByTestId("share-access-edit"));
+    expect(screen.getByText(/Browser editing lets them/).textContent).toContain("shared Markdown files live when available");
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+    expect((await screen.findByTestId("share-browser-invitation")).getAttribute("data-grant-id")).toBe("exact-grant");
+    await user.click(screen.getByTestId("share-browser-invitation-copy"));
+    expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({text: invitation});
+    expect(screen.getByTestId("share-code").textContent).toBe(SHARE_CODE);
+    expect(screen.getByText(/sign in with the invited account/)).toBeTruthy();
+  });
+
+  it("ignores a creation response after the workspace changes", async () => {
+    let complete!: (result: unknown) => void;
+    bridgeMock.createRelayShare.mockImplementation(() => new Promise(resolve => {complete = resolve;}));
+    const user = userEvent.setup();
+    const view = render(<EmailShareForm workspaceId="ws-1" target={{kind: "paths", paths: ["docs"]}} visible onDone={() => {}}/>);
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+    view.rerender(<EmailShareForm workspaceId="ws-2" target={{kind: "paths", paths: ["docs"]}} visible onDone={() => {}}/>);
+    await act(async () => complete({shareId: "old-share", grantId: "old-grant", shareCode: SHARE_CODE,
+      recipientEmail: "friend@dohc.test", browserInvitationUrl: "https://share.example.test/s/edit/old-grant"}));
+    expect(screen.queryByTestId("share-browser-invitation")).toBeNull();
+    expect(screen.queryByTestId("share-code")).toBeNull();
+    expect(screen.getByTestId("share-create").hasAttribute("disabled")).toBe(false);
   });
 
   it("offers View and Edit for email without promising a discussion", async () => {

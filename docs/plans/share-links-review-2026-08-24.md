@@ -160,6 +160,8 @@ Choose one build trust model before choosing Vite:
 
 Effective app authority is the intersection of the pinned app revision's requests, the owner's explicit approval, the active link grant, and server policy. External network access is a capability because it lets an app exfiltrate every datum it can read. A zero-capability app is still untrusted code and still needs the browser sandbox.
 
+The network-capability recommendation above is historical. ADR 0006 was revised on September 12, 2026: published apps use ordinary browser networking, and dohc enforces access to data and authority rather than confinement of received data. The credential, origin, build, and workspace isolation findings still apply.
+
 #### H4. "Writable-by-link" is too coarse to authorize app data
 
 Design point 5 does not define the resource or operation grain for writable app data. A boolean writable flag can easily become read, insert, update, and delete across a table. A visitor can call the endpoint without using the app UI, so UI controls do not count.

@@ -1,7 +1,9 @@
 //! Private admitted-update assembly. No deployment values are selected here.
 
 use crate::EngineService;
-use crate::rpc::live_application::{LiveApplicationInput, LiveApplicationOperation, Registration};
+use crate::rpc::live_application::{
+    AdmittedApplicationInput, LiveApplicationInput, LiveApplicationOperation, Registration,
+};
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveApplicationBootstrap,
@@ -23,11 +25,14 @@ const RANGE_BYTES: usize = 16;
 // Worst-case canonical request with 100 selectors and six-byte JSON escapes.
 const MAX_HEADER_BYTES: usize = 643_576;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
+mod adoption;
+mod restore;
+pub(crate) use restore::RestoreConfig;
 
 #[derive(Clone)]
 pub struct LiveApplicationIngressConfig {
     pub aggregate_bytes: usize,
-    /// Admission accounting for historical reconstruction, not a heap limiter.
+    /// Positive admission allowance for accepted history reconstruction, not a heap limiter.
     pub application_working_reserve_bytes: usize,
     pub max_uploads: usize,
     pub upload_deadline: Duration,
@@ -74,9 +79,37 @@ struct BootstrapParams {
     baseline: LiveApplicationBootstrap,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdoptionParams {
+    registration_id: u64,
+    session_id: String,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncParams {
+    registration_id: u64,
+    stream_id: u64,
+    byte_length: usize,
+    digest: String,
+}
+
 enum Metadata {
+    Owner(crate::rpc::owner_delivery::OwnerUpload),
+    Sync(dohc_engine_collab::live_update_application::AppliedSyncPolicy),
     Apply(RelayAcceptedLiveUpdate),
     Bootstrap(LiveApplicationBootstrap),
+    Adoption {
+        registration_id: u64,
+        session_id: String,
+        max_bytes: usize,
+        max_events: usize,
+        outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
+    },
 }
 
 struct Stream {
@@ -154,7 +187,7 @@ impl Stream {
 struct Upload {
     request: Request,
     metadata: Metadata,
-    registration: Arc<Registration>,
+    registration: Option<Arc<Registration>>,
     update: Stream,
     ranges: Option<Stream>,
     bytes: Vec<u8>,
@@ -203,10 +236,65 @@ pub struct LiveApplicationIngress {
     budget: Arc<Semaphore>,
     upload_slots: Arc<Semaphore>,
     uploads: HashMap<u64, Upload>,
+    restores: HashMap<u64, restore::Upload>,
     last_stream_id: Option<u64>,
 }
 
 impl LiveApplicationIngress {
+    pub(crate) fn owner_admission(&self) -> Result<SettlementAdmission, WireError> {
+        // Two input buffers plus decoded vector, checkpoint and output scratch.
+        // The configured working reserve remains charged while the actor hydrates Yrs.
+        let bytes = self
+            .config
+            .reservation_bytes(MAX_YDOC_UPDATE_BYTES * 2, 0)
+            .and_then(|n| n.checked_add(MAX_YDOC_UPDATE_BYTES * 10))
+            .filter(|n| *n <= self.config.aggregate_bytes)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(overloaded)?;
+        Ok(SettlementAdmission {
+            budget: self.budget.clone(),
+            slots: self.upload_slots.clone(),
+            bytes,
+        })
+    }
+    pub(crate) fn sync_admission(
+        &self,
+        config: crate::rpc::live_application::sync::SyncConfig,
+    ) -> Result<SettlementAdmission, WireError> {
+        let bytes = config
+            .reservation_bytes()
+            .filter(|n| *n <= self.config.aggregate_bytes)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| invalid("invalid applied sync budget"))?;
+        Ok(SettlementAdmission {
+            budget: self.budget.clone(),
+            slots: self.upload_slots.clone(),
+            bytes,
+        })
+    }
+
+    pub(crate) fn validate_adoption_budget(
+        &self,
+        bytes: usize,
+        events: usize,
+    ) -> Result<(), WireError> {
+        if events == 0
+            || self.adoption_reservation(bytes).is_none_or(|charge| {
+                charge > self.config.aggregate_bytes || charge > u32::MAX as usize
+            })
+        {
+            return Err(invalid("invalid-owner-adoption-budget"));
+        }
+        Ok(())
+    }
+
+    fn adoption_reservation(&self, bytes: usize) -> Option<usize> {
+        // Charge raw upload, typed evidence, JSON parsing, and actor scratch together.
+        bytes
+            .checked_mul(32)?
+            .checked_add(self.config.application_working_reserve_bytes)?
+            .checked_add(MAX_CHUNK_BYTES * 2)
+    }
     pub(crate) fn settlement_admission(
         &self,
         max_applications: usize,
@@ -235,6 +323,9 @@ impl LiveApplicationIngress {
         service: Arc<EngineService>,
         config: LiveApplicationIngressConfig,
     ) -> Result<Self, WireError> {
+        if config.application_working_reserve_bytes == 0 {
+            return Err(invalid("applicationWorkingReserveBytes must be positive"));
+        }
         if config.max_uploads == 0
             || config.upload_deadline.is_zero()
             || config.aggregate_bytes > Semaphore::MAX_PERMITS
@@ -251,6 +342,7 @@ impl LiveApplicationIngress {
             upload_slots: Arc::new(Semaphore::new(config.max_uploads)),
             config,
             uploads: HashMap::new(),
+            restores: HashMap::new(),
             last_stream_id: None,
         })
     }
@@ -260,14 +352,24 @@ impl LiveApplicationIngress {
         mut request: Request,
         connection: &ConnectionHandle,
     ) -> Result<(), WireError> {
+        if restore::is_method(&request.method) {
+            return restore::begin(self, request, connection);
+        }
         if !matches!(
             request.method.as_str(),
-            "liveApplication.apply" | "liveApplication.bootstrap"
+            "liveApplication.apply"
+                | "ydoc.ownerDelivery.applyAcceptedFrame"
+                | "ydoc.ownerDelivery.applyInitialSync"
+                | "ydoc.ownerDelivery.enroll"
+                | "ydoc.ownerDelivery.appendDraft"
+                | "liveApplication.bootstrap"
+                | "liveApplication.adoptOwner"
+                | "liveApplication.syncOpen"
         ) || request.idempotency_key.is_some()
         {
             return Err(invalid("invalid-live-application-request"));
         }
-        if self.uploads.contains_key(&request.id) {
+        if self.uploads.contains_key(&request.id) || self.restores.contains_key(&request.id) {
             return Err(invalid("duplicate-live-request"));
         }
         let upload_slot = self
@@ -275,9 +377,62 @@ impl LiveApplicationIngress {
             .clone()
             .try_acquire_owned()
             .map_err(|_| overloaded())?;
-        let (metadata, registration_id, update, ranges, range_count) = if request.method
-            == "liveApplication.bootstrap"
+        let (metadata, registration_id, update, ranges, range_count) = if request
+            .method
+            .starts_with("ydoc.ownerDelivery.")
         {
+            self.service
+                .owner_delivery_connection(connection, request.workspace.as_ref())?;
+            let params = crate::rpc::owner_delivery::OwnerUpload::parse(
+                &request.method,
+                std::mem::take(&mut request.params),
+            )?;
+            let (stream_id, byte_length, digest) = params.stream();
+            let stream = Stream::new(stream_id, byte_length, digest)?;
+            (Metadata::Owner(params), 0, stream, None, 0)
+        } else if request.method == "liveApplication.adoptOwner" {
+            let config = self
+                .service
+                .owner_adoption_config(connection, request.workspace.as_ref())?;
+            let params: AdoptionParams =
+                serde_json::from_value(std::mem::take(&mut request.params))
+                    .map_err(|_| invalid("invalid-owner-adoption-upload"))?;
+            if params.byte_length == 0
+                || params.byte_length > config.max_bytes
+                || params.session_id.is_empty()
+                || params.session_id.len() > 256
+            {
+                return Err(invalid("invalid-owner-adoption-bounds"));
+            }
+            let stream = Stream::new(params.stream_id, params.byte_length, params.digest)?;
+            (
+                Metadata::Adoption {
+                    registration_id: params.registration_id,
+                    session_id: params.session_id,
+                    max_bytes: config.max_bytes,
+                    max_events: config.max_events,
+                    outbox_limits: config.owner_outbox.clone(),
+                },
+                params.registration_id,
+                stream,
+                None,
+                0,
+            )
+        } else if request.method == "liveApplication.syncOpen" {
+            let (policy, _admission) = self.service.sync_admission(connection)?;
+            let params: SyncParams = serde_json::from_value(std::mem::take(&mut request.params))
+                .map_err(|_| invalid("invalid sync vector upload"))?;
+            if params.byte_length == 0 || params.byte_length > policy.max_client_vector_bytes {
+                return Err(invalid("sync vector limit"));
+            }
+            (
+                Metadata::Sync(policy),
+                params.registration_id,
+                Stream::new(params.stream_id, params.byte_length, params.digest)?,
+                None,
+                0,
+            )
+        } else if request.method == "liveApplication.bootstrap" {
             let params: BootstrapParams =
                 serde_json::from_value(std::mem::take(&mut request.params))
                     .map_err(|_| invalid("invalid-live-bootstrap-header"))?;
@@ -336,16 +491,27 @@ impl LiveApplicationIngress {
         }) {
             return Err(invalid("invalid-live-application-bounds"));
         }
-        let registration = self.service.live_application_registration(
-            connection,
-            request.workspace.as_ref(),
-            registration_id,
-        )?;
-        let reserved = self
-            .config
-            .reservation_bytes(update.expected, range_count)
-            .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(overloaded)?;
+        let registration = if matches!(&metadata, Metadata::Owner(_)) {
+            None
+        } else {
+            Some(self.service.live_application_registration(
+                connection,
+                request.workspace.as_ref(),
+                registration_id,
+            )?)
+        };
+        let reserved = if matches!(&metadata, Metadata::Owner(_)) {
+            Some(self.owner_admission()?.bytes as usize)
+        } else if let Metadata::Sync(_) = &metadata {
+            Some(self.service.sync_admission(connection)?.1.bytes as usize)
+        } else if let Metadata::Adoption { max_bytes, .. } = &metadata {
+            // First adoption can seed a native head larger than the relay baseline.
+            self.adoption_reservation(*max_bytes)
+        } else {
+            self.config.reservation_bytes(update.expected, range_count)
+        }
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(overloaded)?;
         let permit = Arc::new(Reservation {
             _upload: upload_slot,
             _bytes: self
@@ -394,6 +560,9 @@ impl LiveApplicationIngress {
     }
 
     pub fn start(&mut self, start: BlobStart) -> Result<(), WireError> {
+        if let Some(upload) = self.restores.get_mut(&start.request_id) {
+            return upload.start(&start);
+        }
         let upload = self
             .uploads
             .get_mut(&start.request_id)
@@ -419,6 +588,13 @@ impl LiveApplicationIngress {
         fin: bool,
         bytes: &[u8],
     ) -> Result<Option<(Request, LiveApplicationInput)>, WireError> {
+        if self
+            .restores
+            .values()
+            .any(|upload| upload.stream_id() == stream_id)
+        {
+            return restore::chunk(self, stream_id, fin, bytes);
+        }
         let id = self
             .uploads
             .iter()
@@ -479,7 +655,25 @@ impl LiveApplicationIngress {
             return Ok(None);
         }
         let mut upload = self.uploads.remove(&id).expect("completed upload");
+        // Preserve the original deadline for both owner and canonical-host dispatch.
+        let remaining = upload
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis();
+        upload.request.deadline_ms = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
+        if let Metadata::Owner(params) = upload.metadata {
+            return Ok(Some((
+                upload.request,
+                LiveApplicationInput::Owner(Box::new(crate::rpc::owner_delivery::OwnerInput {
+                    params,
+                    bytes: upload.bytes,
+                    reservation: upload.permit,
+                })),
+            )));
+        }
         let operation = match upload.metadata {
+            Metadata::Owner(_) => unreachable!("owner dispatched above"),
+            Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
             Metadata::Apply(accepted) => LiveApplicationOperation::Apply(AdmittedLiveUpdate {
                 metadata: AdmittedLiveUpdateMetadata {
                     accepted,
@@ -490,6 +684,19 @@ impl LiveApplicationIngress {
             Metadata::Bootstrap(metadata) => {
                 LiveApplicationOperation::Bootstrap(metadata, upload.bytes)
             }
+            Metadata::Adoption {
+                registration_id,
+                session_id,
+                max_bytes,
+                max_events,
+                outbox_limits,
+            } => LiveApplicationOperation::AdoptOwner {
+                registration_id,
+                session_id,
+                cut: adoption::decode(&upload.bytes, max_events, outbox_limits)?,
+                max_bytes,
+                max_events,
+            },
         };
         // Preserve the upload's original deadline after time spent assembling.
         let remaining = upload
@@ -499,38 +706,53 @@ impl LiveApplicationIngress {
         upload.request.deadline_ms = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
         Ok(Some((
             upload.request,
-            LiveApplicationInput {
-                registration: upload.registration,
+            LiveApplicationInput::Admitted(Box::new(AdmittedApplicationInput {
+                registration: upload
+                    .registration
+                    .expect("canonical host upload registration"),
                 operation,
                 reservation: upload.permit,
-            },
+                working_reserve_bytes: self.config.application_working_reserve_bytes,
+            })),
         )))
     }
 
     pub fn cancel(&mut self, request_id: u64) -> bool {
-        self.uploads.remove(&request_id).is_some()
+        self.uploads.remove(&request_id).is_some() | self.restores.remove(&request_id).is_some()
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.uploads.values().map(|upload| upload.deadline).min()
+        self.uploads
+            .values()
+            .map(|upload| upload.deadline)
+            .chain(self.restores.values().map(|upload| upload.deadline()))
+            .min()
     }
 
     pub fn expire(&mut self) -> Vec<u64> {
         let now = Instant::now();
-        let expired: Vec<_> = self
+        let mut expired: Vec<_> = self
             .uploads
             .iter()
             .filter(|(_, upload)| upload.deadline <= now)
             .map(|(id, _)| *id)
             .collect();
+        expired.extend(
+            self.restores
+                .iter()
+                .filter(|(_, upload)| upload.deadline() <= now)
+                .map(|(id, _)| *id),
+        );
         for id in &expired {
             self.uploads.remove(id);
+            self.restores.remove(id);
         }
         expired
     }
 
     pub fn clear(&mut self) {
         self.uploads.clear();
+        self.restores.clear();
     }
 }
 
@@ -691,6 +913,26 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn ordinary_ingress_rejects_zero_reserve_and_keeps_positive_operator_limits() {
+        let service = Arc::new(EngineService::new());
+        let mut configured = config();
+        configured.application_working_reserve_bytes = 0;
+        let Err(error) = LiveApplicationIngress::new(service.clone(), configured.clone()) else {
+            panic!("zero working reserve was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            error.message,
+            "applicationWorkingReserveBytes must be positive"
+        );
+        for bytes in [1, 1_000_000] {
+            configured.application_working_reserve_bytes = bytes;
+            let ingress = LiveApplicationIngress::new(service.clone(), configured.clone()).unwrap();
+            assert_eq!(ingress.config.application_working_reserve_bytes, bytes);
+        }
+    }
+
     pub(crate) fn request(
         workspace: &str,
         registration: u64,
@@ -753,6 +995,9 @@ pub(crate) mod tests {
             let decoded = ingress.chunk(2, true, &ranges);
             if allowed {
                 let (_, input) = decoded.unwrap().unwrap();
+                let LiveApplicationInput::Admitted(input) = input else {
+                    panic!("expected admitted input")
+                };
                 let LiveApplicationOperation::Apply(event) = input.operation else {
                     panic!("expected application");
                 };

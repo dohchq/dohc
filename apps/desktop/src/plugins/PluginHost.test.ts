@@ -1846,7 +1846,7 @@ describe("PluginHost", () => {
         isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, _text, options) => {
-          authoredRunId = options.author.agentRunId;
+          authoredRunId = options.author.kind === "agent" ? options.author.agentRunId : undefined;
           return { path };
         },
       },

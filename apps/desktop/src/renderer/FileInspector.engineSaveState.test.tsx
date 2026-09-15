@@ -149,6 +149,24 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     );
   });
 
+  it("distinguishes a durable local draft from the shared file", async () => {
+    engineDocStore.set({ saveState: "pending-share" });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const header = await screen.findByTestId("markdown-save-state");
+    expect(header.getAttribute("data-state")).toBe("pending-share");
+    expect(header.textContent).toBe("Saved locally · Pending share");
+    expect(header.getAttribute("title")).toBe("Your edits are saved on this device. The shared file update is pending.");
+  });
+
+  it("names host acceptance without claiming local file settlement", async () => {
+    engineDocStore.set({ saveState: "saved-to-host" });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const header = await screen.findByTestId("markdown-save-state");
+    expect(header.getAttribute("data-state")).toBe("saved-to-host");
+    expect(header.textContent).toBe("Saved to host");
+    expect(header.getAttribute("title")).toBe("The session host accepted your edits. The local file may still be updating.");
+  });
+
   it("names the outside edit when the file changed on disk", async () => {
     // The settle committed, but the FILE holds an edit made outside dohc
     // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —

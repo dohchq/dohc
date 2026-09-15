@@ -82,6 +82,10 @@ impl WorkspaceHandleKind {
 }
 
 impl OpenWorkspace {
+    pub(super) fn is_local_owner(&self) -> bool {
+        self.handle_kind.owns_binding() && self.mode == WorkspaceOpenMode::Full
+    }
+
     fn read_only_attach(&self, owner: WorkspaceHandle) -> Self {
         Self {
             root: self.root.clone(),
@@ -627,6 +631,47 @@ impl EngineService {
             }
             return Err(map_root_binding(error));
         }
+        let open_guard = if requested_mode == WorkspaceOpenMode::Full
+            && let Some(config) = self.ordinary_live_host.get()
+        {
+            let budget_db_path = db_path.clone();
+            let budget_workspace_id = params.workspace_id.clone();
+            let owner_outbox = config.owner_outbox.clone();
+            let budget_probe = self.capture_apply_probe.clone();
+            let mut reading_budget = tokio::task::spawn_blocking(move || {
+                // This task keeps cleanup and open serialization after caller cancellation,
+                // until the reader drops and OpenGuard installs the Closing marker.
+                if let Some(probe) = budget_probe {
+                    probe.pause_open_budget_if_armed();
+                }
+                let result = (|| {
+                    let store = dohc_engine_storage::EngineStore::open_read_only(&budget_db_path)
+                        .map_err(|error| {
+                        map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
+                    })?;
+                    let mismatch: bool = store.read_with(|conn| conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                    rusqlite::params![budget_workspace_id,owner_outbox.max_pending_bytes,owner_outbox.max_pending_age_ms],|row|row.get(0)
+                )).map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-read-failed"))?;
+                    Ok::<_, WireError>(mismatch)
+                })();
+                (result, open_guard)
+            });
+            let (mismatch, open_guard) = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("workspace open (owner outbox budget)")),
+                result = &mut reading_budget => result.map_err(|_| WireError::new(ErrorCode::Internal,"owner-outbox-budget-worker-failed"))?,
+            };
+            if mismatch? {
+                return Err(WireError::new(
+                    ErrorCode::Conflict,
+                    "owner-outbox-configured-budget-mismatch",
+                ));
+            }
+            open_guard
+        } else {
+            open_guard
+        };
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1433,6 +1478,179 @@ mod tests {
         drop(held);
     }
 
+    #[tokio::test]
+    async fn check_move_cancellation_and_deadline_return_while_actor_query_is_queued() {
+        use dohc_engine_protocol::transport::EngineService as _;
+        for deadline in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let service = EngineService::new();
+            let opened = service.workspace_open(&RequestContext::unbounded(),json!({
+                "rootDir":scratch.path(),"workspaceId":"cancelled-check-move","captureMode":"none"
+            })).await.unwrap();
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).unwrap();
+            let actor = service.open(Some(&handle)).unwrap().actor.clone();
+            let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+            let faults: Arc<dyn FaultInjector> = gate.clone();
+            let held = tokio::spawn(async move {
+                actor
+                    .versioned_text_write(
+                        WriteText {
+                            workspace_id: "cancelled-check-move".into(),
+                            version_id: "main".into(),
+                            object_id: "object".into(),
+                            path: "held.md".into(),
+                            text: "held".into(),
+                            moment_id: "held".into(),
+                            metadata_origin: "test".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 1,
+                            request_id: None,
+                        },
+                        faults,
+                        dohc_engine_runtime::CancellationToken::new(),
+                    )
+                    .await
+            });
+            let wait = gate.clone();
+            tokio::task::spawn_blocking(move || wait.wait_until_reached())
+                .await
+                .unwrap();
+            let mut ctx = RequestContext::unbounded();
+            if deadline {
+                tokio::time::pause();
+                ctx.deadline =
+                    Some(tokio::time::Instant::now().into_std() + Duration::from_secs(60));
+            }
+            let cancel = ctx.cancel.clone();
+            let mut checking = Box::pin(service.call(
+                ctx,
+                dohc_engine_protocol::wire::Request {
+                    id: 71,
+                    method: "versionedText.checkMove".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: json!({"versionId":"main","path":"held.md"}),
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(checking.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            if deadline {
+                tokio::time::advance(Duration::from_secs(61)).await;
+            } else {
+                cancel.cancel();
+            }
+            let result = tokio::time::timeout(Duration::from_millis(250), checking.as_mut()).await;
+            let actor_still_held = !held.is_finished();
+            if deadline {
+                tokio::time::resume();
+            }
+            gate.release();
+            held.await.unwrap().unwrap();
+            drop(checking);
+            service.workspace_close(Some(handle)).await.unwrap();
+            assert!(
+                actor_still_held,
+                "the actor query cannot finish before cancellation"
+            );
+            assert_eq!(
+                result
+                    .expect("cancelled checkMove returns before actor release")
+                    .unwrap_err()
+                    .code,
+                if deadline {
+                    ErrorCode::DeadlineExceeded
+                } else {
+                    ErrorCode::Cancelled
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_open_budget_cancellation_keeps_cleanup_ownership_through_worker_completion()
+    {
+        for deadline in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let supervisor: &'static WorkspaceSupervisor =
+                Box::leak(Box::new(WorkspaceSupervisor::new()));
+            let config=serde_json::from_value(json!({
+                "ingress":{"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+                "maxRegistrations":4,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,"maxApplicationsPerSettlement":100,
+                "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":60_000}
+            })).unwrap();
+            let probe = capture_driver::CaptureApplyProbe::default();
+            probe.pause_next_open_budget();
+            let mut service = EngineService::with_supervisor(supervisor);
+            service.capture_apply_probe = Some(probe.clone());
+            let (service, _owner, ingress) = service.configure_ordinary_live_host(config).unwrap();
+            drop(ingress);
+            let params = json!({"rootDir":scratch.path(),"workspaceId":"cancelled-open-budget","captureMode":"none"});
+            let mut ctx = RequestContext::unbounded();
+            if deadline {
+                ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(60));
+            }
+            let cancel = ctx.cancel.clone();
+            let opening_service = service.clone();
+            let opening_params = params.clone();
+            let mut opening =
+                tokio::spawn(
+                    async move { opening_service.workspace_open(&ctx, opening_params).await },
+                );
+            probe.wait_until_open_budget_paused().await;
+            assert_eq!(supervisor.actor_count(), 1);
+            assert!(lock(&service.handles).is_empty());
+            if deadline {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(61)).await;
+            } else {
+                cancel.cancel();
+            }
+            let cancelled = tokio::time::timeout(Duration::from_millis(250), &mut opening).await;
+            let retained = service.open_lock.try_lock().is_err();
+            if deadline {
+                tokio::time::resume();
+            }
+            let reopening_service = service.clone();
+            let reopening = tokio::spawn(async move {
+                reopening_service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            });
+            probe.release_open_budget();
+            if cancelled.is_err() {
+                opening.abort();
+                let _ = opening.await;
+            }
+            let reopened = reopening.await.unwrap().unwrap();
+            let handle = serde_json::from_value(reopened["workspace"].clone()).unwrap();
+            service.workspace_close(Some(handle)).await.unwrap();
+            assert_eq!(supervisor.actor_count(), 0);
+            assert!(
+                retained,
+                "budget worker owns open serialization until it installs Closing"
+            );
+            assert_eq!(
+                cancelled
+                    .expect("cancelled budget read returns before worker release")
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                if deadline {
+                    ErrorCode::DeadlineExceeded
+                } else {
+                    ErrorCode::Cancelled
+                }
+            );
+        }
+    }
+
     /// A fresh store whose root-binding stamp fails is deleted with the
     /// refusal, so the next open mints again instead of finding an engine.db
     /// that never recorded the marker and refusing it as a mismatch.
@@ -1967,6 +2185,8 @@ mod tests {
             PendingCursor {
                 handle: handle.clone(),
                 workspace_id: "evicted-cursor-cleanup".to_owned(),
+                materialization_paths: Vec::new(),
+                materialized: false,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     cursor: 7,
                     replication_epoch: "epoch".to_owned(),

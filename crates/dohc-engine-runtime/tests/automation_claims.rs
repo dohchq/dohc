@@ -216,6 +216,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             100,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("originate collection base");
@@ -257,6 +258,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             200,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("apply status edit");
@@ -310,6 +312,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("replay the same update");
@@ -342,6 +345,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             400,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("apply depth-capped edit");

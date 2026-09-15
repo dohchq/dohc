@@ -17,7 +17,8 @@ const named = { kind: "named", userId: "reader", grantId: "grant" } as const;
 function fixture(deployment = false, workspaceQuotaBytes?: number) {
   const f = registered({ deployment, workspaceQuotaBytes });
   const context = f.storage as StorageContext;
-  const intent: StopRestoreIntent = { operationId: "restore", ownerUserId: "owner", document: f.input.evidence.document,
+  if (!deployment) attachLiveJournalHistory(context,createLiveJournalHistoryAuthority({namespace: "restore-history",reconciled: true}));
+  const intent: StopRestoreIntent = { deliveryKind: "bootstrap", operationId: "restore", ownerUserId: "owner", document: f.input.evidence.document,
     shareId: "share", grantId: "grant", expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 1,
     restorePointCursor: 0, restorePointReceiptDigest: f.input.evidence.checkpoint.updateDigest };
   const lookup = { operationId: intent.operationId, workspaceId: "workspace", ownerUserId: "owner" };
@@ -39,14 +40,18 @@ it.each(["view", "comment"])("refuses a non-edit target grant (%s) without stopp
 });
 
 it.each(["begin", "fence"])("requires reconciled journal history before %s", phase => {
-  const f = fixture();
+  const f = registered();
   try {
+    const context = f.storage as StorageContext;
+    const intent: StopRestoreIntent = {deliveryKind: "bootstrap",operationId: "restore",ownerUserId: "owner",document: f.input.evidence.document,
+      shareId: "share",grantId: "grant",expectedGrantGeneration: 4,expectedDependentGrantIds: [],expectedFence: 1,restorePointCursor: 0,restorePointReceiptDigest: f.input.evidence.checkpoint.updateDigest};
+    const lookup = {operationId: "restore",workspaceId: "workspace",ownerUserId: "owner"};
     const history = createLiveJournalHistoryAuthority({ namespace: "restore-history", reconciled: true });
-    attachLiveJournalHistory(f.context, history);
-    if (phase === "fence") beginStopRestore(f.context, f.intent, 40);
+    attachLiveJournalHistory(context, history);
+    if (phase === "fence") beginStopRestore(context, intent, 40);
     history.markUnreconciled();
     const before = f.rows();
-    expect(() => phase === "begin" ? beginStopRestore(f.context, f.intent, 40) : advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow(/reconciliation/);
+    expect(() => phase === "begin" ? beginStopRestore(context, intent, 40) : advanceStopRestoreFence(context, lookup, 50)).toThrow(/reconciliation/);
     expect(f.rows()).toEqual(before);
   } finally { f.close(); }
 });
@@ -242,8 +247,9 @@ it.each(["before-insert", "after-insert", "after-fence"])("rolls back every effe
 });
 
 it("funds final metadata before revocation and never charges replay or fence advancement", () => {
-  const f = fixture(false, 100_000);
+  const f = fixture();
   try {
+    f.context.options.workspaceQuotaBytes=100_000;
     f.write(db => { db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=99999").run(); });
     const before = f.rows();
     expect(() => beginStopRestore(f.context, f.intent, 40)).toThrow(/quota/);
@@ -339,7 +345,7 @@ it.each([false, true])("handles the final available global cursor without a part
 
 const crashFixture = fileURLToPath(new URL("../../../services/sync-relay/src/liveRestoreOperationCrash.fixture.ts", import.meta.url));
 const tsx = pathToFileURL(createRequire(crashFixture).resolve("tsx")).href;
-it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
+it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
   const f = fixture(true);
   const intentPath = join(dirname(f.configPath), "intent.json");
   writeFileSync(intentPath, JSON.stringify(f.intent));
@@ -351,11 +357,11 @@ it.each(["before-operation", "invalidation-before-commit", "invalidation-after-c
   expect(child.status).toBe(boundary === "before-operation" ? 80 : boundary.endsWith("before-commit") ? 81 : 82);
   const raw = new DatabaseSync(f.path, { readOnly: true });
   try {
-    const invalidated = boundary === "invalidation-after-commit" || boundary.startsWith("fence-");
-    const fenced = boundary === "fence-after-commit";
+    const invalidated = boundary === "invalidation-after-commit" || boundary.startsWith("fence-") || boundary.startsWith("complete-") || boundary.startsWith("native-");
+    const fenced = boundary === "fence-after-commit" || boundary.startsWith("complete-") || boundary.startsWith("native-");
     expect(raw.prepare("SELECT status,generation FROM sync_relay_share_grants WHERE grant_id='grant'").get()).toEqual({ status: invalidated ? "revoked" : "active", generation: invalidated ? 5 : 4 });
     expect(raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toEqual({ admission_state: fenced ? "closed" : "open", restore_fence_generation: fenced ? 2 : 1 });
-    expect(raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").all()).toEqual(invalidated ? [{ phase: fenced ? "fenced" : "authority-invalidated" }] : []);
+    expect(raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").all()).toEqual(invalidated ? [{ phase: boundary === "native-after-commit" ? "native-fenced" : boundary.startsWith("native-") || boundary === "complete-after-commit" ? "old-cut-applied" : fenced ? "fenced" : "authority-invalidated" }] : []);
   } finally { raw.close(); }
   if (boundary.endsWith("before-commit")) expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
   else {

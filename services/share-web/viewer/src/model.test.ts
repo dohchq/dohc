@@ -573,6 +573,11 @@ describe("public discussion projection", () => {
   });
 
   it("parses only an exact, ordered public discussion activity delta", () => {
+    const editActivity = {
+      access: "edit", latestRevision: 9, cursorRevision: 9, hasMore: false,
+      messages: [], composerState: "available", profileName: null,
+    };
+    expect(parseDiscussionActivity({ ok: true, ...editActivity })).toEqual(editActivity);
     expect(parseDiscussionActivity({
       ok: true,
       access: "comment",
@@ -655,7 +660,7 @@ describe("public discussion projection", () => {
       },
       {
         ok: true,
-        access: "edit",
+        access: "owner",
         latestRevision: 9,
         cursorRevision: 9,
         hasMore: false,

@@ -1052,7 +1052,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     assert_eq!(pending, (None, 0, 1));
 
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_300)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_300, 0)
         .expect("push local coordinate");
     client
         .pull_chat_workspace(
@@ -1148,7 +1148,7 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
     assert_eq!(
         client
-            .push_workspace(&mut engine, "ws", faults.as_ref(), 1_000)
+            .push_workspace(&mut engine, "ws", faults.as_ref(), 1_000, 0)
             .expect("push fault"),
         SyncPassOutcome::CrashedAfterRemoteCommit
     );
@@ -1159,7 +1159,7 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
         -1
     );
     client
-        .push_workspace(&mut reopened, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut reopened, "ws", &NoFaults, 1_000, 0)
         .expect("retry push");
     assert_eq!(
         read_pushed_seq(&reopened, "ws", "local").expect("cursor"),
@@ -2055,7 +2055,7 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
         .expect("seed imported share origin");
     let client = RelaySyncClient::new(FakeRelay::default());
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
         .expect("push owner lane");
     assert_eq!(
         client.transport().pushes.lock().expect("push calls").len(),
@@ -2108,7 +2108,7 @@ fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
         .expect("stamp autonomous capture origin");
     let client = RelaySyncClient::new(FakeRelay::default());
 
-    let outcome = client.push_workspace(&mut engine, "ws", &NoFaults, 1_000);
+    let outcome = client.push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0);
 
     assert!(
         matches!(outcome, Ok(SyncPassOutcome::Complete { pushed: 2, .. })),
@@ -2185,7 +2185,7 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
         .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
         .expect("the pull cursor ends enrollment");
     client
-        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000, 0)
         .expect("next push");
 
     let pushes = client.transport().pushes.lock().expect("pushes");

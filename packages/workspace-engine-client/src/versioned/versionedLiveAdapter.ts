@@ -59,6 +59,7 @@ import {
   type VersionedTextListEntry,
   type VersionedTextReadValue,
   type VersionRecord,
+  type SourceCapture,
 } from "./versionedWireContract";
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
@@ -383,6 +384,7 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     text: string;
+    restoreBeforeMomentId?: string;
     metadata: AdapterWriteMetadata;
     author?: AgentAuthor | null;
     momentId?: string;
@@ -396,6 +398,7 @@ export class VersionedLiveAdapter {
         versionId: input.versionId,
         path: input.path,
         text: input.text,
+        ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
           ? { summary: input.metadata.summary }
@@ -866,6 +869,88 @@ export class VersionedLiveAdapter {
     return files;
   }
 
+  async captureSourceMetadata(input: {
+    workspaceId: string;
+    versionId: string;
+    paths: readonly string[];
+    bounds: { maxInputFiles: number; maxInputBytes: number };
+    signal: AbortSignal;
+  }): Promise<SourceCapture> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal.throwIfAborted();
+    const { workspaceId, versionId, signal } = input;
+    const paths = [...input.paths];
+    const bounds = { ...input.bounds };
+    if (!Number.isSafeInteger(bounds.maxInputFiles) || bounds.maxInputFiles < 1 || bounds.maxInputFiles > 512 ||
+        !Number.isSafeInteger(bounds.maxInputBytes) || bounds.maxInputBytes < 1 || bounds.maxInputBytes > 128 * 1024 * 1024 ||
+        paths.length === 0 || paths.length > bounds.maxInputFiles || new Set(paths).size !== paths.length) {
+      throw new Error("Invalid source capture bounds or paths.");
+    }
+    const capture = await this.request(VERSIONED_METHOD.textCaptureSources, { versionId, paths, bounds });
+    signal.throwIfAborted();
+    this.assertWorkspace(workspaceId);
+    const expectedPaths = new Set(paths);
+    let totalBytes = 0;
+    for (const file of capture.files) {
+      if (!expectedPaths.delete(file.path) || !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 ||
+          !/^[a-f0-9]{64}$/.test(file.sha256) || !file.objectId || !file.latestMomentId) {
+        throw new DaemonProtocolError("Invalid captured source identity.");
+      }
+      totalBytes += file.byteLength;
+    }
+    if (capture.workspaceId !== workspaceId || capture.versionId !== versionId || expectedPaths.size !== 0 ||
+        totalBytes !== capture.totalBytes || totalBytes > bounds.maxInputBytes || !/^[a-f0-9]{64}$/.test(capture.sourceDigest)) {
+      throw new DaemonProtocolError("Captured sources do not match the selected workspace, paths, or bounds.");
+    }
+    const digest = createHash("sha256").update(JSON.stringify([
+      "dohc-source-capture-v1", workspaceId, versionId,
+      capture.files.map(({ path, objectId, contentKind, sha256, byteLength, latestMomentId }) =>
+        ({ path, objectId, contentKind, sha256, byteLength, latestMomentId })),
+    ])).digest("hex");
+    if (digest !== capture.sourceDigest) {
+      throw new DaemonProtocolError("Captured source digest does not match its metadata.");
+    }
+    return capture;
+  }
+
+  async hydrateCapturedSources(capture: SourceCapture, signal: AbortSignal): Promise<{
+    path: string; bytes: Uint8Array; sha256: string;
+  }[]> {
+    // Snapshot caller-owned metadata before the first asynchronous read.
+    const workspaceId = capture.workspaceId;
+    const files = capture.files.map((file) => ({ ...file }));
+    this.assertWorkspace(workspaceId);
+    signal.throwIfAborted();
+    if (files.length === 0 || files.length > 512 || files.some((file) =>
+      !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || !/^[a-f0-9]{64}$/.test(file.sha256)) ||
+      files.reduce((total, file) => total + file.byteLength, 0) > 128 * 1024 * 1024) {
+      throw new DaemonProtocolError("Invalid captured source hydration bounds.");
+    }
+    const inputs: { path: string; bytes: Uint8Array; sha256: string }[] = [];
+    for (const file of files) {
+      signal.throwIfAborted();
+      const blob = file.contentKind === "text"
+        ? await this.readTextBlob({ workspaceId, sha256: file.sha256 })
+        : await this.readBinaryBlob({ workspaceId, sha256: file.sha256 });
+      signal.throwIfAborted();
+      this.assertWorkspace(workspaceId);
+      const bytes = typeof blob === "string" ? new TextEncoder().encode(blob) : blob;
+      if (bytes === null || bytes.byteLength !== file.byteLength || createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
+        throw new DaemonProtocolError("Captured source blob is missing or does not match its recorded bytes.");
+      }
+      inputs.push({ path: file.path, sha256: file.sha256, bytes });
+    }
+    return inputs;
+  }
+
+  async checkMove(input: { workspaceId: string; versionId: string; path: string }): Promise<void> {
+    this.assertWorkspace(input.workspaceId);
+    await this.request(VERSIONED_METHOD.textCheckMove, {
+      versionId: input.versionId,
+      path: input.path,
+    });
+  }
+
   async renameTextFile(input: {
     workspaceId: string;
     versionId: string;
@@ -899,6 +984,8 @@ export class VersionedLiveAdapter {
     workspaceId: string;
     versionId: string;
     path: string;
+    expectedObjectId?: string;
+    requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: AgentAuthor | null;
     momentId?: string;
@@ -909,13 +996,14 @@ export class VersionedLiveAdapter {
         "versionedText.delete does not accept a caller-supplied moment id.",
       );
     }
-    const requestId = randomUUID();
+    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
       {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
         path: input.path,
+        ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined
           ? { summary: input.metadata.summary }

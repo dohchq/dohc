@@ -141,6 +141,8 @@ describe("engine markdown source view", () => {
           return () => remoteListeners.delete(listener);
         },
       ),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       // The engine editor subscribes to real settle outcomes on mount (the
       // save indicator is no longer a timer). Without this the hook throws

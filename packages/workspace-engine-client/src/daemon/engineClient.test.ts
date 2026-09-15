@@ -5,8 +5,9 @@ import * as Y from "yjs";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
-import type { Envelope, Request } from "../protocol";
+import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
+import { encodeNativeRestoreInput } from "./nativeRestore";
 import {
   EngineClient,
   EngineClientError,
@@ -29,6 +30,406 @@ const LIMITS = {
   maxBatchLen: 64,
   maxJsonDepth: 32,
 };
+
+describe("private owner delivery transport", () => {
+  const request={id:970,workspace:"workspace",deadlineMs:30_000};
+  const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it("discovers durable drafts, opens their binary state and appends without a caller base", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    const descriptor={...target,revision:1,acceptedCursor:0,nativeHeadSequence:2,outboxId:null,pendingBytes:0,state:null};
+    let wireId=0,digest="";
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;
+      if(e.method==="ydoc.ownerDelivery.listDrafts") peer.send({type:"response",id:e.id,result:{drafts:[descriptor],next:null}});
+      else if(e.method==="ydoc.ownerDelivery.openDraft") {
+        const bytes=Buffer.from([0,0]),sha=createHash("sha256").update(bytes).digest("hex");
+        peer.send({type:"blobStart",requestId:e.id,streamId:e.id,totalBytes:2,sha256:sha});peer.sendRaw(blobChunkFrame(e.id,bytes,true));
+        peer.send({type:"response",id:e.id,result:{status:"draft",draft:descriptor,streamId:e.id,byteLength:2,digest:sha}});
+      } else { expect(e.method).toBe("ydoc.ownerDelivery.appendDraft");expect(e.params).not.toHaveProperty("baseUpdate");expect(e.params).not.toHaveProperty("registrationId");wireId=e.id;digest=(e.params as Record<string,string>).digest; }
+    };
+    peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{outboxId:"outbox",sequence:1,deliveryId:"delivery",updateDigest:digest,pendingBytes:2,oldestEntryAtMs:3,state:"active"}});};
+    try {
+      expect(await transport.ownerYDocListDrafts(request,{after:null,limit:8})).toEqual({drafts:[descriptor],next:null});
+      expect(await transport.ownerYDocOpenDraft({...request,id:971},{binding:target.binding,expectedRevision:1})).toEqual({draft:descriptor,initialUpdate:Buffer.from([0,0])});
+      expect(await transport.ownerYDocAppendDraft({...request,id:972},{binding:target.binding,expectedRevision:1,appendKey:"edit",updateBytes:Uint8Array.of(0,0)})).toMatchObject({outboxId:"outbox",sequence:1,pendingBytes:2});
+    } finally {transport.close();}
+  });
+  it("captures native state and enrolls an exact binary host cut without caller limits", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge(); await transport.ready();
+    const captured={nativeHeadSequence:2,localStateDigest:"ab".repeat(32)}, draft={...target,revision:1,acceptedCursor:9,nativeHeadSequence:3,outboxId:"pending",pendingBytes:2,state:"active"};
+    let wireId=0;const chunks:Buffer[]=[];
+    peer.onEnvelope=e=>{if(e.type!=="request")return;
+      if(e.method==="ydoc.ownerDelivery.prepareEnrollment") {expect(e.params).toEqual(target);peer.send({type:"response",id:e.id,result:{status:"capture",captured}});}
+      else {expect(e.method).toBe("ydoc.ownerDelivery.enroll");expect(e.params).toMatchObject({...target,captured,journalCursor:9,hostVectorByteLength:1});expect(e.params).not.toHaveProperty("limits");wireId=e.id;}
+    };
+    peer.onBlobChunk=frame=>{chunks.push(Buffer.from(frame.payload));if(frame.fin)peer.send({type:"response",id:wireId,result:{draft}});};
+    try {
+      expect(await transport.ownerYDocPrepareEnrollment(request,target)).toEqual({status:"capture",captured});
+      expect(await transport.ownerYDocEnroll({...request,id:971},{...target,captured,journalCursor:9,hostVector:Uint8Array.of(0),checkpoint:Uint8Array.of(0,0)})).toEqual(draft);
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([0,0,0]));
+    } finally {transport.close();}
+  });
+  it("reads a bounded accepted vector without a host registration", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;
+      expect(e.method).toBe("ydoc.ownerDelivery.readState");expect(e.params).toEqual(target);
+      const bytes=Buffer.from([0]),digest=createHash("sha256").update(bytes).digest("hex");
+      peer.send({type:"blobStart",requestId:e.id,streamId:e.id,totalBytes:1,sha256:digest});
+      peer.sendRaw(blobChunkFrame(e.id,bytes,true));
+      peer.send({type:"response",id:e.id,result:{status:"state",revision:2,acceptedCursor:19,nativeHeadSequence:3,streamId:e.id,byteLength:1,digest}});
+    };
+    try { expect(await transport.ownerYDocReadState(request,target)).toEqual({revision:2,acceptedCursor:19,nativeHeadSequence:3,stateVector:Buffer.from([0])}); }
+    finally {transport.close();}
+  });
+  it("streams a 20 MiB update with a separate host vector and retains its cut", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    let wireId=0;const chunks:Buffer[]=[];
+    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;expect(e.method).toBe("ydoc.ownerDelivery.applyInitialSync");expect(e.params).not.toHaveProperty("registrationId");expect(e.params).toHaveProperty("hostVectorByteLength",1);};
+    peer.onBlobChunk=frame=>{chunks.push(Buffer.from(frame.payload));if(frame.fin)peer.send({type:"response",id:wireId,result:{revision:2,acceptedCursor:19,nativeHeadSequence:3}});};
+    const updateBytes=Buffer.alloc(20*1024*1024,7);
+    try {
+      expect(await transport.ownerYDocApplyInitialSync(request,{...target,expectedRevision:1,expectedNativeHeadSequence:2,previousAcceptedCursor:0,journalCursor:19,updateBytes,hostVector:Uint8Array.of(0)})).toEqual({revision:2,acceptedCursor:19,nativeHeadSequence:3});
+      const bytes=Buffer.concat(chunks);expect(bytes.length).toBe(updateBytes.length+1);expect(bytes[0]).toBe(0);expect(bytes.subarray(1).equals(updateBytes)).toBe(true);
+    } finally {transport.close();}
+  });
+  it("checks receipt containment separately and rejects a mismatched applied cursor", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();let wireId=0;
+    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;if(e.method==="ydoc.ownerDelivery.isReceiptApplied")peer.send({type:"response",id:e.id,result:{applied:false}});};
+    peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{revision:2,acceptedCursor:18,nativeHeadSequence:3}});};
+    try {
+      expect(await transport.ownerYDocIsReceiptApplied(request,{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe(false);
+      await expect(transport.ownerYDocApplyAcceptedFrame({...request,id:971},{...target,expectedRevision:1,expectedNativeHeadSequence:2,previousAcceptedCursor:0,journalCursor:19,updateBytes:Uint8Array.of(0,0)})).rejects.toThrow("differs from request");
+    } finally {transport.close();}
+  });
+});
+
+describe("private imported owner capture", () => {
+  it("captures on an attached workspace before registration and preserves a shared client on cancellation", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close");
+    const arrived = Promise.withResolvers<void>();
+    let respond = false, retained = false;
+    const baseline = Buffer.from([0, 0]), full = Buffer.from([1, 1, 1]), bytes = Buffer.concat([baseline, full]);
+    const digest = (value: Buffer) => createHash("sha256").update(value).digest("hex");
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      expect(envelope.method).toBe("liveApplication.captureOwnerActivation");
+      expect(envelope.params).toEqual({ path: "owner.md", maxBytes: 1000, ...(retained ? {activationId:`ordinary-activation-${"a".repeat(64)}`} : {}) });
+      arrived.resolve();
+      if (!respond) return;
+      const id = envelope.id;
+      peer.send({ type: "blobStart", requestId: id, streamId: id, totalBytes: bytes.length, sha256: digest(bytes) });
+      peer.sendRaw(blobChunkFrame(id, bytes, true));
+      peer.send({ type: "response", id, result: {
+        status: "captured", activationId: `ordinary-activation-${"a".repeat(64)}`, sessionId: "native-session",
+        baselineByteLength: baseline.length, streamId: id, byteLength: bytes.length, digest: digest(bytes),
+        source: { version: 1, relayDatabaseNamespace: "relay", workspaceId: "workspace", mainVersionId: "main",
+          objectId: "object", lineageClaimId: digest(baseline), currentPath: "owner.md", replicationEpoch: "epoch",
+          streamIdentity: "stream", committedCursor: 10, baseOriginId: "peer", baseOriginSeq: 2, baseRelaySeq: 8,
+          sourceMomentId: "source", sourceDigest: digest(Buffer.from("source")), sourceByteLength: 6,
+          nativeHeadSequence: 1, fullStateDigest: digest(full), fullStateByteLength: full.length },
+      } });
+    };
+    try {
+      const request = { id: 975, workspace: "workspace", deadlineMs: 30_000 };
+      const abort = new AbortController();
+      const pending = transport.captureOwnerActivation(request, "owner.md", 1000, abort.signal);
+      const rejected = expect(pending).rejects.toThrow();
+      await arrived.promise; abort.abort(); await rejected;
+      expect(closed).not.toHaveBeenCalled();
+      respond = true;
+      const captured = await transport.captureOwnerActivation({ ...request, id: 976 }, "owner.md", 1000);
+      expect(captured.sessionId).toBe("native-session");
+      expect(captured.fullState).toEqual(full);
+      retained = true;
+      const resumed = await transport.captureOwnerActivation({...request,id:977}, "owner.md", 1000, undefined, captured.activationId);
+      expect(resumed.activationId).toBe(captured.activationId);
+      expect(resumed.source).toEqual(captured.source);
+    } finally { transport.close(); }
+  });
+});
+
+describe("private applied sync transport",()=>{
+  const request={id:970,workspace:"workspace",registrationId:7,deadlineMs:30_000};
+  const position={eventCount:0,journalCursor:0,evidenceDigest:"ab".repeat(32)};
+  const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0};
+  const outputBytes=Buffer.from([0,0,0]);
+  function output(peer:FakePeerConnection,id:number,result:Record<string,JsonValue>,bytes=outputBytes) {
+    const digest=createHash("sha256").update(bytes).digest("hex");
+    peer.send({type:"blobStart",requestId:id,streamId:id,totalBytes:bytes.length,sha256:digest});
+    peer.sendRaw(blobChunkFrame(id,bytes,true));
+    peer.send({type:"response",id,result:{...result,streamId:id,byteLength:bytes.length,digest}});
+  }
+  it.each(["queued", "header", "chunk", "final"] as const)("finishes reserved sync input after cancellation at %s without closing another reader", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close"), reached = Promise.withResolvers<void>();
+    const vector = Buffer.alloc(2 * LIMITS.maxBlobChunkBytes + 1, 7), expectedVector = vector.slice();
+    const chunks: Buffer[] = [];
+    let blockerId = 0, wireId = 0, held = false;
+    const hold = () => {if (!held) {held = true; peer.backpressured = true; reached.resolve();}};
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "blocker") {blockerId = envelope.id; hold();}
+      else if (envelope.method === "liveApplication.syncOpen") {wireId = envelope.id; if (mode === "header") hold();}
+      else if (envelope.method === "liveApplication.appliedRead") peer.send({type: "response",id: envelope.id,result: {status: "empty",after: position}});
+      else if (envelope.method === "liveApplication.ack") peer.send({type: "response",id: envelope.id,result: {status: "missing"}});
+    };
+    peer.onBlobChunk = frame => {
+      chunks.push(Buffer.from(frame.payload));
+      if (mode === "chunk" && !frame.fin || mode === "final" && frame.fin) hold();
+    };
+    const signal = new AbortController();
+    let blocker: Promise<unknown> | undefined;
+    try {
+      if (mode === "queued") {blocker = transport.sendRequest({id: 969,method: "blocker",params: {},deadlineMs: 30_000}); void blocker.catch(() => {}); await reached.promise;}
+      const sync = transport.openLiveAppliedSync(request,vector,{maxInputBytes: vector.length,maxOutputBytes: 32},signal.signal);
+      const cancelled = sync.catch(error => error);
+      if (mode !== "queued") await reached.promise;
+      signal.abort(new Error("browser closed"));
+      expect(closed).not.toHaveBeenCalled();
+      await expect(transport.readNextLiveApplied({...request,id: 971},position,32)).rejects.toThrow("capacity is full");
+      if (blockerId) peer.send({type: "response",id: blockerId,result: {done: true}});
+      peer.drain(); await blocker;
+      expect(await cancelled).toBeInstanceOf(EngineClientError);
+      expect(Buffer.concat(chunks)).toEqual(expectedVector);
+      expect(await transport.readNextLiveApplied({...request,id: 972},position,32)).toBeNull();
+      expect(await transport.readLiveApplicationAck({...request,id: 973},{deliveryId: "delivery",updateDigest: "ab".repeat(32)})).toBeNull();
+      expect(peer.received).toContainEqual({type: "cancel",id: wireId});
+      expect(closed).not.toHaveBeenCalled();
+    } finally {peer.drain(); transport.close();}
+  });
+  it.each(["answered", "unanswered"] as const)("rejects duplicate sync responses after cancelling %s final input", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024, maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const closed = vi.spyOn(peer, "close"), reached = Promise.withResolvers<void>();
+    let wireId = 0;
+    peer.onEnvelope = envelope => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    peer.onBlobChunk = frame => {
+      if (!frame.fin) return;
+      peer.backpressured = true;
+      if (mode === "answered") output(peer, wireId, {status: "sync", binding, position,
+        observedLocalYDocHeadSequence: 5, hostVectorByteLength: 1});
+      reached.resolve();
+    };
+    const signal = new AbortController();
+    try {
+      const sync = transport.openLiveAppliedSync(request, Uint8Array.of(0), {maxInputBytes: 8, maxOutputBytes: 32}, signal.signal);
+      const cancelled = expect(sync).rejects.toThrow("cancelled");
+      await reached.promise;
+      signal.abort(); peer.drain(); await cancelled;
+      expect(peer.received).toContainEqual({type: "cancel", id: wireId});
+      expect(closed).not.toHaveBeenCalled();
+      if (mode === "unanswered") {
+        peer.send({type: "response", id: wireId, result: {status: "cancelled"}});
+        expect(closed).not.toHaveBeenCalled();
+      }
+      peer.send({type: "response", id: wireId, result: {status: "duplicate"}});
+      expect(closed).toHaveBeenCalledOnce();
+      await expect(transport.sendRequest({id: 971, method: "after-duplicate", params: {}}))
+        .rejects.toMatchObject({code: "protocol-error"});
+    } finally {peer.drain(); transport.close();}
+  });
+  it.each(["queued", "written"] as const)("cancels a %s applied read without retiring the shared client", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer, {privateLiveApplication: {aggregateBytes: 128*1024*1024,maxUploads: 1}});
+    peer.acknowledge(); await transport.ready();
+    const blocked = Promise.withResolvers<void>();
+    let firstRead = true, blockerId = 0;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "blocker") {blockerId = envelope.id; peer.backpressured = true; blocked.resolve();}
+      else if (envelope.method === "liveApplication.appliedRead") {
+        if (mode === "written" && firstRead) {firstRead = false; peer.backpressured = true; blocked.resolve(); return;}
+        peer.send({type: "response",id: envelope.id,result: {status: "empty",after: position}});
+      } else if (envelope.method === "liveApplication.ack") peer.send({type: "response",id: envelope.id,result: {status: "missing"}});
+    };
+    const signal = new AbortController();
+    let blocker: Promise<unknown> | undefined;
+    try {
+      if (mode === "queued") {
+        blocker = transport.sendRequest({id: 969,method: "blocker",params: {},deadlineMs: 30_000});
+        void blocker.catch(() => {}); await blocked.promise;
+      }
+      const read = transport.readNextLiveApplied(request,position,32,signal.signal);
+      const cancelled = expect(read).rejects.toThrow("reader cancelled");
+      if (mode === "written") await blocked.promise;
+      signal.abort(new Error("reader cancelled")); await cancelled;
+      if (blockerId) peer.send({type: "response",id: blockerId,result: {done: true}});
+      peer.drain(); await blocker;
+      expect(await transport.readNextLiveApplied({...request,id: 971},position,32)).toBeNull();
+      expect(await transport.readLiveApplicationAck({...request,id: 972},{deliveryId: "delivery",updateDigest: "ab".repeat(32)})).toBeNull();
+    } finally {peer.drain(); transport.close();}
+  });
+  it.each(["valid","vector-length","extra","position"])("checks %s sync output",async mode=>{
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();let id=0;
+    peer.onEnvelope=e=>{if(e.type!=="request")return;id=e.id;expect(e.method).toBe("liveApplication.syncOpen");expect(e.params).toHaveProperty("registrationId",7);};
+    peer.onBlobChunk=frame=>{if(frame.fin)output(peer,id,{status:"sync",binding,position:mode==="position"?{...position,eventCount:2}:position,
+      observedLocalYDocHeadSequence:5,hostVectorByteLength:mode==="vector-length"?2:1,...(mode==="extra"?{extra:true}:{})});};
+    try {
+      const call=transport.openLiveAppliedSync(request,Uint8Array.of(0),{maxInputBytes:8,maxOutputBytes:32});
+      if(mode==="valid") {const cut=await call;expect(cut.hostVector).toEqual(Buffer.from([0]));expect(cut.missingStateUpdate).toEqual(Buffer.from([0,0]));expect(cut.observedLocalYDocHeadSequence).toBe(5);}
+      else await expect(call).rejects.toThrow();
+    }finally{transport.close();}
+  });
+  it.each(["update","empty","gap","wrong-digest","empty-with-blob"])("checks %s applied feed output",async mode=>{
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;expect(e.method).toBe("liveApplication.appliedRead");
+      if(mode==="empty") {peer.send({type:"response",id:e.id,result:{status:"empty",after:position}});return;}
+      if(mode==="empty-with-blob") {output(peer,e.id,{status:"empty",after:position});return;}
+      const digest=createHash("sha256").update(outputBytes).digest("hex");
+      output(peer,e.id,{status:"update",position:{eventCount:mode==="gap"?2:1,journalCursor:11,evidenceDigest:"ef".repeat(32)},
+        ack:{deliveryId:"delivery",updateDigest:mode==="wrong-digest"?"aa".repeat(32):digest,journalCursor:11,acceptingHostEpoch:1,localYDocSequence:1,applicationReplayed:true}});
+    };
+    try {
+      const call=transport.readNextLiveApplied(request,position,32);
+      if(mode==="update")expect((await call)?.position.journalCursor).toBe(11);
+      else if(mode==="empty")expect(await call).toBeNull();
+      else await expect(call).rejects.toThrow();
+    }finally{transport.close();}
+  });
+});
+
+describe("private application ACK read", () => {
+  const call = { id: 920, workspace: "workspace", registrationId: 7, deadlineMs: 30_000 };
+  const identity = { deliveryId: "delivery", updateDigest: "ab".repeat(32) };
+  it.each(["historical", "missing", "wrong-id", "wrong-digest", "relay-receipt", "not-replayed", "extra"])("handles %s evidence", async mode => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const ack = { ...identity, journalCursor: 4, acceptingHostEpoch: 1, localYDocSequence: 2, applicationReplayed: true };
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      expect(envelope.method).toBe("liveApplication.ack");
+      expect(envelope.params).toEqual({ registrationId: 7, ...identity });
+      let result: Extract<Envelope, { type: "response" }>["result"] = { status: "applied", ack: { ...ack,
+        ...(mode === "wrong-id" ? { deliveryId: "other" } : {}),
+        ...(mode === "wrong-digest" ? { updateDigest: "cd".repeat(32) } : {}),
+        ...(mode === "not-replayed" ? { applicationReplayed: false } : {}),
+      } };
+      if (mode === "missing") result = { status: "missing" };
+      if (mode === "relay-receipt") result = { status: "applied", ack: { ...identity, journalCursor: 4, acceptingHostEpoch: 1 } };
+      if (mode === "extra") result = { status: "missing", ack };
+      peer.send({ type: "response", id: envelope.id, result });
+    };
+    try {
+      const pending = transport.readLiveApplicationAck(call, identity);
+      if (mode === "historical") expect(await pending).toEqual(ack);
+      else if (mode === "missing") expect(await pending).toBeNull();
+      else await expect(pending).rejects.toThrow();
+    } finally { transport.close(); }
+  });
+});
+
+describe("private native restore transport", () => {
+  const input = encodeNativeRestoreInput(Buffer.from('{"fence":{}}'), 128);
+  it("frames one bounded restore header without a caller-supplied owner cut", () => {
+    const header = Buffer.from('{"fence":{}}'), encoded = encodeNativeRestoreInput(header, header.length + 4);
+    expect(new DataView(encoded.buffer).getUint32(0, true)).toBe(header.length);
+    expect(encoded.subarray(4)).toEqual(new Uint8Array(header));
+    expect(encoded.length).toBe(header.length + 4);
+    expect(() => encodeNativeRestoreInput(header, header.length + 3)).toThrow();
+    expect(() => encodeNativeRestoreInput(new Uint8Array(), 128)).toThrow();
+  });
+  const call = { id: 903, workspace: "ws-0000000000000001", deadlineMs: 30_000 };
+  async function connected() {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    return { peer, transport };
+  }
+  function reply(peer: FakePeerConnection, wireId: number, bytes = Buffer.from("raw receipt"), status = "applied") {
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    peer.send({ type: "blobStart", requestId: wireId, streamId: wireId, totalBytes: bytes.length, sha256: digest });
+    peer.sendRaw(blobChunkFrame(wireId, bytes, true));
+    peer.send({ type: "response", id: wireId, result: { status, streamId: wireId, byteLength: bytes.length, digest } });
+  }
+  it("sends host-scoped binary input and retains raw output through its final descriptor", async () => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      wireId = envelope.id;
+      expect(envelope.method).toBe("liveApplication.applyRestore");
+      expect(envelope.params).not.toHaveProperty("registrationId");
+      expect(envelope.params).toHaveProperty("maxOutputBytes",128);
+    };
+    peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
+    try {
+      const result = await transport.sendLiveRestore(call, "apply", input, 128);
+      expect(result.response.id).toBe(call.id);
+      expect(result.bytes.toString()).toBe("raw receipt");
+    } finally { transport.close(); }
+  });
+  it("rejects an unsatisfiable restore bound before sending the request",async()=>{
+    const {peer,transport}=await connected();
+    const requests=vi.fn();peer.onEnvelope=requests;
+    try{
+      await expect(transport.sendLiveRestore(call,"prepare",input,64*1024*1024+1)).rejects.toThrow("Invalid native restore bounds");
+      expect(requests).not.toHaveBeenCalled();
+    }finally{transport.close();}
+  });
+  it.each(["too large", "unknown length", "duplicate", "missing blob", "wrong digest", "wrong status"])("refuses %s restore output", async mode => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    peer.onEnvelope = envelope => { if (envelope.type === "request") wireId = envelope.id; };
+    peer.onBlobChunk = frame => {
+      if (!frame.fin) return;
+      if (mode === "missing blob") {
+        peer.send({ type: "response", id: wireId, result: { status: "applied" } });
+      } else if (mode === "wrong status") reply(peer, wireId, Buffer.from("raw"), "settled");
+      else {
+        peer.send({ type: "blobStart", requestId: wireId, streamId: wireId,
+          totalBytes: mode === "unknown length" ? null : mode === "too large" ? 129 : 3, sha256: "a".repeat(64) });
+        if (mode === "duplicate") peer.send({ type: "blobStart", requestId: wireId, streamId: wireId + 1, totalBytes: 3, sha256: "a".repeat(64) });
+        if (mode === "wrong digest") peer.sendRaw(blobChunkFrame(wireId, Buffer.from("raw"), true));
+      }
+    };
+    try { await expect(transport.sendLiveRestore(call, "apply", input, 128)).rejects.toThrow(); }
+    finally { transport.close(); }
+  });
+  it("releases a cancelled partial response before accepting the next reserved request", async () => {
+    const { peer, transport } = await connected();
+    let wireId = -1;
+    let uploadDone!: () => void;
+    const drained = new Promise<void>(resolve => { uploadDone = resolve; });
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      if (envelope.method === "barrier") peer.send({ type: "response", id: envelope.id, result: {} });
+      else wireId = envelope.id;
+    };
+    peer.onBlobChunk = frame => { if (frame.fin) uploadDone(); };
+    const controller = new AbortController();
+    const pending = transport.sendLiveRestore(call, "apply", input, 128, controller.signal);
+    const rejected = expect(pending).rejects.toThrow();
+    try {
+      await drained;
+      // Yield through the actual write completion before cancelling.
+      await transport.sendRequest({ ...request(999, "barrier"), deadlineMs: 30_000 });
+      const oldId = wireId;
+      const bytes = Buffer.from("raw");
+      peer.send({ type: "blobStart", requestId: oldId, streamId: oldId, totalBytes: 3, sha256: createHash("sha256").update(bytes).digest("hex") });
+      peer.sendRaw(blobChunkFrame(oldId, bytes.subarray(0, 1), false));
+      controller.abort();
+      await rejected;
+      peer.sendRaw(blobChunkFrame(oldId, bytes.subarray(1), true));
+      peer.onBlobChunk = frame => { if (frame.fin) reply(peer, wireId); };
+      await expect(transport.sendLiveRestore({ ...call, id: 904 }, "apply", input, 128)).resolves.toHaveProperty("bytes");
+    } finally { controller.abort(); transport.close(); }
+  });
+});
 
 function helloAck(
   limits: typeof LIMITS = LIMITS,
@@ -428,11 +829,13 @@ describe.each(["application", "bootstrap"] as const)(
     );
     it.each([
       "abort",
+      "abort-no-drain",
+      "abort-final-response",
       "early-response",
       "early-response-no-drain",
       "final-response-no-drain",
     ])(
-      "bounds concurrent uploads and closes partial streams after %s",
+      "bounds concurrent uploads and preserves framing after %s",
       async (mode) => {
         const peer = new FakePeerConnection();
         const transport = client(peer, {
@@ -474,7 +877,7 @@ describe.each(["application", "bootstrap"] as const)(
           let chunks = 0;
           peer.onEnvelope = (envelope) => {
             if (
-              mode !== "final-response-no-drain" &&
+              mode !== "final-response-no-drain" && mode !== "abort-final-response" &&
               envelope.type === "blobStart"
             ) {
               peer.backpressured = true;
@@ -483,7 +886,7 @@ describe.each(["application", "bootstrap"] as const)(
           };
           peer.onBlobChunk = () => {
             chunks++;
-            if (mode === "final-response-no-drain" && chunks === streamCount) {
+            if ((mode === "final-response-no-drain" || mode === "abort-final-response") && chunks === streamCount) {
               peer.backpressured = true;
               reached.resolve();
               peer.send({
@@ -522,7 +925,11 @@ describe.each(["application", "bootstrap"] as const)(
               event,
             ),
           ).rejects.toThrow("capacity is full");
-          if (mode === "abort") signal.abort();
+          if (mode.startsWith("abort")) {
+            signal.abort();
+            if (mode !== "abort-no-drain") {peer.onEnvelope = null; peer.drain();}
+            else await vi.advanceTimersByTimeAsync(30_000);
+          }
           else {
             if (mode !== "final-response-no-drain")
               peer.send({
@@ -536,8 +943,17 @@ describe.each(["application", "bootstrap"] as const)(
           expect(await pending).toBeInstanceOf(EngineClientError);
           peer.drain();
           expect(chunks).toBe(
-            mode === "final-response-no-drain" ? streamCount : 0,
+            mode === "final-response-no-drain" || mode === "abort" || mode === "abort-final-response" ? streamCount : 0,
           );
+          if (mode === "abort" || mode === "abort-final-response") {
+            expect(peer.received).toContainEqual({type:"cancel",id:1});
+            peer.onEnvelope = envelope => {
+              if (envelope.type === "request") peer.send({type:"response",id:envelope.id,result:{}});
+            };
+            await expect(transport.sendRequest(request(99,"after.cancel"))).resolves.toMatchObject({result:{}});
+            expect(vi.getTimerCount()).toBe(0);
+            return;
+          }
           await expect(
             transport.sendRequest(request(99, "after.partial")),
           ).rejects.toThrow("is closed");
@@ -1061,8 +1477,8 @@ describe("private baseline upload", () => {
         }),
       ).rejects.toThrow("capacity is full");
       abort.abort();
-      expect(await pending).toBeInstanceOf(EngineClientError);
       peer.drain();
+      expect(await pending).toBeInstanceOf(EngineClientError);
     } finally {
       abort.abort();
       transport.close();

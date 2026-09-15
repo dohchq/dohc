@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
@@ -17,7 +18,7 @@ const OWNER_YDOC_OUTBOX_METHOD = {
   quarantine: "ydoc.ownerOutbox.quarantine",
 } as const;
 
-export interface OwnerYDocOutboxLimits {
+interface OwnerYDocOutboxLimits {
   readonly maxPendingBytes: number;
   readonly maxPendingAgeMs: number;
 }
@@ -68,6 +69,8 @@ export interface OwnerYDocOutboxPending {
 export interface OwnerYDocOutboxHead extends Omit<OwnerYDocOutboxPending, "entries"> {
   readonly entry: OwnerYDocOutboxEntry | null;
 }
+
+export type OwnerYDocOutboxDeliveryHead = Omit<OwnerYDocOutboxHead, "baseUpdate">;
 
 export class OwnerYDocOutboxReadChangedError extends Error {
   constructor() {
@@ -249,7 +252,15 @@ export class OwnerYDocOutbox {
     return { ...pending, entry: entries[0] ?? null };
   }
 
-  private async readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending> {
+  /** Reads one update for an already adopted lineage, without retransferring its immutable base. */
+  async readDeliveryHead(outboxId: string, binding: LiveObjectBinding): Promise<OwnerYDocOutboxDeliveryHead> {
+    const { entries, ...pending } = await this.readSnapshot(outboxId, true, parseLiveObjectBinding(binding));
+    return { ...pending, entry: entries[0] ?? null };
+  }
+
+  private readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending>;
+  private readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate">>;
+  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array}> {
     this.assertLive();
     let next: ReadCursor | null | undefined;
     let snapshot: string | undefined;
@@ -318,7 +329,27 @@ export class OwnerYDocOutbox {
     const nextSequence = wireInteger(raw, "nextSequence", 1);
     if (count >= nextSequence || count > pendingBytes) throw new TypeError("Invalid owner outbox entry count.");
     const baseUpdateDigest = digestField(raw, "baseUpdateDigest");
-    const baseUpdate = await readPart("base", 0, wireInteger(raw, "baseByteLength", 1), baseUpdateDigest);
+    const baseByteLength = wireInteger(raw, "baseByteLength", 1);
+    const binding = parseLiveObjectBinding(raw.binding);
+    const firstEntryCursor = raw.firstEntryCursor === null ? null : readCursor(raw.firstEntryCursor);
+    if ((count === 0) !== (firstEntryCursor === null) || (firstEntryCursor !== null && (
+      firstEntryCursor.snapshot !== snapshot || firstEntryCursor.part !== "entryHeader"
+      || firstEntryCursor.offset !== 0 || firstEntryCursor.sequence < 1 || firstEntryCursor.sequence >= nextSequence
+    ))) throw new TypeError("Owner outbox first entry cursor does not match its header.");
+    if (deliveryBinding !== undefined && (!isDeepStrictEqual(binding, deliveryBinding)
+      || baseUpdateDigest !== deliveryBinding.lineageClaimId)) {
+      throw new TypeError("Owner outbox binding changed.");
+    }
+    const baseCursor = next as ReadCursor | null | undefined;
+    if (baseCursor == null || baseCursor.snapshot !== snapshot || baseCursor.part !== "base"
+      || baseCursor.sequence !== 0 || baseCursor.offset !== 0) {
+      throw new TypeError("Owner outbox base cursor does not match its header.");
+    }
+    const baseUpdate = deliveryBinding === undefined ? await readPart("base", 0, baseByteLength, baseUpdateDigest) : undefined;
+    if (deliveryBinding === undefined && !isDeepStrictEqual(next, firstEntryCursor)) {
+      throw new TypeError("Owner outbox first entry cursor changed.");
+    }
+    next = firstEntryCursor;
     const entries: OwnerYDocOutboxEntry[] = [];
     let lastSequence = 0;
     let remaining = pendingBytes;
@@ -361,9 +392,9 @@ export class OwnerYDocOutbox {
     const observed = raw.observedBinding;
     return {
       outboxId: stringField(raw, "outboxId"),
-      binding: parseLiveObjectBinding(raw.binding),
+      binding,
       baseUpdateDigest,
-      baseUpdate,
+      ...(baseUpdate === undefined ? {} : {baseUpdate}),
       state: state(raw.state),
       pendingBytes,
       oldestEntryAtMs:

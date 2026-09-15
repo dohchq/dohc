@@ -555,6 +555,11 @@ const DohcCallout = Node.create({
       return match.index === 0 ? 0 : match.index + 1
     },
     tokenize(src, _tokens, helpers) {
+      const newline = src.indexOf('\n')
+      const first = newline < 0 ? src : src.slice(0, newline)
+      if (!CALLOUT_LINE_RE.test(first)) return undefined
+      const header = CALLOUT_HEADER_RE.exec(stripBlockquotePrefix(first))
+      if (!header) return undefined
       const lines = src.split('\n')
       let count = 0
       // Track whether an open paragraph is currently continuable, so we only
@@ -611,8 +616,6 @@ const DohcCallout = Node.create({
       if (count === 0) return undefined
       const consumed = lines.slice(0, count)
       const inner = consumed.map(stripBlockquotePrefix)
-      const header = CALLOUT_HEADER_RE.exec(inner[0] ?? '')
-      if (!header) return undefined
       const [, calloutType = '', fold = '', title = ''] = header
       const body = inner.slice(1).join('\n')
       return {

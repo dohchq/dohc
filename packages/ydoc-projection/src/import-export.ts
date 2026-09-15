@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@tiptap/extension-table'
-import { TaskList } from '@tiptap/extension-list'
+import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskList } from '@tiptap/extension-list'
 import * as yaml from 'js-yaml'
 import {
   CORE_SCHEMA,
@@ -36,8 +36,8 @@ import {
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence } from './markdown-fence.js'
+import { getDohcYDocBodyFragment } from './body-fragment.js'
 
-const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
@@ -149,7 +149,54 @@ function prepareRenderedTableCell(markdown: string): string {
   return output
 }
 
+function firstLine(source: string): string {
+  const newline = source.indexOf('\n')
+  return newline < 0 ? source : source.slice(0, newline)
+}
+
+const orderedListTokenizer = OrderedList.config.markdownTokenizer!
+const taskListTokenizer = TaskList.config.markdownTokenizer!
+const tableTokenizer = Table.config.markdownTokenizer!
+const orderedListStart = new RegExp(`^(\\s*)(${ORDERED_LIST_MARKER_PATTERN})([.)])\\s+(.*)$`)
+
+// Tiptap 3.29.2 splits the remaining document before rejecting unrelated
+// blocks. Check only the first line, then leave eligible blocks to Tiptap.
+const MarkdownOrderedList = OrderedList.extend({
+  markdownTokenizer: {
+    ...orderedListTokenizer,
+    tokenize: (src, tokens, helpers) => {
+      if (!orderedListStart.test(firstLine(src))) return undefined
+      return orderedListTokenizer.tokenize(src, tokens, helpers)
+    },
+  },
+})
+const MarkdownTaskList = TaskList.extend({
+  markdownTokenizer: {
+    ...taskListTokenizer,
+    tokenize: (src, tokens, helpers) => {
+      // parseIndentedBlocks also accepts leading blank lines.
+      const firstContent = src.search(/\S/)
+      if (firstContent < 0) return undefined
+      const line = firstLine(src.slice(firstContent))
+      if (!/^([-+*])\s+\[([ xX])\]\s+(.*)$/.test(line)) return undefined
+      return taskListTokenizer.tokenize(src, tokens, helpers)
+    },
+  },
+})
+
 const MarkdownTable = Table.extend({
+  markdownTokenizer: {
+    ...tableTokenizer,
+    // Table.start only inspects the first two lines. Avoid splitting the full
+    // remaining document while probing ordinary blocks.
+    start: (src: string) => {
+      const newline = src.indexOf('\n')
+      if (newline < 0) return -1
+      const second = src.indexOf('\n', newline + 1)
+      const prefix = second < 0 ? src : src.slice(0, second)
+      return (tableTokenizer.start as (source: string) => number)(prefix)
+    },
+  },
   renderMarkdown: (node, helpers) => {
     const tableHelpers: MarkdownRendererHelpers = {
       ...helpers,
@@ -169,8 +216,9 @@ const MarkdownTable = Table.extend({
 
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
-  StarterKit,
-  TaskList,
+  StarterKit.configure({ orderedList: false }),
+  MarkdownOrderedList,
+  MarkdownTaskList,
   DohcTaskItem,
   MarkdownTable,
   TableCell,
@@ -207,7 +255,7 @@ export function markdownToYDoc(markdown: string): Y.Doc {
         }),
   })
 
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
+  const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
     usesCrlf ? body.replaceAll('\r\n', '\n') : body,
   )
@@ -477,10 +525,6 @@ export function getDohcYDocMeta(doc: Y.Doc): DohcMeta {
   }
 }
 
-export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
-  return doc.getXmlFragment(BODY_FIELD)
-}
-
 export function getDohcYDocPlainText(doc: Y.Doc): Y.Text | null {
   return getDohcYDocMeta(doc).contentKind === PLAIN_TEXT_CONTENT_KIND
     ? doc.getText(PLAIN_TEXT_FIELD)
@@ -498,7 +542,7 @@ function yDocBodyToMarkdown(doc: Y.Doc): string {
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
+  const bodyFragment = getDohcYDocBodyFragment(doc)
   return yXmlFragmentToProseMirrorRootNode(
     bodyFragment,
     schema,

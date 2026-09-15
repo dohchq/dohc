@@ -560,7 +560,7 @@ export function CommentsPanel(props: {
   const submitComment = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (
-      props.access !== "comment" ||
+      props.access === "view" ||
       followerPhaseRef.current !== "live" ||
       composerState !== "available" ||
       normalizedBody === null ||
@@ -694,7 +694,7 @@ export function CommentsPanel(props: {
     <aside className="comments-panel" aria-labelledby="comments-title">
       <h2 id="comments-title">Comments</h2>
       <p className="comments-helper">
-        {props.access === "comment"
+        {props.access !== "view"
           ? "Anyone with the link can also comment. Names they give are not verified."
           : "Anyone with the link can read what you selected."}
       </p>
@@ -750,7 +750,7 @@ export function CommentsPanel(props: {
           </div>
         </div>
       ) : null}
-      {currentLoadState === "ready" && props.access === "comment" ? (
+      {currentLoadState === "ready" && props.access !== "view" ? (
         <form
           className="comment-composer"
           aria-describedby={`${NAME_HELP_ID} ${SUBMIT_STATUS_ID}`}

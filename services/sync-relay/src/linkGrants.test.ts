@@ -1052,6 +1052,35 @@ describe("owner link contract", () => {
     },
   );
 
+  it.each([
+    ["view", "comment", true], ["view", "edit", true], ["comment", "edit", true],
+    ["comment", "view", false], ["edit", "comment", false], ["edit", "view", false],
+  ] as const)("storage %s to %s rotates credentials only when widening", async (from, access, widening) => {
+    const storage = await newStorage();
+    await seedFileShare(handler(storage));
+    const grantId = "rank-transition";
+    const original = {credentialId: "rank-original", grantId, secretHash: hmac("o".repeat(43)), generation: 1,
+      mintedAtMs: 2000, retiredAtMs: null};
+    expect(storage.createLinkGrant({
+      grant: {grantId, shareId: "share-existing", principalKind: "link", principalUserId: null,
+        principalEmail: null, access: from, generation: 1, status: "active", createdAtMs: 2000,
+        revokedAtMs: null, parentGrantId: null}, credential: original,
+    })).toBe(true);
+    const mintCredential = vi.fn(() => ({credentialId: "rank-replacement", secretHash: hmac("n".repeat(43))}));
+    const input = {shareId: "share-existing", grantId, access, changedAtMs: 3000,
+      expectedDependentGrantIds: [], guard: () => undefined};
+    expect(storage.retuneShareGrant({...input, ...(widening ? {} : {mintCredential})})).toEqual({ok: false});
+    expect(mintCredential).not.toHaveBeenCalled();
+    expect(storage.getShareGrant(grantId)).toMatchObject({access: from, generation: 1});
+    expect(storage.getCurrentLinkCredential(grantId)).toEqual(original);
+    expect(storage.retuneShareGrant({...input, ...(widening ? {mintCredential} : {})})).toMatchObject({ok: true});
+    expect(storage.getShareGrant(grantId)).toMatchObject({access, generation: widening ? 2 : 1});
+    expect(mintCredential).toHaveBeenCalledTimes(widening ? 1 : 0);
+    expect(storage.getCurrentLinkCredential(grantId)).toMatchObject(widening
+      ? {credentialId: "rank-replacement", generation: 2}
+      : original);
+  });
+
   it("refuses attach creation and retuning to edit", async () => {
     const access = "edit";
     const storage = await newStorage();
@@ -1092,7 +1121,7 @@ describe("owner link contract", () => {
   });
 
   it.each(["view", "comment"] as const)(
-    "refuses retuning an active Edit link down to %s before Phase 4",
+    "narrows an active Edit link down to %s while public Edit issuance is disabled",
     async (access) => {
       const storage = await newStorage();
       const h = handler(storage);
@@ -1134,8 +1163,9 @@ describe("owner link contract", () => {
         ),
       );
 
-      expect(response.status).toBe(404);
-      expect(storage.getShareGrant(grantId)).toEqual(beforeGrant);
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({ok: true, access, generation: 1});
+      expect(storage.getShareGrant(grantId)).toEqual({...beforeGrant, access});
       expect(storage.getCurrentLinkCredential(grantId)).toEqual(beforeCredential);
     },
   );
@@ -5597,5 +5627,94 @@ describe("relay link grants", () => {
       lastUsedAtMs: null,
       urlIssuedAtMs: 2_001,
     });
+  });
+});
+
+describe("explicit public Edit release", () => {
+  const exchangeKey = "public-edit-test-relay-key-at-least-32";
+  const releaseOptions: HandlerOverrides = {
+    publicEditRelease: {version: 1}, relayExchangeKey: exchangeKey,
+    namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000},
+  };
+  const exchangeRequest = (secret: string) => request(null, "/sync/link-exchange", {
+    ...jsonBody({secret}), headers: {"content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey},
+  });
+
+  it("requires relay prerequisites for a release marker", async () => {
+    const storage = await newStorage();
+    expect(() => handler(storage, {publicEditRelease: {version: 1}})).toThrow(/Public Edit release requires/);
+  });
+
+  it("issues Edit only when released, then permits narrowing after release is removed", async () => {
+    const storage = await newStorage();
+    const enabled = handler(storage, releaseOptions);
+    await seedFileShare(enabled, "edit");
+    expect((await json(await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`)))).supportedLinkAccess).toEqual(["view", "comment", "edit"]);
+    const createdResponse = await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/share-existing/links`, jsonBody({access: "edit"})));
+    expect(createdResponse.status).toBe(200);
+    const created = await json(createdResponse);
+    const secret = linkSecret(created.url), grantId = String(created.grantId);
+    expect((await enabled(exchangeRequest(secret))).status).toBe(200);
+    const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined});
+    expect((await closed(exchangeRequest(secret))).status).not.toBe(200);
+    expect((await json(await closed(request(OWNER, `/sync/${WORKSPACE}/shares/links`)))).supportedLinkAccess).toEqual(["view", "comment"]);
+    const rotate = `/sync/shares/share-existing/links/${grantId}/rotate`;
+    const retune = `/sync/shares/share-existing/links/${grantId}/retune`;
+    const transition = {workspaceId: WORKSPACE, expectedDependentGrantIds: []};
+    expect((await closed(request(OWNER, rotate, jsonBody(transition)))).status).toBe(400);
+    expect((await enabled(request(OWNER, rotate, jsonBody(transition)))).status).toBe(200);
+    expect((await closed(request(OWNER, retune, jsonBody({...transition, access: "comment"})))).status).toBe(200);
+    expect(storage.getShareGrant(grantId)?.access).toBe("comment");
+    expect((await closed(request(OWNER, retune, jsonBody({...transition, access: "edit"})))).status).toBe(400);
+    expect((await enabled(request(OWNER, retune, jsonBody({...transition, access: "edit"})))).status).toBe(200);
+    expect((await closed(request(OWNER, "/sync/shares/share-existing/revoke", jsonBody({...transition, grantId})))).status).toBe(200);
+  });
+
+  it("renews Edit only while release and the capability generation remain current", async () => {
+    const storage = await newStorage();
+    const newLinkBearer = vi.fn(() => mintLinkBearer());
+    const enabled = handler(storage, {...releaseOptions, newLinkBearer});
+    await seedFileShare(enabled, "edit");
+    const createdResponse = await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/share-existing/links`, jsonBody({access: "edit"})));
+    expect(createdResponse.status).toBe(200);
+    const created = await json(createdResponse);
+    const exchangedResponse = await enabled(exchangeRequest(linkSecret(created.url)));
+    expect(exchangedResponse.status).toBe(200);
+    const exchanged = await json(exchangedResponse);
+    const renewal = (capability: unknown) => request(null, "/sync/link-refresh", {
+      method: "POST", headers: {authorization: `LinkCapability ${String(capability)}`, "x-dohc-relay-exchange-key": exchangeKey},
+    });
+    const renewedResponse = await enabled(renewal(exchanged.capabilityToken));
+    expect(renewedResponse.status).toBe(200);
+    const renewed = await json(renewedResponse);
+    expect(renewed).toMatchObject({access: "edit", generation: 1});
+    expect(renewed.capabilityToken).not.toBe(exchanged.capabilityToken);
+
+    const closed = handler(storage, {...releaseOptions, publicEditRelease: undefined, newLinkBearer});
+    const mintedBeforeClosure = newLinkBearer.mock.calls.length;
+    expect((await closed(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeClosure);
+
+    const rotatedResponse = await enabled(request(OWNER, `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
+      jsonBody({workspaceId: WORKSPACE, expectedDependentGrantIds: []})));
+    expect(rotatedResponse.status).toBe(200);
+    const rotated = await json(rotatedResponse);
+    const mintedBeforeStaleRenewal = newLinkBearer.mock.calls.length;
+    expect((await enabled(renewal(renewed.capabilityToken))).status).toBe(401);
+    expect(newLinkBearer).toHaveBeenCalledTimes(mintedBeforeStaleRenewal);
+    const freshResponse = await enabled(exchangeRequest(linkSecret(rotated.url)));
+    expect(freshResponse.status).toBe(200);
+    const fresh = await json(freshResponse);
+    const currentResponse = await enabled(renewal(fresh.capabilityToken));
+    expect(currentResponse.status).toBe(200);
+    expect(await json(currentResponse)).toMatchObject({access: "edit", generation: 2});
+  });
+
+  it("refuses pinned Edit creation even with release enabled", async () => {
+    const storage = await newStorage(), enabled = handler(storage, releaseOptions);
+    await enabled(request(OWNER, "/sync/workspaces", jsonBody({workspaceId: WORKSPACE})));
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({versionId: "version-pinned", access: "edit"})))).status).toBe(400);
+    expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
+    expect((await enabled(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({paths: ["docs"], access: "edit"})))).status).toBe(200);
   });
 });

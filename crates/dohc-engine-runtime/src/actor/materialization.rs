@@ -256,7 +256,11 @@ fn active_projection_coordinates(
         .read_with(|connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT workspace_id, version_id FROM active_versions ORDER BY workspace_id",
+                    "SELECT w.workspace_id, COALESCE(v.version_id, w.main_version_id) \
+                     FROM versioned_workspaces w \
+                     LEFT JOIN active_versions a ON a.workspace_id = w.workspace_id \
+                     LEFT JOIN versions v ON v.workspace_id = a.workspace_id \
+                       AND v.version_id = a.version_id ORDER BY w.workspace_id",
                 )
                 .map_err(StorageError::corrupt_public)?;
             let rows = statement

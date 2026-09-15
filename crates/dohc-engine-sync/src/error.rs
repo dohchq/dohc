@@ -23,6 +23,8 @@ impl std::fmt::Display for ObservedBytes {
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("live document binding is still active")]
+    LiveDocumentBindingActive,
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("invalid replication input: {reason}")]
@@ -140,6 +142,7 @@ impl SyncError {
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
+            | SyncError::LiveDocumentBindingActive
             | SyncError::InputTooLarge { .. }
             | SyncError::UnsupportedOperation
             | SyncError::ShareBoundaryViolation
@@ -162,6 +165,7 @@ impl SyncError {
 
     pub const fn code(&self) -> &'static str {
         match self {
+            SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",

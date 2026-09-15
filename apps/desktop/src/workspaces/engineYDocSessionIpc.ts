@@ -6,6 +6,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 import {
   AcknowledgeEngineYDocLineageReplacementPayload,
@@ -16,6 +17,7 @@ import {
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
   EngineYDocSaveStateEvent,
+  EngineYDocOwnerHandoff,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
@@ -61,10 +63,10 @@ export interface EngineYDocIpcSender {
   once(event: "destroyed", listener: () => void): this;
 }
 
-export type EngineYDocSessionCapture = Pick<
-  WorkspaceEngineCapture,
-  "openYDocSession"
->;
+export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & { liveWritable?(): boolean };
+export interface EngineYDocSessionCapture {
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number) => void}): Promise<EngineYDocSessionProvider>;
+}
 
 interface EngineYDocWorkspace {
   workspaceId: string;
@@ -92,6 +94,7 @@ interface EngineYDocSessionIpcOptions {
   ) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
+  sharedCaptureFor?: (workspace: EngineYDocWorkspace) => Promise<EngineYDocSessionCapture | null>;
   resolveDocumentPath: (
     workspace: EngineYDocWorkspace,
     path: string,
@@ -111,8 +114,9 @@ interface LineageReplacement {
 }
 
 interface EngineYDocIpcOwnedSession {
+  ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
-  provider: WorkspaceEngineYDocProviderSession;
+  provider: EngineYDocSessionProvider;
   saveSeq: EngineYDocSaveSeqState;
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
@@ -247,6 +251,7 @@ class EngineYDocSessionIpc {
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
+  readonly #sharedCaptureFor: EngineYDocSessionIpcOptions["sharedCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
     "resolveDocumentPath"
@@ -262,6 +267,7 @@ class EngineYDocSessionIpc {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#sharedCaptureFor = options.sharedCaptureFor;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#documentReservations = new DocumentMutationReservations();
@@ -329,7 +335,7 @@ class EngineYDocSessionIpc {
     const workspace = authority.workspace;
     authority.assertCurrent();
     if (!rendererSession.isCurrent()) return unavailableOpen();
-    if (this.#isSharedView(workspace)) return unavailableOpen();
+    if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) return unavailableOpen();
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
     const requestedSpellingKind = liveDocumentKindForPath(
@@ -353,7 +359,7 @@ class EngineYDocSessionIpc {
     }
     if (
       !rendererSession.isCurrent() ||
-      this.#isSharedView(workspace)
+      (this.#isSharedView(workspace) && !this.#sharedCaptureFor)
     ) {
       return unavailableOpen();
     }
@@ -367,6 +373,7 @@ class EngineYDocSessionIpc {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (canonicalKind === null) return unavailableOpen();
+    if (this.#isSharedView(workspace) && (canonicalKind !== "richdoc" || !/\.md$/i.test(canonicalPath))) return unavailableOpen();
     const releaseOpening = await this.#documentReservations.reserveOpen(
       workspace.attachmentId,
       canonicalPath,
@@ -400,7 +407,14 @@ class EngineYDocSessionIpc {
     rendererSession: EngineYDocRendererSession,
     generation: number,
   ): Promise<OpenResult> {
-    let capture = this.#captureFor(workspace);
+    const shared = this.#isSharedView(workspace);
+    let capture: EngineYDocSessionCapture | null;
+    if (shared && this.#sharedCaptureFor) {
+      try { capture = await this.#sharedCaptureFor?.(workspace) ?? null; }
+      catch { return unavailableOpen({ liveHostUnavailable: true }); }
+      authority.assertCurrent();
+      if (!capture || !rendererSession.isCurrent()) return unavailableOpen({ liveHostUnavailable: true });
+    } else capture = this.#captureFor(workspace);
     if (!capture) {
       try {
         await this.#ensureCaptureFor(workspace);
@@ -438,8 +452,8 @@ class EngineYDocSessionIpc {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (
-      !rendererSession.isCurrent() ||
-      this.#isSharedView(workspace)
+      !rendererSession.isCurrent() || this.#isSharedView(workspace) !== shared ||
+      (this.#isSharedView(workspace) && !this.#sharedCaptureFor)
     ) {
       return unavailableOpen();
     }
@@ -458,7 +472,7 @@ class EngineYDocSessionIpc {
           if (delivery === "active") send();
           else if (delivery === "pending") pending.push(send);
         };
-        let provider: WorkspaceEngineYDocProviderSession;
+        let provider: EngineYDocSessionProvider;
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
@@ -506,7 +520,12 @@ class EngineYDocSessionIpc {
             owned.deleted = true;
             owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
           },
-          close: (options) => provider.close(options),
+          close: (options) => {
+            owned.ownerHandoff?.fail(new Error("Owner session closed."));
+            owned.ownerHandoff?.finish();
+            owned.ownerHandoff = undefined;
+            return provider.close(options);
+          },
         };
         if (provider.contentKind === documentKind) {
           delivery = "active";
@@ -563,7 +582,7 @@ class EngineYDocSessionIpc {
       `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
       opened.error,
     );
-    return this.#openRefusal(opened.error);
+    return shared ? unavailableOpen({ liveHostUnavailable: true }) : this.#openRefusal(opened.error);
   }
 
   async readArtifactAsset(
@@ -613,7 +632,7 @@ class EngineYDocSessionIpc {
           owned.emit({ state: "deleted", seq: input.seq });
           return { accepted: false, reason: "deleted" };
         }
-        if (this.#isSharedView(owned.workspace)) {
+        if (this.#isSharedView(owned.workspace) && !owned.provider.liveWritable?.()) {
           owned.emit({ state: "read-only", seq: input.seq });
           return { accepted: false, reason: "read-only" };
         }
@@ -635,6 +654,76 @@ class EngineYDocSessionIpc {
       });
     }
     return ApplyEngineYDocUpdateResult.parse(applied.value);
+  }
+
+  existingOwner(binding: LiveObjectBinding) {
+    const authority = this.#acquireWorkspace(binding.workspaceId);
+    try {
+      authority.assertCurrent();
+      const captured = this.#owner.documentSession(authority.workspace.attachmentId, binding.currentPath);
+      const owned = captured?.session;
+      const native = owned?.provider.nativeOwner;
+      if (!captured || !owned || !native) throw new Error("Existing owner is unavailable.");
+      const renderer = this.#sessionFor(captured.caller.sender);
+      const assertCurrent = () => {
+        const currentAuthority = this.#acquireWorkspace(binding.workspaceId);
+        try {
+          currentAuthority.assertCurrent();
+          if (currentAuthority.workspace.attachmentId !== owned.workspace.attachmentId) throw new Error("Owner workspace changed.");
+        } finally { currentAuthority.release(); }
+        captured.assertCurrent();
+        if (!renderer?.isCurrent() || captured.caller.sender.isDestroyed() || owned.deleted || this.#isSharedView(owned.workspace) ||
+          owned.provider.nativeOwner?.sessionId !== native.sessionId || owned.provider.objectId !== binding.objectId ||
+          owned.provider.versionId !== binding.mainVersionId || owned.provider.lineageClaimId !== binding.lineageClaimId) throw new Error("Existing owner changed.");
+      };
+      assertCurrent();
+      return {
+        nativeSessionId: native.sessionId,
+        assertCurrent,
+        onDurableLocalChange: (handler: () => void) => {
+          assertCurrent();
+          return native.onDurableLocalChange(handler);
+        },
+        prepareHandoff: async (signal: AbortSignal) => {
+          assertCurrent(); signal.throwIfAborted();
+          if (owned.ownerHandoff) throw new Error("Owner handoff is already active.");
+          let ready!: () => void, fail!: (error: unknown) => void, finish!: () => void;
+          const prepared = new Promise<void>((resolve,reject) => { ready = resolve; fail = reject; });
+          const done = new Promise<void>(resolve => { finish = resolve; });
+          const handoff = { ready,fail,done,finish };
+          owned.ownerHandoff = handoff;
+          const abort = () => { fail(signal.reason); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; };
+          signal.addEventListener("abort",abort,{once: true});
+          void done.finally(() => signal.removeEventListener("abort",abort));
+          try {captured.caller.sender.send(CHANNELS.engineYDocOwnerHandoff, EngineYDocOwnerHandoff.parse({sessionId: captured.caller.sessionId,lineageGeneration: captured.caller.lineageGeneration}));}
+          catch (error) {fail(error); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;}
+          await prepared; assertCurrent();
+        },
+        finishHandoff: async (_adopted: boolean) => {
+          const handoff = owned.ownerHandoff;
+          if (!handoff) return;
+          owned.ownerHandoff = undefined;
+          handoff.fail(new Error("Owner handoff ended.")); handoff.finish();
+        },
+        remoteApplied: async (update: Uint8Array) => { assertCurrent(); await native.applyRemoteUpdate(update); assertCurrent(); },
+      };
+    } finally { authority.release(); }
+  }
+
+  async prepareOwnerHandoff(sender: EngineYDocIpcSender, payload: EngineYDocOwnerHandoff): Promise<void> {
+    const input = EngineYDocOwnerHandoff.parse(payload);
+    const caller = { ...this.#caller(sender,input.sessionId),lineageGeneration: input.lineageGeneration };
+    const access = this.#owner.applyUpdate(caller, owned => owned);
+    if (access.kind !== "applied") throw new Error("Owner handoff session is unavailable.");
+    const owned = access.value, handoff = owned.ownerHandoff, native = owned.provider.nativeOwner;
+    if (!handoff || !native || owned.deleted || this.#isSharedView(owned.workspace)) throw new Error("Owner handoff was not requested.");
+    try {
+      await native.flush();
+      const current = this.#owner.applyUpdate(caller, value => value === owned && value.ownerHandoff === handoff && value.provider.nativeOwner?.sessionId === native.sessionId);
+      if (current.kind !== "applied" || !current.value) throw new Error("Owner handoff session changed.");
+      handoff.ready();
+      await handoff.done;
+    } catch (error) { handoff.fail(error); handoff.finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; throw error; }
   }
 
   acknowledgeLineageReplacement(

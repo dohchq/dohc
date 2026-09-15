@@ -1,4 +1,8 @@
+import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
+import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
+import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
 import type {
@@ -11,7 +15,7 @@ import type { LiveDocumentKey, LiveUpdateStructRange, ServerDerivedLiveUpdateAut
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "../deviceHostCredential";
-import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
+import type { LiveBrowserContext } from "../liveBrowserContext";
 
 export type LiveHostControlRefusalReason =
   | "not-provisioned"
@@ -46,7 +50,9 @@ export interface CurrentLiveBindingRequest {
   readonly document: LiveDocumentKey;
   readonly actor:
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
-    | { readonly kind: "named"; readonly userId: string; readonly grantId: string };
+    | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
+    | { readonly kind: "link"; readonly sessionId: string; readonly capabilityHash: string;
+        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -524,6 +530,7 @@ export type LiveJournalValidation =
       readonly document: LiveDocumentKey;
       readonly currentPath: string;
       readonly checkpointDigest: string;
+      readonly checkpointRanges: readonly LiveUpdateStructRange[];
       readonly suffixDigests: readonly string[];
       readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
       readonly stateUpdate?: Uint8Array;
@@ -553,19 +560,43 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
+  approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};
+  acceptAppCollection(input: import("./appCollections").AcceptAppCollectionInput, policy: import("./appCollections").AppCollectionAcceptancePolicy): import("./appCollections").AppCollectionReceipt;
+  readAppCollection(input: import("./appCollections").ReadAppCollectionInput): import("./appCollections").AppCollectionPage;
+  readOwnerAppCollectionAcceptances(input: import("./appCollectionModeration").OwnerAppCollectionAcceptancesInput): import("./appCollectionModeration").OwnerAppCollectionAcceptancesPage;
+  authorizeLinkAppCollection(input:import("./publications").LinkAppPublicationInput):import("./publications").LinkAppPublicationAuthority;
+  readAppPublication(input: import("./publications").ReadAppPublicationInput): import("./publications").AppPublicationRow;
+  listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
+  listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
+  withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
+  reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
+  authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
+  createLinkAppPublicationGuard(input: import("./publications").LinkAppPublicationInput): (nowMs: number) => void;
+  readLinkAppPublicationBlob(input: import("./publications").LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}): import("./publications").LinkAppPublicationAuthority & {file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number]; bytes: Uint8Array};
+  readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
+  readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
+  readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
+  beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
+  advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
+  readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;
-  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore;
+  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore;
+  createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
   readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
-  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
+  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
 
   close(): void;
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
+  /** Groups synchronous authority checks in one current read snapshot. */
+  readLiveAuthority<T>(run: () => T): T;
+  resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
-  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null;
-  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null;
-  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null;
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null;
+  readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
+  redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;
   // Local deployment-operator operations. Account and device requests cannot call these.
   provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult;
@@ -1034,19 +1065,19 @@ export interface TicketHostReport {
   readonly binding: LiveObjectBinding;
 }
 
-export interface NamedLiveTicketLookup {
+export interface LiveTicketLookup {
   readonly tokenHash: string;
-  readonly scope: NamedLiveBrowserContext;
+  readonly scope: LiveBrowserContext;
   readonly audience: string;
 }
 
-export interface NamedLiveTicketMint extends NamedLiveTicketLookup {
+export interface LiveTicketMint extends LiveTicketLookup {
   readonly objectId: string;
   readonly ticketId: string;
   readonly report: TicketHostReport;
 }
 
-export interface NamedLiveTicketRedemption extends NamedLiveTicketLookup {
+export interface LiveTicketRedemption extends LiveTicketLookup {
   readonly report: TicketHostReport;
 }
 

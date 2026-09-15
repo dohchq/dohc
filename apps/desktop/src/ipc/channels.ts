@@ -130,6 +130,8 @@ export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 // noise and "saved" would be a lie about the disk. "deleted" is terminal for
 // this live session: the path is gone and the renderer preserves its draft.
 export const ENGINE_YDOC_SAVE_STATES = [
+  "saved-to-host",
+  "pending-share",
   "settling",
   "saved",
   "error",
@@ -226,6 +228,9 @@ export const CHANNELS = {
   createRelayShareLink: "desktop:create-relay-share-link",
   addRelayShareLink: "desktop:add-relay-share-link",
   listRelayShareLinks: "desktop:list-relay-share-links",
+  ownerRestore: "desktop:owner-restore",
+  publishOwnerApp: "desktop:publish-owner-app",
+  ownerAppResponses: "desktop:owner-app-responses",
   retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",
@@ -348,6 +353,8 @@ export const CHANNELS = {
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
+  engineYDocOwnerHandoff: "desktop:engine-ydoc-owner-handoff",
+  engineYDocPrepareOwnerHandoff: "desktop:engine-ydoc-prepare-owner-handoff",
   engineYDocAcknowledgeLineageReplacement:
     "desktop:engine-ydoc-acknowledge-lineage-replacement",
   engineYDocClose: "desktop:engine-ydoc-close",
@@ -378,4 +385,3 @@ export const CHANNELS = {
   getLaunchMarks: "desktop:test:get-launch-marks",
   getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;
-

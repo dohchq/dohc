@@ -46,8 +46,28 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "live_audit_base_publications",
+    "live_audit_bases",
+    "live_audit_base_conflicts",
+    "live_audit_record_manifests",
+    "live_audit_pending_exports",
+    "live_audit_settlements",
+    "live_audit_settlement_publications",
+    "live_audit_settlement_conflicts",
+    "live_audit_record_chunks",
+    "live_audit_events",
+    "live_audit_event_publications",
+    "live_audit_event_conflicts",
+    "live_accepted_updates",
+    "live_accepted_checkpoints",
+    "live_restore_fences",
+    "ydoc_owner_applied_frames",
+    "ydoc_owner_bindings",
+    "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "ydoc_owner_base_sources",
+    "ydoc_owner_activation_sources",
     "live_device_application_bindings",
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -81,6 +101,9 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "replication_log",
+    "replication_refused_moment_blobs",
+    "replication_refused_ydoc_blobs",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -472,7 +495,7 @@ mod tests {
     use super::COMPARED_TABLES;
 
     #[test]
-    fn restore_comparison_rejects_missing_or_lost_live_application_tables() {
+    fn restore_comparison_rejects_missing_or_lost_live_and_recovery_tables() {
         use crate::{EngineStore, NoFaults, StorageError};
         use dohc_test_scratch::ScratchDir;
         let dir = ScratchDir::new_named("backup-application-comparison").unwrap();
@@ -480,19 +503,65 @@ mod tests {
         store.write_with(&NoFaults, |tx| {
             let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
             tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
+            tx.execute("INSERT INTO live_accepted_updates VALUES ('relay','workspace','main','object',?1,1,1,'delivery','{}',?1,1,2,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_accepted_checkpoints VALUES ('relay','workspace','main','object',?1,0,0,'null','{}',?1,?1,?1,NULL,NULL)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','restore','{}','{}')",[]).unwrap();
             tx.execute("INSERT INTO live_device_bootstraps VALUES ('relay','workspace','main','object',?1,'bootstrap','bootstrap-moment','{}',?1,2,0,0,?1,0,0,'{}')",[&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','workspace','main','object','lineage','a.md','[\"a.md\"]',0,'host',1,'instance','connection',1)", []).unwrap();
             tx.execute("INSERT INTO live_device_update_applications VALUES ('relay','workspace','delivery','main','object','lineage','a.md','[\"a.md\"]',0,?1,2,1,1,'owner','person',NULL,NULL,0,1,1,'host',1,'instance','connection')", [&sha]).unwrap();
             tx.execute("INSERT INTO live_device_application_first_seen VALUES ('relay','workspace','delivery',0,1,0,1)", []).unwrap();
-            tx.execute("INSERT INTO live_device_settlements VALUES ('settlement','relay','workspace','main','object','lineage',0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_device_settlements VALUES ('settlement','relay','workspace','main','object','lineage',0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0,'ordinary',NULL)",[&sha]).unwrap();
+            let source=crate::hex_sha256(b"");
+            tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
+            tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
+            tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_base_publications VALUES ('relay','workspace','main','object',?1,'{}',?1,'peer',0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_bases VALUES ('relay','workspace','main','object',?1,?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_base_conflicts VALUES ('workspace','peer',0,?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_record_manifests VALUES (?1,'{}',?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_pending_exports VALUES ('relay','workspace','main','object',?1,0,-1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlements VALUES ('settlement','workspace',?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlement_publications VALUES ('settlement','workspace','relay','main','object',?1,0,?2,'peer',0)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_audit_settlement_conflicts VALUES ('workspace','peer',0,?1,'{}',?2)",rusqlite::params![sha,source]).unwrap();
+            tx.execute("INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object',?1,1,?1,?1,1,'delivery',1,NULL,NULL)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_event_publications VALUES ('relay','workspace','main','object',?1,1,'peer',0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "live_audit_record_manifests",
+            "live_audit_pending_exports",
+            "live_audit_settlements",
+            "live_audit_settlement_publications",
+            "live_audit_settlement_conflicts",
+            "live_audit_record_chunks",
+            "live_audit_events",
+            "live_audit_event_publications",
+            "live_audit_event_conflicts",
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
+            "live_accepted_updates",
+            "live_accepted_checkpoints",
+            "live_restore_fences",
+            "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
             "live_device_update_applications",
             "live_device_application_first_seen",
+            "replication_log",
+            "replication_refused_moment_blobs",
+            "replication_refused_ydoc_blobs",
         ]
         .into_iter()
         .enumerate()
@@ -524,6 +593,13 @@ mod tests {
     #[test]
     fn backup_compares_live_application_tables() {
         for table in [
+            "live_audit_base_publications",
+            "live_audit_bases",
+            "live_audit_base_conflicts",
+            "live_accepted_updates",
+            "live_accepted_checkpoints",
+            "live_restore_fences",
+            "live_owner_adoptions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -565,7 +641,12 @@ mod tests {
 
     #[test]
     fn backup_compares_owner_ydoc_outbox_tables() {
-        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
+        for table in [
+            "owner_ydoc_outboxes",
+            "owner_ydoc_outbox_entries",
+            "ydoc_owner_base_sources",
+            "ydoc_owner_activation_sources",
+        ] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"

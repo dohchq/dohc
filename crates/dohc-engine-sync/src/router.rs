@@ -55,6 +55,7 @@ enum OwnedRoute {
     Chat,
     Secret,
     Ydoc,
+    LiveAudit,
     Conflict,
     Workspace,
     Version,
@@ -74,6 +75,9 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("secret.file.delete", OwnedRoute::Secret),
     ("secret.version.fork", OwnedRoute::Secret),
     ("ydoc.update", OwnedRoute::Ydoc),
+    ("live.audit.base", OwnedRoute::LiveAudit),
+    ("live.audit.application", OwnedRoute::LiveAudit),
+    ("live.audit.settlement", OwnedRoute::LiveAudit),
     ("conflict.open", OwnedRoute::Conflict),
     ("conflict.resolve", OwnedRoute::Conflict),
     ("workspace.init", OwnedRoute::Workspace),
@@ -117,7 +121,7 @@ pub fn apply_replication_envelope(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
-    if !matches!(route, OwnedRoute::Ydoc) {
+    if !matches!(route, OwnedRoute::Ydoc | OwnedRoute::LiveAudit) {
         // Other replicated routes can archive or replace Y.Doc lineages. Clear
         // before their transactions so a later envelope in this pull cannot
         // observe an ABA-valid stale entry after a committed crash.
@@ -125,6 +129,9 @@ pub fn apply_replication_envelope(
     }
     match route {
         OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
+        OwnedRoute::LiveAudit => plain(crate::live_audit::apply_audit_envelope(
+            store, envelope, faults,
+        )),
         OwnedRoute::Secret => map_applied(
             crate::secret_apply::apply_secret_envelope_detailed(store, envelope, faults),
             |secret| RoutedApply {

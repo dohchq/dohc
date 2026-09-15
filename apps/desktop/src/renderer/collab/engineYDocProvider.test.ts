@@ -11,6 +11,62 @@ import {
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
+it.each([false,true])("queues edits made during owner handoff and drains them after terminal result (failure=%s)", async fail => {
+  const fixture = mockTransport();
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  fixture.transport.adoptOwner = async generation => { expect(generation).toBe(1); enter(); await gate; if (fail) throw new Error("adoption refused"); };
+  const binding = await bindEngineYDoc(fixture.transport);
+  const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+  text.insert(0,"before ");
+  const adopted = binding.adoptOwner();
+  const outcome = adopted.then(() => "adopted", () => "refused");
+  await entered;
+  expect(fixture.shipped).toHaveLength(1);
+  text.insert(0,"during ");
+  expect(fixture.shipped).toHaveLength(1);
+  expect(fixture.staged()).toBe(2);
+  release();
+  expect(await outcome).toBe(fail ? "refused" : "adopted");
+  expect(fixture.shipped).toHaveLength(2);
+  expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(binding.doc!.getXmlFragment("body").toString());
+  await binding.destroy();
+  fixture.mainDoc.destroy();
+});
+
+it.each([false, true])("destroy drains edits queued during an unfinished owner handoff (failure=%s)", async fail => {
+  const fixture = mockTransport();
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  fixture.transport.adoptOwner = async () => {
+    enter();
+    await gate;
+    if (fail) throw new Error("adoption refused");
+  };
+  const binding = await bindEngineYDoc(fixture.transport);
+  const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+  text.insert(0, "before ");
+  const handoff = binding.adoptOwner().then(() => "adopted", () => "refused");
+  await entered;
+  text.insert(0, "during ");
+  const expected = binding.doc!.getXmlFragment("body").toString();
+  const destroying = binding.destroy();
+  expect(fixture.closed()).toBe(false);
+  expect(fixture.shipped).toHaveLength(1);
+  release();
+  expect(await handoff).toBe("refused");
+  await destroying;
+  expect(fixture.shipped).toHaveLength(2);
+  expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(expected);
+  expect(fixture.events.at(-1)).toBe("close");
+  expect(fixture.closed()).toBe(true);
+  await binding.destroy();
+  fixture.mainDoc.destroy();
+});
+
 // A mock transport standing in for the main-process engine session: it holds a
 // "main" Y.Doc, seeds the renderer from it, records every shipped local update,
 // and can push a remote delta back. This exercises the renderer half of the

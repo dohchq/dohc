@@ -45,7 +45,9 @@ use yrs::{
 use crate::error::CollabError;
 use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
+mod bounded_encoder;
 mod frontmatter_yaml;
+mod restore_copy;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
@@ -335,6 +337,8 @@ impl Ydoc {
     fn with_offset_kind(offset_kind: yrs::OffsetKind) -> Self {
         let doc = Doc::with_options(Options {
             offset_kind,
+            // Durable snapshots and restore proofs retain deleted CRDT payload.
+            skip_gc: true,
             ..Options::default()
         });
         Self::from_doc(doc)
@@ -344,6 +348,7 @@ impl Ydoc {
         let doc = Doc::with_options(Options {
             client_id: yrs::ClientID::new(client_id),
             offset_kind: yrs::OffsetKind::Utf16,
+            skip_gc: true,
             ..Options::default()
         });
         Self::from_doc(doc)
@@ -482,8 +487,8 @@ impl Ydoc {
 
     /// Resolve exact Markdown source only when it is equivalent to
     /// `canonical_projection`: the projection witness must be fresh, the
-    /// source digest must match, and parsing the source must reproject to
-    /// exactly the canonical projection. The digests alone prove freshness
+    /// source digest must match, and differing source bytes must parse and
+    /// reproject to the canonical projection. The digests alone prove freshness
     /// and self-consistency, never equivalence — the metadata rides the
     /// replicated doc, so a crafted update can pair the current projection's
     /// digest with foreign source bytes, and settlement would write bytes the
@@ -496,7 +501,11 @@ impl Ydoc {
             return None;
         }
         let source = self.markdown_source(&reference)?;
+        if source == canonical_projection {
+            return Some(source);
+        }
         let staged = Ydoc::wire();
+        self.copy_tagged_frontmatter_to(&staged);
         staged
             .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
             .ok()?;
@@ -532,7 +541,11 @@ impl Ydoc {
                 ("schemaVersion", Out::Any(Any::Number(1.0)))
                     | (MARKDOWN_CRLF_META_KEY, Out::Any(Any::Bool(true)))
                     | (
-                        TAGGED_FRONTMATTER_PREFIX_META_KEY | TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                        TAGGED_FRONTMATTER_PREFIX_META_KEY
+                            | TAGGED_FRONTMATTER_BASELINE_META_KEY
+                            | MARKDOWN_SOURCE_META_KEY
+                            | MARKDOWN_SOURCE_SHA_META_KEY
+                            | MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
                         Out::Any(Any::String(_)),
                     )
             );
@@ -547,6 +560,29 @@ impl Ydoc {
             != meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY)
         {
             return Err(invalid());
+        }
+        let source_fields = [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ]
+        .iter()
+        .filter(|key| meta.contains_key(&txn, key))
+        .count();
+        if source_fields != 0 && source_fields != 3 {
+            return Err(invalid());
+        }
+        drop(txn);
+        if source_fields == 3 {
+            let reference = self.markdown_source_reference().ok_or_else(invalid)?;
+            let source = self.markdown_source(&reference).ok_or_else(invalid)?;
+            let canonical = self.project_richdoc()?;
+            if reference.projection_sha256 == crate::hex_sha256(canonical.as_bytes())
+                && (source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+                    || self.preserved_markdown_source(&canonical).is_none())
+            {
+                return Err(invalid());
+            }
         }
         Ok(())
     }
@@ -610,6 +646,14 @@ impl Ydoc {
         txn.encode_state_as_update_v1(&StateVector::default())
     }
 
+    pub(crate) fn encode_full_state_bounded(&self, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut encoder = bounded_encoder::BoundedEncoder::new(max_bytes)?;
+        self.doc
+            .transact()
+            .encode_state_as_update(&StateVector::default(), &mut encoder);
+        encoder.finish()
+    }
+
     /// The state vector, v1-encoded in ascending client-id order — the
     /// provenance/diff primitive.
     ///
@@ -632,6 +676,45 @@ impl Ydoc {
         })?;
         let txn = self.doc.transact();
         Ok(txn.encode_state_as_update_v1(&sv))
+    }
+
+    /// Bounded output allocation. Yrs traversal itself is not preemptible.
+    pub(crate) fn diff_bounded(
+        &self,
+        remote_sv: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, CollabError> {
+        crate::replay_parity::prevalidate_state_vector_bytes(remote_sv)?;
+        let sv = StateVector::decode_v1(remote_sv).map_err(|e| CollabError::MalformedUpdate {
+            reason: format!("state vector decode: {e}"),
+        })?;
+        let Some(mut encoder) = bounded_encoder::BoundedEncoder::new(max_bytes) else {
+            return Ok(None);
+        };
+        self.doc
+            .transact()
+            .encode_state_as_update(&sv, &mut encoder);
+        Ok(encoder.finish())
+    }
+
+    pub(crate) fn encode_state_vector_bounded(&self, max_bytes: usize) -> Option<Vec<u8>> {
+        let txn = self.doc.transact();
+        let vector = txn.state_vector();
+        // Each client needs at least two encoded bytes. Bound sorting scratch before allocation.
+        if vector.iter().count() > max_bytes.saturating_sub(1) / 2 {
+            return None;
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(vector.iter().count()).ok()?;
+        entries.extend(vector.iter().map(|(client, clock)| (client.get(), *clock)));
+        entries.sort_unstable_by_key(|(client, _)| *client);
+        let mut encoder = bounded_encoder::BoundedEncoder::new(max_bytes)?;
+        encoder.write_var(entries.len());
+        for (client, clock) in entries {
+            encoder.write_var(client);
+            encoder.write_var(clock);
+        }
+        encoder.finish()
     }
 
     /// The canonical semantic content — the convergence surface the JS driver
@@ -970,6 +1053,14 @@ impl Ydoc {
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
+                    let retains_prefix = matches!(
+                        meta.get(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY),
+                        Some(Out::Any(Any::String(prefix))) if markdown.starts_with(prefix.as_ref())
+                    );
+                    if !retains_prefix {
+                        meta.remove(txn, TAGGED_FRONTMATTER_PREFIX_META_KEY);
+                        meta.remove(txn, TAGGED_FRONTMATTER_BASELINE_META_KEY);
+                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1036,6 +1127,38 @@ impl Ydoc {
             let _ = staged.rewrite_content_to_markdown(content_kind, markdown)?;
             Ok(())
         })
+    }
+
+    pub(crate) fn rewrite_richdoc_preserving_source_bounded(
+        &self,
+        markdown: &str,
+        point: &Ydoc,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
+            point.copy_tagged_frontmatter_to(staged);
+            restore_copy::copy(point, staged, max_bytes)
+        })
+    }
+
+    fn copy_tagged_frontmatter_to(&self, target: &Ydoc) {
+        let source = self.doc.get_or_insert_map(ROOT_META);
+        let source_txn = self.doc.transact();
+        let meta = target.doc.get_or_insert_map(ROOT_META);
+        let mut txn = target.doc.transact_mut();
+        for key in [
+            TAGGED_FRONTMATTER_PREFIX_META_KEY,
+            TAGGED_FRONTMATTER_BASELINE_META_KEY,
+        ] {
+            match source.get(&source_txn, key) {
+                Some(Out::Any(Any::String(value))) => {
+                    meta.insert(&mut txn, key, value.as_ref());
+                }
+                _ => {
+                    meta.remove(&mut txn, key);
+                }
+            }
+        }
     }
 
     /// Remove one target from a relation field. A single relation removes the
@@ -1147,6 +1270,15 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit_bounded(markdown, None, edit)
+    }
+
+    fn stage_source_preserving_edit_bounded(
+        &self,
+        markdown: &str,
+        budget: Option<usize>,
+        edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
+    ) -> Result<Vec<u8>, CollabError> {
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
             return Err(CollabError::ProjectionTooLarge {
                 actual: markdown.len(),
@@ -1156,20 +1288,64 @@ impl Ydoc {
 
         let before = self.doc.transact().state_vector();
         let staged = Ydoc::wire();
-        staged.apply(&self.encode_full_state())?;
+        let capacity_error = || CollabError::ConfiguredByteBudgetExceeded;
+        let encoder_error = |remaining: usize| {
+            if remaining < crate::limits::MAX_YDOC_UPDATE_BYTES {
+                CollabError::ConfiguredByteBudgetExceeded
+            } else {
+                CollabError::UpdateTooLarge {
+                    actual: crate::limits::MAX_YDOC_UPDATE_BYTES + 1,
+                    max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+                }
+            }
+        };
+        let bounded = budget.is_some();
+        let mut max_bytes = budget.unwrap_or(usize::MAX);
+        let full = if bounded {
+            self.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or_else(|| encoder_error(max_bytes))?
+        } else {
+            self.encode_full_state()
+        };
+        max_bytes = max_bytes
+            .checked_sub(full.len())
+            .ok_or_else(capacity_error)?;
+        staged.apply(&full)?;
+        drop(full);
         edit(&staged)?;
         staged.record_validated_markdown_source_reference(markdown)?;
-        let update = staged.doc.transact().encode_state_as_update_v1(&before);
+        let update = if bounded {
+            let mut encoder = bounded_encoder::BoundedEncoder::new(
+                max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES),
+            )
+            .ok_or_else(capacity_error)?;
+            staged
+                .doc
+                .transact()
+                .encode_state_as_update(&before, &mut encoder);
+            encoder.finish().ok_or_else(|| encoder_error(max_bytes))?
+        } else {
+            staged.doc.transact().encode_state_as_update_v1(&before)
+        };
         if update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(CollabError::UpdateTooLarge {
                 actual: update.len(),
                 max: crate::limits::MAX_YDOC_UPDATE_BYTES,
             });
         }
-        let full_state_len = staged.encode_full_state().len();
-        if full_state_len > crate::limits::MAX_YDOC_UPDATE_BYTES {
+        max_bytes = max_bytes
+            .checked_sub(update.len())
+            .ok_or_else(capacity_error)?;
+        let final_bytes = if bounded {
+            staged
+                .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+                .ok_or_else(|| encoder_error(max_bytes))?
+        } else {
+            staged.encode_full_state()
+        };
+        if final_bytes.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(CollabError::UpdateTooLarge {
-                actual: full_state_len,
+                actual: final_bytes.len(),
                 max: crate::limits::MAX_YDOC_UPDATE_BYTES,
             });
         }
@@ -4222,6 +4398,21 @@ mod projection_tests {
     use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
 
+    #[test]
+    fn fixed_client_retains_deleted_yjs_payload() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/lossless-fixtures/deleted-history.json"
+        ))
+        .unwrap();
+        let updates: Vec<Vec<u8>> = serde_json::from_value(fixture["updates"].clone()).unwrap();
+        let expected: Vec<u8> = serde_json::from_value(fixture["retainedState"].clone()).unwrap();
+        let doc = Ydoc::with_client_id(17);
+        for update in updates {
+            doc.apply(&update).unwrap();
+        }
+        assert_eq!(doc.encode_full_state(), expected);
+    }
+
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);
         doc.with_delta(|txn| {
@@ -5603,6 +5794,65 @@ fn main() {}
     }
 
     #[test]
+    fn conflict_fold_preserves_selected_tagged_prefix() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        for row in fixtures.as_array().unwrap().iter().filter(|row| {
+            row["name"].as_str().unwrap().starts_with("tagged")
+                && row["registrationAccepted"] == true
+        }) {
+            let doc = Ydoc::wire();
+            doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
+                .unwrap();
+            let selected = format!("{} edited", row["markdown"].as_str().unwrap());
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &selected)
+                .unwrap();
+            assert_eq!(
+                doc.project(ContentKind::Richdoc).unwrap().content,
+                selected,
+                "{}",
+                row["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn source_preserving_rewrite_clears_previous_tagged_frontmatter_projection() {
+        let doc = Ydoc::wire();
+        let selected = "---\npriority: high\n---\n\nRestored body";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
+            .unwrap();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_PREFIX_META_KEY,
+                "---\npriority: !custom high\n---\n\n",
+            );
+            meta.insert(
+                &mut txn,
+                TAGGED_FRONTMATTER_BASELINE_META_KEY,
+                "priority: high\n",
+            );
+        }
+        assert!(doc.project_richdoc().unwrap().contains("!custom"));
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, selected)
+            .unwrap();
+        let projection = doc.project_richdoc().unwrap();
+        assert_eq!(projection, selected);
+        assert_eq!(
+            doc.preserved_markdown_source(&projection).as_deref(),
+            Some(selected)
+        );
+        let txn = doc.doc.transact();
+        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_PREFIX_META_KEY));
+        assert!(!meta.contains_key(&txn, TAGGED_FRONTMATTER_BASELINE_META_KEY));
+    }
+
+    #[test]
     fn forged_tagged_frontmatter_prefix_falls_back_to_canonical_projection() {
         for prefix in [
             "---\npriority: !custom foreign\n---\n\n",
@@ -5931,6 +6181,53 @@ fn main() {}
             assert_eq!(
                 projected.content, chosen,
                 "a {levels}-level quote must roundtrip byte-identically"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod owner_source_public_limits {
+    use super::*;
+    #[test]
+    fn active_owner_source_obeys_public_output_limit_but_stale_source_remains_historical() {
+        let seed: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/owner-source/owner-source-seed.json"))
+                .unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(seed["bytes"].clone()).unwrap();
+        for stale in [false, true] {
+            let doc = Ydoc::wire();
+            doc.apply(&bytes).unwrap();
+            let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
+            let source = format!(
+                "{canonical}{}",
+                "\n".repeat(crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
+            );
+            {
+                let meta = doc.doc.get_or_insert_map(ROOT_META);
+                let mut tx = doc.doc.transact_mut();
+                meta.insert(&mut tx, MARKDOWN_SOURCE_META_KEY, source.as_str());
+                meta.insert(
+                    &mut tx,
+                    MARKDOWN_SOURCE_SHA_META_KEY,
+                    crate::hex_sha256(source.as_bytes()),
+                );
+                if stale {
+                    meta.insert(
+                        &mut tx,
+                        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                        crate::hex_sha256(b"old canonical state"),
+                    );
+                }
+            }
+            assert_eq!(
+                doc.validate_public_baseline(&doc.encode_full_state())
+                    .is_ok(),
+                stale
+            );
+            assert_eq!(
+                doc.project(ContentKind::Richdoc).unwrap().content,
+                canonical
             );
         }
     }

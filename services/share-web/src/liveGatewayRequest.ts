@@ -14,8 +14,12 @@ function validHost(value: string): boolean {
 export function createLiveGatewayRequestParser(config: {
   publicHosts: ReadonlySet<string>;
   publicOrigin: string;
+  path?: "/api/live" | "/api/live/link";
 }) {
   const publicOrigin = parseLiveTicketAudience(config.publicOrigin);
+  const path = config.path ?? "/api/live";
+  if (path !== "/api/live" && path !== "/api/live/link") throw new TypeError("Invalid live gateway path.");
+  const targetPrefix = `${path}?session=`;
   const publicHosts = new Set([...config.publicHosts].map(host => {
     if (!validHost(host)) throw new TypeError("Live gateway requires valid configured Host values.");
     return host.toLowerCase();
@@ -42,7 +46,6 @@ export function createLiveGatewayRequestParser(config: {
     const host = selected.get("host");
     if (!host || !validHost(host) || !publicHosts.has(host.toLowerCase())) return null;
     if (selected.get("origin") !== publicOrigin) return null;
-    const targetPrefix = "/api/live?session=";
     if (method !== "GET" || !url?.startsWith(targetPrefix)) return null;
     const session = url.slice(targetPrefix.length);
     if (!isSessionDiscriminator(session)) return null;

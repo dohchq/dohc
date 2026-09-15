@@ -45,7 +45,7 @@ export function startDeviceNativeTransport(options: {
       if (stopping) return;
       const nativeConfig = join(temporary, "host.json");
       await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: start.relayNamespace, host: start.host,
-        workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement }), { flag: "wx", mode: 0o600 });
+        workspaces: config.workspaces, ingress: config.ingress, settlement: config.settlement, restore: config.restore, sync: config.sync }), { flag: "wx", mode: 0o600 });
       if (stopping) return;
       child = spawn(config.engineExecutable, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
         env: { ...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_AUTH_TOKEN: start.authToken } });

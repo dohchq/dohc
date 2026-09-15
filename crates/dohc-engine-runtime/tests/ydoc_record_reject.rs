@@ -63,6 +63,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
             3,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect_err("a malformed seed must be rejected");
@@ -126,6 +127,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
             5,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("genuine seed lands");
@@ -189,6 +191,7 @@ async fn direct_record_update_refuses_invalid_actor_origins_before_journaling() 
                 3,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
+                None,
             )
             .await;
         match result {

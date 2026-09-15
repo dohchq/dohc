@@ -107,10 +107,142 @@ function harness() {
   };
 }
 
+describe("named browser invitations", () => {
+  it.each([undefined, "https://share.example.test/s/edit/exact-grant"])("preserves the grant and optional server URL %s", async browserInvitationUrl => {
+    const h = harness();
+    h.request.mockResolvedValue({shareId: "share", grantId: "exact-grant", ...(browserInvitationUrl ? {browserInvitationUrl} : {})});
+    const result = await h.invoke(CHANNELS.createRelayShare, {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"});
+    expect(result).toEqual({shareId: "share", grantId: "exact-grant", browserInvitationUrl,
+      shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!}), recipientEmail: "friend@dohc.test"});
+    expect(h.request.mock.lastCall?.[2]?.body).toBe(JSON.stringify({recipientEmail: "friend@dohc.test", access: "edit", paths: ["docs"]}));
+  });
+  it("retains the listed grant URL without deriving it from desktop credentials", async () => {
+    const h = harness(), browserInvitationUrl = "https://share.example.test/s/edit/exact-grant";
+    h.accountRequest.mockResolvedValue({granted: [{shareId: "share", workspaceId: "remote-workspace", grantId: "exact-grant", generation: 1,
+      recipientUserId: "friend", recipientEmail: "friend@dohc.test", selector: {paths: ["docs"], versionId: null}, access: "edit",
+      createdAtMs: 1, revokedAtMs: null, browserInvitationUrl}]});
+    expect(await h.invoke(CHANNELS.listRelayShares)).toMatchObject({granted: [{grantId: "exact-grant", browserInvitationUrl,
+      shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!})}]});
+  });
+});
+
+describe("registered owner restore handler", () => {
+  const document = {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
+  const intent = {deliveryKind: "owner", operationId: "restore", document, shareId: "share", grantId: "grant",
+    expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 1,
+    restorePointCursor: 0, restorePointReceiptDigest: "a".repeat(64)};
+  const status = {operationId: "restore", document, path: "notes.md", phase: "authority-invalidated", intent, proposalDigest: null};
+  const statusInput = {workspaceId, action: "status", operationId: "restore"};
+
+  it("rejects untrusted senders and caller-supplied identity before any remote work", async () => {
+    const h = harness();
+    await expect(h.invoke(CHANNELS.ownerRestore, statusInput, -1)).rejects.toThrow("untrusted sender");
+    for (const input of [{...statusInput, ownerUserId: "owner"}, {...statusInput, credentials: h.credentials},
+      {workspaceId, action: "begin", intent: {...intent, ownerUserId: "owner"}}]) {
+      await expect(h.invoke(CHANNELS.ownerRestore, input)).rejects.toThrow();
+    }
+    expect(h.remote).not.toHaveBeenCalled(); expect(h.request).not.toHaveBeenCalled();
+  });
+
+  it("uses the original workspace and credential snapshot without forwarding owner identity", async () => {
+    const h = harness(); h.request.mockResolvedValue(status);
+    await expect(h.invoke(CHANNELS.ownerRestore, {workspaceId, action: "begin", intent})).resolves.toEqual(status);
+    expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-restores",
+      {method: "POST", body: JSON.stringify({intent})}, {retainRestoreConflict: true});
+    h.workspace.shareView = {};
+    await expect(h.invoke(CHANNELS.ownerRestore, statusInput)).rejects.toThrow("original workspace");
+    expect(h.request).toHaveBeenCalledOnce();
+  });
+
+  it.each(["retireRenderer", "retirePhysical", "rotateCredentials"] as const)("rejects %s before request and before response parsing", async invalidate => {
+    const loading = harness(), loaded = deferred<{credentials: CloudCredentials; credentialGeneration: number}>(), started = deferred();
+    loading.remote.mockImplementation(() => {started.resolve(); return loaded.promise;});
+    const pending = loading.invoke(CHANNELS.ownerRestore, statusInput);
+    await started.promise; loading[invalidate](); loaded.resolve({credentials: loading.credentials, credentialGeneration: 1});
+    await expect(pending).rejects.toThrow(); expect(loading.request).not.toHaveBeenCalled();
+
+    const h = harness(), response = deferred<unknown>(), requested = deferred();
+    h.request.mockImplementation(() => {requested.resolve(); return response.promise;});
+    const result = h.invoke(CHANNELS.ownerRestore, statusInput);
+    await requested.promise; h[invalidate]();
+    const read = vi.fn(() => "restore"); response.resolve({...status, get operationId() {return read();}});
+    await expect(result).rejects.toThrow(); expect(read).not.toHaveBeenCalled();
+  });
+
+  it("preserves the retained conflict body as pending work rather than completion", async () => {
+    const h = harness();
+    for (const [action, kind] of [["prepare", "pending"], ["confirm", "review-required"]] as const) {
+      const response = {status, result: {kind}}; h.request.mockResolvedValue(response);
+      const input = {...statusInput, action, ...(action === "confirm" ? {proposalDigest: "b".repeat(64)} : {})};
+      await expect(h.invoke(CHANNELS.ownerRestore, input)).resolves.toEqual(response);
+      expect(h.request.mock.lastCall?.[3]).toEqual({retainRestoreConflict: true});
+    }
+    h.request.mockResolvedValue({status, result: {kind: "resumed"}});
+    await expect(h.invoke(CHANNELS.ownerRestore, {...statusInput, action: "confirm", proposalDigest: "b".repeat(64)})).rejects.toThrow();
+  });
+
+  it.each(["workspace", "operation", "top-operation", "top-document", "point", "path"])("rejects substituted %s coordinates", async substitution => {
+    const h = harness();
+    let input: unknown = statusInput, response: unknown = structuredClone(status);
+    if (substitution === "workspace") response = {...status, intent: {...intent, document: {...document, workspaceId: "other"}}};
+    if (substitution === "operation") response = {...status, intent: {...intent, operationId: "other"}};
+    if (substitution === "top-operation") response = {...status, operationId: "other"};
+    if (substitution === "top-document") response = {...status, document: {...document, objectId: "other"}};
+    if (substitution === "point") {
+      input = {workspaceId, action: "plan", document, shareId: "share", grantId: "grant", restorePointCursor: 0, restorePointReceiptDigest: "a".repeat(64)};
+      response = {intent: {...intent, restorePointCursor: 1}, path: "notes.md", recipients: []};
+    }
+    if (substitution === "path") {
+      input = {workspaceId, action: "options", path: "notes.md"};
+      response = {document, path: "other.md", grants: [], points: [], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
+    }
+    h.request.mockResolvedValue(response);
+    await expect(h.invoke(CHANNELS.ownerRestore, input)).rejects.toThrow();
+  });
+});
+
 describe("registered relay share handlers", () => {
+  it.each([
+    ["comment", {ok: true, access: "comment", url: "https://relay.example/new"}, {outcome: "widened", url: "https://relay.example/new"}],
+    ["edit", {ok: true, access: "edit", url: "https://relay.example/new"}, {outcome: "widened", url: "https://relay.example/new"}],
+    ["comment", {ok: true, access: "comment"}, {outcome: "narrowed"}],
+    ["view", {ok: true, access: "view"}, {outcome: "narrowed"}],
+  ])("reports the relay's actual credential transition for %s", async (access, response, expected) => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: response});
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+      workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access,
+    })).resolves.toEqual(expected);
+  });
+
+  it.each([
+    {ok: true, access: "view"},
+    {ok: true, access: "edit", url: "https://relay.example/new"},
+    {ok: true, access: "comment", url: "not a URL"},
+    {ok: true, access: "comment", url: null},
+    {ok: false, access: "comment", url: "https://relay.example/new"},
+  ])("rejects a malformed or mismatched retune response %j", async response => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: response});
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+      workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "comment",
+    })).rejects.toThrow("sharing failed (500)");
+  });
+
+  it("rejects a replacement URL for View and an unknown access level before making a request", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view", url: "https://relay.example/new"}});
+    const payload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "view"})).rejects.toThrow();
+    h.request.mockClear();
+    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "owner"})).rejects.toThrow();
+    expect(h.request).not.toHaveBeenCalled();
+  });
+
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
+      CHANNELS.ownerRestore,
       CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
       CHANNELS.revokeRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
       CHANNELS.listRelayShareLinks, CHANNELS.retuneRelayShareLink, CHANNELS.rotateRelayShareLink,

@@ -3385,3 +3385,393 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     .expect_err("a response past the negotiated limit without blobs must be refused");
     assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
+    use dohc_engine_runtime::{CancellationToken, WorkspaceSupervisor};
+
+    const PATH: &str = "responses/accepted_00000000-0000-4000-8000-000000000001.md";
+    const ACCEPTANCE: &str = "accepted_00000000-0000-4000-8000-000000000001";
+    const MOMENT: &str = "00000000-0000-4000-8000-000000000002";
+    const OBJECT: &str = "00000000-0000-4000-8000-000000000003";
+    const PRINCIPAL: &str = "public_00000000-0000-4000-8000-000000000004";
+    const GRANT: &str = "grant-trip-1";
+    const OWNER: &str = "trip-owner-device";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("seed owner store");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "name: Responses\nfields:\n  destination:\n    type: text\n  name:\n    type: text\n  created_at:\n    type: number\n  created_by:\n    type: text\n  grant_id:\n    type: text\n  idempotency_key:\n    type: text\n  acceptance_id:\n    type: text\n";
+    seed_text(&mut store, "responses/collection.yaml", schema, 2);
+    write_file(
+        scratch.path(),
+        "responses/collection.yaml",
+        schema.as_bytes(),
+    );
+    drop(store);
+
+    // Match acceptAppCollection's JSON frontmatter. The relay has assigned an
+    // acceptance and public principal; the owner has not assigned a record id.
+    let text = format!(
+        "---\n{{\"destination\":\"Tokyo\",\"name\":\"Ice\",\"created_at\":20,\"created_by\":\"{PRINCIPAL}\",\"grant_id\":\"{GRANT}\",\"idempotency_key\":\"vote-1\",\"acceptance_id\":\"{ACCEPTANCE}\"}}\n---\n"
+    );
+    let sha = hex_sha256(text.as_bytes());
+    let author = json!({ "kind": "public", "principalId": PRINCIPAL, "grantId": GRANT });
+    let envelope = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: format!("relay:collection-create:{GRANT}"),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "moment.append".to_owned(),
+        recorded_at_ms: 20,
+        payload: json!({
+            "momentId": MOMENT,
+            "versionId": "main",
+            "objectId": OBJECT,
+            "path": PATH,
+            "recordedAtMs": 20,
+            "operation": "write",
+            "beforePresent": "null",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadBeforeContentKind": null,
+            "payloadBeforeByteLength": null,
+            "payloadAfterBlobSha256": sha,
+            "payloadAfterPath": PATH,
+            "payloadAfterContentKind": "text",
+            "payloadAfterByteLength": text.len(),
+            "metadata": { "origin": "sync" },
+            "author": author,
+        }),
+    };
+    let connection = rusqlite::Connection::open(&db).expect("seed replication connection");
+    connection
+        .execute(
+            "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+            rusqlite::params![sha, text.len() as i64, text],
+        )
+        .expect("hydrate accepted response blob");
+    connection
+        .execute(
+            "INSERT INTO sync_identity \
+         (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES (?1,?2,'trip-epoch','trip-stream',1)",
+            rusqlite::params![WORKSPACE_ID, OWNER],
+        )
+        .expect("seed owner sync identity");
+    connection.execute(
+        "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES (?1,?2,0)",
+        rusqlite::params![WORKSPACE_ID, OWNER],
+    ).expect("enable owner settlement journal");
+    drop(connection);
+    let mut store = EngineStore::open(&db, 2).expect("replication store");
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply accepted public response");
+    assert!(applied.refusals.is_empty(), "{applied:?}");
+    assert!(applied.sharing_declined.is_empty(), "{applied:?}");
+    let routed = match applied.primary {
+        ApplyDisposition::Applied(r) => r,
+        other => panic!("unexpected apply: {other:?}"),
+    };
+    assert_eq!(routed.materialization_changes.len(), 1);
+    let changes = routed.materialization_changes;
+    let retry = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("retry accepted response before materialization");
+    assert!(matches!(retry.primary, ApplyDisposition::Skipped));
+    assert!(retry.refusals.is_empty());
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 2).expect("open actor").actor;
+    actor
+        .materialize_relay_page(
+            WORKSPACE_ID.to_owned(),
+            scratch.path().to_path_buf(),
+            changes.clone(),
+            Arc::new(()),
+            20,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("materialize");
+    actor
+        .materialize_relay_page(
+            WORKSPACE_ID.to_owned(),
+            scratch.path().to_path_buf(),
+            changes.clone(),
+            Arc::new(()),
+            21,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retry page materialization");
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("materialized accepted response"),
+        text
+    );
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":WORKSPACE_ID}),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    reconcile_capture(&transport, &handle, 10).await;
+    let query = call(
+        &transport,
+        &handle,
+        20,
+        "collections.query",
+        json!({"collectionPath":"responses"}),
+    )
+    .await;
+    let record_id = query["records"][0]["id"]
+        .as_str()
+        .expect("adopted id")
+        .to_owned();
+    assert!(record_id.starts_with("rec_"));
+    assert_eq!(query["records"].as_array().expect("records").len(), 1);
+    let pending = call(
+        &transport,
+        &handle,
+        21,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        pending["adoptions"]
+            .as_array()
+            .expect("pending adoptions")
+            .len(),
+        1
+    );
+    assert_eq!(pending["adoptions"][0]["recordId"], record_id);
+    assert_eq!(pending["adoptions"][0]["objectId"], OBJECT);
+    assert_eq!(pending["adoptions"][0]["filePath"], PATH);
+    let seeded = call(
+        &transport,
+        &handle,
+        22,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": PATH, "contentKind": "richdoc", "expectedObjectId": OBJECT,
+        }),
+    )
+    .await;
+    assert_eq!(seeded["lineage"], "absent");
+    assert_eq!(seeded["seedContent"], text);
+    let doc = Ydoc::wire();
+    // The native fixture has only frontmatter. Desktop adoption uses the
+    // shared Markdown importer to provide this seed through the same RPC.
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
+        .expect("seed response document");
+    call(&transport, &handle, 23, "ydoc.recordUpdate", json!({
+        "sessionId": seeded["sessionId"],
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
+        "seed": true,
+    })).await;
+    call(
+        &transport,
+        &handle,
+        24,
+        "ydoc.evict",
+        json!({ "sessionId": seeded["sessionId"] }),
+    )
+    .await;
+    reconcile_capture(&transport, &handle, 30).await;
+    let settled = std::fs::read_to_string(scratch.path().join(PATH)).expect("adopted Markdown");
+    assert!(settled.contains(&record_id), "{settled}");
+    let query = call(
+        &transport,
+        &handle,
+        60,
+        "collections.query",
+        json!({ "collectionPath": "responses" }),
+    )
+    .await;
+    assert_eq!(query["records"].as_array().expect("records").len(), 1);
+    assert_eq!(query["records"][0]["id"], record_id);
+    for (field, expected) in [
+        ("destination", json!("Tokyo")),
+        ("name", json!("Ice")),
+        ("created_at", json!(20)),
+        ("created_by", json!(PRINCIPAL)),
+        ("grant_id", json!(GRANT)),
+        ("idempotency_key", json!("vote-1")),
+        ("acceptance_id", json!(ACCEPTANCE)),
+    ] {
+        let value = query["records"][0]["values"]
+            .as_array()
+            .expect("record values")
+            .iter()
+            .find(|value| value["field"] == field)
+            .unwrap_or_else(|| panic!("missing {field}: {query}"));
+        assert_eq!(value["value"], expected, "{field}");
+    }
+    let pending = call(
+        &transport,
+        &handle,
+        61,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["adoptions"], json!([]));
+    let original = call(
+        &transport,
+        &handle,
+        62,
+        "moments.get",
+        json!({ "momentId": MOMENT }),
+    )
+    .await;
+    assert_eq!(original["author"], author);
+    assert_eq!(original["afterText"], text);
+    call(&transport, &handle, 63, "workspace.close", json!({})).await;
+    drop(transport);
+
+    let outgoing = || {
+        let connection = rusqlite::Connection::open(&db).expect("read owner journal");
+        let mut statement = connection
+            .prepare(
+                "SELECT payload_json FROM replication_log \
+             WHERE workspace_id=?1 AND origin_id=?2 AND imported=0 AND op_kind='moment.append' \
+             AND json_extract(payload_json,'$.path')=?3 ORDER BY origin_seq",
+            )
+            .expect("owner moment query");
+        statement
+            .query_map(rusqlite::params![WORKSPACE_ID, OWNER, PATH], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("owner moments")
+            .map(|row| {
+                serde_json::from_str::<Value>(&row.expect("owner moment")).expect("owner payload")
+            })
+            .collect::<Vec<_>>()
+    };
+    let before_retry = outgoing();
+    assert_eq!(
+        before_retry.len(),
+        1,
+        "adoption must publish exactly one ordinary file moment"
+    );
+    let adoption = before_retry
+        .iter()
+        .find(|op| op["payloadAfterBlobSha256"] == hex_sha256(settled.as_bytes()))
+        .expect("owner adoption must enter the outgoing replication journal");
+    assert_eq!(adoption["objectId"], OBJECT);
+    assert_eq!(
+        adoption["metadata"]["origin"], "local-file",
+        "the adoption must use a valid ordinary replication origin"
+    );
+    assert_eq!(
+        adoption["payloadAfterBlobSha256"],
+        hex_sha256(settled.as_bytes())
+    );
+    assert!(
+        adoption["author"].is_null(),
+        "owner settlement must not impersonate the public voter"
+    );
+    let mut retry = EngineStore::open(&db, 3).expect("retry store");
+    let again = apply_replication_envelope(
+        &mut retry,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("retry");
+    assert!(matches!(again.primary, ApplyDisposition::Skipped));
+    assert!(again.refusals.is_empty());
+    drop(retry);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).expect("reopen actor").actor;
+    actor
+        .materialize_relay_page(
+            WORKSPACE_ID.to_owned(),
+            scratch.path().to_path_buf(),
+            changes,
+            Arc::new(()),
+            30,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("materialization retry after adoption preserves current head");
+    supervisor.close(&db).expect("close restarted actor");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("restarted Markdown"),
+        settled
+    );
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                70,
+                "workspace.open",
+                None,
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
+            ),
+        )
+        .await
+        .expect("restart workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("restart handle");
+    reconcile_capture(&transport, &handle, 80).await;
+    let query = call(
+        &transport,
+        &handle,
+        110,
+        "collections.query",
+        json!({ "collectionPath": "responses" }),
+    )
+    .await;
+    assert_eq!(
+        query["records"]
+            .as_array()
+            .expect("restarted records")
+            .len(),
+        1
+    );
+    assert_eq!(query["records"][0]["id"], record_id);
+    call(&transport, &handle, 111, "workspace.close", json!({})).await;
+    assert_eq!(
+        outgoing(),
+        before_retry,
+        "retries and restart must not add owner settlements"
+    );
+    let connection = rusqlite::Connection::open(&db).expect("read durable imported moment");
+    let counts: (i64, i64) = connection.query_row(
+        "SELECT (SELECT count(*) FROM moments WHERE workspace_id=?1 AND moment_id=?2), \
+         (SELECT count(*) FROM replication_log WHERE workspace_id=?1 AND origin_id=?3 AND imported=1)",
+        rusqlite::params![WORKSPACE_ID, MOMENT, envelope.origin_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).expect("count imported response");
+    assert_eq!(counts, (1, 1));
+}

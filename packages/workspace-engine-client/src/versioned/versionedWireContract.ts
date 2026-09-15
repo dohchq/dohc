@@ -9,9 +9,11 @@ export const VERSIONED_METHOD = {
   textRead: "versionedText.read",
   textReadBlob: "versionedText.readBlob",
   textRename: "versionedText.rename",
+  textCheckMove: "versionedText.checkMove",
   textDelete: "versionedText.delete",
   textRollback: "versionedText.rollback",
   textList: "versionedText.list",
+  textCaptureSources: "versionedText.captureSources",
   binaryWrite: "versionedBinary.write",
   binaryWriteBlob: "versionedBinary.writeBlob",
   binaryRead: "versionedBinary.read",
@@ -77,6 +79,7 @@ type VersionedTextWriteParams = MutationMetadata & {
   objectId?: string;
   path: string;
   text: string;
+  restoreBeforeMomentId?: string;
   momentId?: string;
 };
 
@@ -117,6 +120,7 @@ type VersionedTextRenameParams = MutationMetadata & {
 type VersionedTextDeleteParams = MutationMetadata & {
   versionId: string;
   path: string;
+  expectedObjectId?: string;
 };
 
 type VersionedTextRollbackParams = Omit<MutationMetadata, "nowMs"> & {
@@ -429,10 +433,16 @@ type HistoryPageResult = typeof HistoryPageResultSchema.Type;
 type SearchEnsureIndexResult = JsonObject;
 
 export type VersionedMethodParamsMap = {
+  [VERSIONED_METHOD.textCaptureSources]: JsonObject & {
+    versionId: string;
+    paths: string[];
+    bounds: { maxInputFiles: number; maxInputBytes: number };
+  };
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteParams;
   [VERSIONED_METHOD.textRead]: VersionedTextReadParams;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;
@@ -466,10 +476,12 @@ export type VersionedMethodParamsMap = {
 };
 
 export type VersionedMethodResultMap = {
+  [VERSIONED_METHOD.textCaptureSources]: SourceCapture;
   [VERSIONED_METHOD.textWrite]: VersionedTextWriteResult;
   [VERSIONED_METHOD.textRead]: VersionedTextReadResult;
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobResult;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameResult;
+  [VERSIONED_METHOD.textCheckMove]: { allowed: true };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteResult;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackResult;
   [VERSIONED_METHOD.textList]: VersionedTextListResult;
@@ -589,9 +601,14 @@ const AgentAuthorSchema = mutableStruct({
   onBehalfOf: Schema.String,
   agentRunId: Schema.optionalKey(Schema.String),
 });
+const PublicAuthorSchema = mutableStruct({
+  kind: Schema.Literal("public"),
+  principalId: Schema.String,
+  grantId: Schema.String,
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorSchema = Schema.NullOr(
-  Schema.Union([AgentAuthorSchema, CorruptAuthorSchema]),
+  Schema.Union([AgentAuthorSchema, PublicAuthorSchema, CorruptAuthorSchema]),
 );
 
 const MomentRecordSchema = mutableStruct({
@@ -904,11 +921,29 @@ const TextListResultSchema = mutableStruct({
   nextAfterPath: NullableString,
 });
 
+const SourceCaptureSchema = mutableStruct({
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  sourceDigest: Schema.String,
+  totalBytes: Schema.Int,
+  files: Schema.mutable(Schema.Array(mutableStruct({
+    path: Schema.String,
+    objectId: Schema.String,
+    contentKind: ContentKindSchema,
+    sha256: Schema.String,
+    byteLength: Schema.Int,
+    latestMomentId: Schema.String,
+  }))),
+});
+export type SourceCapture = typeof SourceCaptureSchema.Type;
+
 const VersionedResultSchemas = {
+  [VERSIONED_METHOD.textCaptureSources]: SourceCaptureSchema,
   [VERSIONED_METHOD.textWrite]: TextWriteResultSchema,
   [VERSIONED_METHOD.textRead]: Schema.NullOr(VersionedTextReadValueSchema),
   [VERSIONED_METHOD.textReadBlob]: BlobReadResultSchema,
   [VERSIONED_METHOD.textRename]: TextRenameResultSchema,
+  [VERSIONED_METHOD.textCheckMove]: mutableStruct({ allowed: Schema.Literal(true) }),
   [VERSIONED_METHOD.textDelete]: TextDeleteResultSchema,
   [VERSIONED_METHOD.textRollback]: TextRollbackResultSchema,
   [VERSIONED_METHOD.textList]: TextListResultSchema,

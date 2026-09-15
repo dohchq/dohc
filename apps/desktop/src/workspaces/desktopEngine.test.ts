@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
   createRustEngineDaemon,
+  EngineClient,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
   type EngineDaemonLifecycleOptions,
@@ -16,6 +17,13 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { PluginWorkspaceRuntimes, type PluginWorkspaceRuntimeParts } from "../plugins/pluginWorkspaceRuntimes";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
+
+const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
+vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock.read, startDesktopOwnerHost: ownerHostMock.start }));
+
+const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
+vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
+vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
 
 type State = { pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace> };
 type Dependencies = Parameters<typeof createDesktopEngine<State>>[0];
@@ -99,6 +107,7 @@ function fixture() {
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
   const dependencies: Dependencies = {
+    findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root"), quit: vi.fn() },
     dialog: { showErrorBox: vi.fn() },
     process: { env: {}, resourcesPath: "resources" },
@@ -143,6 +152,7 @@ function fixture() {
       return workspace;
     },
     async close(expectedRuntimeError?: Error) {
+      quitting = true;
       const stopped = await Promise.allSettled([...states].map(([id, state]) => state.pluginRuntimes.stop(id)));
       try { await engine.closeAllRelayTransportWorkspaces(); }
       finally {
@@ -159,6 +169,189 @@ function fixture() {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
+  it("discovers remaining configured owners after another workspace closes", async () => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    for (const workspaceId of ["first","second"]) {
+      const rootPath = await createTestScratch(`dohc-owner-workspace-close-${workspaceId}-`);
+      f.rows.set(workspaceId,{workspaceId,rootPath,kind:"personal",mode:"local-first"});
+    }
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => {throw new Error("No editor in this discovery test.");});
+    ownerHostMock.read.mockReturnValue({nativeConfigPath:"native-config",workspaceIds:["first","second"],transport:{aggregateBytes:1024,maxUploads:1}});
+    ownerHostMock.start.mockImplementation(() => ({stop:vi.fn()}));
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async request => request.method === "workspace.open" && ["first","second"].includes(String(workspaceIdOf(request)))
+      ? {id:request.id,result:{workspace:`handle-${workspaceIdOf(request)}`}} : originalSend(request);
+    try {
+      expect(f.authorities.workspaceIds()).toEqual([]);
+      expect(await f.engine.start()).toBe(true);
+      const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
+      expect((await discover()).workspaces).toHaveLength(2);
+      await f.authorities.invalidate("first"); f.rows.delete("first");
+      const remaining = await discover();
+      expect(remaining.workspaces).toEqual([{workspaceId:"second",workspaceHandle:"handle-second"}]);
+      expect(() => remaining.assertCurrent()).not.toThrow();
+      await f.authorities.invalidate("second"); f.rows.delete("second");
+      await expect(discover()).rejects.toThrow("Owner host has no registered workspaces.");
+    } finally {await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();}
+  });
+
+  it.each(["closed", "reopened"])("rejects discovered owner handles after a capture directly closes its %s session", async mode => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-capture-close-");
+    f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => { throw new Error("No editor in this discovery test."); });
+    ownerHostMock.read.mockReturnValue({ nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: { aggregateBytes: 1024, maxUploads: 1 } });
+    ownerHostMock.start.mockImplementation(() => ({ stop: vi.fn() }));
+    let handles = 0;
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async input => input.method === "workspace.open" && workspaceIdOf(input) === "owner"
+      ? { id: input.id, result: { workspace: `owner-${++handles}` } } : originalSend(input);
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const lease = f.authorities.acquire("owner");
+      const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
+      lease.release();
+      const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
+      const captured = await discover();
+      expect(() => captured.assertCurrent()).not.toThrow();
+      // Temporary dispatch capture closes its store after the paused relay close.
+      await f.engine.sessions!.closeWorkspace(workspace);
+      if (mode === "reopened") await f.engine.sessions!.run(workspace, async () => undefined);
+      expect(() => captured.assertCurrent()).toThrow();
+      const current = await discover();
+      expect(current.client).toBe(captured.client);
+      expect(current.workspaces[0].workspaceHandle).not.toBe(captured.workspaces[0].workspaceHandle);
+      expect(() => current.assertCurrent()).not.toThrow();
+      expect(() => captured.assertCurrent()).toThrow();
+    } finally { await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset(); }
+  });
+
+  it.each(["initial", "credential", "cloud", "rejecting-close", "quitting"])("retires discovered owner bindings before the first relay request after %s rebind", async mode => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-relay-rebind-");
+    f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => { throw new Error("No editor in this discovery test."); });
+    ownerHostMock.read.mockReturnValue({ nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: { aggregateBytes: 1024, maxUploads: 1 } });
+    const stops: ReturnType<typeof vi.fn>[] = [];
+    ownerHostMock.start.mockImplementation(() => { const stop = vi.fn(); stops.push(stop); return { stop }; });
+    let handles = 0, blockedHandle: string | undefined;
+    let request: Promise<unknown> | undefined;
+    const closing = deferred(), closeEntered = deferred();
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async input => {
+      if (input.method === "workspace.open" && workspaceIdOf(input) === "owner") {
+        f.client.requests.push(input);
+        return { id: input.id, result: { workspace: `owner-${++handles}` } };
+      }
+      if (input.method === "workspace.close" && input.workspace === blockedHandle) {
+        closeEntered.resolve(); await closing.promise;
+        if (mode === "rejecting-close") throw new Error("injected binding close failure");
+      }
+      if (input.method === "sync.probe") { f.client.requests.push(input); return { id: input.id, result: { hasContent: true } }; }
+      return originalSend(input);
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const lease = f.authorities.acquire("owner");
+      const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
+      lease.release();
+      let relay = f.engine.relayClient!.bind({ ...workspace, relay: { baseUrl: "https://relay.test", token: "first-token" } });
+      const rotated = mode === "credential" || mode === "cloud";
+      if (rotated) await relay.probe();
+      if (mode === "cloud") await f.engine.closeAllRelayTransportWorkspaces();
+      if (rotated) relay = f.engine.relayClient!.bind({ ...workspace, relay: { baseUrl: "https://relay.test", token: "second-token" } });
+      const discovered = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      blockedHandle = discovered.workspaces[0].workspaceHandle;
+      const priorStop = stops.at(-1)!;
+      request = relay.probe();
+      await closeEntered.promise;
+      expect(() => discovered.assertCurrent()).toThrow("Owner host daemon retired.");
+      expect(priorStop).toHaveBeenCalledOnce();
+      const startsBeforeClose = ownerHostMock.start.mock.calls.length;
+      if (mode === "quitting") f.setQuitting(true);
+      closing.resolve();
+      await expect(request).resolves.toEqual({ hasContent: true });
+      if (mode === "quitting") {
+        expect(ownerHostMock.start).toHaveBeenCalledTimes(startsBeforeClose);
+        return;
+      }
+      const current = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(() => current.assertCurrent()).not.toThrow();
+      expect(current.client).toBe(discovered.client);
+      expect(current.workspaces[0].workspaceHandle).not.toBe(blockedHandle);
+      expect(f.client.requests.filter(row => row.method === "sync.probe").at(-1)?.workspace).toBe(current.workspaces[0].workspaceHandle);
+      const opened = f.client.requests.filter(row => row.method === "workspace.open" && workspaceIdOf(row) === "owner").at(-1)!;
+      expect(opened.params).toMatchObject({ relay: { bearerToken: rotated ? "second-token" : "first-token" } });
+      const starts = ownerHostMock.start.mock.calls.length;
+      await relay.probe();
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(starts);
+    } finally {
+      closing.resolve(); await request?.catch(() => undefined); await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();
+    }
+  });
+
+  it.each(["workspace", "cloud", "overlapping-cloud", "shutdown"])("retires owner discovery during %s close and resumes only while running", async mode => {
+    const f = fixture();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-host-rotation-");
+    f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "test-config";
+    f.dependencies.existingOwnerFor = vi.fn(() => { throw new Error("No editor in this discovery test."); });
+    const stopped: ReturnType<typeof vi.fn>[] = [];
+    ownerHostMock.read.mockReturnValue({ nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: { aggregateBytes: 1024, maxUploads: 1 } });
+    ownerHostMock.start.mockImplementation(() => { const stop = vi.fn(); stopped.push(stop); return { stop }; });
+    let handles = 0;
+    const closing = deferred(), closeEntered = deferred();
+    const originalSend = f.client.sendRequest.bind(f.client);
+    f.client.sendRequest = async request => {
+      if (request.method === "workspace.open" && workspaceIdOf(request) === "owner") return { id: request.id, result: { workspace: `owner-${++handles}` } };
+      if (request.method === "workspace.close" && request.workspace === "owner-1") { closeEntered.resolve(); await closing.promise; }
+      return originalSend(request);
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const lease = f.authorities.acquire("owner");
+      const workspace = { workspaceId: "owner", rootPath, attachmentId: lease.binding.attachmentId };
+      lease.release();
+      f.engine.relayClient!.bind({...workspace, relay: {baseUrl: "https://relay.test", token: "first-token"}});
+      const first = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(first.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-1" }]);
+      const close = mode === "cloud" ? f.engine.closeAllRelayTransportWorkspaces() : f.engine.closeRelayTransportWorkspace(workspace);
+      await closeEntered.promise;
+      expect(stopped[0]).toHaveBeenCalledOnce();
+      expect(() => first.assertCurrent()).toThrow("Owner host daemon retired.");
+      if (mode === "shutdown") f.setQuitting(true);
+      const shutdownDone = mode === "shutdown" || mode === "overlapping-cloud" ? f.engine.closeAllRelayTransportWorkspaces() : Promise.resolve();
+      f.options().onLaunch?.();
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(1);
+      closing.resolve(); await close; await shutdownDone;
+      expect(ownerHostMock.start).toHaveBeenCalledTimes(mode === "shutdown" ? 1 : 2);
+      if (mode === "shutdown") {
+        f.options().onLaunch?.();
+        expect(ownerHostMock.start).toHaveBeenCalledTimes(1);
+        return;
+      }
+      f.engine.relayClient!.bind({...workspace, relay: {baseUrl: "https://relay.test", token: "second-token"}});
+      const next = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(next.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-2" }]);
+      expect(() => next.assertCurrent()).not.toThrow();
+      expect(next.client).toBe(first.client);
+      await f.engine.closeAllRelayTransportWorkspaces();
+      expect(() => next.assertCurrent()).toThrow("Owner host daemon retired.");
+      const reopened = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
+      expect(reopened.workspaces).toEqual([{ workspaceId: "owner", workspaceHandle: "owner-3" }]);
+      expect(() => reopened.assertCurrent()).not.toThrow();
+    } finally {
+      closing.resolve(); await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();
+    }
+  });
+
   it("creates no daemon until start and publishes sessions only after the held handshake", async () => {
     const f = fixture(); const held = deferred(); const entered = deferred();
     f.setLaunch(async () => { entered.resolve(); await held.promise; return f.client; });
@@ -478,5 +671,58 @@ describe("desktop engine composed sessions and events", () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["notes.md"] });
     } finally { vi.useRealTimers(); await f.close(); }
+  });
+});
+
+
+describe("private owner peer lifecycle", () => {
+  it.each(["credentials", "daemon", "workspace"])("holds the workspace session until %s cancellation settles", async mode => {
+    const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-owner-peer-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner"}, outboxId: "pending"};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      relayUrl: "https://relay.example.test", documents: [document]};
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
+    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", relayUrl: config.relayUrl, signal: credentials.signal});
+    ownerDeliveryMock.read.mockReturnValue(config);
+    let active: Promise<unknown> | undefined, lifetime!: AbortController;
+    ownerDeliveryMock.start.mockImplementation(options => {
+      lifetime = new AbortController();
+      return {stop: async () => {lifetime.abort(); await active?.catch(() => undefined);}};
+    });
+    let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
+    ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "retry";});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      expect(f.options().privateOwnerHost).toEqual({configPath: "native-config", client: config.nativeClient});
+      const run = ownerDeliveryMock.start.mock.calls.at(-1)![0].runPass;
+      active = run(document, lifetime.signal);
+      await entered.promise;
+      expect(passOptions.bearer).toBe("actual-token");
+      if (mode === "credentials") credentials.abort();
+      let closed = false;
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      expect(passOptions.signal.aborted).toBe(true);
+      expect(() => passOptions.assertCurrent()).toThrow();
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(f.client.requests.filter(request => request.method === "workspace.close" && request.workspace === "workspace-handle")).toHaveLength(0);
+      settled.resolve(); await active?.catch(() => undefined); await closing;
+      expect(closed).toBe(true);
+    } finally {settled.resolve(); await f.close(); ownerDeliveryMock.read.mockReset(); ownerDeliveryMock.start.mockReset(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  it("rejects conflicting native ingress budgets before launching the daemon", async () => {
+    const f = fixture();
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_HOST_CONFIG = "host-config";
+    f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
+    f.dependencies.existingOwnerFor = vi.fn();
+    f.dependencies.ownerDeliveryCredentials = () => null;
+    ownerHostMock.read.mockReturnValue({nativeConfigPath: "native-config", workspaceIds: ["owner"], transport: {aggregateBytes: 100_000_000, maxUploads: 2}});
+    ownerDeliveryMock.read.mockReturnValue({nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 3}, documents: []});
+    try {expect(await f.engine.start()).toBe(false); expect(f.dependencies.createRustEngineDaemon).not.toHaveBeenCalled();}
+    finally {await f.close(); ownerHostMock.read.mockReset(); ownerDeliveryMock.read.mockReset();}
   });
 });

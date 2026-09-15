@@ -1,5 +1,10 @@
+import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
+import { ServiceActivationStore } from "./storage/serviceActivation";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
+import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
+import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
 import { RelayWriteOwner } from "./storage/writeOwner";
+import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
@@ -61,9 +66,9 @@ import type {
   ShareProposalState,
   FetchLogPageResult,
   CurrentFileStateSnapshot,
-  NamedLiveTicketLookup,
-  NamedLiveTicketMint,
-  NamedLiveTicketRedemption,
+  LiveTicketLookup,
+  LiveTicketMint,
+  LiveTicketRedemption,
   DeviceHostCredentialResult,
 } from "./storage/types";
 import { createRequire } from "node:module";
@@ -88,6 +93,9 @@ import type { HostControlSnapshot, HostMode, HostTransitionGeneration } from "@d
 import * as hostControlStorage from "./storage/hostControl";
 import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
+import * as publicationStorage from "./storage/publications";
+import * as appCollectionStorage from "./storage/appCollections";
+import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as sharesStorage from "./storage/shares";
@@ -176,9 +184,9 @@ export {
   type CurrentLiveBindingResult,
   type DeviceHostCredentialResult,
   type TicketHostReport,
-  type NamedLiveTicketLookup,
-  type NamedLiveTicketMint,
-  type NamedLiveTicketRedemption,
+  type LiveTicketLookup,
+  type LiveTicketMint,
+  type LiveTicketRedemption,
   type LiveTicketStoragePolicy,
 } from "./storage/types";
 export {
@@ -308,6 +316,7 @@ export function openSyncRelayStorage(
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
   readonly newDiscussionId: () => string;
+  private readingLiveAuthority = false;
 
   constructor(
     readonly db: SqliteDb,
@@ -325,8 +334,31 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
 
-  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
-    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input);
+  readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
+    return liveRestoreOperationStorage.readStopRestorePlan(this, input);
+  }
+  readOwnerRestoreOptions(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreOptions>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerRestoreOptions(this, input);
+  }
+  readOwnerRestoreStatus(input: Parameters<typeof ownerRestoreOptionsStorage.readOwnerRestoreStatus>[1]) {
+    return ownerRestoreOptionsStorage.readOwnerRestoreStatus(this, input);
+  }
+  beginStopRestore(input: Parameters<typeof liveRestoreOperationStorage.beginStopRestore>[1], now: number) {
+    return liveRestoreOperationStorage.beginStopRestore(this, input, now);
+  }
+  advanceStopRestoreFence(input: Parameters<typeof liveRestoreOperationStorage.advanceStopRestoreFence>[1], now: number) {
+    return liveRestoreOperationStorage.advanceStopRestoreFence(this, input, now);
+  }
+  readStopRestore(input: Parameters<typeof liveRestoreOperationStorage.readStopRestore>[1]) {
+    return liveRestoreOperationStorage.readStopRestore(this, input);
+  }
+
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
+  }
+
+  resolveLiveObjectHostBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveLiveObjectHostBinding>[1], objectId: string): liveDocumentAuthorityStorage.LiveObjectHostBindingResult {
+    return liveDocumentAuthorityStorage.resolveLiveObjectHostBinding(this, scope, objectId);
   }
 
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
@@ -337,16 +369,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input);
   }
 
-  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult {
-    return liveUpdateJournalStorage.commitLiveUpdateJournal(this, input);
+  commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {
+    return liveUpdateJournalStorage.commitLiveUpdateJournal(this, input, activation);
   }
 
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
-  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority): LiveCommittedDeliveryStore {
-    return new LiveCommittedDeliveryStore(this, history);
+  createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore {
+    return new LiveCommittedDeliveryStore(this, history, activation);
+  }
+  createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore {
+    return new ServiceActivationStore(this,history);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
@@ -448,6 +483,61 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+  }
+
+  publishAppPublication(input: publicationStorage.PublishAppPublicationInput) {
+    return publicationStorage.publishAppPublication(this, input);
+  }
+
+  approveAppCollection(input: appCollectionStorage.ApproveAppCollectionInput) {
+    return appCollectionStorage.approveAppCollection(this,input);
+  }
+
+  acceptAppCollection(input: appCollectionStorage.AcceptAppCollectionInput, policy: appCollectionStorage.AppCollectionAcceptancePolicy) {
+    return appCollectionStorage.acceptAppCollection(this,input,policy);
+  }
+
+  readAppCollection(input: appCollectionStorage.ReadAppCollectionInput) {
+    return appCollectionStorage.readAppCollection(this,input);
+  }
+  authorizeLinkAppCollection(input: publicationStorage.LinkAppPublicationInput) {
+    return appCollectionStorage.authorizeLinkAppCollection(this,input);
+  }
+
+  readOwnerAppCollectionAcceptances(input: appCollectionModeration.OwnerAppCollectionAcceptancesInput) {
+    return appCollectionModeration.readOwnerAppCollectionAcceptances(this,input);
+  }
+
+  readAppPublication(input: publicationStorage.ReadAppPublicationInput) {
+    return publicationStorage.readAppPublication(this, input);
+  }
+
+  listAppPublications(input: publicationStorage.ListAppPublicationsInput) {
+    return publicationStorage.listAppPublications(this, input);
+  }
+
+  listLinkAppPublications(input: publicationStorage.ListLinkAppPublicationsInput) {
+    return publicationStorage.listLinkAppPublications(this, input);
+  }
+
+  withdrawAppPublication(input: publicationStorage.WithdrawAppPublicationInput) {
+    return publicationStorage.withdrawAppPublication(this, input);
+  }
+
+  reactivateAppPublication(input: publicationStorage.ReactivateAppPublicationInput) {
+    return publicationStorage.reactivateAppPublication(this, input);
+  }
+
+  authorizeLinkAppPublication(input: publicationStorage.LinkAppPublicationInput) {
+    return publicationStorage.authorizeLinkAppPublication(this, input);
+  }
+
+  createLinkAppPublicationGuard(input: publicationStorage.LinkAppPublicationInput) {
+    return publicationStorage.createLinkAppPublicationGuard(this, input);
+  }
+
+  readLinkAppPublicationBlob(input: publicationStorage.LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}) {
+    return publicationStorage.readLinkAppPublicationBlob(this, input);
   }
 
   putBlob(input: {
@@ -852,7 +942,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
   tx<T>(run: () => T): T {
-    return this.owner.write(run);
+    if (!hasRelayWriteObservers(this)) return this.owner.write(run);
+    const revision = this.db.prepare("SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version");
+    const before = JSON.stringify(revision.get());
+    try { return this.owner.write(run); }
+    finally {
+      if (this.unavailable.aborted || JSON.stringify(revision.get()) !== before) notifyRelayWrite(this);
+    }
   }
 
   readTx<T>(run: () => T): T {
@@ -868,6 +964,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {}
       throw error;
     }
+  }
+
+  readLiveAuthority<T>(run: () => T): T {
+    if (isAsyncFunction(run)) throw new TypeError("Live authority reads must be synchronous.");
+    const read = () => {
+      const value = run();
+      if (value !== null && (typeof value === "object" || typeof value === "function") &&
+        typeof (value as {then?: unknown}).then === "function") throw new TypeError("Live authority reads must be synchronous.");
+      return value;
+    };
+    if (this.readingLiveAuthority) { this.captureStanding(); return read(); }
+    return this.readTx(() => {
+      this.readingLiveAuthority = true;
+      try { return read(); }
+      finally { this.readingLiveAuthority = false; }
+    });
   }
 
   settleShareProposalInTransaction(
@@ -940,16 +1052,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  readNamedLiveTicketTarget(input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
-    return liveDocumentAuthorityStorage.readNamedLiveTicketTarget(this, input);
+  readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null {
+    return liveDocumentAuthorityStorage.readLiveTicketTarget(this, input);
   }
 
-  mintNamedLiveTicket(input: NamedLiveTicketMint): { expiresAtMs: number } | null {
-    return liveDocumentAuthorityStorage.mintNamedLiveTicket(this, input);
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null {
+    return liveDocumentAuthorityStorage.mintLiveTicket(this, input);
   }
 
-  redeemNamedLiveTicket(input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
-    return liveDocumentAuthorityStorage.redeemNamedLiveTicket(this, input);
+  redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null {
+    return liveDocumentAuthorityStorage.redeemLiveTicket(this, input);
   }
 
   provisionDeviceHostCredential(input: { credential: DeviceHostCredential; updatedAtMs: number }): DeviceHostCredentialResult {
@@ -968,3 +1080,4 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return hostControlStorage.revokeDeviceHostCredential(this, input);
   }
 }
+import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";

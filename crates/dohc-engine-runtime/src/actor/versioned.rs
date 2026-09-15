@@ -59,6 +59,28 @@ pub struct RollbackExecutionResult {
 }
 
 impl ActorHandle {
+    pub async fn ensure_no_adopted_owner_under_path(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            let path = dohc_engine_domain::validate_addressable_plaintext_path(&path)?;
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                        conn,
+                        &workspace_id,
+                        &version_id,
+                        &path,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// Execute a versioned-text write on the actor's single writer thread.
     pub async fn versioned_text_write(
         &self,
@@ -73,6 +95,7 @@ impl ActorHandle {
                     store,
                     &input,
                     root_dir.as_deref(),
+                    None,
                     faults.as_ref(),
                     &token,
                 )
@@ -89,6 +112,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        self.versioned_text_write_indexed_with_history(input, root_dir, None, faults, token)
+            .await
+    }
+
+    pub async fn versioned_text_write_indexed_with_history(
+        &self,
+        input: WriteText,
+        root_dir: PathBuf,
+        restore_before_moment_id: Option<String>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
         let root_dir: Option<PathBuf> = Some(root_dir);
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
@@ -96,6 +131,7 @@ impl ActorHandle {
                     store,
                     &input,
                     root_dir.as_deref(),
+                    restore_before_moment_id.as_deref(),
                     faults.as_ref(),
                     &token,
                 )
@@ -160,11 +196,33 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<DeleteResult, RuntimeError> {
+        self.versioned_text_delete_expected_object(
+            input,
+            None,
+            root_dir,
+            self_writes,
+            faults,
+            token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn versioned_text_delete_expected_object(
+        &self,
+        input: DeleteTextFile,
+        expected_object_id: Option<String>,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<DeleteResult, RuntimeError> {
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
                 versioned_text_delete_on_store(
                     store,
                     &input,
+                    expected_object_id.as_deref(),
                     &root_dir,
                     self_writes.as_ref(),
                     faults.as_ref(),
@@ -508,6 +566,7 @@ fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
     root_dir: Option<&std::path::Path>,
+    restore_before_moment_id: Option<&str>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -526,7 +585,11 @@ fn versioned_text_write_on_store(
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
-        let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let result = match restore_before_moment_id {
+            Some(source) => dohc_engine_domain::write_history_text_in_tx(tx, input, source),
+            None => write_text_in_tx(tx, input),
+        }
+        .map_err(RuntimeError::from)?;
         if !result.deduped {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
@@ -776,6 +839,7 @@ fn versioned_text_rename_on_store(
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
+    expected_object_id: Option<&str>,
     root_dir: &std::path::Path,
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
@@ -785,8 +849,8 @@ fn versioned_text_delete_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result =
-            dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let result = dohc_engine_domain::delete_text_in_tx_checked(tx, input, expected_object_id)
+            .map_err(RuntimeError::from)?;
         let asset_jobs = if !result.deduped {
             delete_file_search_index(
                 tx,
@@ -2002,6 +2066,9 @@ fn conflict_resolve_on_store(
 /// domain: payload-shaped refusals stay refusals, storage stays storage.
 fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::DomainError {
     match error {
+        dohc_engine_sync::SyncError::LiveDocumentBindingActive => {
+            dohc_engine_domain::DomainError::LiveDocumentBindingActive
+        }
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }

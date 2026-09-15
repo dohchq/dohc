@@ -590,6 +590,35 @@ CREATE TABLE replication_log (
 CREATE INDEX idx_replication_log_order
     ON replication_log(workspace_id, recorded_at_ms, origin_id, origin_seq);
 
+CREATE TABLE replication_refused_moment_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    role TEXT NOT NULL CHECK (role IN ('payload-before', 'payload-after', 'before')),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq, role),
+    CHECK ((text_sha256 IS NOT NULL) != (binary_sha256 IS NOT NULL)),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX replication_refused_moment_text_blobs
+    ON replication_refused_moment_blobs(text_sha256) WHERE text_sha256 IS NOT NULL;
+CREATE INDEX replication_refused_moment_binary_blobs
+    ON replication_refused_moment_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
+
+CREATE TABLE replication_refused_ydoc_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX replication_refused_ydoc_binary_blobs
+    ON replication_refused_ydoc_blobs(update_sha256);
+
 CREATE TABLE replication_peers (
     workspace_id TEXT    NOT NULL,
     origin_id    TEXT    NOT NULL,
@@ -1475,6 +1504,67 @@ CREATE UNIQUE INDEX idx_automation_claims_trigger_history
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 
+CREATE TABLE ydoc_owner_bindings (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    relay_database_namespace TEXT NOT NULL,
+    binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),
+    accepted_cursor INTEGER NOT NULL CHECK (accepted_cursor >= 0),
+    native_head_sequence INTEGER NOT NULL CHECK (native_head_sequence >= 0),
+    checkpoint_digest TEXT NOT NULL REFERENCES binary_blobs(sha256),
+    max_pending_bytes INTEGER NOT NULL CHECK (max_pending_bytes > 0),
+    max_pending_age_ms INTEGER NOT NULL CHECK (max_pending_age_ms > 0),
+    PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id)
+) STRICT;
+
+CREATE TABLE ydoc_owner_applied_frames (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
+    relay_database_namespace TEXT NOT NULL,
+    journal_cursor INTEGER NOT NULL CHECK(journal_cursor > 0),
+    previous_cursor INTEGER NOT NULL CHECK(previous_cursor >= 0 AND previous_cursor < journal_cursor),
+    update_digest TEXT NOT NULL,
+    previous_revision INTEGER NOT NULL CHECK(previous_revision > 0),
+    previous_native_head INTEGER NOT NULL CHECK(previous_native_head >= 0),
+    native_head_sequence INTEGER NOT NULL CHECK(native_head_sequence >= 0),
+    PRIMARY KEY(workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor)
+) STRICT;
+
+CREATE TABLE live_owner_adoptions (
+    relay_database_namespace TEXT NOT NULL,
+    adoption_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_byte_length INTEGER NOT NULL CHECK (source_byte_length >= 0),
+    baseline_moment_relay_sequence INTEGER NOT NULL CHECK (baseline_moment_relay_sequence >= 0),
+    baseline_registered_at_ms INTEGER NOT NULL CHECK (baseline_registered_at_ms >= 0),
+    evidence_digest TEXT NOT NULL,
+    coverage_digest TEXT NOT NULL,
+    covered_outbox_sequence INTEGER NOT NULL CHECK (covered_outbox_sequence >= 0),
+    local_ydoc_sequence INTEGER NOT NULL CHECK (local_ydoc_sequence >= 0),
+    terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    terminal_receipt_json TEXT NOT NULL CHECK (json_valid(terminal_receipt_json)),
+    host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
+    max_pending_bytes INTEGER NOT NULL CHECK (max_pending_bytes BETWEEN 1 AND 9007199254740991),
+    max_pending_age_ms INTEGER NOT NULL CHECK (max_pending_age_ms BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (relay_database_namespace, adoption_id),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
 CREATE TABLE live_device_bootstraps (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
     workspace_id TEXT NOT NULL,
@@ -1499,6 +1589,92 @@ CREATE TABLE live_device_bootstraps (
     FOREIGN KEY (baseline_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TABLE live_accepted_updates (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 1 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+    delivery_id TEXT NOT NULL,
+    metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    suffix_count INTEGER NOT NULL CHECK (suffix_count BETWEEN 1 AND 4095),
+    suffix_bytes INTEGER NOT NULL CHECK (suffix_bytes BETWEEN 1 AND 41943040),
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, event_count),
+    UNIQUE (relay_database_namespace, delivery_id),
+    UNIQUE (relay_database_namespace, journal_cursor),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX live_accepted_updates_cursor ON live_accepted_updates
+    (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor);
+
+CREATE TABLE live_accepted_checkpoints (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 0 AND 9007199254740991),
+    terminal_json TEXT NOT NULL CHECK (json_valid(terminal_json)),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    origin_stamp TEXT NOT NULL CHECK (length(origin_stamp)=64 AND origin_stamp NOT GLOB '*[^0-9a-f]*'),
+    state_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    restore_operation_id TEXT,
+    restore_stamp TEXT,
+    CHECK ((restore_operation_id IS NULL AND restore_stamp IS NULL) OR (event_count>0 AND restore_operation_id IS NOT NULL AND restore_stamp IS NOT NULL AND length(restore_stamp)=64)),
+    FOREIGN KEY (relay_database_namespace,restore_operation_id) REFERENCES live_restore_fences(relay_database_namespace,operation_id) ON DELETE RESTRICT,
+    PRIMARY KEY (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, event_count),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE live_restore_fences (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    input_json TEXT NOT NULL CHECK (json_valid(input_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    proposal_json TEXT CHECK (proposal_json IS NULL OR json_valid(proposal_json)),
+    proposal_candidate_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    proposal_frozen_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    proposal_point_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    application_json TEXT CHECK (application_json IS NULL OR json_valid(application_json)),
+    application_delivery_id TEXT,
+    lineage_claim_id TEXT GENERATED ALWAYS AS (json_extract(input_json,'$.oldBinding.lineageClaimId')) VIRTUAL,
+    old_generation INTEGER GENERATED ALWAYS AS (json_extract(input_json,'$.oldBinding.restoreFenceGeneration')) VIRTUAL,
+    new_generation INTEGER GENERATED ALWAYS AS (json_extract(input_json,'$.newFence')) VIRTUAL,
+    previous_operation_id TEXT,
+    resume_receipt_json TEXT CHECK (resume_receipt_json IS NULL OR json_valid(resume_receipt_json)),
+    resume_settlement_id TEXT REFERENCES live_device_settlements(settlement_id) ON DELETE RESTRICT,
+    resume_evidence_digest TEXT,
+    CHECK ((resume_receipt_json IS NULL AND resume_settlement_id IS NULL AND resume_evidence_digest IS NULL)
+        OR (resume_receipt_json IS NOT NULL AND resume_settlement_id IS NOT NULL AND application_json IS NOT NULL
+            AND resume_evidence_digest IS NOT NULL AND length(resume_evidence_digest)=64 AND resume_evidence_digest NOT GLOB '*[^0-9a-f]*')),
+    CHECK ((application_json IS NULL AND application_delivery_id IS NULL)
+        OR (application_json IS NOT NULL AND application_delivery_id IS NOT NULL AND proposal_json IS NOT NULL)),
+    CHECK ((proposal_json IS NULL AND proposal_candidate_sha256 IS NULL AND proposal_frozen_sha256 IS NULL AND proposal_point_sha256 IS NULL)
+        OR (proposal_json IS NOT NULL AND proposal_candidate_sha256 IS NOT NULL AND proposal_frozen_sha256 IS NOT NULL AND proposal_point_sha256 IS NOT NULL)),
+    PRIMARY KEY (relay_database_namespace, operation_id),
+    UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, new_generation),
+    FOREIGN KEY (relay_database_namespace, previous_operation_id)
+        REFERENCES live_restore_fences(relay_database_namespace, operation_id) ON DELETE RESTRICT,
+    FOREIGN KEY (relay_database_namespace, workspace_id, application_delivery_id)
+        REFERENCES live_device_update_applications(relay_database_namespace, workspace_id, delivery_id) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX live_restore_active ON live_restore_fences(workspace_id,main_version_id,object_id)
+    WHERE resume_receipt_json IS NULL;
+CREATE INDEX live_restore_document_generation ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation);
+CREATE UNIQUE INDEX live_restore_application_delivery ON live_restore_fences(relay_database_namespace,application_delivery_id)
+    WHERE application_delivery_id IS NOT NULL;
+
 CREATE TABLE live_device_settlements (
     settlement_id TEXT NOT NULL PRIMARY KEY,
     relay_database_namespace TEXT NOT NULL,
@@ -1518,8 +1694,48 @@ CREATE TABLE live_device_settlements (
     binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
     host_coordinate_json TEXT NOT NULL CHECK (json_valid(host_coordinate_json)),
     recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms BETWEEN 0 AND 9007199254740991),
+    settlement_kind TEXT NOT NULL DEFAULT 'ordinary' CHECK (settlement_kind IN ('ordinary','restore')),
+    restore_operation_id TEXT,
+    CHECK ((settlement_kind='ordinary' AND restore_operation_id IS NULL)
+        OR (settlement_kind='restore' AND restore_operation_id IS NOT NULL)),
+    UNIQUE (relay_database_namespace, restore_operation_id),
+    FOREIGN KEY (relay_database_namespace, restore_operation_id)
+        REFERENCES live_restore_fences(relay_database_namespace, operation_id) ON DELETE RESTRICT,
     UNIQUE (relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, terminal_cursor),
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE ydoc_owner_activation_sources (
+    activation_id TEXT PRIMARY KEY,
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    source_moment_id TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    full_state_digest TEXT NOT NULL,
+    descriptor_json TEXT NOT NULL CHECK (json_valid(descriptor_json)),
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_digest) REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (full_state_digest) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX ydoc_owner_activation_source_document
+    ON ydoc_owner_activation_sources(relay_database_namespace,workspace_id,version_id,object_id,lineage_claim_id);
+
+CREATE TABLE ydoc_owner_base_sources (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    source_moment_id TEXT NOT NULL,
+    source_blob_sha256 TEXT NOT NULL,
+    source_byte_length INTEGER NOT NULL CHECK (source_byte_length >= 0),
+    PRIMARY KEY (workspace_id, version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (workspace_id, version_id, object_id) REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id) REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (source_blob_sha256) REFERENCES blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
 CREATE TABLE live_device_application_bindings (
@@ -1574,6 +1790,10 @@ CREATE TABLE live_device_update_applications (
 
 CREATE INDEX live_device_applications_document_cursor
     ON live_device_update_applications(relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, journal_cursor);
+CREATE INDEX live_device_bindings_document
+    ON live_device_application_bindings(workspace_id, main_version_id, object_id);
+CREATE INDEX live_device_applications_content
+    ON live_device_update_applications(relay_database_namespace, workspace_id, main_version_id, object_id, lineage_claim_id, update_digest);
 
 CREATE TABLE live_device_application_first_seen (
     relay_database_namespace TEXT NOT NULL CHECK (length(CAST(relay_database_namespace AS BLOB)) > 0),
@@ -1592,7 +1812,150 @@ CREATE TABLE live_device_application_first_seen (
 CREATE INDEX live_device_application_delivery_ranges
     ON live_device_application_first_seen(relay_database_namespace, delivery_id, ordinal);
 
+-- Portable historical evidence is separate from native live authority.
+CREATE TABLE live_audit_base_publications (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE live_audit_bases (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+
+CREATE TABLE live_audit_base_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    base_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id,origin_id,origin_seq),
+    FOREIGN KEY (workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+
 -- Owner update recovery stays independent of live document and version rows.
+CREATE TABLE live_audit_record_manifests (
+    record_digest TEXT PRIMARY KEY NOT NULL,
+    manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),
+    update_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX live_audit_manifest_updates ON live_audit_record_manifests(update_sha256);
+CREATE TABLE live_audit_pending_exports (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    after_event_count INTEGER NOT NULL CHECK(after_event_count BETWEEN 0 AND 9007199254740991),
+    after_settlement_cursor INTEGER NOT NULL DEFAULT -1 CHECK(after_settlement_cursor BETWEEN -1 AND 9007199254740991),
+    PRIMARY KEY(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+CREATE INDEX live_accepted_enrollment_streams ON live_accepted_checkpoints(workspace_id,event_count,relay_database_namespace,main_version_id,object_id,lineage_claim_id);
+CREATE TABLE live_audit_settlements (
+    settlement_id TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE live_audit_settlement_publications (
+    settlement_id TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    terminal_cursor INTEGER NOT NULL CHECK(terminal_cursor BETWEEN 0 AND 9007199254740991),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX live_audit_settlement_export_stream ON live_audit_settlement_publications(workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id,terminal_cursor);
+CREATE TABLE live_audit_settlement_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    record_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+    markdown_digest TEXT NOT NULL REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE TABLE live_audit_record_chunks (
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 1024),
+    chunk_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(record_digest,ordinal)
+) STRICT;
+CREATE INDEX live_audit_chunk_roots ON live_audit_record_chunks(chunk_sha256);
+CREATE TABLE live_audit_events (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK(event_count BETWEEN 1 AND 9007199254740991),
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    evidence_digest TEXT NOT NULL,
+    journal_cursor INTEGER NOT NULL CHECK(journal_cursor BETWEEN 1 AND 9007199254740991),
+    delivery_id TEXT NOT NULL,
+    accepting_host_epoch INTEGER NOT NULL CHECK(accepting_host_epoch BETWEEN 1 AND 9007199254740991),
+    restore_operation_id TEXT,
+    restore_markdown_digest TEXT,
+    CHECK ((restore_operation_id IS NULL AND restore_markdown_digest IS NULL) OR
+           (restore_operation_id IS NOT NULL AND restore_markdown_digest IS NOT NULL)),
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count),
+    UNIQUE(relay_database_namespace,journal_cursor),
+    UNIQUE(relay_database_namespace,delivery_id)
+) STRICT;
+CREATE INDEX live_audit_event_interval ON live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,journal_cursor);
+CREATE TABLE live_audit_event_publications (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count),
+    FOREIGN KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count)
+      REFERENCES live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count) ON DELETE RESTRICT,
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE live_audit_event_conflicts (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    record_digest TEXT NOT NULL REFERENCES live_audit_record_manifests(record_digest) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX replication_ydoc_content ON replication_log(workspace_id,
+    json_extract(payload_json,'$.versionId'),json_extract(payload_json,'$.objectId'),
+    json_extract(payload_json,'$.lineageClaimId'),json_extract(payload_json,'$.updateBlobSha256'),
+    json_extract(payload_json,'$.path'),origin_id,origin_seq) WHERE op_kind='ydoc.update';
+
 CREATE TABLE owner_ydoc_outboxes (
     outbox_id                 TEXT NOT NULL PRIMARY KEY,
     workspace_id              TEXT NOT NULL,
@@ -1622,7 +1985,7 @@ CREATE TABLE owner_ydoc_outboxes (
       (pending_bytes = 0 AND oldest_entry_at_ms IS NULL) OR
       (pending_bytes > 0 AND oldest_entry_at_ms IS NOT NULL)
     ),
-    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id, restore_fence_generation),
     FOREIGN KEY (base_blob_digest)
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
@@ -1633,6 +1996,8 @@ CREATE TABLE owner_ydoc_outbox_entries (
     append_key               TEXT NOT NULL UNIQUE,
     delivery_id              TEXT NOT NULL UNIQUE,
     update_digest            TEXT NOT NULL,
+    native_source_json       TEXT CHECK (native_source_json IS NULL OR json_valid(native_source_json)),
+    accepted_receipt_json    TEXT CHECK (accepted_receipt_json IS NULL OR json_valid(accepted_receipt_json)),
     update_blob_digest       TEXT,
     byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
     created_at_ms            INTEGER NOT NULL CHECK (created_at_ms >= 0),

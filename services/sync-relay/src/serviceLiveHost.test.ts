@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
+import {observeRelayWrites} from "./relayWriteChanges.js";
 
 const spawn = vi.hoisted(() => vi.fn());
-vi.mock("@dohc/workspace-engine-client/daemon", () => ({ createEngineClient: spawn }));
+vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
+  ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
+}));
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset(); });
 
@@ -53,6 +56,57 @@ it("registers only the discovered engine identity and releases its incarnation o
   expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
   expect(existsSync(captured.nativePath)).toBe(false);
   expect(f.storage.getLiveHostControl()?.admissionState).toBe("closed");
+});
+
+it("prepares attached ordinary replication without registering a partly activated live host", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  const attachment = {relay: {baseUrl: "https://relay.example", bearerToken: "actual-owner-credential"},
+    identity: {kind: "join", replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 1};
+  const adoption = {maxBytes: 1_000_000, maxEvents: 10, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 60_000}};
+  Object.assign(f.config, {adoption});
+  Object.assign(f.config.workspaces[0]!, {ordinaryReplication: attachment}); await f.save();
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    const discovery = captured.client.sendRequest.getMockImplementation()!;
+    captured.client.sendRequest.mockImplementation(async (...args: unknown[]) => {
+      const request = args[0] as {method: string};
+      if (request.method === "liveApplication.hosts") return discovery();
+      if (request.method === "sync.adoptJoinIdentity") return {result: {adopted: true}} as never;
+      if (request.method === "sync.materializePendingCursor") return {result: {materialized: true}} as never;
+      if (request.method === "sync.commitCursor") return {result: {committed: true, sharingDeclined: []}} as never;
+      return {result: {status: "complete", nextCursor: 7, pendingCursor: {kind: "relay", token: "native-issued-token"},
+        hasMore: false, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
+        changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}]}} as never;
+    });
+    return captured.client;
+  });
+  const before = f.storage.getLiveHostControl();
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.workspaces[0]).toEqual({root: f.config.workspaces[0]!.root, workspaceId: "workspace", maxRegistrations: 8, relay: attachment.relay});
+    expect(captured.config.workspaces[0]).not.toHaveProperty("ordinaryReplication");
+    expect(captured.config.adoption).toEqual(adoption);
+    expect(f.storage.getLiveHostControl()).toEqual(before);
+    expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
+    await expect(host.drain({workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)})).rejects.toThrow("retired");
+    expect(await host.prepareOrdinary("workspace")).toMatchObject({nextCursor: 7, hasMore: false});
+    expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "sync.materializePendingCursor",
+      workspace: "actual-open-handle", params: {workspaceId: "workspace", pendingCursor: {kind: "relay", token: "native-issued-token"}}}), expect.any(AbortSignal));
+    expect(f.storage.getLiveHostControl()).toEqual(before);
+  } finally { await host.close(); }
+  expect(f.storage.getLiveHostControl()).toEqual(before);
+});
+
+it("rejects an unconfigured ordinary workspace before starting a pull", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  Object.assign(f.config.workspaces[0]!, {ordinaryReplication: {relay: {baseUrl: "https://relay.example", bearerToken: "owner"},
+    identity: {kind: "claim"}, maxPagesPerPull: 1}}); await f.save();
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const host = await startServiceLiveHost(f);
+  try {
+    await expect(host.prepareOrdinary("other")).rejects.toThrow("attachment");
+    expect(captured.client.sendRequest).toHaveBeenCalledTimes(1);
+  } finally {await host.close();}
 });
 
 it("refuses forged engine discovery before opening relay admission", async () => {
@@ -112,19 +166,111 @@ it("preserves a replacement connection when an older host closes", async () => {
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
 });
 
-it("rejects settlement without an application reserve before spawning", async () => {
+it("wakes captures after stored authority changes and releases its observer on close", async () => {
+  const f = await fixture(), notify = vi.fn();
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  const host = await startServiceLiveHost({...f, frameChanges: {maxListeners: 16, notify, subscribe: () => () => {}}});
+  await new Promise<void>(queueMicrotask);
+  notify.mockClear();
+  const stopReading = observeRelayWrites(f.storage, () => {
+    f.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: "workspace", mainVersionId: "main", objectId: "missing", lineageClaimId: "a".repeat(64)}, actor: {kind: "named", userId: "alice", grantId: "missing"}});
+  });
+  const stop = observeRelayWrites(f.storage, () => {});
+  f.storage.registerLiveHost({...host.coordinate, connectionId: "replacement", updatedAtMs: Date.now(), guard: f.storage.captureStanding()});
+  expect(notify).not.toHaveBeenCalled();
+  await new Promise<void>(queueMicrotask);
+  expect(notify).toHaveBeenCalledTimes(1);
+  await new Promise<void>(queueMicrotask);
+  expect(notify).toHaveBeenCalledTimes(1);
+  stopReading();
+  await host.close();
+  await new Promise<void>(queueMicrotask);
+  notify.mockClear();
+  f.storage.registerLiveHost({...host.coordinate, connectionId: "another", updatedAtMs: Date.now(), guard: f.storage.captureStanding()});
+  await new Promise<void>(queueMicrotask);
+  expect(notify).not.toHaveBeenCalled();
+  stop();
+});
+
+it("forwards explicitly provisioned native sync bounds without enabling frame capture implicitly", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const sync = {policy: {maxClientVectorBytes: 1000, maxHostVectorBytes: 1000, maxOutputBytes: 10000,
+    maxReadBytes: 10000}, workingReserveBytes: 10000};
+  await writeFile(f.configPath, JSON.stringify({...f.config, sync}));
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.sync).toEqual(sync);
+    await expect(host.captureNative({workspaceId: "workspace", mainVersionId: "main", objectId: "object",
+      lineageClaimId: "a".repeat(64), currentPath: "docs/note.md", selectorPaths: ["docs"], restoreFenceGeneration: 0})).rejects.toThrow("not configured");
+  } finally {await host.close();}
+});
+
+it("rejects zero application reserve before spawning with or without settlement", async () => {
   const f = await fixture();
   f.config.ingress.applicationWorkingReserveBytes = 0;
   const settlement = { maxApplicationsPerSettlement: 8 };
   await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
-  await expect(startServiceLiveHost(f)).rejects.toThrow("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   expect(spawn).not.toHaveBeenCalled();
   spawn.mockImplementation(async options => clientFrom(options).client);
   await f.save();
-  const host = await startServiceLiveHost(f);
-  await host.close();
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
   f.config.ingress.applicationWorkingReserveBytes = 1;
   await writeFile(f.configPath, JSON.stringify({ ...f.config, settlement }));
   const withSettlement = await startServiceLiveHost(f);
   await withSettlement.close();
+});
+
+it("requires a restore working reserve and passes only native restore bounds to the engine", async () => {
+  const f = await fixture();
+  const validation = {maxStructVisits: 1000, maxValueNodeVisits: 1000, maxDecodedPayloadByteVisits: 1000,
+    maxStructClientGroupVisits: 1000, maxDeleteClientGroupVisits: 1000, maxDeleteIntervalVisits: 1000, maxIndexOperations: 1000};
+  const restore = {maxBytes: 1_000_000, maxEvents: 10, aggregateBytes: 17_000_000, workingReserveBytes: 1_000_000,
+    maxOperations: 1, validation};
+  f.config.ingress.applicationWorkingReserveBytes = 0;
+  await writeFile(f.configPath, JSON.stringify({...f.config, restore}));
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Live application requires a positive applicationWorkingReserveBytes limit.");
+  expect(spawn).not.toHaveBeenCalled();
+  f.config.ingress.applicationWorkingReserveBytes = 50_000_000;
+  await writeFile(f.configPath, JSON.stringify({...f.config, restore}));
+  let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const host = await startServiceLiveHost(f);
+  try {
+    expect(captured.config.restore).toEqual({maxBytes: restore.maxBytes, maxEvents: restore.maxEvents});
+    await expect(host.prepareRestore({operationId: "restore", workspaceId: "other", ownerUserId: "owner"})).rejects.toThrow("not configured");
+  } finally {await host.close();}
+});
+
+it("runs bounded ordinary preparation in the configured activation lifecycle and closes its pass",async()=>{
+  const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
+  Object.assign(f.config.workspaces[0]!,{ordinaryReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"owner-token"},
+    identity:{kind:"join",replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
+  Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
+    sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
+    activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
+      maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
+      validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
+        maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000}}});
+  await f.save();
+  spawn.mockImplementation(async options=>{
+    captured=clientFrom(options);const discovery=captured.client.sendRequest.getMockImplementation()!;
+    captured.client.sendRequest.mockImplementation(async(...args:unknown[])=>{
+      const request=args[0] as {method:string};
+      if(request.method==="liveApplication.hosts")return discovery();
+      if(request.method==="sync.adoptJoinIdentity")return {result:{adopted:true}} as never;
+      if(request.method==="sync.materializePendingCursor")return {result:{materialized:true}} as never;
+      if(request.method==="sync.commitCursor")return {result:{committed:true,sharingDeclined:[]}} as never;
+      return {result:{status:"complete",nextCursor:1,pendingCursor:{kind:"relay",token:"pending"},hasMore:true,
+        fetched:1,applied:1,refused:0,skipped:0,conflictsOpened:0,refusals:[],sharingDeclined:[]}} as never;
+    });return captured.client;
+  });
+  const host=await startServiceLiveHost(f);
+  await vi.waitFor(()=>expect(captured.client.sendRequest).toHaveBeenCalledWith(expect.objectContaining({method:"sync.commitCursor"}),expect.any(AbortSignal)));
+  await expect(host.prepareOrdinary("workspace")).rejects.toThrow("activation driver owns");
+  expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull();
+  await host.close();
+  expect(captured.client.close).toHaveBeenCalledTimes(1);
+  expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
 });

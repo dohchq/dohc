@@ -55,6 +55,7 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
     params: { versionId: "main", path: "a.md", mutationMomentId: "moment" },
   },
   { method: VERSIONED_METHOD.textList, params: { versionId: "main" } },
+  { method: VERSIONED_METHOD.textCaptureSources, params: { versionId: "main", paths: ["a.md"], bounds: { maxInputFiles: 1, maxInputBytes: 1024 } } },
   {
     method: VERSIONED_METHOD.binaryWrite,
     params: { versionId: "main", path: "a.bin", bytes: [1] },
@@ -1256,12 +1257,13 @@ describe("VersionedLiveAdapter", () => {
       },
       {
         method: VERSIONED_METHOD.textDelete,
-        metadata: { summary: "Delete note" },
+        metadata: { summary: "Delete note", expectedObjectId: "accepted-object" },
         mutate: () =>
         adapter.deleteTextFile({
           workspaceId: "workspace",
           versionId: "main",
           path: "notes/delete.md",
+          expectedObjectId: "accepted-object",
           metadata: { origin: "api", summary: "Delete note" },
         }),
       },
@@ -1382,7 +1384,7 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("encodes every one of the 33 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(34);
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(35);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),

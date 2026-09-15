@@ -40,6 +40,8 @@ describe("accountless path projection", () => {
     expect(projection.projectPath("clients/other/readme.md"))
       .toBe("clients/other/readme.md");
     expect(projection.projectPath("teams/private/readme.md")).toBeNull();
+    expect(projection.resolvePath("docs/start.md")).toBe("clients/acme/private/docs/start.md");
+    expect(projection.resolvePath("clients/acme/private/docs/start.md")).toBeNull();
   });
 
   it("fails closed when a payload names a path outside every root", () => {
@@ -87,6 +89,9 @@ describe("accountless path projection", () => {
     expect(projection.projectPath("clients/acme/docs/one.md")).toBe("docs/one.md");
     expect(projection.projectPath("clients/other/docs/two.md")).toBe("3~docs/two.md");
     expect(projection.projectPath("teams/blue/2~docs/three.md")).toBe("2~docs/three.md");
+    expect(projection.resolvePath("docs/one.md")).toBe("clients/acme/docs/one.md");
+    expect(projection.resolvePath("3~docs/two.md")).toBe("clients/other/docs/two.md");
+    expect(projection.resolvePath("2~docs/three.md")).toBe("teams/blue/2~docs/three.md");
   });
 
   it("keeps file extensions when duplicate file roots need aliases", () => {
@@ -98,6 +103,9 @@ describe("accountless path projection", () => {
 
     expect(projection.selector.paths).toEqual(["report.md", "2~report.md"]);
     expect(projection.projectPath("teams/blue/report.md")).toBe("2~report.md");
+    expect(projection.resolvePath("2~report.md")).toBe("teams/blue/report.md");
+    for (const path of ["../report.md", "report.md/../report.md", "./report.md", "/report.md", "report.md\\..\\report.md", "teams/blue/report.md"])
+      expect(projection.resolvePath(path)).toBeNull();
   });
 
   it("keeps workspace-relative paths for a whole-version selector", () => {
@@ -110,5 +118,16 @@ describe("accountless path projection", () => {
     expect(projection.selector.paths).toEqual([]);
     expect(projection.projectPath("clients/acme/report.md"))
       .toBe("clients/acme/report.md");
+    expect(projection.resolvePath("clients/acme/report.md")).toBe("clients/acme/report.md");
+    expect(projection.resolvePath("../report.md")).toBeNull();
+  });
+
+  it("validates reserved names against the real workspace path", () => {
+    const projection = createAccountlessPathProjection({paths: ["docs/shared-with-me"], versionId: null, access: "edit"});
+    expect(projection.resolvePath("shared-with-me/a.md")).toBe("docs/shared-with-me/a.md");
+    expect(projection.resolvePath("shared-with-me/../a.md")).toBeNull();
+    expect(projection.resolvePath("shared-with-me/.dohc/a.md")).toBeNull();
+    const workspace = createAccountlessPathProjection({paths: [], versionId: null, access: "edit"});
+    expect(workspace.resolvePath("shared-with-me/a.md")).toBeNull();
   });
 });

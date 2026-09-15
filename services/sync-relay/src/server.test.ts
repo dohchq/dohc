@@ -1129,7 +1129,7 @@ describe("sync relay handler", () => {
   // zero grace window (so aging cannot save it) and even though a sibling
   // orphan blob IS reclaimed in the same sweep. This is the relay side of the
   // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
-  it("never GCs a blob a live ydoc.update op references (GC root), while collecting a sibling orphan", async () => {
+  it.each(["ydoc.update", "live.audit.base"])("never GCs a blob referenced by %s, while collecting a sibling orphan", async opKind => {
     const storage = await testStorage({ blobGraceMs: 0 });
     const h = handler(storage);
     await createWorkspace(h);
@@ -1158,8 +1158,8 @@ describe("sync relay handler", () => {
           ops: [
             {
               originSeq: 0,
-              opKind: "ydoc.update",
-              payload: {
+              opKind,
+              payload: opKind === "live.audit.base" ? {formatVersion: 1,recordDigest: "a".repeat(64),record: {checkpoint: {stateDigest: updateSha}}} : {
                 versionId: "main",
                 objectId: "obj-rich",
                 path: "docs/rich.md",

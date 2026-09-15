@@ -355,6 +355,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             40,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("record ydoc edit");
@@ -371,6 +372,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             50,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("settle ydoc");

@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
@@ -522,6 +522,7 @@ function makeBaseBridge(
     })),
     createRelayShare: vi.fn(async () => ({
       shareId: "relay-share-1",
+      grantId: "relay-grant-1",
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
@@ -965,6 +966,11 @@ describe("workspace switch performance timeline", () => {
 });
 
 describe("direct message workspace picker", () => {
+  beforeAll(async () => {
+    // Module loading is setup; keep the deadline for the rendered behavior.
+    await import("./workbench/ChatsView");
+  }, 30_000);
+
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
@@ -2067,6 +2073,27 @@ describe("global letter shortcut ownership", () => {
 });
 
 describe("collection folders", () => {
+  class ObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): never[] {
+      return [];
+    }
+  }
+
+  beforeAll(async () => {
+    // These tests assert the real lazy surface after opening the folder.
+    // Load its dependencies separately from that 15-second behavior budget.
+    vi.stubGlobal("ResizeObserver", ObserverStub);
+    vi.stubGlobal("IntersectionObserver", ObserverStub);
+    try {
+      await import("./CollectionPage");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 30_000);
+
   // The table virtualizer reads offsetWidth/offsetHeight, which jsdom reports
   // as 0 — no row would render (CollectionPage.test.tsx precedent).
   const offsetDescriptors = {
@@ -2079,14 +2106,6 @@ describe("collection folders", () => {
     // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
     // collection surface's lazy chunk evaluates @dnd-kit, which reads both
     // observers while its module loads, so they must exist before the click.
-    class ObserverStub {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-      takeRecords(): never[] {
-        return [];
-      }
-    }
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
@@ -2243,6 +2262,8 @@ describe("collection folders", () => {
       applyEngineYDocUpdate,
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
@@ -3702,6 +3723,8 @@ describe("editor groups", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -3995,6 +4018,8 @@ describe("workspace admission over collection writes", () => {
       applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
@@ -6971,6 +6996,8 @@ describe("engine store recovery", () => {
         closeEngineYDocSession,
         onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
         onEngineYDocSaveState: vi.fn(() => () => undefined),
+        onEngineYDocOwnerHandoff: () => () => undefined,
+        prepareEngineYDocOwnerHandoff: async () => undefined,
         onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
         acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
           accepted: true as const,
@@ -7064,6 +7091,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession,
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -7176,6 +7205,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -7241,6 +7272,8 @@ describe("engine store recovery", () => {
       closeEngineYDocSession,
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
         accepted: true as const,
@@ -8407,9 +8440,8 @@ describe("shared view banner", () => {
     expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 
-  // Edit gets its own sentence. It states both halves: the
-  // recipient edits, and the granter decides.
-  it("tells an edit recipient to edit and send changes for the granter to accept", async () => {
+  // Markdown edits save live; other file changes still need acceptance.
+  it("distinguishes live Markdown edits from other changes needing acceptance", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, {
       ...SHARE_VIEW,
@@ -8422,7 +8454,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test. Edit these files and send your changes for sam@dohc.test to accept.",
+      "Shared view from sam@dohc.test. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
     expect(banner.textContent, "falling through to the PR2 sentence tells an edit recipient they cannot edit, which is the exact lie PR3a removes.").not.toContain("not edit them");
   });
@@ -8436,7 +8468,7 @@ describe("shared view banner", () => {
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from another dohc user. Edit these files and send your changes for another dohc user to accept.",
+      "Shared view from another dohc user. Markdown edits save to the live host. Other file changes need their acceptance.",
     );
   });
 
@@ -15465,6 +15497,8 @@ describe("set-aside draft recovery", () => {
       applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {

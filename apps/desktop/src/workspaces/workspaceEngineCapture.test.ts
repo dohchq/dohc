@@ -970,6 +970,177 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("removes a renamed accepted response and preserves replacements on retry",async()=>{
+    const root=await createTestScratch("dohc-response-undo-");
+    const requests:Request[]=[];
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine(),requests);
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
+    await write(root,"responses/moved.md","response");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    const result=await engine.undoAcceptedAppResponse(selection);
+    expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
+    expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
+    const deletion=requests.findLast(request=>request.method==="versionedText.delete");
+    expect(deletion?.params).toMatchObject({path:"responses/moved.md",expectedObjectId:created.object.id,requestId:"undo-a"});
+    await engine.stop();
+    const reopened=capture(root,{store,rustEngineSessions:sessions});
+    // Another object now occupies the deleted path; retries cannot touch it.
+    await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/moved.md",text:"replacement",metadata:{origin:"api"}});
+    await write(root,"responses/moved.md","replacement");
+    const retry=await reopened.undoAcceptedAppResponse(selection);
+    expect(retry).toEqual({status:"deleted",momentId:result.momentId});
+    expect(await readFile(join(root,"responses/moved.md"),"utf8")).toBe("replacement");
+    expect(requests.filter(request=>request.method==="versionedText.delete")).toHaveLength(1);
+    await reopened.stop();
+  });
+
+  it("pages long response history and recovers an interrupted deletion without deleting a restore",async()=>{
+    const root=await createTestScratch("dohc-response-recovery-");
+    const requests:Request[]=[];
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine(),requests);
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    for(let i=0;i<105;i++)await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:created.snapshot.path,text:`response ${i}`,metadata:{origin:"api"}});
+    await write(root,created.snapshot.path,"response 104");
+    const deleted=await engine.undoAcceptedAppResponse(selection);
+    expect(deleted.status).toBe("deleted");
+    // Recreate the bytes left by a crash between native commit and materialization.
+    await write(root,created.snapshot.path,"response 104");
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);
+    expect(existsSync(join(root,created.snapshot.path))).toBe(false);
+    await engine.restoreFileToBeforeMoment(deleted.momentId!);
+    expect(requests.filter(request=>request.method==="versionedText.write").at(-1)?.params).toMatchObject({
+      restoreBeforeMomentId: deleted.momentId,
+      origin: "restore",
+    });
+    for(let i=0;i<105;i++)await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:created.snapshot.path,text:`restored ${i}`,metadata:{origin:"api"}});
+    await write(root,created.snapshot.path,"restored 104");
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);
+    expect(await readFile(join(root,created.snapshot.path),"utf8")).toBe("restored 104");
+    expect(requests.filter(request=>request.method==="versionedText.delete")).toHaveLength(1);
+    await engine.stop();
+  });
+
+  it("reports stale disk bytes from a different response delete as a conflict",async()=>{
+    const root=await createTestScratch("dohc-response-orphan-");
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine());
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    await store.renameTextFile({workspaceId:WORKSPACE_ID,versionId:"main",fromPath:created.snapshot.path,toPath:"responses/moved.md",metadata:{origin:"api"}});
+    await write(root,"responses/moved.md","response");
+    await store.deleteTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/moved.md",metadata:{origin:"api"}});
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
+    expect(await readFile(join(root,"responses/moved.md"),"utf8")).toBe("response");
+    await rm(join(root,"responses/moved.md"));
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"already-absent"});
+    await engine.stop();
+  });
+
+  it("refuses response removal with forged public attribution or uncaptured disk edits",async()=>{
+    const root=await createTestScratch("dohc-response-conflict-");
+    const sessions=mockLiveSessions(new VersionedLoopbackEngine());
+    const store=createCaptureLiveStores({workspaceId:WORKSPACE_ID,rootPath:root,attachmentId:WORKSPACE_ATTACHMENT_ID},sessions).store;
+    await store.ensureMainVersion({workspaceId:WORKSPACE_ID});
+    const created=await store.writeTextFile({workspaceId:WORKSPACE_ID,versionId:"main",path:"responses/accepted-a.md",text:"response",metadata:{origin:"api"}});
+    await write(root,created.snapshot.path,"disk edit");
+    const engine=capture(root,{store,rustEngineSessions:sessions});
+    const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
+    const getMoment=store.getMoment.bind(store);
+    vi.spyOn(store,"getMoment").mockImplementation(async input=>{
+      const moment=await getMoment(input);
+      return moment?.id===created.moment.id?{...moment,author:{kind:"public",principalId:"public-a",grantId:"grant"}}:moment;
+    });
+    expect(await engine.undoAcceptedAppResponse(selection)).toEqual({status:"conflict"});
+    expect(await readFile(join(root,created.snapshot.path),"utf8")).toBe("disk edit");
+    await engine.stop();
+  });
+
+  it.each(["present", "absent"])("explains a shared live file restore refusal with the artifact %s", async artifact => {
+    const root = await createTestScratch("dohc-live-restore-refusal-");
+    let deletionAttempts = 0;
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine(), undefined, undefined, request => {
+      if (request.method === "versionedText.delete") {
+        deletionAttempts += 1;
+        throw new DaemonRefusalError(
+          { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
+          new Error("daemon response"),
+        );
+      }
+    });
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const created = await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", text: "original", metadata: { origin: "api" } });
+    if (artifact === "present") await write(root, "shared.md", "original");
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
+    expect(deletionAttempts).toBe(1);
+    expect((await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md" }))?.text).toBe("original");
+    if (artifact === "present") expect(await readFile(join(root, "shared.md"), "utf8")).toBe("original");
+    else expect(existsSync(join(root, "shared.md"))).toBe(false);
+    await engine.stop();
+  });
+
+  it.each(["binary source", "current binary artifact"])("explains a restore refusal from a %s", async route => {
+    const root = await createTestScratch("dohc-live-binary-restore-refusal-");
+    const binary = Uint8Array.of(0xff, 0x00, 0xfe);
+    const refusal = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "live-document-binding-active", retry: "no" },
+      new Error("daemon response"),
+    );
+    let refuseBinaryWrites = false;
+    let binaryAttempts = 0;
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine(), undefined, undefined, request => {
+      if (refuseBinaryWrites && (request.method === VERSIONED_METHOD.binaryWrite || request.method === VERSIONED_METHOD.binaryWriteBlob)) {
+        binaryAttempts += 1;
+        throw refusal;
+      }
+    });
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", metadata: { origin: "api" as const } };
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    if (route === "binary source") await store.writeBinaryFile({ ...target, bytes: binary });
+    else await store.writeTextFile({ ...target, text: "original" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    const disk = route === "binary source" ? Buffer.from("current") : Buffer.from(binary);
+    await write(root, target.path, disk);
+    refuseBinaryWrites = true;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toMatchObject({
+      message: "dohc could not restore shared.md. This action is unavailable for shared live files. Continue editing at the current location.",
+      cause: refusal,
+    });
+    expect(binaryAttempts).toBe(1);
+    expect((await store.readTextFile(target))?.text).toBe("current");
+    expect(await readFile(join(root, target.path))).toEqual(disk);
+    await engine.stop();
+  });
+
   it("closes both daemon stores when the final capture flush rejects", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

@@ -651,3 +651,13 @@ export function validateFieldValue(
 export function isRecordId(value: string): boolean {
   return RECORD_ID_PATTERN.test(value);
 }
+
+/** Bounded record frontmatter for a collection projection. No executable YAML tags. */
+export function parseCollectionRecordFields(markdown: string): Record<string, unknown> | null {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
+  if (!match || new TextEncoder().encode(markdown).byteLength > 16_384) return null;
+  try {
+    const value = yamlToPlain(load(match[1], {schema: COLLECTION_SCHEMA, json: false, maxAliases: 0, maxDepth: 4}));
+    return isMapping(value) ? value : null;
+  } catch { return null; }
+}

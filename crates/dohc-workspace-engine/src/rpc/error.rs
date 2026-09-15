@@ -155,6 +155,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::UnsettledClose) => {
             return WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close");
         }
+        RuntimeError::Collab(CollabError::OwnerOutboxFrozen) => {
+            return WireError::new(ErrorCode::InvalidParams, "owner-outbox-frozen");
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
@@ -173,14 +176,20 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
         }
+        RuntimeError::Sync(SyncError::LiveDocumentBindingActive) => {
+            return WireError::new(ErrorCode::InvalidParams, "live-document-binding-active");
+        }
         _ => {}
     }
     if let RuntimeError::LiveApplication(ref application) = error {
         let code = match application {
+            ApplicationError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
             ApplicationError::InvalidInput(_)
             | ApplicationError::WorkspaceMismatch
             | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
-            ApplicationError::Conflict => ErrorCode::Conflict,
+            ApplicationError::Conflict | ApplicationError::ConfiguredBudgetMismatch => {
+                ErrorCode::Conflict
+            }
             _ => ErrorCode::Internal,
         };
         return WireError::new(code, error.code());
@@ -285,7 +294,9 @@ fn map_domain(error: DomainError) -> WireError {
             (InvalidParams, "duplicate-id")
         }
         DomainError::FileNotFound => (InvalidParams, "file-not-found"),
+        DomainError::ObjectIdentityMismatch => (InvalidParams, "object-identity-mismatch"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
+        DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
         DomainError::VersionNotFound => (InvalidParams, "version-not-found"),
         DomainError::InvalidVersion => (InvalidParams, "invalid-version"),
         DomainError::VersionNameConflict => (InvalidParams, "version-name-conflict"),
@@ -329,6 +340,7 @@ fn map_domain(error: DomainError) -> WireError {
 
 fn map_collab_code(error: CollabError) -> ErrorCode {
     match error {
+        CollabError::ConfiguredByteBudgetExceeded => ErrorCode::LimitExceeded,
         CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
         CollabError::MalformedUpdate { .. }
         | CollabError::ReplayParityViolation { .. }
@@ -357,6 +369,8 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::MissingDependencies
         | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
+        | CollabError::OwnerOutboxFrozen
+        | CollabError::RestoreFenced
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }
 }
@@ -371,6 +385,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::LiveDocumentBindingActive
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }
@@ -441,6 +456,10 @@ mod tests {
                 ErrorCode::InvalidParams,
             ),
             (ApplicationError::Conflict, ErrorCode::Conflict),
+            (
+                ApplicationError::ConfiguredByteBudgetExceeded,
+                ErrorCode::LimitExceeded,
+            ),
             (ApplicationError::Corrupt, ErrorCode::Internal),
             (ApplicationError::Interrupted, ErrorCode::Internal),
         ] {

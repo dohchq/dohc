@@ -458,6 +458,7 @@ pub struct LocalAppend<'a> {
     pub actor_origin_id: Option<&'a str>,
     pub attribution: Option<&'a ChangeAttribution>,
     pub lineage_guard: LineageGuard<'a>,
+    pub restore_generation: Option<i64>,
     pub ensure_parent_row: bool,
     pub require_empty_lineage: bool,
     /// Captured artifact imported by a client-declared first seed.
@@ -490,6 +491,7 @@ where
         actor_origin_id,
         attribution,
         lineage_guard,
+        restore_generation,
         ensure_parent_row,
         require_empty_lineage,
         seed_source_sha256,
@@ -515,7 +517,7 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v3{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
+                "ydoc-record-v4{sep}{restore_generation:?}{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
@@ -533,6 +535,8 @@ where
     let mut probe = GateBaseProbe::default();
     let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+        crate::live_update_application::require_restore_generation(tx, key, restore_generation)?;
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
                 .query_row(
@@ -654,9 +658,10 @@ where
             // Collection reconciliation already indexed the captured artifact.
             // Its declared first seed establishes the lineage without inventing
             // an absent-to-value field edit; later appends use the normal hook.
-            let index_frontmatter = seed_source_sha256.is_none()
+            let index_frontmatter = (seed_source_sha256.is_none()
                 || marker.head_update_seq > 0
-                || marker.head_snapshot_seq > 0;
+                || marker.head_snapshot_seq > 0)
+                && !crate::owner_outbox::has_adopted_owner_in(tx, key)?;
             let mut outcome = append_local_update_cached(
                 tx,
                 key,
@@ -1365,6 +1370,7 @@ fn claim_base_with_coordinate_in_tx(
     coordinate: Option<&BaseRelayCoordinate>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(base_bytes)?;
     let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
@@ -1726,6 +1732,7 @@ pub fn replace_lineage_with_successor_in_tx(
     tx: &Transaction<'_>,
     replacement: SuccessorReplacement<'_>,
 ) -> Result<SuccessorInstallOutcome, CollabError> {
+    crate::live_update_application::require_restore_open(tx, replacement.key)?;
     let SuccessorReplacement {
         key,
         expected_predecessor_claim_id,
@@ -1884,6 +1891,7 @@ pub fn archive_active_lineage_in_tx(
     last_surfaced_projection_sha256: Option<&str>,
     now_ms: i64,
 ) -> Result<(), CollabError> {
+    crate::live_update_application::require_restore_open(tx, key)?;
     let (marker, doc, state_vector) =
         load_exact_active_lineage(tx, key, expected_claim_id, expected_state_vector_sha256)?;
 
@@ -2075,6 +2083,23 @@ pub fn record_update_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+    crate::live_update_application::require_restore_open(tx, key)?;
+    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
+        return Err(CollabError::OwnerOutboxFrozen);
+    }
+    record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
+}
+
+/// The receipt application owner has checked its full binding in this transaction.
+pub(crate) fn record_authorized_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
@@ -2099,14 +2124,22 @@ pub fn record_update_in_tx(
 /// it already holds: a fresh seed would mint new Yjs item ids, leave those rows
 /// on the origin alone, and every clean peer would be permanently missing them.
 ///
-/// `None` means "do not originate yet": the lineage has an unresolved
-/// dependency, so a full-state encode would silently drop the pending row. A
+/// `None` means there is no retained lineage, or it has an unresolved
+/// dependency and a full-state encode would silently drop the pending row. A
 /// later append retries once the predecessor lands. This is the same condition
 /// [`maybe_compact`] skips on, for the same reason.
 pub fn encode_origination_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<OriginationBase>, CollabError> {
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.head_update_seq == 0
+        && marker.head_snapshot_seq == 0
+        && !marker.lineage_claim_status.has_claimed_base()
+    {
+        // A closed local cache has no lineage to publish. Its saved file is authoritative.
+        return Ok(None);
+    }
     let doc = load_doc_in(tx, key)?;
     if doc.has_missing_updates() {
         return Ok(None);
@@ -2136,6 +2169,7 @@ pub fn settle(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<SettleOutcome>, CollabError> {
+    store.read_with(|conn| crate::owner_outbox::require_ordinary_settlement(conn, key))?;
     let persisted = match load_persisted(store, key)? {
         Some(p) => p,
         None => return Err(CollabError::NoMarker),
@@ -2146,6 +2180,8 @@ pub fn settle(
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
+        crate::owner_outbox::require_ordinary_settlement(tx, key)?;
+        crate::live_update_application::require_restore_open(tx, key)?;
         // Persist the content and its provenance state vector as blobs. The
         // content digest was computed once above; the settle rows below reuse
         // it too.

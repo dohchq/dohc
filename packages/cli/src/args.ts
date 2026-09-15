@@ -1,5 +1,7 @@
 import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
+import { OwnerAppPublicationRequest } from "./appPublication";
+import {OwnerAppResponsesRequest} from "./appResponses";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -8,6 +10,8 @@ interface ParsedCliBase {
 
 export type ParsedCliCommand = ParsedCliBase &
   (
+    | { verb: "appPublication"; request: OwnerAppPublicationRequest }
+    | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
     | { verb: "channels" }
     | { verb: "threads"; channel: string }
     | { verb: "inbox" }
@@ -328,6 +332,16 @@ export function parseCliArguments(
 ): ParsedCliCommand {
   const global = stripGlobalFlags(argv);
   const [family, verb, ...tokens] = global.tokens;
+  if (family === "app") {
+    const [json, ...rest] = tokens;
+    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|revokeCollection|reviewReactivation|responses> '<JSON>'");
+    try {
+      const value: unknown = JSON.parse(json);
+      if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
+      if(verb==="responses" || verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"ownerAppResponses",request:OwnerAppResponsesRequest.parse({...value,action:verb==="responses"?"list":"undo"})};
+      return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
+    } catch { fail(verb === "responses" || verb === "undo-responses" ? "invalid app response arguments" : "invalid app publication arguments"); }
+  }
   if (family !== "chat") fail("usage: dohc chat <verb>");
   const actor: CliActor = global.actorFlag || env.DOHC_CHAT_ACTOR === "agent" ? "agent" : "human";
   const base = { actor, json: global.json };

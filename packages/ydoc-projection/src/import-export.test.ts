@@ -9,7 +9,6 @@ import {
 import * as Y from 'yjs'
 import {
   getDohcProseMirrorSchema,
-  getDohcYDocBodyFragment,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   yDocToMarkdown,
@@ -17,8 +16,79 @@ import {
   plainTextToYDoc,
   serializeRichdocBody,
 } from './import-export.js'
+import { getDohcYDocBodyFragment } from './body-fragment.js'
 
 type ExpectedMarkdownFragment = string | RegExp
+
+it('scans a linear amount of text when rejecting block tokenizers for paragraphs', () => {
+  const split = String.prototype.split
+  const measure = (paragraphs: number) => {
+    let scanned = 0
+    const spy = vi.spyOn(String.prototype, 'split').mockImplementation(function (
+      this: string,
+      separator: unknown,
+      limit?: number,
+    ) {
+      if (separator === '\n') scanned += this.length
+      return Reflect.apply(split, this, [separator, limit]) as string[]
+    })
+    try {
+      const doc = markdownToYDoc(Array(paragraphs).fill('Ordinary paragraph.').join('\n\n'))
+      expect(getDohcYDocBodyFragment(doc).length).toBe(paragraphs)
+      doc.destroy()
+      return scanned
+    } finally {
+      spy.mockRestore()
+    }
+  }
+  const small = measure(64)
+  const large = measure(128)
+  expect(large, `newline split characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+it.each([
+  ['1. decimal', 'orderedList'],
+  ['12) decimal', 'orderedList'],
+  ['iii. roman', 'orderedList'],
+  ['IV) roman', 'orderedList'],
+  ['aa. alpha', 'orderedList'],
+  ['ZZ) alpha', 'orderedList'],
+  ['  2. indented\n     - nested', 'orderedList'],
+  ['- [ ] unchecked', 'taskList'],
+  ['+ [x] checked', 'taskList'],
+  ['* [X] checked', 'taskList'],
+  ['\n \t\n  - [ ] leading blank lines', 'taskList'],
+  ['- [ ] \n- [x] second', 'taskList'],
+  ['> [!note]+ Title\nlazy body', 'callout'],
+  ['   >[!custom]- Title\n   > body', 'callout'],
+  ['| Heading |\n| --- |\n| Cell |', 'table'],
+  ['Heading | Other\n--- | ---\nCell | Value', 'table'],
+  ['Ordinary paragraph.', 'paragraph'],
+  ['abc. not an alpha marker', 'paragraph'],
+  ['1\\. escaped marker', 'paragraph'],
+  ['> Ordinary blockquote', 'blockquote'],
+  ['> [!broken header', 'blockquote'],
+  ['Heading\n---', 'heading'],
+  ['Heading | Other\nnot a separator', 'paragraph'],
+])('preserves the block kind for %j', (markdown, type) => {
+  const doc = markdownToYDoc(markdown)
+  try {
+    expect(yDocBodyJSON(doc).content?.[0]?.type).toBe(type)
+  } finally {
+    doc.destroy()
+  }
+})
+
+it.each(['\n', '\n\n', '\n\n\n'])('keeps a table after a paragraph with separator %j', separator => {
+  const doc = markdownToYDoc(`Before${separator}| Heading |\n| --- |\n| Cell |\n\nAfter`)
+  try {
+    const blocks = yDocBodyJSON(doc).content ?? []
+    expect(blocks.map(block => block.type)).toEqual(['paragraph', 'table', 'paragraph'])
+    expect(blocks[1]?.content?.[1]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe('Cell')
+  } finally {
+    doc.destroy()
+  }
+})
 
 interface FrontmatterVector {
   name: string

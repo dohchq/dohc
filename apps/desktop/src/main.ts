@@ -1,12 +1,19 @@
+import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
+import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
   type DesktopWorkspaceCallbacksDependencies,
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
+import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
+import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
+import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
+import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -719,12 +726,15 @@ type CloudSessionCredentials = NonNullable<
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
 let credentialCacheGeneration = 0;
+let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
 // across physical workspaces in the same session, and clear it whenever that
 // credential session ends or changes.
 const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
+    ownerDeliveryCredentialLifetime.abort();
+    ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
     shareHandoffRedemption.credentialsChanged();
@@ -849,10 +859,17 @@ type RelayShareRetainedNotFoundResult<T> =
 
 type RelayShareJsonOptions =
   | { retainDependentSetConflict: true }
-  | { retainNotFound: true };
+  | { retainNotFound: true }
+  | { retainRestoreConflict: true };
 
 const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init: RequestInit | undefined,
+  options: {retainRestoreConflict: true},
+): Promise<T>;
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -884,7 +901,7 @@ async function relayShareJsonWithCredentials<T>(
     throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
   }
   const headers = new Headers(init?.headers);
-  if (init?.body) headers.set("content-type", "application/json");
+  if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
   const response = await relayShareFetch(
     `${normalizeServerUrl(credentials.relayUrl)}${path}`,
@@ -908,7 +925,9 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (await response.json().catch(() => null)) as {
+  const data = (options && "retainRestoreConflict" in options
+    ? await readOwnerRestoreResponse(response)
+    : await response.json().catch(() => null)) as {
     ok?: boolean;
     error?: string;
     code?: string;
@@ -916,6 +935,9 @@ async function relayShareJsonWithCredentials<T>(
   }
     | null;
   if (!response.ok || data?.ok === false) {
+    if (options && "retainRestoreConflict" in options && response.status === 409 && data && "status" in data && "result" in data) {
+      return data as T;
+    }
     if (
       options &&
       "retainDependentSetConflict" in options &&
@@ -936,7 +958,7 @@ async function relayShareJsonWithCredentials<T>(
     }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
-  if (options) {
+  if (options && !("retainRestoreConflict" in options)) {
     return { kind: "success", body: data as T };
   }
   return data as T;
@@ -3023,7 +3045,17 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
+let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
+let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  ownerAppPublication: input => {
+    if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
+    return ownerAppPublicationForCli(input);
+  },
+  ownerAppResponses:input=>{
+    if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
+    return ownerAppResponsesForCli(input);
+  },
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
@@ -3068,6 +3100,30 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
   },
   isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
+  sharedCaptureFor: async (workspace) => {
+    await warmCredentialCache();
+    const registered = findWorkspace(workspace.workspaceId), marker = registered?.shareView;
+    const credentials = cachedCredentials;
+    if (!marker || !credentials?.relayUrl || !marker.relayUrl ||
+      !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) || marker.ended ||
+      marker.grantedSelector?.access !== "edit" ||
+      (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) return null;
+    const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
+      selector: value?.grantedSelector, ended: value?.ended === true});
+    const pinned = identity(marker);
+    return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      preserveDraft: draft => preserveNamedLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
+      credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
+        signal: ownerDeliveryCredentialLifetime.signal},
+      assertCurrent() {
+        const current = findWorkspace(workspace.workspaceId);
+        if (cachedCredentials?.token !== credentials.token || cachedCredentials?.userId !== credentials.userId ||
+          cachedCredentials?.relayUrl !== credentials.relayUrl || current?.rootPath !== workspace.rootPath || identity(current.shareView) !== pinned) {
+          throw new Error("The shared file session changed.");
+        }
+      },
+    });
+  },
   resolveDocumentPath: async (workspace, path) => {
     try {
       return (await resolveWorkspaceFile(workspace.rootPath, path, "write"))
@@ -3133,6 +3189,10 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTra
 });
 
 const desktopEngine = createDesktopEngine({
+  ownerDeliveryCredentials: () => cachedCredentials?.relayUrl ? {bearer: cachedCredentials.token,
+    relayUrl: cachedCredentials.relayUrl, signal: ownerDeliveryCredentialLifetime.signal} : null,
+  existingOwnerFor: binding => engineYDocSessionIpc.existingOwner(binding),
+  findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
   workspaceAuthorities, pluginWorkspaceRuntimes, notifyRenderer,
@@ -3995,6 +4055,56 @@ function registerIpcHandlers(): void {
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
   });
+
+  let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
+  const ownerPublicationDependencies = {
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    flushCapture: async workspace => {
+      await openWorkspaceActivity(workspace);
+      const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+      if (!capture) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      await capture.flush();
+    },
+    withAdapter: withEngineAdapter,
+    compile: async (request, signal) => {
+      installedAppCompiler ??= createInstalledAppCompiler(pluginResourcesBasePath());
+      const compile = await installedAppCompiler;
+      signal.throwIfAborted();
+      return compile(request, { timeoutMs: 60_000, maxMemoryBytes: 1024 * 1024 * 1024, maxProcesses: 8,
+        maxInputBytes: 192 * 1024 * 1024, maxOutputBytes: 48 * 1024 * 1024, maxErrorBytes: 64 * 1024 }, signal);
+    },
+    relayJson: relayShareJsonWithCredentials,
+    upload: async (credentials, workspaceId, sha256, bytes, signal) => {
+      const result = await relayShareJsonWithCredentials<{ workspaceId: string; sha256: string; byteLength: number }>(credentials,
+        `/sync/${encodeURIComponent(workspaceId)}/blobs/${sha256}`, { method: "PUT", signal, body: Uint8Array.from(bytes).buffer,
+          headers: { "content-type": "application/octet-stream" } });
+      if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
+    },
+  } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
+  registerOwnerAppPublicationIpc(ownerPublicationDependencies);
+  const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
+    ...ownerPublicationDependencies,
+    callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
+    withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+  });
+  ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  const ownerResponseDependencies={
+    registerHandler:(channel,handler)=>ipcMain.handle(channel,handler),assertTrustedSender,withRendererWorkspaceOperation,
+    remoteForWorkspace,currentCredentialGeneration:()=>credentialCacheGeneration,relayJson:relayShareJsonWithCredentials,
+    undoAcceptedResponse:async(workspace,input)=>{
+      await openWorkspaceActivity(workspace);
+      const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
+      if(!capture)throw new Error("dohc could not open app responses. Restart dohc and try again.");
+      return capture.undoAcceptedAppResponse(input);
+    },
+  } satisfies Parameters<typeof registerOwnerAppResponsesIpc<WebContents,DesktopRendererWorkspaceOperation["workspace"],DesktopRendererWorkspaceOperation>>[0];
+  registerOwnerAppResponsesIpc(ownerResponseDependencies);
+  const cliOwnerResponses=createOwnerAppResponsesHandler<string,DesktopRendererWorkspaceOperation["workspace"],WorkspaceAuthorityOperation<RegistryEntry,DesktopWorkspaceAuthorityState>>({
+    ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
+  });
+  ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
 
   const {
     assertShareNotHeldElsewhere,

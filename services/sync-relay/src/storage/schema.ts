@@ -1,4 +1,7 @@
+import { initializeAppPublicationSchema } from "./publicationSchema";
+import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
+import { initializeServiceActivationSchema } from "./serviceActivationSchema";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -58,6 +61,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_share
     ON sync_relay_share_grants(share_id, created_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_restore_page
+    ON sync_relay_share_grants(share_id, created_at_ms, grant_id);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_user
     ON sync_relay_share_grants(principal_user_id, created_at_ms);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email
@@ -680,6 +685,15 @@ CREATE TABLE sync_relay_live_update_journal (
       validation_checkpoint_bytes IS NULL OR
       length(validation_checkpoint_bytes) BETWEEN 1 AND 20971520
     ),
+  relay_database_namespace TEXT NOT NULL
+    CHECK (length(CAST(relay_database_namespace AS BLOB)) BETWEEN 1 AND 512),
+  accepted_event_count INTEGER NOT NULL
+    CHECK (accepted_event_count BETWEEN 1 AND 9007199254740991),
+  accepted_evidence_digest TEXT NOT NULL
+    CHECK (length(accepted_evidence_digest) = 64 AND accepted_evidence_digest NOT GLOB '*[^0-9a-f]*'),
+  accepted_metadata_bytes INTEGER NOT NULL CHECK (accepted_metadata_bytes > 0),
+  restore_operation_id TEXT CHECK (length(CAST(restore_operation_id AS BLOB)) BETWEEN 1 AND 512),
+  CHECK (restore_operation_id IS NULL OR validation_checkpoint_bytes IS NOT NULL),
   UNIQUE (
     journal_cursor,
     workspace_id, main_version_id, object_id, lineage_claim_id
@@ -695,8 +709,15 @@ CREATE TABLE sync_relay_live_update_journal (
     (validation_checkpoint_sha256 IS NOT NULL AND validation_checkpoint_bytes IS NOT NULL)
   ),
   FOREIGN KEY (workspace_id)
-    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (relay_database_namespace,restore_operation_id)
+    REFERENCES sync_relay_live_restore_operations(relay_database_namespace,operation_id) ON DELETE NO ACTION
 ) STRICT;
+`,
+  idx_sync_relay_live_update_journal_restore: `
+CREATE UNIQUE INDEX idx_sync_relay_live_update_journal_restore
+  ON sync_relay_live_update_journal(relay_database_namespace,restore_operation_id)
+  WHERE restore_operation_id IS NOT NULL;
 `,
   idx_sync_relay_live_update_journal_document: `
 CREATE INDEX idx_sync_relay_live_update_journal_document
@@ -773,19 +794,28 @@ const LIVE_JOURNAL_SHAPE = {
       [16,"update_bytes","BLOB",1,null,0],
       [17,"validation_checkpoint_sha256","TEXT",0,null,0],
       [18,"validation_checkpoint_bytes","BLOB",0,null,0],
+      [19,"relay_database_namespace","TEXT",1,null,0],
+      [20,"accepted_event_count","INTEGER",1,null,0],
+      [21,"accepted_evidence_digest","TEXT",1,null,0],
+      [22,"accepted_metadata_bytes","INTEGER",1,null,0],
+      [23,"restore_operation_id","TEXT",0,null,0],
     ],
     foreignKeys: [
-      [0,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
+      [0,0,"sync_relay_live_restore_operations","relay_database_namespace","relay_database_namespace","NO ACTION","NO ACTION","NONE"],
+      [0,1,"sync_relay_live_restore_operations","restore_operation_id","operation_id","NO ACTION","NO ACTION","NONE"],
+      [1,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
     ],
     indexes: [
       ["idx_sync_relay_live_update_journal_checkpoint",0,"c",1],
       ["idx_sync_relay_live_update_journal_document",0,"c",0],
+      ["idx_sync_relay_live_update_journal_restore",1,"c",1],
       ["sqlite_autoindex_sync_relay_live_update_journal_1",1,"u",0],
       ["sqlite_autoindex_sync_relay_live_update_journal_2",1,"u",0],
     ],
     indexColumns: {
       idx_sync_relay_live_update_journal_checkpoint: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
       idx_sync_relay_live_update_journal_document: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
+      idx_sync_relay_live_update_journal_restore: [[0,19,"relay_database_namespace"],[1,23,"restore_operation_id"]],
       sqlite_autoindex_sync_relay_live_update_journal_1: [[0,1,"delivery_id"]],
       sqlite_autoindex_sync_relay_live_update_journal_2: [[0,0,"journal_cursor"],[1,3,"workspace_id"],[2,4,"main_version_id"],[3,5,"object_id"],[4,6,"lineage_claim_id"]],
     },
@@ -840,7 +870,7 @@ function assertLiveJournalSchema(db: SqliteDb): void {
 function initializeLiveJournalSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
   if (marked) { assertLiveJournalSchema(db); return; }
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?,?,?,?,?,?)").all(...Object.keys(LIVE_JOURNAL_SCHEMA));
+  const existing = db.prepare(`SELECT name FROM sqlite_schema WHERE name IN (${Object.keys(LIVE_JOURNAL_SCHEMA).map(()=>"?").join(",")})`).all(...Object.keys(LIVE_JOURNAL_SCHEMA));
   if (existing.length) throw new Error("unmarked live update journal schema already exists");
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);
@@ -894,6 +924,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       );
       CREATE INDEX IF NOT EXISTS idx_sync_relay_log_page
         ON sync_relay_log(workspace_id, relay_seq);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_document_page
+        ON sync_relay_log(workspace_id, json_extract(payload_json, '$.versionId'),
+          json_extract(payload_json, '$.objectId'), relay_seq);
       -- MU-C4: findThreadCreateChannelWireId's LIKE pre-filter cannot use an
       -- index on payload_json, but this PARTIAL index confines the scan to a
       -- workspace's chat.thread.create rows (a tiny slice of a busy log) in
@@ -1144,10 +1177,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeSessionHostControlSchema(db);
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
+    initializeServiceActivationSchema(db);
+    initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveCommittedDeliverySchema(db);
-    initializeLiveRestoreOperationSchema(db);
     initializeLiveTicketSchema(db);
+    initializeAppPublicationSchema(db);
+    initializeAppCollectionSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -1390,7 +1426,7 @@ CREATE TABLE sync_relay_live_session_tickets (
   ),
   restore_fence_generation INTEGER NOT NULL
     CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
-  principal_kind TEXT NOT NULL CHECK (principal_kind = 'named'),
+  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('named', 'link')),
   principal_id TEXT NOT NULL
     CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
   grant_id TEXT NOT NULL
@@ -1410,6 +1446,10 @@ CREATE TABLE sync_relay_live_session_tickets (
       redeemed_at_ms BETWEEN 0 AND 9007199254740991
       AND minted_at_ms <= redeemed_at_ms AND redeemed_at_ms < expires_at_ms
     )
+  ),
+  link_session_id TEXT CHECK (
+    (principal_kind = 'named' AND link_session_id IS NULL) OR
+    (principal_kind = 'link' AND link_session_id IS NOT NULL AND length(CAST(link_session_id AS BLOB)) BETWEEN 1 AND 512)
   ),
   PRIMARY KEY (ticket_id),
   FOREIGN KEY (workspace_id)
@@ -1436,7 +1476,7 @@ export const LIVE_TICKET_COLUMNS = [
   "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
   "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
   "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
-  "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+  "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id",
 ] as const;
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
@@ -1457,7 +1497,7 @@ function assertLiveTicketSchema(db: SqliteDb): void {
   same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
   LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
-    name === "redeemed_at_ms" ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+    (name === "redeemed_at_ms" || name === "link_session_id") ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
   same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
   [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);

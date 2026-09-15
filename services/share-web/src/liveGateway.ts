@@ -1,18 +1,20 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
-import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
-export interface NamedLiveGatewaySession {
-  readonly userId: string;
+interface LiveGatewayScope {
   readonly workspaceId: string;
   readonly shareId: string;
   readonly grantId: string;
 }
 
+export type LiveGatewaySession = LiveGatewayScope & (
+  | { readonly kind: "named"; readonly userId: string }
+  | { readonly kind: "link"; readonly principalId: string; readonly sessionId: string }
+);
+
 export interface LiveGatewayHostRoute {
-  readonly ticket: RedeemedLiveTicket;
   // Exclusively owned, open, and paused before any application bytes are read.
   // The adapter installs an error listener at construction. The router checks
   // current host, binding and fence; invalidation precedes replacement or fencing.
@@ -47,22 +49,40 @@ export interface LiveGatewayLimits {
 export interface LiveGatewayOptions {
   readonly publicHosts: ReadonlySet<string>;
   readonly publicOrigin: string;
+  readonly path?: "/api/live" | "/api/live/link";
   readonly limits: LiveGatewayLimits;
   // The adapter resolves trusted route scope and the account cookie through
   // relay named authentication. The discriminator is a lookup key, not identity.
-  resolveNamedSession(request: IncomingMessage, discriminator: string, signal: AbortSignal): Promise<NamedLiveGatewaySession | null>;
-  redeem(token: string, session: NamedLiveGatewaySession, signal: AbortSignal): Promise<RedeemedLiveTicket | null>;
+  resolveSession(request: IncomingMessage, discriminator: string, signal: AbortSignal): Promise<LiveGatewaySession | null>;
   // Apply these options when constructing or accepting the host socket, before
   // receiving any bytes. An already-open socket's decoder cannot be reconfigured.
-  openHostRoute(ticket: RedeemedLiveTicket, signal: AbortSignal, receive: LiveGatewayHostReceiveOptions): Promise<LiveGatewayHostRoute | null>;
+  // The private relay rederives identity and redeems once before accepting the socket.
+  openHostRoute(input: {request: IncomingMessage; discriminator: string; ticketToken: string}, signal: AbortSignal, receive: LiveGatewayHostReceiveOptions): Promise<LiveGatewayHostRoute | null>;
 }
 
-function copiedSession(value: NamedLiveGatewaySession): NamedLiveGatewaySession {
-  const { userId, workspaceId, shareId, grantId } = value;
-  if ([userId, workspaceId, shareId, grantId].some(id => typeof id !== "string" || id.length === 0)) {
-    throw new TypeError("Invalid named gateway session.");
+export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
+  const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
+    "maxConnectionsPerGrant", "maxFrameBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
+    "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== names.length ||
+    Object.keys(value).some(key => !names.includes(key as keyof LiveGatewayLimits))) throw new TypeError("Invalid live gateway limits.");
+  const limits = {...value} as LiveGatewayLimits;
+  for (const name of names) {
+    if (!Number.isSafeInteger(limits[name]) || limits[name] <= 0 ||
+      ((name.endsWith("TimeoutMs") || name === "maxFrameBytes" || name === "maxFragments" || name === "maxBufferedChunks") &&
+        limits[name] > 2_147_483_647)) throw new TypeError(`Invalid live gateway limit: ${name}.`);
   }
-  return Object.freeze({ userId, workspaceId, shareId, grantId });
+  return limits;
+}
+
+function copiedSession(value: LiveGatewaySession): LiveGatewaySession {
+  const { kind, workspaceId, shareId, grantId } = value;
+  const identity = kind === "named" ? [value.userId] : kind === "link" ? [value.principalId, value.sessionId] : [null];
+  if ([...identity, workspaceId, shareId, grantId].some(id => typeof id !== "string" || id.length === 0)) {
+    throw new TypeError("Invalid live gateway session.");
+  }
+  return Object.freeze(kind === "named" ? { kind, userId: value.userId, workspaceId, shareId, grantId } :
+    { kind, principalId: value.principalId, sessionId: value.sessionId, workspaceId, shareId, grantId });
 }
 
 function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal, dispose?: (value: T) => void): Promise<T | null> {
@@ -79,18 +99,8 @@ function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal, dispose?: (
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {
   const parseRequest = createLiveGatewayRequestParser(options);
-  const publicOrigin = options.publicOrigin;
-  const limits = { ...options.limits };
-  const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
-    "maxConnectionsPerGrant", "maxFrameBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
-    "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
-  for (const name of names) {
-    if (!Number.isSafeInteger(limits[name]) || limits[name] <= 0 ||
-      ((name.endsWith("TimeoutMs") || name === "maxFrameBytes" || name === "maxFragments" || name === "maxBufferedChunks") &&
-        limits[name] > 2_147_483_647)) throw new TypeError(`Invalid live gateway limit: ${name}.`);
-  }
-  const resolveNamedSession = options.resolveNamedSession.bind(options);
-  const redeem = options.redeem.bind(options);
+  const limits = parseLiveGatewayLimits(options.limits);
+  const resolveSession = options.resolveSession.bind(options);
   const openHostRoute = options.openHostRoute.bind(options);
   const hostReceive: LiveGatewayHostReceiveOptions = Object.freeze({
     maxPayload: limits.maxFrameBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
@@ -177,25 +187,19 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     timer.unref();
 
     try {
-      const resolved = await untilCancelled(resolveNamedSession(request, parsed.session, abort.signal), abort.signal);
+      const resolved = await untilCancelled(resolveSession(request, parsed.session, abort.signal), abort.signal);
       if (done) return;
       if (resolved === null) { stop(); return; }
       const session = copiedSession(resolved);
       release = reserve([
-        [JSON.stringify(["session", session.userId, session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession],
-        [JSON.stringify(["principal", session.userId]), limits.maxConnectionsPerPrincipal],
+        [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
+          session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession],
+        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
+          ["principal", "link", session.workspaceId, session.grantId, session.principalId]), limits.maxConnectionsPerPrincipal],
         [JSON.stringify(["grant", session.workspaceId, session.grantId]), limits.maxConnectionsPerGrant],
       ]) ?? undefined;
       if (!release) { stop(); return; }
-      const redeemed = await untilCancelled(redeem(parsed.ticketToken, session, abort.signal), abort.signal);
-      if (done) return;
-      if (redeemed === null) { stop(); return; }
-      const ticket = parseRedeemedLiveTicket(redeemed);
-      if (ticket.audience !== publicOrigin || ticket.authority.principalKind !== "named" ||
-        ticket.authority.principalId !== session.userId || ticket.authority.grantId !== session.grantId ||
-        ticket.binding.workspaceId !== session.workspaceId) { stop(); return; }
-      const identity = JSON.stringify(ticket);
-      const opened = await untilCancelled(openHostRoute(parseRedeemedLiveTicket(ticket), abort.signal, hostReceive), abort.signal, late => {
+      const opened = await untilCancelled(openHostRoute({request, discriminator: parsed.session, ticketToken: parsed.ticketToken}, abort.signal, hostReceive), abort.signal, late => {
         if (late !== null) {
           late.socket.on("error", () => undefined);
           late.socket.terminate();
@@ -204,9 +208,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (opened === null) { stop(); return; }
       opened.socket.on("error", stop);
       if (done) { opened.socket.terminate(); return; }
-      route = { ticket: opened.ticket, socket: opened.socket, invalidated: opened.invalidated };
+      route = { socket: opened.socket, invalidated: opened.invalidated };
       route.socket.once("close", stop);
-      if (JSON.stringify(parseRedeemedLiveTicket(route.ticket)) !== identity || route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
+      if (route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
         stop(); return;
       }
       route.socket.binaryType = "nodebuffer";

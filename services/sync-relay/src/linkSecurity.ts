@@ -235,6 +235,6 @@ export function validateLinkCapability(input: {
   };
 }
 
-export function isPublicLinkAccess(value: string): value is "view" | "comment" {
-  return value === "view" || value === "comment";
+export function isPublicLinkAccess(value: string, release?: import("@dohc/security-contract").PublicEditRelease): value is "view" | "comment" | "edit" {
+  return value === "view" || value === "comment" || (release?.version === 1 && value === "edit");
 }

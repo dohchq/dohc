@@ -4,6 +4,9 @@ import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-c
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveSettlementConfig } from "./liveSettlementConfig.js";
+import {parseLiveRestoreConfig} from "./liveRestorePreparation.js";
+import {DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
+import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 
 export function configRecord(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -27,7 +30,7 @@ function read(value: string): unknown {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimits) {
-  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement"]);
+  const row = configRecord(read(file), ["version", "engineExecutable", "hostId", "hostEpoch", "instanceId", "workspaces", "ingress", "maxQueuedBytes", "shutdownGraceMs"], ["settlement", "restore", "sync"]);
   if (row.version !== 1 || !Array.isArray(row.workspaces) || row.workspaces.length < 1 || row.workspaces.length > 64) throw new TypeError("Invalid device delivery configuration.");
   const workspaces = row.workspaces.map(item => {
     const entry = configRecord(item, ["root", "workspaceId", "maxRegistrations"]);
@@ -37,10 +40,12 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
     new Set(workspaces.map(item => process.platform === "win32" ? item.root.toLowerCase() : item.root)).size !== workspaces.length) throw new TypeError("Duplicate device workspace.");
   const ingress = configRecord(row.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(row.settlement);
+  const restoreRow = row.restore === undefined ? undefined : configRecord(row.restore, ["maxBytes", "maxEvents"]);
+  const restore = restoreRow ? Object.freeze({maxBytes: integer(restoreRow.maxBytes, 5, DEFAULT_MAX_BLOB_BYTES), maxEvents: integer(restoreRow.maxEvents)}) : undefined;
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
-  if (settlement && applicationWorkingReserveBytes === 0) throw new TypeError("Settlement requires a positive applicationWorkingReserveBytes limit.");
+  if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");
   return Object.freeze({ version: 1 as const, engineExecutable: path(row.engineExecutable, false),
-    settlement,
+    settlement, restore, sync: parseNativeLiveSyncConfig(row.sync, integer(ingress.aggregateBytes)),
     shutdownGraceMs: integer(row.shutdownGraceMs),
     hostId: parseHostControlIdentifier(row.hostId), hostEpoch: parseHostEpoch(row.hostEpoch), instanceId: parseHostControlIdentifier(row.instanceId),
     workspaces: Object.freeze(workspaces), maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, 65_536 + 16)),
@@ -50,13 +55,17 @@ export function readDeviceLiveHostConfig(file: string, limits: DeviceControlLimi
 export type DeviceLiveHostConfig = ReturnType<typeof readDeviceLiveHostConfig>;
 
 export function readRelayDeviceDeliveryConfig(file: string, limits: DeviceControlLimits) {
-  const row = configRecord(read(file), ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"]);
+  return parseRelayDeviceDeliveryConfig(read(file),limits);
+}
+export function parseRelayDeviceDeliveryConfig(value: unknown, limits: DeviceControlLimits) {
+  const row = configRecord(value, ["version", "workspaceIds", "client", "maxQueuedBytes", "maxActiveDrains"], ["restore"]);
   if (row.version !== 1 || !Array.isArray(row.workspaceIds) || row.workspaceIds.length < 1 || row.workspaceIds.length > 64) throw new TypeError("Invalid relay delivery configuration.");
   const workspaceIds = row.workspaceIds.map(value => parseLiveUpdateIdentifier(value));
   if (new Set(workspaceIds).size !== workspaceIds.length) throw new TypeError("Duplicate relay workspace.");
   const client = configRecord(row.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs", "maxFrameBytes"]);
   const maxFrameBytes = integer(client.maxFrameBytes, 1024 * 1024);
-  return Object.freeze({ workspaceIds: Object.freeze(workspaceIds), maxActiveDrains: integer(row.maxActiveDrains),
+  return Object.freeze({ version: 1 as const,workspaceIds: Object.freeze(workspaceIds), maxActiveDrains: integer(row.maxActiveDrains),
+    restore: parseLiveRestoreConfig(row.restore),
     maxQueuedBytes: integer(row.maxQueuedBytes, Math.max(limits.maxPayloadBytes + 16, maxFrameBytes + 20 + 16)),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes, 20 * 1024 * 1024 + Math.floor((20 * 1024 * 1024 - 2) / 5) * 16 + 3 * 1024 * 1024),
       maxUploads: integer(client.maxUploads), connectTimeoutMs: integer(client.connectTimeoutMs), requestDeadlineMs: integer(client.requestDeadlineMs), maxFrameBytes }) });

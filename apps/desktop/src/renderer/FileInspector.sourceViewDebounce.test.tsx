@@ -42,6 +42,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     saveError: null,
     notInVersion: false,
     documentUnavailable: false,
+  liveHostUnavailable: false,
     engineMayHoldDocument: false,
     artifactAssetsInvalid: false,
     deletedWhileEditing: false,

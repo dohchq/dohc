@@ -60,6 +60,44 @@ function makeLive(serverLimits = limits, hostEpoch = 1) {
 }
 
 describe("live frame codec", () => {
+  it("encodes membership as only revision, overflow and fixed-width pseudonyms", () => {
+    const frame = { kind: "membership", revision: 1, overflow: false, members: ["ab".repeat(16)] } as unknown as LiveFrame;
+    const literal = bytes("444c4956010900000000001d00000000000000010000000001" + "ab".repeat(16));
+    expect(encodeLiveFrame(frame, 41)).toEqual(literal);
+    expect(decodeLiveFrame(literal, 41)).toEqual(frame);
+    expect(() => encodeLiveFrame(frame, 40)).toThrow();
+    for (const extra of ["userId", "name", "email", "clientId", "state", "cursor", "activity", "ticketId"]) {
+      expect(() => encodeLiveFrame({ ...frame, [extra]: "private" } as LiveFrame, 586)).toThrow();
+    }
+    for (let index = 0; index < literal.length; index++) expect(() => decodeLiveFrame(literal.slice(0, index), 41)).toThrow();
+    expect(() => decodeLiveFrame(new Uint8Array([...literal, 0]), 42)).toThrow();
+  });
+  it("bounds membership count before allocating and refuses noncanonical members", () => {
+    const frame = { kind: "membership", revision: 1, overflow: true, members: [] } as unknown as LiveFrame;
+    const encoded = encodeLiveFrame(frame, 25);
+    expect(encoded).toHaveLength(25);
+    const forged = encoded.slice(); new DataView(forged.buffer).setUint32(21, 0xffff_ffff);
+    expect(() => decodeLiveFrame(forged, 586)).toThrow();
+    for (const members of [["private-name"], ["AB".repeat(16)], ["ab".repeat(16), "ab".repeat(16)], new Array(0xffff_ffff)]) {
+      expect(() => encodeLiveFrame({ ...frame, members } as LiveFrame, 586)).toThrow();
+    }
+    expect(() => encodeLiveFrame({ ...frame, overflow: 1 } as unknown as LiveFrame, 586)).toThrow();
+  });
+  it("admits membership only from the live server and charges its control lease", () => {
+    const frame = { kind: "membership", revision: 1, overflow: true, members: ["ab".repeat(16)] } as unknown as LiveFrame;
+    const { server, client } = makeLive();
+    const outgoing = server.send(frame);
+    expect(server.usage().outgoing.controlBytes).toBe(41);
+    const incoming = client.receive(outgoing.value);
+    expect(client.usage().incoming.controlBytes).toBe(41);
+    expect(incoming.value.frame).toEqual(frame);
+    incoming.release(); outgoing.release();
+    expect(server.usage().outgoing.controlBytes).toBe(0);
+    expect(client.usage().incoming.controlBytes).toBe(0);
+    expect(() => server.send(frame)).toThrow();
+    expect(() => pair().server.send(frame)).toThrow();
+    expect(() => makeLive().client.send(frame)).toThrow();
+  });
   it.each(vectors.frames)("matches independent literal $name bytes", vector => {
     const expected = fixture(vector.frame), literal = bytes(vector.hex);
     expect(encodeLiveFrame(expected, 586)).toEqual(literal);

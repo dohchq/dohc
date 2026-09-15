@@ -115,12 +115,18 @@ impl RuntimeError {
                     ApplicationError::Storage(err) => err.code(),
                     ApplicationError::Collab(err) => err.code(),
                     ApplicationError::InvalidInput(_) => "live-application-invalid-input",
+                    ApplicationError::ConfiguredByteBudgetExceeded => {
+                        "live-application-byte-budget-exceeded"
+                    }
                     ApplicationError::WorkspaceMismatch => "live-application-workspace-mismatch",
                     ApplicationError::MainVersionMismatch => {
                         "live-application-main-version-mismatch"
                     }
                     ApplicationError::Corrupt => "live-application-corrupt",
                     ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::ConfiguredBudgetMismatch => {
+                        "owner-outbox-configured-budget-mismatch"
+                    }
                     ApplicationError::Interrupted => "operation-crashed",
                 }
             }

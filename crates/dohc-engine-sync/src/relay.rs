@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::{
@@ -572,6 +572,7 @@ pub trait RelayTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncPassOutcome {
     Complete {
+        owner_admission_pending: Vec<crate::OwnerAdmissionPending>,
         pushed: usize,
         fetched: usize,
         has_more: bool,
@@ -971,17 +972,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
         now_ms: i64,
+        max_read_bytes: usize,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
+        let mut sharing_declined =
+            crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
+                .map_err(local)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
-        let mut sharing_declined = Vec::new();
+        let mut owner_admission_pending = Vec::new();
+        let mut resume_needed = false;
 
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
+        let mut enrollment_prepared = has_position;
         if origins.is_empty() && !has_position {
             let response = self.transport.push(push_probe_request(
                 workspace_id,
@@ -1008,11 +1015,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                 }
             }
-            // Re-read so the probe's same-transaction backfill enters the push loop.
+            sharing_declined.extend(
+                crate::live_audit::enrollment::prepare_exports(store, workspace_id, faults, now_ms)
+                    .map_err(local)?,
+            );
+            enrollment_prepared = true;
+            // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
 
-        for origin_id in origins {
+        let mut seen_origins: BTreeSet<_> = origins.iter().cloned().collect();
+        let mut origins: VecDeque<_> = origins.into();
+        while let Some(origin_id) = origins.pop_front() {
             let mut local_max =
                 local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut cursor = read_pushed_seq(store, workspace_id, &origin_id).map_err(local)?;
@@ -1030,7 +1044,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if ops.is_empty() {
                     break;
                 }
-                self.upload_missing_blobs(store, workspace_id, &identity, &ops)?;
+                let prefix =
+                    crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
+                        .map_err(local)?;
+                let blocked = prefix.pending.is_some() || prefix.budget_exhausted;
+                let ops = &ops[..prefix.allowed_ops];
+                if let Some(pending) = prefix.pending {
+                    owner_admission_pending.push(pending);
+                }
+                if ops.is_empty() {
+                    break;
+                }
+                self.upload_missing_blobs(store, workspace_id, &identity, ops)?;
 
                 let mut conflict = false;
                 for batch in ops.chunks(crate::MAX_PUSH_OPS_PER_BATCH) {
@@ -1071,6 +1096,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                     }
+                    if !enrollment_prepared {
+                        sharing_declined.extend(
+                            crate::live_audit::enrollment::prepare_exports(
+                                store,
+                                workspace_id,
+                                faults,
+                                now_ms,
+                            )
+                            .map_err(local)?,
+                        );
+                        enrollment_prepared = true;
+                        for added in list_workspace_origins(store, workspace_id).map_err(local)? {
+                            if seen_origins.insert(added.clone()) {
+                                origins.push_back(added);
+                            }
+                        }
+                    }
                     local_max =
                         local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
                     pushed = pushed
@@ -1079,6 +1121,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     cursor = response.current_max_origin_seq;
                 }
                 if !conflict {
+                    if blocked {
+                        resume_needed |= prefix.budget_exhausted;
+                        break;
+                    }
                     continue;
                 }
 
@@ -1114,9 +1160,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
 
         Ok(SyncPassOutcome::Complete {
+            owner_admission_pending,
             pushed,
             fetched: 0,
-            has_more: false,
+            has_more: resume_needed
+                || store
+                    .read_with(|conn| {
+                        crate::live_audit::enrollment::pending_in_tx(conn, workspace_id)
+                    })
+                    .map_err(local)?,
             applied: 0,
             refused: 0,
             skipped: 0,
@@ -1323,6 +1375,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             });
         }
         Ok(SyncPassOutcome::Complete {
+            owner_admission_pending: Vec::new(),
             pushed: 0,
             fetched,
             has_more,
@@ -1889,6 +1942,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// stops at that bound instead of failing after it, and records the
     /// journal position it stopped at, so the rest travels in the next submit.
     /// `more_pending` on the outcome says a further submit has more to offer.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_share_proposal(
         &self,
         store: &mut EngineStore,
@@ -1897,6 +1951,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         granted: &crate::ShareGrant,
         submit_id: &str,
         faults: &dyn FaultInjector,
+        max_read_bytes: usize,
     ) -> Result<ShareProposalSubmitOutcome, RelayError> {
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
@@ -1917,6 +1972,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &identity.origin_id,
             scanned,
             submit_through,
+            max_read_bytes,
         )?;
         if scan.changes.is_empty() {
             // Nothing to offer, but this window is read. Recording it keeps
@@ -2454,6 +2510,42 @@ fn collect_blob_refs(
                 insert_optional_ref(
                     &mut refs,
                     op.payload.get("updateBlobSha256"),
+                    BlobKind::Ydoc,
+                )?;
+            }
+            "live.audit.application" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload.get("updateBlobSha256"),
+                    BlobKind::Ydoc,
+                )?;
+                for chunk in op
+                    .payload
+                    .get("manifest")
+                    .and_then(|m| m.get("chunks"))
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    insert_optional_ref(&mut refs, chunk.get("sha256"), BlobKind::Binary)?;
+                }
+            }
+            "live.audit.settlement" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("record")
+                        .and_then(|record| record.get("markdownDigest")),
+                    BlobKind::Text,
+                )?;
+            }
+            "live.audit.base" => {
+                insert_optional_ref(
+                    &mut refs,
+                    op.payload
+                        .get("record")
+                        .and_then(|record| record.get("checkpoint"))
+                        .and_then(|checkpoint| checkpoint.get("stateDigest")),
                     BlobKind::Ydoc,
                 )?;
             }
@@ -3500,6 +3592,7 @@ fn collect_share_proposal_changes(
     origin_id: &str,
     scanned_seq: i64,
     submit_through: i64,
+    max_read_bytes: usize,
 ) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
     let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
@@ -3536,6 +3629,19 @@ fn collect_share_proposal_changes(
                     {
                         more_pending = true;
                         break 'pages;
+                    }
+                    let proof = crate::owner_publication_prefix(
+                        store,
+                        workspace_id,
+                        std::slice::from_ref(&op),
+                        max_read_bytes,
+                    )
+                    .map_err(local)?;
+                    if let Some(pending) = proof.pending {
+                        return Err(RelayError::Local(format!(
+                            "owner-admission-pending: {}:{} {}",
+                            pending.origin_id, pending.origin_seq, pending.path
+                        )));
                     }
                     let mut change = proposed_change(&op);
                     match by_object.get(&object_id) {
@@ -4607,6 +4713,64 @@ mod conflict_resolve_blob_ref_tests {
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, SuccessorContentKindV1,
         SuccessorV1, build_conflict_resolve_v1,
     };
+
+    #[test]
+    fn native_event_zero_keeps_the_ydoc_blob_ceiling() {
+        let sha = "a".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.base".into(),
+            payload: serde_json::json!({"record":{"checkpoint":{"stateDigest":sha}}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([(sha, BTreeSet::from([BlobKind::Ydoc]))])
+        );
+    }
+
+    #[test]
+    fn native_settlement_keeps_projection_in_the_text_blob_lane() {
+        let sha = "a".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.settlement".into(),
+            payload: serde_json::json!({"record":{"markdownDigest":sha}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([(sha, BTreeSet::from([BlobKind::Text]))])
+        );
+    }
+
+    #[test]
+    fn live_application_audit_keeps_update_and_metadata_in_their_existing_blob_lanes() {
+        let update = "a".repeat(64);
+        let chunk = "b".repeat(64);
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "live.audit.application".into(),
+            payload: serde_json::json!({"updateBlobSha256":update,"manifest":{"chunks":[{"sha256":chunk},{"sha256":chunk}]}}),
+            recorded_at_ms: 0,
+        };
+        assert_eq!(
+            collect_blob_refs(&[envelope]).unwrap(),
+            BTreeMap::from([
+                (update, BTreeSet::from([BlobKind::Ydoc])),
+                (chunk, BTreeSet::from([BlobKind::Binary]))
+            ])
+        );
+    }
 
     #[test]
     fn conflict_resolve_collects_text_binary_and_successor_roots() {

@@ -85,6 +85,11 @@ if (config) {
   );
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
   const extraResources = Array.isArray(config.extraResources) ? config.extraResources : [];
+  const compilerResource = extraResources.find(
+    entry => entry?.from === "resources/app-compiler" && entry?.to === "app-compiler",
+  );
+  check(compilerResource?.filter?.includes("**/*") === true,
+    "app compiler ships all staged assets as unpacked extraResources");
   check(
     extraResources.some(
       (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",

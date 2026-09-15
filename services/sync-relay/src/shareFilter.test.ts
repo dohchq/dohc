@@ -52,6 +52,13 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
+it.each(["live.audit.base","live.audit.application","live.audit.settlement"])("keeps %s out of every file-share level", (kind) => {
+  const payload = JSON.stringify({formatVersion: 1,record: {checkpoint: {binding: {currentPath: "docs/a.md"},stateDigest: "a".repeat(64)}}});
+  for (const access of ["view","comment","edit"] as const) {
+    expect(filterOpForShare({...pathShare,access},kind,payload).allowed).toBe(false);
+  }
+});
+
 describe("share selector validation", () => {
   it("returns only the normalized tracked path inside the selector", () => {
     for (const [path, expected] of [
@@ -942,6 +949,7 @@ describe("chat-channel share op filter", () => {
       ["secret.file.put", { versionId: "main", path: "notes/.env", ciphertextSha256: "b".repeat(64) }],
       ["version.create", { versionId: "main", forkSnapshots: [] }],
       ["ydoc.update", { path: "docs/a.md", updateBlobSha256: "c".repeat(64) }],
+      ["live.audit.base", {record: {checkpoint: {stateDigest: "d".repeat(64)}}}],
       ["conflict.open", {}],
       ["chat.thread.update", { threadId: "thread-in" }],
       ["made.up.kind", { threadId: "thread-in" }],

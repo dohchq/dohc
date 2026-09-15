@@ -290,6 +290,7 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
+    expect(screen.queryByTestId("site-preview-publish")).toBeNull();
   });
 
   it("reuses the last successful preview mode when it remains available", async () => {
@@ -339,6 +340,7 @@ describe("SitePreviewPage", () => {
     await screen.findByTestId("site-preview-frame");
     expect(screen.getByTestId("site-preview-shared-label").textContent).toBe("Shared");
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
+    expect(screen.queryByTestId("site-preview-publish")).toBeNull();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
@@ -366,6 +368,19 @@ describe("SitePreviewPage", () => {
       paths: ["report/index.html"],
       label: "Report",
     });
+  });
+
+  it("shares the source folder from publication without changing static Share", async () => {
+    const onShareSite = vi.fn();
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock,
+      listRelayShareLinks: vi.fn(async () => ({ supportedLinkAccess: ["view", "comment"], links: [], independentGrants: [] })),
+      publishOwnerApp: vi.fn(async () => ({ kind: "listed", publications: [], nextCursor: null })),
+    });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShareSite={onShareSite} />);
+    await screen.findByTestId("site-preview-frame");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Publish app" }));
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Share app folder" }));
+    expect(onShareSite).toHaveBeenCalledExactlyOnceWith({ paths: ["report"], label: "Report" });
   });
 
   it("shares the mode actually running, not whatever prepareShare's callback closed over before auto-start", async () => {

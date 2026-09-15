@@ -23,6 +23,7 @@ export function OpenSharedView(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
   onBack: () => void;
   onOpened?: () => void;
+  liveEditing?: boolean;
   resolvedShare?: {
     shareId: string;
     shareCode: string;
@@ -43,7 +44,7 @@ export function OpenSharedView(props: {
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
   const [mode, setMode] = useState<"mount" | "separate">(
-    props.mountInto ? "mount" : "separate",
+    props.mountInto && !props.liveEditing ? "mount" : "separate",
   );
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -224,6 +225,11 @@ export function OpenSharedView(props: {
                 </button>
               </div>
             </div>
+          ) : null}
+          {props.liveEditing && props.mountInto ? (
+            <p className="m-0 text-xs leading-relaxed text-muted">
+              Open separately to edit shared Markdown. Adding it to this workspace creates a read-only folder.
+            </p>
           ) : null}
           {!mounting ? (
           <div className="flex flex-col gap-1">

@@ -18,6 +18,7 @@ import {
   type PullShareViewResult,
   type ShareViewRefusal,
   type SharingDeclined,
+  type OwnerAdmissionPending,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -396,6 +397,16 @@ function shareViewRefusals(
   });
 }
 
+function ownerAdmissionPending(value: unknown): OwnerAdmissionPending[] {
+  if (!Array.isArray(value)) throw new Error("Rust engine sync.push.ownerAdmissionPending must be an array.");
+  return value.map(item => {
+    const row = resultRecord(item, "sync.push.ownerAdmissionPending");
+    const text = (key: string) => stringField(row, key, "sync.push.ownerAdmissionPending");
+    return {workspaceId: text("workspaceId"), originId: text("originId"), originSeq: numberField(row, "originSeq", "sync.push.ownerAdmissionPending"),
+      versionId: text("versionId"), objectId: text("objectId"), path: text("path")};
+  });
+}
+
 function sharingDeclined(
   value: JsonValue | undefined,
   label: string,
@@ -562,6 +573,8 @@ export interface EngineRelayWorkspaceClient {
 export interface EngineRelayClientOptions {
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
+  /** Closes the captured binding without re-entering this client's request lane. */
+  closeWorkspaceBinding?(workspace: EngineWorkspace): Promise<void>;
   allowInsecureLoopbackForTests?: boolean;
   requestDeadlineMs?: number;
 }
@@ -571,6 +584,7 @@ const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 export class EngineRelayClient {
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
+  private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
   private readonly allowInsecureLoopbackForTests: boolean;
   private readonly requestDeadlineMs: number;
   private readonly activeLocations = new Map<string | symbol, string>();
@@ -580,6 +594,8 @@ export class EngineRelayClient {
   constructor(options: EngineRelayClientOptions) {
     this.sessions = options.sessions;
     this.routes = options.routes;
+    this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
+      (workspace => this.sessions.closeWorkspaceBinding(workspace).catch(() => undefined));
     this.allowInsecureLoopbackForTests =
       options.allowInsecureLoopbackForTests === true;
     this.requestDeadlineMs =
@@ -620,9 +636,7 @@ export class EngineRelayClient {
     ): Promise<JsonValue> =>
       await runInKeyedLane(this.lanes, workspaceKey, async () => {
         if (this.activeLocations.get(workspaceKey) !== connectionKey) {
-          await this.sessions
-            .closeWorkspaceBinding(workspace)
-            .catch(() => undefined);
+          await this.closeWorkspaceBinding(workspace);
           this.activeLocations.set(workspaceKey, connectionKey);
         }
         try {
@@ -728,6 +742,7 @@ export class EngineRelayClient {
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],
+          ownerAdmissionPending: ownerAdmissionPending(result.ownerAdmissionPending),
           sharingDeclined: sharingDeclined(
             result.sharingDeclined,
             "sync.push",

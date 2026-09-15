@@ -50,6 +50,8 @@ struct VersionedTextWriteParams {
     path: String,
     text: String,
     #[serde(default)]
+    restore_before_moment_id: Option<String>,
+    #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
@@ -146,11 +148,20 @@ struct VersionedTextRenameParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextCheckMoveParams {
+    version_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextDeleteParams {
     #[serde(default)]
     workspace_id: Option<String>,
     version_id: String,
     path: String,
+    #[serde(default)]
+    expected_object_id: Option<String>,
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
@@ -304,7 +315,7 @@ impl EngineService {
         });
         let result = open
             .actor
-            .versioned_text_write_indexed(
+            .versioned_text_write_indexed_with_history(
                 WriteText {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -320,6 +331,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
                 open.root.clone(),
+                params.restore_before_moment_id,
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
@@ -530,6 +542,28 @@ impl EngineService {
         }))
     }
 
+    pub(super) async fn versioned_text_check_move(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextCheckMoveParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "versionedText.checkMove",
+            open.actor.ensure_no_adopted_owner_under_path(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.path,
+            ),
+        )
+        .await?;
+        Ok(json!({"allowed":true}))
+    }
+
     pub(super) async fn versioned_text_rename(
         &self,
         ctx: &RequestContext,
@@ -625,7 +659,7 @@ impl EngineService {
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
         let result = open
             .actor
-            .versioned_text_delete(
+            .versioned_text_delete_expected_object(
                 DeleteTextFile {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -638,6 +672,7 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
+                params.expected_object_id,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),

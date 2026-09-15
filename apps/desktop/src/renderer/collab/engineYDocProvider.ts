@@ -49,6 +49,7 @@ export interface EngineYDocTransport {
     notInVersion?: boolean;
     // Main could no longer resolve the live file at the path the renderer read.
     documentUnavailable?: boolean;
+    liveHostUnavailable?: boolean;
     // A session for this document may still be the engine's —
     // This available:false must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
@@ -95,6 +96,8 @@ export interface EngineYDocTransport {
     }) => void | Promise<void>,
   ): () => void;
   acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
+  adoptOwner?(lineageGeneration: number): Promise<void>;
+  onOwnerHandoff?(listener: (lineageGeneration: number) => void): () => void;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
 }
@@ -220,6 +223,7 @@ export interface EngineYDocBinding {
   readonly notInVersion: boolean;
   // Main could no longer resolve the live file at the path the renderer read.
   readonly documentUnavailable: boolean;
+  readonly liveHostUnavailable: boolean;
   // A session for this document may still be the engine's. The
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
@@ -240,6 +244,7 @@ export interface EngineYDocBinding {
   // acknowledgement. Path mutations use this barrier before main settles and
   // closes the old-path session.
   flushPendingLocalUpdates(): Promise<void>;
+  adoptOwner(): Promise<void>;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent. If main has not acknowledged an edit,
   // teardown waits and keeps the session open. It completes after recovery.
@@ -288,6 +293,7 @@ export async function bindEngineYDoc(
       versionId: null,
       notInVersion: opened.notInVersion === true,
       documentUnavailable: opened.documentUnavailable === true,
+      liveHostUnavailable: opened.liveHostUnavailable === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
@@ -305,6 +311,7 @@ export async function bindEngineYDoc(
       flushPendingLocalUpdates() {
         return Promise.resolve();
       },
+      adoptOwner() { return Promise.reject(new Error("Owner session is unavailable.")); },
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -341,6 +348,8 @@ export async function bindEngineYDoc(
   let deliveryPending = false;
   let localUpdatesRefused = false;
   let replacementInProgress = false;
+  let ownerHandoff: Promise<void> | null = null;
+  let ownerHandoffActive = false;
   let destroyRequested = false;
   let recoveryError: unknown = null;
 
@@ -443,6 +452,13 @@ export async function bindEngineYDoc(
   };
 
   const flushPendingLocalUpdates = (): Promise<void> => {
+    if (ownerHandoffActive) {
+      return ownerHandoff!.then(flushPendingLocalUpdates, flushPendingLocalUpdates);
+    }
+    return flushStagedUpdates();
+  };
+
+  const flushStagedUpdates = (): Promise<void> => {
     if (scheduledFlush !== null) {
       batchScheduler.cancel(scheduledFlush);
       scheduledFlush = null;
@@ -467,7 +483,7 @@ export async function bindEngineYDoc(
   };
 
   const scheduleLocalUpdateFlush = (): void => {
-    if (scheduledFlush !== null) return;
+    if (scheduledFlush !== null || ownerHandoffActive) return;
     scheduledFlush = batchScheduler.schedule(() => {
       scheduledFlush = null;
       void flushPendingLocalUpdates();
@@ -578,7 +594,7 @@ export async function bindEngineYDoc(
     void queueReplacement(replacement);
   }
 
-  return {
+  const binding: EngineYDocBinding = {
     get doc() {
       return doc;
     },
@@ -587,6 +603,7 @@ export async function bindEngineYDoc(
     versionId: opened.versionId ?? null,
     notInVersion: false,
     documentUnavailable: false,
+    liveHostUnavailable: false,
     engineMayHoldDocument: false,
     artifactAssetsInvalid: false,
     removalInProgress: null,
@@ -606,11 +623,32 @@ export async function bindEngineYDoc(
       return () => replacementListeners.delete(listener);
     },
     flushPendingLocalUpdates,
+    adoptOwner() {
+      if (ownerHandoff) return ownerHandoff;
+      if (!transport.adoptOwner || destroyed || destroyRequested || replacementInProgress || localUpdatesRefused) return Promise.reject(new Error("Owner handoff is unavailable."));
+      const capturedDoc = doc, generation = lineageGeneration;
+      ownerHandoffActive = true;
+      const drain = flushStagedUpdates();
+      ownerHandoff = (async () => {
+        try {
+          await drain;
+          if (destroyed || destroyRequested || replacementInProgress || generation !== lineageGeneration || capturedDoc !== doc || localUpdatesRefused) throw new Error("Owner handoff session changed.");
+          await transport.adoptOwner!(generation);
+          if (destroyed || replacementInProgress || generation !== lineageGeneration || capturedDoc !== doc) throw new Error("Owner handoff session changed.");
+        } finally {
+          ownerHandoffActive = false;
+          ownerHandoff = null;
+          if (!destroyed && !replacementInProgress && !localUpdatesRefused) await flushStagedUpdates();
+        }
+      })();
+      return ownerHandoff;
+    },
     destroy() {
       if (destroyPromise !== null) return destroyPromise;
       destroyed = true;
       doc.off("update", onUpdate);
       unsubscribe();
+      unsubscribeOwnerHandoff();
       // A close settles the engine state. Flush and await every accepted local
       // edit before close so teardown cannot settle behind the mirror. If the
       // transport stays unavailable, this promise stays pending by design.
@@ -635,4 +673,9 @@ export async function bindEngineYDoc(
       return destroyPromise;
     },
   };
+  const unsubscribeOwnerHandoff = transport.onOwnerHandoff?.(generation => {
+    if (generation !== lineageGeneration) return;
+    void binding.adoptOwner().catch(error => console.error("[desktop] owner handoff failed:",error));
+  }) ?? (() => undefined);
+  return binding;
 }

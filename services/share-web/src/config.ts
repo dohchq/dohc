@@ -1,8 +1,14 @@
+import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
+import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
+import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 
 export interface ShareWebConfig {
+  appLaunch?: AppLaunchConfig;
+  publicEditRelease?: PublicEditRelease;
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
@@ -13,6 +19,9 @@ export interface ShareWebConfig {
   devMode: boolean;
   accountAuth?: AccountAuthConfig;
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
+  namedLiveGatewayLimits?: LiveGatewayLimits;
+  namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
+  linkLive?: {publicOrigin: string; gateway: LiveGatewayLimits; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -123,7 +132,37 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     namedBrowserSessionLimits = parseNamedLiveBrowserClientLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS));
   }
 
+  let namedLiveGatewayLimits: LiveGatewayLimits | undefined;
+  if (env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS !== undefined) {
+    if (!namedBrowserSessionLimits || !accountAuth || !relayExchangeKey) throw new Error("Named live transport requires named browser sessions and relay exchange configuration.");
+    namedLiveGatewayLimits = parseLiveGatewayLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS));
+  }
+  let namedRecipientBrowserLimits: NamedLiveBrowserLimits | undefined;
+  if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {
+    if (!namedLiveGatewayLimits) throw new Error("Named browser editing requires the named live gateway.");
+    namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS));
+    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes) {
+      throw new Error("Named browser frames exceed gateway capacity.");
+    }
+  }
+
+  let linkLive: ShareWebConfig["linkLive"];
+  if (env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS !== undefined) {
+    const publicOrigin = required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), origin = new URL(publicOrigin);
+    if (origin.protocol !== "https:" || origin.origin !== publicOrigin || !hosts.includes(origin.host) || !relayExchangeKey) throw new Error("Link live editing requires an exact HTTPS public origin and relay exchange configuration.");
+    const value: unknown = JSON.parse(env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS);
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "editor,gateway,requests") throw new Error("Invalid link live limits.");
+    const fields = value as Record<string, unknown>;
+    linkLive = {publicOrigin, gateway: parseLiveGatewayLimits(fields.gateway), requests: parseNamedLiveBrowserClientLimits(fields.requests), editor: parseNamedLiveBrowserLimits(fields.editor)};
+    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes) throw new Error("Link browser frames exceed gateway capacity.");
+  }
+
+  const publicEditRelease = parsePublicEditRelease(env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE));
+  if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");
+
   return {
+    appLaunch: env.DOHC_SHARE_WEB_APP_DOMAIN ? parseAppLaunchConfig({viewerOrigin: required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), appDomain: env.DOHC_SHARE_WEB_APP_DOMAIN}) : undefined,
+    publicEditRelease,
     relayUrl: relayUrl.href,
     publicRelayUrl,
     relayExchangeKey,
@@ -134,5 +173,8 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     devMode,
     ...(accountAuth ? { accountAuth } : {}),
     ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
+    ...(namedLiveGatewayLimits ? {namedLiveGatewayLimits} : {}),
+    ...(namedRecipientBrowserLimits ? {namedRecipientBrowserLimits} : {}),
+    ...(linkLive ? {linkLive} : {}),
   };
 }

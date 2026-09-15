@@ -5,7 +5,7 @@ import {
   type LiveHostConnectionCoordinate,
 } from "../../../services/sync-relay/src/storage.js";
 import {
-  registered,
+  registered as registeredFixture,
   DatabaseSync,
   host,
   policy,
@@ -20,16 +20,18 @@ import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js";
 
-function delivery(f: ReturnType<typeof registered>) {
+function registered(...args: Parameters<typeof registeredFixture>) {
+  const f = registeredFixture(...args);
   const history = createLiveJournalHistoryAuthority({
     namespace: "history-one",
     reconciled: true,
   });
-  return {
+  return { ...f, delivery: {
     history,
     store: f.storage.createLiveCommittedDeliveryStore(history),
-  };
+  } };
 }
+function delivery(f: ReturnType<typeof registered>) { return f.delivery; }
 function ackBaseline(
   store: ReturnType<typeof delivery>["store"],
   drain: ReturnType<ReturnType<typeof delivery>["store"]["open"]>,
@@ -66,7 +68,7 @@ it("funds the stored document binding independently of a large share selector", 
   } finally { f.close(); }
 });
 it("reserves delivery before admission and completes acknowledgements at quota", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const event = f.capture(f.update(), "reserved-event");
@@ -96,13 +98,14 @@ it("reserves delivery before admission and completes acknowledgements at quota",
 });
 
 it("refuses an event atomically when its delivery reservation does not fit", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const event = f.capture(f.update(), "no-reservation-space");
     const path = `${f.path}.quota-probe`;
     f.raw.prepare("VACUUM INTO ?").run(path);
     const probe = openSyncRelayStorage(path), raw = new DatabaseSync(path);
+    probe.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({ namespace: "history-one", reconciled: true }));
     let journalCharge: number;
     try {
       const usage = () => Number(raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
@@ -176,7 +179,7 @@ it("funds new documents and events when a previously used host returns", () => {
 });
 
 it("keeps the previous host coordinate when destination funding exceeds quota", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const begin = f.storage.beginLiveHostTransition({ from: host, toMode: "service", toHostId: "new-host", transitionId: "quota-transition", startedAtMs: 40, guard() {} });
@@ -207,7 +210,7 @@ it("stores delivery acknowledgements at the configured host identifier limit", (
 });
 
 it("refuses baseline registration atomically when its delivery budget does not fit", () => {
-  const quota = 200_000;
+  const quota = 1_000_000;
   const f = registered({ workspaceQuotaBytes: quota });
   try {
     const input = { ...f.input, evidence: { ...f.input.evidence, currentPath: "docs/b.md", document: { ...f.input.evidence.document, objectId: "second-object" } } };
@@ -465,10 +468,7 @@ it("uses canonical document identity for concurrent consumer ownership and captu
     };
     const consumer = new LiveCommittedDelivery(
       f.storage,
-      createLiveJournalHistoryAuthority({
-        namespace: "history-one",
-        reconciled: true,
-      }),
+      f.delivery.history,
       connection,
     );
     connection.workspace = "replacement";

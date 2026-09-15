@@ -72,6 +72,23 @@ function receivedShare(shareId: string, shareCode: string, grantId = `grant-${sh
   };
 }
 
+it("opens an Edit handoff as a standalone live view while mounts remain read-only", async () => {
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({found: true,
+    share: {...receivedShare("share-edit", "edit-code"), access: "edit"}});
+  const onWorkspaceReady = vi.fn();
+  render(<ShareHandoffSurface status={{status: "done", statusId: "edit-status", shareId: "share-edit"}}
+    onWorkspaceReady={onWorkspaceReady} onBack={() => {}} onOpened={() => {}}
+    mountInto={{workspaceId: "host", onMounted: vi.fn()}} />);
+  const user = userEvent.setup();
+  expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
+  expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
+  await user.click(screen.getByTestId("open-share-choose-folder"));
+  await user.click(screen.getByTestId("open-share-start"));
+  await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalledWith({shareCode: "edit-code", rootPath: "/home/ice/dohc/shared"}));
+  expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  expect(onWorkspaceReady).toHaveBeenCalled();
+});
+
 type ExactReceivedShareResult =
   | { found: false }
   | { found: true; share: ReturnType<typeof receivedShare> };

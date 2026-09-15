@@ -1,4 +1,7 @@
 import type { StoredLiveDocumentAuthority } from "./types";
+import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
+import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
+import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
 import type {
   CurrentLiveBindingRequest,
   LiveDocumentBaselineRegistrationInput,
@@ -7,16 +10,16 @@ import type {
   SqliteDb,
   SyncRelayShareRow,
   CurrentLiveBindingResult,
-  NamedLiveTicketLookup,
+  LiveTicketLookup,
   TicketHostReport,
-  NamedLiveTicketMint,
-  NamedLiveTicketRedemption,
+  LiveTicketMint,
+  LiveTicketRedemption,
 } from "./types";
 import {
   ticketRecord,
   snapshotHostCoordinate,
   parseTicketHash,
-  snapshotNamedTicketScope,
+  snapshotLiveTicketScope,
   snapshotTicketHostReport,
 } from "../liveTicketInputs";
 import {
@@ -57,11 +60,15 @@ import {
   LIVE_TICKET_LIFETIME_MS,
   type RedeemedLiveTicket,
 } from "@dohc/live-session-contract/live-ticket";
-import type { NamedLiveBrowserContext } from "../namedLiveBrowserAuth";
+import type { LiveBrowserContext } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./liveDeliveryReservations";
+import { nextShareDiscussionRevision } from "./discussion";
+import { liveBrowserActor } from "../liveBrowserContext";
+import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
+import { authorizeLinkShareAction } from "../shareAuthorization";
 
 export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
@@ -72,8 +79,14 @@ export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest):
   if (nodeTypes.isProxy(outer.actor)) throw new TypeError("live authority actor must not be a proxy");
   const kind = typeof outer.actor === "object" && outer.actor !== null
     ? Object.getOwnPropertyDescriptor(outer.actor, "kind") : undefined;
-  if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named")) {
-    throw new TypeError("live authority requires an owner or named actor");
+  if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named" && kind.value !== "link")) {
+    throw new TypeError("live authority requires an authenticated actor");
+  }
+  if (kind.value === "link") {
+    const actor = ticketRecord(outer.actor, ["kind", "sessionId", "capabilityHash", "profileTokenHash", "grantId", "workspaceId"]);
+    return { document, actor: { kind: "link", sessionId: parseLiveUpdateIdentifier(actor.sessionId, "session ID"),
+      capabilityHash: parseTicketHash(actor.capabilityHash), profileTokenHash: parseTicketHash(actor.profileTokenHash),
+      grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
   }
   const actor = ticketRecord(outer.actor,
     kind.value === "owner" ? ["kind", "userId", "shareId"] : ["kind", "userId", "grantId"]);
@@ -246,11 +259,31 @@ export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: Liv
   const projectionLength = authorityInteger(row.baseline_projected_byte_length);
   authorityIntegrity(projectionLength <= 2_097_152);
   const baselineSequence = authorityInteger(row.baseline_moment_relay_seq, 1);
-  const sourceMoment = db.prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
-    FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq = ?`)
-    .get(document.workspaceId, document.objectId, baselineSequence);
-  authorityIntegrity(sourceMoment && sourceMoment.version_id === "main" && sourceMoment.path === binding.currentPath &&
-    sourceMoment.content_kind === "text" && sourceMoment.blob_sha256 === projectionDigest && sourceMoment.byte_length === projectionLength);
+  const ordinary=readOrdinaryActivationBasis(db,storedDocument);
+  if(ordinary){
+    authorityIntegrity(ordinary.base_relay_seq===baselineSequence&&ordinary.current_path===binding.currentPath&&
+      ordinary.projected_sha256===projectionDigest&&ordinary.projected_byte_length===projectionLength);
+    const epoch=db.prepare("SELECT replication_epoch,stream_identity,COALESCE(epoch_log_floor,0) AS log_floor FROM sync_relay_workspaces WHERE workspace_id=?").get(document.workspaceId);
+    authorityIntegrity(epoch);
+    if(baselineSequence>authorityInteger(epoch.log_floor)){
+      authorityIntegrity(epoch.replication_epoch===ordinary.replication_epoch&&epoch.stream_identity===ordinary.stream_identity);
+    }
+    const source=db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`)
+      .get(document.workspaceId,baselineSequence,ordinary.base_origin_id,ordinary.base_origin_seq);
+    authorityIntegrity(source&&typeof source.payload_json==="string");
+    const payload=JSON.parse(source.payload_json) as Record<string,unknown>;
+    authorityIntegrity(payload.versionId===storedDocument.mainVersionId&&payload.objectId===storedDocument.objectId&&payload.path===binding.currentPath&&
+      payload.contentKind==="richdoc"&&payload.isBaseState===true&&payload.lineageClaimId===baselineDigest&&payload.updateBlobSha256===baselineDigest);
+    const blob=db.prepare("SELECT byte_length,content=? AS matches FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+      .get(bytes,document.workspaceId,baselineDigest);
+    authorityIntegrity(blob?.byte_length===bytes.length&&blob.matches===1);
+  }else{
+    const sourceMoment = db.prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
+      FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq = ?`)
+      .get(document.workspaceId, document.objectId, baselineSequence);
+    authorityIntegrity(sourceMoment && sourceMoment.version_id === "main" && sourceMoment.path === binding.currentPath &&
+      sourceMoment.content_kind === "text" && sourceMoment.blob_sha256 === projectionDigest && sourceMoment.byte_length === projectionLength);
+  }
   const ranges = db.prepare(`SELECT * FROM sync_relay_live_document_baseline_ranges
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? AND lineage_claim_id = ?
     ORDER BY client_id, start_clock`)
@@ -280,22 +313,65 @@ export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareS
   });
 }
 
-export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     const request = snapshotCurrentBindingRequest(input);
-    return storage.tx(() => currentLiveDocumentBinding(storage, request));
+    return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
   }
+
+export type LiveObjectHostBindingResult =
+  | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
+  | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
+
+export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveBrowserContext, requestedObjectId: string): LiveObjectHostBindingResult {
+  const scope = snapshotLiveTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
+  return storage.readLiveAuthority(() => {
+    if (!ticketScopeIsCurrent(storage, scope)) return { kind: "refused", reason: "not-authorized" };
+    const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' LIMIT 1`).get(scope.workspaceId, objectId);
+    if (!row) return { kind: "refused", reason: "stale-document" };
+    const document = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId,
+      lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id) };
+    if (scope.kind === "named") {
+      const current = currentLiveDocumentBinding(storage, { document, actor: liveBrowserActor(scope) });
+      return current.kind === "current" ? { kind: "current", binding: current.binding, host: current.host } : current;
+    }
+    const host = readLiveHostControl(storage.db);
+    if (host !== null) assertCurrentAuthorityHost(storage.db, host);
+    if (host === null || host.admissionState !== "open" || host.transition !== null) return { kind: "refused", reason: "host-unavailable" };
+    const link = currentLinkEdit(storage, liveBrowserActor(scope));
+    if (!link) return { kind: "refused", reason: "not-authorized" };
+    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), link.share, link.effectiveSelector);
+    if (bound.kind !== "bound") return bound;
+    return { kind: "current", binding: bound.binding,
+      host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
+        instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! } };
+  });
+}
+
+function currentLinkEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>) {
+  const now = Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid link authority clock.");
+  const enrollment = readLinkEnrollment(storage, actor, now);
+  if (!enrollment || enrollment.authority.session_id !== actor.sessionId || enrollment.authority.grant_id !== actor.grantId ||
+    enrollment.authority.workspace_id !== actor.workspaceId || linkWriteRefusal(enrollment)) return null;
+  const authorized = authorizeLinkShareAction({ storage, grantId: actor.grantId, action: "live-edit" });
+  if (!authorized.ok || !isLiveEditShareSelector(authorized.effectiveSelector)) return null;
+  return { ...authorized, enrollment };
+}
 
 function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTicketClaims; redeemedAtMs: number | null } {
   try {
     for (const column of LIVE_TICKET_COLUMNS) {
       const value = row[column];
-      if (column === "redeemed_at_ms" && value === null) continue;
+      if ((column === "redeemed_at_ms" || column === "link_session_id") && value === null) continue;
       if (LIVE_TICKET_INTEGER_COLUMNS.has(column)) {
         if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error();
       } else if (typeof value !== "string") throw new Error();
     }
     parseTicketHash(row.token_hash);
-    if (row.principal_kind !== "named" || row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
+    if ((row.principal_kind !== "named" && row.principal_kind !== "link") || row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
+    if (row.principal_kind === "named" ? row.link_session_id !== null :
+      parseLiveUpdateIdentifier(row.link_session_id, "link session ID") !== row.link_session_id) throw new Error();
     parseLiveUpdateDigest(row.lineage_claim_id);
     const claims = parseLiveTicketClaims({
       ticketId: row.ticket_id, audience: row.audience,
@@ -317,44 +393,48 @@ function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTick
 
 export const LIVE_TICKET_REFUSED = Symbol("live-ticket refused");
 
-function snapshotTicketLookup(input: Record<string, unknown>): NamedLiveTicketLookup {
+function snapshotTicketLookup(input: Record<string, unknown>): LiveTicketLookup {
   return { tokenHash: parseTicketHash(input.tokenHash), audience: parseLiveTicketAudience(input.audience),
-    scope: snapshotNamedTicketScope(input.scope) };
+    scope: snapshotLiveTicketScope(input.scope) };
 }
 
-export function ticketScopeIsCurrent(storage: StorageContext, scope: NamedLiveBrowserContext): boolean {
+export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveBrowserContext): boolean {
     const grant = storage.getShareGrant(scope.grantId);
     const share = grant && storage.getShare(grant.shareId);
     return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
-      authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: scope.userId, grantId: scope.grantId }).ok;
+      (scope.kind === "named" ? authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: scope.userId, grantId: scope.grantId }).ok :
+        currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
   }
 
-export function currentTicketAuthority(storage: StorageContext, scope: NamedLiveBrowserContext, objectId: string, report: TicketHostReport):
+export function currentTicketAuthority(storage: StorageContext, scope: LiveBrowserContext, objectId: string, report: TicketHostReport):
     Extract<CurrentLiveBindingResult, { kind: "current" }> {
     if (report.binding.workspaceId !== scope.workspaceId || report.binding.objectId !== objectId ||
       !ticketScopeIsCurrent(storage, scope)) throw LIVE_TICKET_REFUSED;
     const current = currentLiveDocumentBinding(storage, {
       document: { workspaceId: scope.workspaceId, objectId, mainVersionId: "main", lineageClaimId: report.binding.lineageClaimId },
-      actor: { kind: "named", userId: scope.userId, grantId: scope.grantId },
+      actor: liveBrowserActor(scope),
     });
-    if (current.kind !== "current" || current.authority.principalKind !== "named" || current.binding.restoreFenceGeneration === 0 ||
+    if (current.kind !== "current" || current.authority.principalKind !== scope.kind || current.binding.restoreFenceGeneration === 0 ||
       JSON.stringify(current.binding) !== JSON.stringify(report.binding) ||
       JSON.stringify(current.host) !== JSON.stringify(report.connection)) throw LIVE_TICKET_REFUSED;
     return current;
   }
 
-export function matchingTicket(storage: StorageContext, input: NamedLiveTicketLookup, now: number): LiveTicketClaims {
+export function matchingTicket(storage: StorageContext, input: LiveTicketLookup, now: number): LiveTicketClaims {
     const row = storage.db.prepare(`SELECT * FROM ${LIVE_TICKET_TABLE} WHERE token_hash = ?`).get(input.tokenHash);
     if (!row) throw LIVE_TICKET_REFUSED;
     const { claims, redeemedAtMs } = parseStoredLiveTicket(row);
     if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
-      claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== "named" ||
-      claims.authority.principalId !== input.scope.userId || claims.authority.grantId !== input.scope.grantId ||
+      claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== input.scope.kind ||
+      (input.scope.kind === "named" ? claims.authority.principalId !== input.scope.userId :
+        row.link_session_id !== input.scope.sessionId ||
+        currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal?.principalId !== claims.authority.principalId) ||
+      claims.authority.grantId !== input.scope.grantId ||
       !ticketScopeIsCurrent(storage, input.scope)) throw LIVE_TICKET_REFUSED;
     return claims;
   }
 
-export function readNamedLiveTicketTarget(storage: StorageContext, input: NamedLiveTicketLookup): { workspaceId: string; objectId: string } | null {
+export function readLiveTicketTarget(storage: StorageContext, input: LiveTicketLookup): { workspaceId: string; objectId: string } | null {
     const owned = snapshotTicketLookup(ticketRecord(input, ["tokenHash", "scope", "audience"]));
     return storage.ticketTransaction(now => {
       const claims = matchingTicket(storage, owned, now);
@@ -362,7 +442,7 @@ export function readNamedLiveTicketTarget(storage: StorageContext, input: NamedL
     });
   }
 
-export function mintNamedLiveTicket(storage: StorageContext, input: NamedLiveTicketMint): { expiresAtMs: number } | null {
+export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): { expiresAtMs: number } | null {
     const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "objectId", "ticketId", "report"]);
     const owned = snapshotTicketLookup(raw);
     const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
@@ -370,6 +450,16 @@ export function mintNamedLiveTicket(storage: StorageContext, input: NamedLiveTic
     const report = snapshotTicketHostReport(raw.report);
     return storage.ticketTransaction((now, policy) => {
       if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
+      if (owned.scope.kind === "link") {
+        const actor = liveBrowserActor(owned.scope);
+        const link = currentLinkEdit(storage, actor);
+        if (!link || !ticketScopeIsCurrent(storage, owned.scope) || linkPrincipalLimitReached(storage, link.enrollment)) throw LIVE_TICKET_REFUSED;
+        const principalId = link.enrollment.principal?.principalId ?? parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
+        if (!link.enrollment.principal) assertWorkspaceQuota(storage, owned.scope.workspaceId,
+          linkPrincipalStorageBytes(principalId, owned.scope.grantId, owned.scope.profileTokenHash));
+        commitLinkEnrollment(storage, { ...owned.scope, enrollment: link.enrollment, principalId,
+          displayName: null, createdAtMs: now, discussionRevision: link.enrollment.principal ? Number(link.enrollment.authority.discussion_revision) : nextShareDiscussionRevision(storage, owned.scope.shareId) });
+      }
       const current = currentTicketAuthority(storage, owned.scope, objectId, report);
       const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
         binding: current.binding, hostEpoch: current.host.hostEpoch, mintedAtMs: now, expiresAtMs: now + LIVE_TICKET_LIFETIME_MS });
@@ -381,22 +471,23 @@ export function mintNamedLiveTicket(storage: StorageContext, input: NamedLiveTic
       )`).run(now, policy.expiredTicketCleanupBatchSize);
       const count = storage.db.prepare(`SELECT count(*) AS retained_count FROM (
         SELECT ticket_id FROM ${LIVE_TICKET_TABLE}
-        WHERE workspace_id = ? AND principal_kind = 'named' AND principal_id = ? AND grant_id = ? AND expires_at_ms > ?
+        WHERE workspace_id = ? AND principal_kind = ? AND principal_id = ? AND grant_id = ? AND expires_at_ms > ?
         ORDER BY expires_at_ms, ticket_id LIMIT ?
-      )`).get(owned.scope.workspaceId, owned.scope.userId, owned.scope.grantId, now, policy.retainedTicketsPerPrincipalGrant);
+      )`).get(owned.scope.workspaceId, claims.authority.principalKind, claims.authority.principalId, owned.scope.grantId, now, policy.retainedTicketsPerPrincipalGrant);
       if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
       storage.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(
         claims.ticketId, owned.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
         claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
         claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
         claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
+        owned.scope.kind === "link" ? owned.scope.sessionId : null,
       );
       return { expiresAtMs: claims.expiresAtMs };
     });
   }
 
-export function redeemNamedLiveTicket(storage: StorageContext, input: NamedLiveTicketRedemption): RedeemedLiveTicket | null {
+export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedemption): RedeemedLiveTicket | null {
     const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "report"]);
     const owned = snapshotTicketLookup(raw);
     const report = snapshotTicketHostReport(raw.report);
@@ -417,6 +508,18 @@ export function redeemNamedLiveTicket(storage: StorageContext, input: NamedLiveT
   }
 
 export function registerLiveDocumentBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    return registerBaseline(storage, input, operation => storage.tx(operation));
+  }
+
+export function registerLiveDocumentBaselineInTransaction(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
+    return registerBaseline(storage, input, operation => operation());
+  }
+
+export function registerOrdinaryActivationBaselineInTransaction(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut):RelayBaselineRegistrationResult {
+    return registerBaseline(storage,input,operation=>operation(),cut);
+  }
+
+function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult, ordinaryCut?:VerifiedOrdinaryActivationCut): RelayBaselineRegistrationResult {
     let outer: Record<string, unknown>;
     try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
@@ -428,7 +531,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
     catch { return { kind: "refused", reason: "invalid-baseline" }; }
     const { evidence, baselineBytes, registeredAtMs } = owned;
     const { document, currentPath, checkpoint } = evidence;
-    return storage.tx((): RelayBaselineRegistrationResult => {
+    return run(() => {
       const host = readLiveHostControl(storage.db);
       if (host !== null) assertCurrentAuthorityHost(storage.db, host);
       if (host === null || host.admissionState !== "open" || host.transition !== null) {
@@ -437,7 +540,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
       if (host.configuredMode !== coordinate.mode || host.configuredHostId !== coordinate.hostId ||
         host.hostEpoch !== coordinate.hostEpoch || host.registeredInstanceId !== coordinate.instanceId ||
         host.registeredConnectionId !== coordinate.connectionId) return { kind: "refused", reason: "stale-host" };
-      const latest = currentLiveDocumentMoment(storage, document, currentPath);
+      const latest = ordinaryCut ? ordinaryActivationBaseline(storage,owned,ordinaryCut) : currentLiveDocumentMoment(storage, document, currentPath);
       if (!latest || latest.blob_sha256 !== evidence.projectedMarkdownSha256 ||
         latest.byte_length !== evidence.projectedMarkdownByteLength) return { kind: "refused", reason: "stale-document" };
       const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents
@@ -469,7 +572,8 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
         ...rangePrefix, range.clientId, range.startClock, range.endClock,
       ])), 0);
       // Charge logical stored values, excluding SQLite pages and indexes.
-      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes;
+      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes+
+        (ordinaryCut?ordinaryActivationBasisCharge(storage,owned,ordinaryCut):0);
       assertWorkspaceQuota(storage, document.workspaceId, charge);
       storage.db.prepare(`INSERT INTO sync_relay_live_documents (
         workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
@@ -477,6 +581,7 @@ export function registerLiveDocumentBaseline(storage: StorageContext, input: Liv
         lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms, baseline_bytes
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(...metadata, baselineBytes);
+      if(ordinaryCut)persistOrdinaryActivationBasis(storage,owned,ordinaryCut);
       const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
         (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
         VALUES (?, ?, ?, ?, ?, ?, ?)`);
@@ -504,7 +609,7 @@ export function currentLiveDocumentMoment(storage: StorageContext, document: Liv
     return latest;
   }
 
-export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) {
@@ -512,18 +617,11 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
     const stored = readLiveDocumentAuthority(storage.db, document);
-    return authorizeLiveDocument(storage, { document, actor }, host, stored);
+    return authorizeLiveDocument(storage, { document, actor }, host, stored, activation);
   }
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
-    stored: StoredLiveDocumentAuthority | null): CurrentLiveBindingResult {
-    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
-      stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
-      return { kind: "refused", reason: "stale-document" };
-    }
-    if (!currentLiveDocumentMoment(storage, document, stored.binding.currentPath)) {
-      return { kind: "refused", reason: "stale-document" };
-    }
+    stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     let share: SyncRelayShareRow;
     let selector: ShareSelector;
     let authority: ServerDerivedLiveUpdateAuthority;
@@ -534,6 +632,15 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       selector = named.effectiveSelector;
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
         grantId: named.grant.grantId, grantGeneration: named.grant.generation });
+    } else if (actor.kind === "link") {
+      const link = currentLinkEdit(storage, actor);
+      if (!link?.enrollment.principal || link.enrollment.sessionPrincipalId !== link.enrollment.principal.principalId) {
+        return { kind: "refused", reason: "not-authorized" };
+      }
+      share = link.share;
+      selector = link.effectiveSelector;
+      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
+        grantId: link.grant.grantId, grantGeneration: link.grant.generation });
     } else {
       const owned = storage.getShare(actor.shareId);
       if (!owned || owned.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(owned.workspaceId, actor.userId)) {
@@ -547,6 +654,26 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
       authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
         grantId: null, grantGeneration: null });
     }
+    const bound = bindLiveDocument(storage, document, stored, share, selector);
+    if (bound.kind !== "bound") return bound;
+    const { binding } = bound;
+    const coordinate = { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
+      instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
+    if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
+    return { kind: "current", binding, authority, host: coordinate };
+  }
+
+function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey,
+  stored: Pick<StoredLiveDocumentAuthority, "binding" | "current" | "open" | "baselineSequence"> | null,
+  share: SyncRelayShareRow, selector: ShareSelector):
+  { kind: "bound"; binding: LiveObjectBinding } | Extract<CurrentLiveBindingResult, { kind: "refused" }> {
+    if (!stored || !stored.current || !stored.open || stored.binding.lineageClaimId !== document.lineageClaimId ||
+      stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) {
+      return { kind: "refused", reason: "stale-document" };
+    }
+    if (!currentLiveDocumentMoment(storage, document, stored.binding.currentPath)) {
+      return { kind: "refused", reason: "stale-document" };
+    }
     if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
     if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
       return { kind: "refused", reason: "stale-selector" };
@@ -554,7 +681,5 @@ export function authorizeLiveDocument(storage: StorageContext, { document, actor
     let binding: LiveObjectBinding;
     try { binding = parseLiveObjectBinding({ ...stored.binding, selectorPaths: selector.paths }); }
     catch { return { kind: "refused", reason: "stale-selector" }; }
-    return { kind: "current", binding, authority,
-      host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-        instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! } };
-  }
+    return { kind: "bound", binding };
+}

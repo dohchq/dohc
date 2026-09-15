@@ -14,10 +14,9 @@
 //! `momentId` (which the receiver preserves verbatim, unlike secrets). An
 //! imported coordinate with a pending refusal did not create the matching
 //! domain row, so it is not import provenance. The backfill also excludes
-//! `'ydoc'` moments outright, a true local origin whose content the CRDT
-//! stream supersedes, and every object with a Y.Doc lineage. Once `ydoc_docs`
-//! exists, its base supersedes the moment lane's older representation whether
-//! or not the base is claimed.
+//! moments whose object has retained or claimed CRDT state, or deferred CRDT
+//! input. A pruned local marker has no such state: its saved artifact history,
+//! including settled Y.Doc projections, remains the source for enrollment.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
@@ -46,10 +45,26 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
-    let sharing_declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
-    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+    crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
+    let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
+        let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+        backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+        declined
+    } else {
+        Vec::new()
+    };
     backfill_secret_moments(tx, workspace_id)?;
     Ok(sharing_declined)
+}
+
+pub(crate) fn finish_live_history_enrolment_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<Vec<SharingDeclined>, SyncError> {
+    let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, now_ms)?;
+    backfill_moments_and_conflict_bundles(tx, workspace_id)?;
+    Ok(declined)
 }
 
 pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
@@ -129,14 +144,18 @@ fn backfill_moments_between(
     // matching `imported=1` row in `replication_log` in the same transaction.
     // A refused coordinate is logged and ACKed too, but its pending refusal
     // still exists while first-position backfill runs. Exclude only a matching
-    // coordinate with no refusal. `'ydoc'` is excluded separately: it is a
-    // true local origin (Y.Doc settle-projection), never imported, but its
-    // content is superseded by the CRDT stream once a lineage exists.
+    // coordinate with no refusal. Retained CRDT state supersedes file moments;
+    // a pruned local cache does not. Deferred input still reserves that CRDT path.
     let moment_ids: Vec<String> = {
         let mut statement = tx
             .prepare(
                 "SELECT m.moment_id FROM moments m \
-                 WHERE m.workspace_id=?1 AND m.metadata_origin != 'ydoc' \
+                 WHERE m.workspace_id=?1 \
+                   AND (m.metadata_origin != 'ydoc' OR EXISTS ( \
+                     SELECT 1 FROM ydoc_docs p \
+                     WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
+                       AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
+                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0)) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -149,6 +168,11 @@ fn backfill_moments_between(
                          WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
                            AND p.origin_seq=r.origin_seq))) \
                    AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
+                     WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+                       AND d.object_id=m.object_id \
+                       AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
+                         OR d.lineage_claim_status != 'unclaimed')) \
+                   AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
                      WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                        AND d.object_id=m.object_id) \
                  ORDER BY m.moment_order",
@@ -1442,7 +1466,16 @@ mod tests {
 
     #[test]
     fn capture_history_is_superseded_when_the_same_object_gains_a_ydoc_lineage() {
-        let (_scratch, _, mut store) = open_store();
+        assert_enrollment_after_live_edit(false);
+    }
+
+    #[test]
+    fn pruned_local_lineage_backfills_saved_file_history_instead_of_empty_state() {
+        assert_enrollment_after_live_edit(true);
+    }
+
+    fn assert_enrollment_after_live_edit(close_before_enrollment: bool) {
+        let (scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1484,6 +1517,46 @@ mod tests {
             12,
         );
 
+        if close_before_enrollment {
+            let settled =
+                match dohc_engine_collab::settle(&mut store, &key, "live-object.md", &NoFaults, 13)
+                    .expect("settle the live document")
+                {
+                    dohc_engine_storage::TxnOutcome::Committed(outcome) => outcome,
+                    dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
+                };
+            let job = store
+                .load_materialization_job(&settled.job_id)
+                .expect("load settlement job")
+                .expect("settlement queues materialization");
+            assert_eq!(
+                dohc_engine_files::materialize_one(
+                    &store,
+                    &scratch,
+                    &job,
+                    &dohc_engine_files::MaterializeOptions {
+                        policy: dohc_engine_files::DurabilityPolicy::none(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 14,
+                        faults: &NoFaults,
+                    },
+                )
+                .expect("materialize the saved document"),
+                dohc_engine_files::JobOutcome::Completed
+            );
+            assert_eq!(
+                std::fs::read(scratch.join("live-object.md")).expect("read saved document"),
+                b"edited in the live session"
+            );
+            assert!(matches!(
+                dohc_engine_collab::close_session(&mut store, &key, false, None, &NoFaults, 15)
+                    .expect("close the saved local document"),
+                dohc_engine_storage::TxnOutcome::Committed(
+                    dohc_engine_collab::CloseOutcome::Pruned { .. }
+                )
+            ));
+        }
         enroll(&mut store).expect("enroll after settle");
 
         let ops = local_ops(&store);
@@ -1553,15 +1626,15 @@ mod tests {
         assert_eq!(peer_text, "edited in the live session");
         assert_eq!(
             ops.iter().filter(|(kind, _)| kind == "ydoc.update").count(),
-            1,
-            "the live lineage must backfill exactly one canonical representation"
+            usize::from(!close_before_enrollment),
+            "only retained CRDT state may originate a live baseline"
         );
         assert_eq!(
             ops.iter()
                 .filter(|(kind, _)| kind == "moment.append")
                 .count(),
-            0,
-            "the older capture history must not compete with its Y.Doc lineage"
+            if close_before_enrollment { 2 } else { 0 },
+            "pruned local documents retain their saved file history; live state supersedes it"
         );
     }
 

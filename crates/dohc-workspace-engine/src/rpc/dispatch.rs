@@ -19,6 +19,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("search.")
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
+        || method.starts_with("ydoc.ownerDelivery.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
@@ -26,10 +27,12 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
             method,
             "capture.reconcile"
                 | "versionedText.list"
+                | "versionedText.captureSources"
                 | "versionedText.read"
                 | "versionedText.readBlob"
                 | "versionedText.compare"
                 | "versionedText.rename"
+                | "versionedText.checkMove"
                 | "versionedText.delete"
                 | "versionedText.rollback"
                 | "versionedText.merge"
@@ -59,7 +62,30 @@ fn engine_ping() -> Value {
 }
 
 impl EngineService {
-    fn ensure_configured_host_method(&self, method: &str) -> Result<(), WireError> {
+    fn ensure_configured_host_method(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+    ) -> Result<(), WireError> {
+        let method = request.method.as_str();
+        if matches!(
+            method,
+            "sync.claim"
+                | "sync.adoptJoinIdentity"
+                | "sync.pull"
+                | "liveApplication.captureOwnerActivation"
+                | "liveApplication.releaseOwnerActivation"
+                | "liveApplication.ownerState"
+                | "liveApplication.adoptOwner"
+                | "ydoc.ownerOutbox.readPending"
+                | "ydoc.ownerOutbox.acknowledge"
+                | "sync.materializePendingCursor"
+                | "sync.commitCursor"
+                | "sync.push"
+        ) && self.configured_ordinary_request(ctx, request)
+        {
+            return Ok(());
+        }
         if self.configured_live_host.get().is_some()
             && !matches!(
                 method,
@@ -67,7 +93,15 @@ impl EngineService {
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
+                    | "liveApplication.ack"
+                    | "liveApplication.syncOpen"
+                    | "liveApplication.appliedRead"
                     | "liveApplication.settle"
+                    | "liveApplication.fenceRestore"
+                    | "liveApplication.prepareRestore"
+                    | "liveApplication.applyRestore"
+                    | "liveApplication.settleRestore"
+                    | "liveApplication.resumeRestore"
             )
         {
             return Err(WireError::new(
@@ -84,10 +118,20 @@ impl EngineService {
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
-        self.ensure_configured_host_method(&request.method)?;
+        self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
-        self.live_application_apply(ctx, request, input).await
+        match input {
+            crate::LiveApplicationInput::Admitted(input) => {
+                self.live_application_apply(ctx, request, *input).await
+            }
+            crate::LiveApplicationInput::Restore(input) => {
+                self.live_application_restore(ctx, request, *input).await
+            }
+            crate::LiveApplicationInput::Owner(input) => {
+                self.owner_delivery_apply(ctx, request, *input).await
+            }
+        }
     }
 
     pub(crate) async fn dispatch(
@@ -96,11 +140,35 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
-        self.ensure_configured_host_method(&request.method)?;
+        self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
+            return self.owner_delivery_prepare_enrollment(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.listDrafts" {
+            return self.owner_delivery_list_drafts(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.openDraft" {
+            return self.owner_delivery_open_draft(ctx, request).await;
+        }
+        if matches!(
+            request.method.as_str(),
+            "ydoc.ownerDelivery.readState" | "ydoc.ownerDelivery.isReceiptApplied"
+        ) {
+            return self.owner_delivery_read(ctx, request).await;
+        }
         if request.method == "liveApplication.settle" {
             return self.live_application_settle(ctx, request).await;
+        }
+        if request.method == "liveApplication.appliedRead" {
+            return self.live_application_applied_read(ctx, request).await;
+        }
+        if request.method == "liveApplication.ack" {
+            return self.live_application_ack(ctx, request).await;
+        }
+        if request.method == "liveApplication.fenceRestore" {
+            return self.live_application_fence_restore(ctx, request).await;
         }
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
@@ -121,6 +189,12 @@ impl EngineService {
                 response: Response { id, result },
                 blob_egress,
             });
+        }
+        if request.method == "liveApplication.captureOwnerActivation" {
+            return self.capture_owner_activation(ctx, request).await;
+        }
+        if request.method == "liveApplication.releaseOwnerActivation" {
+            return self.release_owner_activation(ctx, request).await;
         }
         if request.method == "ydoc.open" {
             let (result, blob_egress) = self
@@ -173,6 +247,14 @@ impl EngineService {
             });
         }
         let result = match request.method.as_str() {
+            "liveApplication.provisionOwner" => {
+                self.ordinary_live_provision(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "liveApplication.ownerState" => {
+                self.live_owner_state(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
@@ -186,6 +268,14 @@ impl EngineService {
             }
             "sync.pull" => {
                 Box::pin(self.sync_pull(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.materializePendingCursor" => {
+                Box::pin(self.sync_materialize_pending_cursor(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "sync.commitCursor" => {
                 Box::pin(self.sync_commit_cursor(&ctx, request.workspace, request.params)).await?
@@ -240,6 +330,10 @@ impl EngineService {
             }
             "versionedText.rename" => {
                 self.versioned_text_rename(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.checkMove" => {
+                self.versioned_text_check_move(&ctx, &request, request.params.clone())
                     .await?
             }
             "versionedText.delete" => {
@@ -371,6 +465,10 @@ impl EngineService {
             }
             "versionedText.list" => {
                 self.versioned_text_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.captureSources" => {
+                self.versioned_text_capture_sources(&ctx, request.workspace, request.params)
                     .await?
             }
             "versionedBinary.read" => {
@@ -818,6 +916,112 @@ mod tests {
     use super::*;
     use dohc_engine_protocol::transport::EngineService as _;
 
+    #[tokio::test]
+    async fn configured_ordinary_methods_require_attached_handle_and_current_connection() {
+        use dohc_engine_protocol::transport::ConnectionOwner;
+        let attached = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let private = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let config = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "relay",
+            "host": {"hostId": "host", "hostEpoch": 1, "instanceId": "instance", "connectionId": "connection"},
+            "workspaces": [
+                {"root": attached.path(), "workspaceId": "attached", "maxRegistrations": 4,
+                    "relay": {"baseUrl": "https://relay.example", "bearerToken": "actual-owner-credential"}},
+                {"root": private.path(), "workspaceId": "private", "maxRegistrations": 4}
+            ],
+            "ingress": {"aggregateBytes": 400_000_000, "applicationWorkingReserveBytes": 1_000_000,
+                "maxUploads": 2, "uploadDeadlineMs": 30_000}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut request = Request {
+            id: 1,
+            method: "liveApplication.hosts".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({}),
+        };
+        let discovery = service.configured_live_hosts(&ctx, &request).unwrap();
+        let attached_handle: WorkspaceHandle =
+            serde_json::from_value(discovery["workspaces"][0]["workspaceHandle"].clone()).unwrap();
+        let private_handle: WorkspaceHandle =
+            serde_json::from_value(discovery["workspaces"][1]["workspaceHandle"].clone()).unwrap();
+        for method in [
+            "sync.claim",
+            "sync.adoptJoinIdentity",
+            "sync.pull",
+            "sync.materializePendingCursor",
+            "sync.commitCursor",
+            "sync.push",
+        ] {
+            request.method = method.into();
+            request.workspace = Some(attached_handle.clone());
+            assert!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .is_ok(),
+                "{method}"
+            );
+            for handle in [
+                Some(private_handle.clone()),
+                Some(WorkspaceHandle("foreign".into())),
+                None,
+            ] {
+                request.workspace = handle;
+                assert_eq!(
+                    service
+                        .ensure_configured_host_method(&ctx, &request)
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Forbidden
+                );
+            }
+        }
+        request.workspace = Some(attached_handle.clone());
+        for method in [
+            "workspace.open",
+            "ydoc.open",
+            "sync.recoverOrigin",
+            "sync.probe",
+            "versionedText.write",
+        ] {
+            request.method = method.into();
+            assert_eq!(
+                service
+                    .ensure_configured_host_method(&ctx, &request)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden
+            );
+        }
+        request.method = "sync.pull".into();
+        let other = ConnectionOwner::authenticated();
+        ctx.connection = Some(other.handle());
+        assert_eq!(
+            service
+                .ensure_configured_host_method(&ctx, &request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden
+        );
+        ctx.connection = Some(owner.handle());
+        owner.retire();
+        assert_eq!(
+            service
+                .ensure_configured_host_method(&ctx, &request)
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden
+        );
+        service
+            .workspace_close(Some(attached_handle))
+            .await
+            .unwrap();
+        service.workspace_close(Some(private_handle)).await.unwrap();
+    }
+
     #[test]
     fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
         assert!(!method_requires_initial_capture_ready(
@@ -1010,6 +1214,7 @@ mod tests {
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",
+            "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.probe",
             "sync.pull",
@@ -1020,8 +1225,10 @@ mod tests {
             "versionedBinary.write",
             "versionedBinary.writeBlob",
             "versionedText.compare",
+            "versionedText.checkMove",
             "versionedText.delete",
             "versionedText.list",
+            "versionedText.captureSources",
             "versionedText.merge",
             "versionedText.read",
             "versionedText.readBlob",

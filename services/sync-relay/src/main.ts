@@ -1,3 +1,4 @@
+import {parsePublicEditRelease} from "@dohc/security-contract";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { tmpdir } from "node:os";
@@ -15,12 +16,30 @@ import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
+import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
+import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig";
+import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
+import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
+import { parseNamedLiveConfig } from "./namedLiveConfig";
+import { readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
+import { createNamedFrameChanges } from "./liveHostChanges";
+import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
+import { createLiveTickets } from "./liveTickets";
+import { createLiveHostReports } from "./namedLiveHostReports";
+import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {createLinkLiveHttp} from "./linkLiveHttp";
+import {createLiveMembershipRegistry} from "./liveMembership";
+import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
+import {createNamedDesktopLive} from "./namedDesktopLive";
+import {parseNamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
+import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -146,13 +165,49 @@ if (!testAuthSeam && secret.length < 32) {
   );
 }
 
+const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
+const appPublicationLimits = (() => {
+  try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
+  catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
+})();
+const appCollectionPolicy = (() => {
+  try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
+})();
+if (appCollectionPolicy && !appPublicationLimits) {
+  fatal("FATAL: App collections require DOHC_RELAY_APP_PUBLICATIONS=1.");
+}
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
+const namedLiveConfig = (() => {
+  const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
+  if (value === undefined) return undefined;
+  if (!namedBrowserSessionLimits || !shareWebOrigin || !relayExchangeKey || !linkKey || !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS) {
+    fatal("FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.");
+  }
+  try { return parseNamedLiveConfig(JSON.parse(value)); }
+  catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
+})();
+const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
+const linkLiveEnabled = process.env.DOHC_RELAY_LINK_LIVE === "1";
+if (process.env.DOHC_RELAY_LINK_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_RELAY_LINK_LIVE)) fatal("FATAL: DOHC_RELAY_LINK_LIVE must be 0 or 1.");
+if (linkLiveEnabled && !namedLiveConfig) fatal("FATAL: Link live routes require configured live admission limits.");
+const desktopEditorLimits = (() => {
+  const value = process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS;
+  if (value === undefined) return undefined;
+  if (!namedLiveConfig || !namedBrowserSessionLimits) fatal("FATAL: Desktop live editing requires configured named live routes.");
+  try {
+    const limits = parseNamedLiveBrowserLimits(JSON.parse(value));
+    if (limits.provider.frames.receive.maxFrameBytes > namedLiveConfig.frames.receive.maxFrameBytes) throw Error();
+    return limits;
+  } catch {fatal("FATAL: DOHC_RELAY_NAMED_EDITOR_LIMITS must provide bounded editor limits within relay frame capacity.");}
+})();
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, { workspaceQuotaBytes }) : undefined;
-const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
+const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -232,7 +287,9 @@ if (testAuthSeam) {
 // (by design — presence is not durable).
 const presence = new PresenceHub();
 
-const relayHandler = guardRelayResponses(storage, createSyncRelayHandler({
+let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+const relayApplication = createSyncRelayHandler({
+  ownerRestoreHost: () => ownerRestoreHost?.(),
   storage,
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -244,7 +301,23 @@ const relayHandler = guardRelayResponses(storage, createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
-}));
+  publicEditRelease,
+  appPublicationLimits,
+  appCollectionPolicy,
+});
+let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
+let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
+let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
+const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]);
+const relayHandler = guardRelayResponses(storage, request => {
+  const path = new URL(request.url).pathname;
+  if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (linkLivePaths.has(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  return relayApplication(request);
+});
 const fetchHandler = async (request: Request): Promise<Response> => {
   if (new URL(request.url).pathname === "/health") {
     // The presence hub footprint is exposed only under the dev/test seam so
@@ -310,12 +383,14 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
+    url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES,
   oversized: (url) =>
-    isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -336,30 +411,103 @@ const server = serveFetchHandler({
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
 const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
+const ownerAdmissionPath = process.env.DOHC_RELAY_OWNER_ADMISSION_CONFIG;
+if (ownerAdmissionPath && !deviceDeliveryConfig) fatal("FATAL: Private owner admission requires configured device delivery.");
+let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
 if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined)) fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
 if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
+    const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
+    const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
+    if (ownerAdmissionPath && delivery) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
-      limits: JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS),
-      ...(deviceDeliveryConfig && deployment ? { delivery: { configPath: deviceDeliveryConfig, history: deployment.history } } : {}),
+      limits,
+      ...(delivery && deployment ? { delivery: { config: delivery, history: deployment.history,ownerAdmission: ownerAdmission?.admission, frameChanges } } : {}),
     });
-  } catch {
-    fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_RELAY_DEVICE_CONTROL_HOSTS, DOHC_RELAY_DEVICE_DELIVERY_CONFIG, and relay exchange key.");
+  } catch (error) {
+    fatal(`FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 if (deviceControl) {
-  server.on("upgrade", deviceControl.handleUpgrade);
+  server.on("upgrade", (request, socket, head) => {
+    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
+    deviceControl!.handleUpgrade(request, socket, head);
+  });
   process.once("SIGINT", deviceControl.close);
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);
 }
+const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startOwnerAdmission({config: ownerAdmission,storage,history: deployment.history,control: deviceControl,
+  onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
+server.once("close",() => ownerAdmissionRun?.close());
+process.once("SIGINT",() => ownerAdmissionRun?.close());
+process.once("SIGTERM",() => ownerAdmissionRun?.close());
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const serviceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history })
+  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
+ownerRestoreHost = () => {
+  const mode = storage.getLiveHostControl()?.configuredMode;
+  return mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+};
+if (publicEditRelease) {
+  const mode = storage.getLiveHostControl()?.configuredMode;
+  if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? !serviceHost : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {
+    fatal("FATAL: Public Edit release requires link live routes and the configured service host or device delivery with owner admission.");
+  }
+}
+if (namedLiveConfig) {
+  if (!serviceHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
+  const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {
+    const mode = storage.getLiveHostControl()?.configuredMode;
+    const host = mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+    if (!host) throw new Error("Named live host is unavailable.");
+    return host.captureNative(binding, signal);
+  };
+  const tickets = createLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createLiveHostReports({ storage, captureNative }) });
+  const admission = createLiveConnectionAdmission();
+  const membership = createLiveMembershipRegistry({maxSessions: namedLiveConfig.transport.maxConnections, maxMembers: namedLiveConfig.transport.maxConnections,
+    maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
+  namedLive = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
+  if (linkLiveEnabled && publicEditRelease) {
+    const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
+    linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!});
+    server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
+  }
+  if (desktopEditorLimits) {
+    const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
+    desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
+      limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets});
+    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, hosts,
+      publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+      sessions: desktopAdmission, tickets, captureNative, membership, admission});
+    server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
+  }
+  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
+  server.once("close", ownerLive.close);
+  process.once("SIGINT", ownerLive.close); process.once("SIGTERM", ownerLive.close);
+  server.on("upgrade", (request, socket, head) => {
+    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive.handleUpgrade(request, socket, head);
+    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
+    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive.handleUpgrade(request, socket, head); else socket.destroy();}
+    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive.handleUpgrade(request, socket, head); else socket.destroy();}
+    else if (!deviceControl) socket.destroy();
+  });
+  server.once("close", namedLive.close);
+  process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
+}
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;

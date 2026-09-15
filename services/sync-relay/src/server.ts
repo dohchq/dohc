@@ -1,4 +1,12 @@
+import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
+import {readOwnerAppResponses,type OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
+import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
+import { createLinkAppCollectionRoutes, type LinkAppCollectionRoute, type AppCollectionPolicy } from "./appCollectionRoutes";
+import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
+import { createOwnerRestoreRoutes, type OwnerRestoreHost, type OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -62,6 +70,9 @@ export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareR
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
 export interface CreateSyncRelayHandlerOptions {
+  appPublicationLimits?: AppPublicationLimits;
+  appCollectionPolicy?: AppCollectionPolicy;
+  ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   nowMs?: () => number;
@@ -97,6 +108,7 @@ export interface CreateSyncRelayHandlerOptions {
   shareWebOrigin?: string;
   relayExchangeKey?: string;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
+  publicEditRelease?: PublicEditRelease;
   linkExchangeRateLimiter?: TokenBucketLimiter;
   linkRedeemRateLimiter?: TokenBucketLimiter;
   linkReadRateLimiter?: TokenBucketLimiter;
@@ -111,6 +123,11 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | LinkAppPublicationRoute
+  | LinkAppCollectionRoute
+  | OwnerAppPublicationRoute
+  | OwnerAppResponseRoute
+  | OwnerRestoreRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
   | { route: "link-handoff" }
@@ -137,6 +154,9 @@ type SyncRelayRoute =
 const MAX_LINK_CURRENT_FILES = 5_000;
 
 export function createSyncRelayHandler({
+  appPublicationLimits,
+  appCollectionPolicy,
+  ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
   nowMs = () => Date.now(),
@@ -153,6 +173,7 @@ export function createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   namedBrowserSessionLimits,
+  publicEditRelease: releaseInput,
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
   linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
@@ -176,21 +197,32 @@ export function createSyncRelayHandler({
   linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
-}: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+}: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
+  resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+} {
+  const publicEditRelease = parsePublicEditRelease(releaseInput);
+  if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
+    throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
+  }
   if (namedBrowserSessionLimits && (!shareWebOrigin || !relayExchangeKey)) {
     throw new TypeError("Named browser sessions require configured viewer origin and relay exchange.");
   }
+  const resolveNamedActor: ResolveActor = async (request, workspaceId) => {
+    request.signal.throwIfAborted();
+    const actor = await resolveActor(request, workspaceId);
+    request.signal.throwIfAborted();
+    if (actor.workspaceId !== workspaceId) return actor;
+    await claimPendingShares(actor.userId, request.signal);
+    request.signal.throwIfAborted();
+    return actor;
+  };
   const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserHttp({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, now: nowMs,
-    resolveActor: async (request, workspaceId) => {
-      request.signal.throwIfAborted();
-      const actor = await resolveActor(request, workspaceId);
-      request.signal.throwIfAborted();
-      if (actor.workspaceId !== workspaceId) return actor;
-      await claimPendingShares(actor.userId, request.signal);
-      request.signal.throwIfAborted();
-      return actor;
-    },
+    resolveActor: resolveNamedActor,
+  }) : undefined;
+  const namedDocuments = namedBrowserSessionLimits ? createNamedRecipientDocuments({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
+    resolveActor: resolveNamedActor, maxFiles: linkCurrentFileLimit,
   }) : undefined;
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -323,7 +355,8 @@ export function createSyncRelayHandler({
     dependentGrantSummary,
     independentGrantSummary,
     linkInventorySummary,
-  } = createShareSummaries(lookupUserEmail);
+    namedBrowserInvitation,
+  } = createShareSummaries(lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = createShareInventoryRoutes(
     storage,
@@ -334,6 +367,7 @@ export function createSyncRelayHandler({
     receivedShareSummary,
     independentGrantSummary,
     linkInventorySummary,
+    publicEditRelease,
   );
 
   const { respondToShareGrantTransition, respondToWorkspaceShareCreation } = createShareGrantRoutes(
@@ -354,6 +388,8 @@ export function createSyncRelayHandler({
     linkGrantBody,
     namedGrantTransitionBody,
     dependentGrantSummary,
+    namedBrowserInvitation,
+    publicEditRelease,
   );
 
   const requireLinkRead = (
@@ -453,6 +489,7 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
+    publicEditRelease,
   );
 
   const {
@@ -475,6 +512,7 @@ export function createSyncRelayHandler({
     linkRedeemRateLimiter,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
+    publicEditRelease,
   );
 
   const respondToLinkRead = createLinkReadRoutes(
@@ -496,11 +534,21 @@ export function createSyncRelayHandler({
     respondWithLinkBytes,
   );
 
-  return async (request) => {
+  const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId});
+  const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
+  const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
+    requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
+    egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
+  const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
+    requireLinkRead,capabilityLimiter:linkReadRateLimiter,grantLimiter:linkGrantReadRateLimiter,egress:linkGrantEgressRateLimiter,streams:{admitLinkBlobBytes,respondWithLinkBytes}});
+  const handle: SyncRelayHandler = async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
       if (pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve") {
         return namedBrowser ? await namedBrowser(request) : errorResponse(notFound());
+      }
+      if (pathname === "/sync/live/named-documents") {
+        return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {
@@ -543,6 +591,19 @@ export function createSyncRelayHandler({
       ) {
         return await respondToLinkRead(request, route);
       }
+      if (route.route === "owner-app-publication" || route.route === "owner-app-responses") {
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        // Owner publication uses explicit desktop/agent credentials, never ambient browser cookies.
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        if(route.route==="owner-app-responses")return readOwnerAppResponses(request,route,actor.userId,storage);
+        return await respondToOwnerAppPublication(request, route, actor.userId);
+      }
+      if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
+      if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
         request.method === "POST" &&
@@ -588,6 +649,8 @@ export function createSyncRelayHandler({
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      if (route.route === "owner-restore") return await respondToOwnerRestore(request, route, actor.userId);
 
       // The granter's half. Everything below this line is
       // owner-scoped by the one check above, which is why accept and decline
@@ -644,10 +707,24 @@ export function createSyncRelayHandler({
       return errorResponse(error);
     }
   };
+  return Object.assign(handle, {
+    resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+  });
 }
 
 function parseRoute(request: Request): SyncRelayRoute {
   const parts = new URL(request.url).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
+    if (parts.length === 3) return {route: "link-app-publication"};
+    const publicationId = parts[3];
+    if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
+    if (parts.length === 4) return {route: "link-app-publication", publicationId};
+    if (parts.length === 5 && parts[4] === "collection") return {route: "link-app-collection", publicationId};
+    if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
+      return {route: "link-app-publication", publicationId, sha256: parts[5]};
+    }
+    throw notFound();
+  }
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange") {
     return { route: "link-exchange" };
   }
@@ -757,6 +834,28 @@ function parseRoute(request: Request): SyncRelayRoute {
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
+  if(parts[2]==="app-responses" && parts.length===4)return {route:"owner-app-responses",workspaceId,grantId:parseShareId(parts[3])};
+  if (parts[2] === "app-publications") {
+    if (parts.length === 3) return {route: "owner-app-publication", workspaceId, action: "publish"};
+    const publicationId = parts[3];
+    if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
+    if (parts.length === 4) return {route: "owner-app-publication", workspaceId, publicationId, action: "read"};
+    if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
+    if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
+    if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
+    throw notFound();
+  }
+  if (parts[2] === "live-restores") {
+    if (parts.length === 3) return {route: "owner-restore", workspaceId, action: "begin"};
+    if (parts.length === 4 && (parts[3] === "plan" || parts[3] === "options")) return {route: "owner-restore", workspaceId, action: parts[3]};
+    const operationId = parseString(parts[3], "operationId", 512);
+    if (parts.length === 4) return {route: "owner-restore", workspaceId, operationId, action: "status"};
+    const action = parts[4];
+    if (parts.length === 5 && (action === "prepare" || action === "review" || action === "confirm")) {
+      return {route: "owner-restore", workspaceId, operationId, action};
+    }
+    throw notFound();
+  }
   if (parts.length === 4 && parts[2] === "blobs" && parts[3] === "have") {
     return { route: "blob-have", workspaceId };
   }

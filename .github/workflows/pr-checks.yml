@@ -59,6 +59,12 @@ jobs:
               - 'packages/security-contract/**'
               - 'packages/workspace-contracts/**'
               - 'packages/workspace-core/**'
+              - 'packages/workspace-engine-client/**'
+              - 'packages/workspace-auth/**'
+              - 'packages/service-http/**'
+              # Native paired-backup proof invokes the production relay fixture.
+              - 'services/sync-relay/**'
+              - 'packages/live-session-contract/**'
               - '**/package.json'
               - '**/tsconfig*.json'
               - 'pnpm-workspace.yaml'
@@ -76,6 +82,8 @@ jobs:
             # sees the probe file that test writes into the repo root, so an
             # ignore rule can disable that regression test silently.
             js:
+              # Source-backed example apps are compiled and staged by the desktop scripts.
+              - 'examples/trip-poll/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
               - '.npmrc'
