@@ -131,7 +131,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       remove(); if (standing) captureCount--;
       if (sharedChanges.listenerCount() === 0) released();
     };
-  }, listenerCount: () => captureCount };
+  }, captureCount: () => captureCount };
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
   const closes: (() => Promise<void>)[] = [], contexts: BrowserContext[] = [], upgrades: Promise<void>[] = [];
   let browser: Browser | undefined;
@@ -281,7 +281,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     for (let index = 0; index < capacity.admittedConcurrency; index++) peers.push(await openLink(created.url, index));
     expect(new Set(peers.map(peer => peer.profileDigest)).size).toBe(capacity.admittedConcurrency);
     expect(new Set(peers.map(peer => peer.sessionDigest)).size).toBe(capacity.admittedConcurrency);
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     await Promise.all(peers.map(async (peer, index) => {
       await peer.editor.click(); await peer.page.keyboard.press("Control+End"); await peer.page.keyboard.insertText(` Public peer ${index}.`);
       await browserExpect(peer.page.getByRole("status")).toContainText("Changes saved");
@@ -308,7 +308,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     results.tinyBrowserLifecycle = {concurrency: peers.length, settlement, settledMarkdown};
     const first = peers[0]!;
     await first.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency - 1);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     const wire = createPublicLinkWireProof({audience, root, frames, timeoutMs: routeLimits.upgradeTimeoutMs}); closes.push(wire.close);
     const consumed = await wire.ticket(first.context, first.discriminator, "object");
     const initialWire = await wire.connect(first.context, consumed, "consumed-ticket-first"); await initialWire.sync(); await initialWire.close();
@@ -318,7 +318,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const staleDoc = new Y.Doc(); Y.applyUpdate(staleDoc, Y.encodeStateAsUpdate(hostile.doc)); staleDoc.getMap("frontmatter").set("stalePublic", "must refuse");
     const staleBytes = Y.encodeStateAsUpdate(staleDoc, Y.encodeStateVector(hostile.doc)); staleDoc.destroy();
     const partial = await hostile.partial(staleBytes, "public-old-partial");
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     const options = OwnerRestoreActionResponse.options.parse(await ownerRequest("/sync/workspace/live-restores/options", {path: "docs/a.md"}));
     const point = options.points.find(row => row.cursor === 0); if (!point) throw new Error("Baseline restore point missing.");
     const planned = OwnerRestoreActionResponse.plan.parse(await ownerRequest("/sync/workspace/live-restores/plan", {document: options.document,
@@ -352,7 +352,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     for (let index = 0; index < capacity.admittedConcurrency; index++) freshPeers.push(await openLink(freshLink.url, peers.length + index));
     const freshFirst = freshPeers[0]!;
     await freshFirst.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency - 1);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     for (const origin of [null, "https://unapproved.example.test"]) {
       const invalidOrigin = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), `origin-${origin ?? "missing"}`, origin);
       expect(await invalidOrigin.status).toBe(404); await invalidOrigin.close();
@@ -361,19 +361,19 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const outsidePeer = await openLink(outsideLink.url, peers.length + freshPeers.length);
     await browserExpect(outsidePeer.editor).toHaveText("Hello");
     await outsidePeer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency - 1);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     const outsideTicketCapacity = assertTicketCapacity(freshLink.grantId);
     const outsideTicket = await freshFirst.context.request.post(audience + "/api/live/link-ticket", {
       data: {discriminator: freshFirst.discriminator, objectId: "outside-object"}, headers: {origin: audience}});
     expect(outsideTicket.status()).toBe(404);
     const preRestartTicket = await wire.ticket(freshFirst.context, freshFirst.discriminator, "object");
-    for (const path of ["docs/a.txt", "docs/other.md", "../docs/a.md"]) {
+    for (const path of ["a.txt", "other.md", "docs/a.md", "../docs/a.md"]) {
       const refused = await freshFirst.context.request.post(audience + "/api/live/link-document", {
         data: {discriminator: freshFirst.discriminator, path}, headers: {origin: audience}});
       expect(refused.status()).toBe(404);
     }
     const validDocument = await freshFirst.context.request.post(audience + "/api/live/link-document", {
-      data: {discriminator: freshFirst.discriminator, path: "docs/a.md"}, headers: {origin: audience}});
+      data: {discriminator: freshFirst.discriminator, path: "a.md"}, headers: {origin: audience}});
     expect(validDocument.status()).toBe(200); expect(Object.keys(await validDocument.json()).sort()).toEqual(["limits", "objectId"]);
     const pinned = await fetch(relayUrl + "/sync/workspace/shares/links", {method: "POST",
       headers: {authorization: `Bearer ${ownerToken}`, "content-type": "application/json"},
@@ -387,7 +387,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const epochDoc = new Y.Doc(); Y.applyUpdate(epochDoc, Y.encodeStateAsUpdate(oldEpoch.doc)); epochDoc.getMap("frontmatter").set("oldEpochProbe", "must refuse");
     const epochBytes = Y.encodeStateAsUpdate(epochDoc, Y.encodeStateVector(oldEpoch.doc)); epochDoc.destroy();
     const epochPartial = await oldEpoch.partial(epochBytes, "public-old-epoch");
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     await active.close(); active = undefined;
     await oldEpoch.hostileSend(epochPartial); await oldEpoch.until(() => oldEpoch.closed !== undefined);
     active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
@@ -399,7 +399,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       await peer.page.getByRole("button", {name: "Retry connection", exact: true}).click();
       await browserExpect(peer.editor).toHaveAttribute("contenteditable", "true");
     }
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     const freshDoc = new Y.Doc(); Y.applyUpdate(freshDoc, Y.encodeStateAsUpdate(newEpoch.doc)); freshDoc.getMap("frontmatter").set("freshEpoch", "accepted");
     const freshBytes = Y.encodeStateAsUpdate(freshDoc, Y.encodeStateVector(newEpoch.doc)); freshDoc.destroy();
     const accepted = await newEpoch.submit(freshBytes, "public-fresh-epoch"); expect(accepted.kind).toBe("result");
@@ -437,7 +437,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const browserWorkloadLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/browser-workload.md"], access: "edit"});
     const workloadBrowsers = [];
     for (let index = 0; index < capacity.admittedConcurrency; index++) workloadBrowsers.push(await openLink(browserWorkloadLink.url, contexts.length));
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     results.workloadBrowserBaseline = {concurrency: workloadBrowsers.length, ready: true, checkpointSha256: hash(workload.checkpoint)};
     await Promise.all(workloadBrowsers.map(async (peer, index) => {
       await peer.editor.click(); await peer.page.keyboard.press("Control+End"); await peer.page.keyboard.insertText(` Workload peer ${index}.`);
@@ -471,7 +471,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       const socket = await wire.connect(peer.context, await wire.ticket(peer.context, peer.discriminator, workloadDocument.objectId), `workload-${index}`);
       await socket.sync(); expect(hash(Buffer.from(yDocToMarkdown(socket.doc)))).toBe(hash(workload.markdown)); workloadWires.push(socket);
     }
-    await browserExpect.poll(() => frameChanges.listenerCount()).toBe(capacity.admittedConcurrency);
+    await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     const workloadCurrent = storage.resolveCurrentLiveDocumentBinding({document: workloadDocument, actor: {kind: "owner", userId: ownerUser.id, shareId: workloadLink.shareId}});
     if (workloadCurrent.kind !== "current") throw new Error("Workload native binding missing.");
     const workloadNative = await active.captureNative(workloadCurrent.binding), workloadRounds = [];
@@ -496,7 +496,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
       }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
-      listeners: () => frameChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
+      listeners: () => frameChanges.captureCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
       interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
       register: async (id, checkpoint, markdown) => {
         const path = `docs/${id}.md`, document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: id, lineageClaimId: hash(checkpoint)};
