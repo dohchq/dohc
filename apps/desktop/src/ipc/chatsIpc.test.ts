@@ -129,7 +129,7 @@ function fixture(kind: ScopeKind = "local") {
     warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Ice",
     localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
     verifiedChatAuthorUserIdFor, revalidateChatWrite,
-    chatRelayIdentityFor: async (_workspaceId, target) =>
+    chatRelayIdentityFor: async (_workspaceId, target, _store) =>
       "threadId" in target && target.threadId === "thread-joined"
         ? { joinedChannel: null, authorUserId: "recipient" }
         : { joinedChannel: null, authorUserId: "verified-owner" },
