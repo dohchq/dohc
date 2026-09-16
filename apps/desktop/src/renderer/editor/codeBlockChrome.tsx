@@ -161,9 +161,11 @@ function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
 
 function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
   const decorations: Decoration[] = [];
+  let ordinal = 0;
 
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return;
+    const index = ordinal++;
 
     const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
     decorations.push(
@@ -252,7 +254,7 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
           copy.addEventListener("mousedown", stopEditorMouseEvent);
           copy.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            // The widget key is keyed on pos+language, not the code text, so
+            // The widget key uses block order and language, not code text, so
             // ProseMirror reuses this DOM (and its captured `node`) across
             // pure text edits. Read the live node at click time so "copy"
             // never writes pre-edit content.
@@ -279,7 +281,8 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
         },
         {
           side: -1,
-          key: `code-lang-${pos}-${language}`,
+          // Prose edits before this block preserve its toolbar and live getPos.
+          key: `code-lang-${index}-${language}`,
           ignoreSelection: true,
           stopEvent: () => true,
         },
