@@ -633,6 +633,60 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
 }
 
 #[test]
+fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
+    let (_scratch, _path, mut engine) = open_store();
+    // A resolved poll with choices that names no choice is refused; the
+    // domain never writes one, so a peer that sends one is malformed.
+    let unanswered = envelope(
+        "poll-no-answer",
+        0,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "poll-message",
+            "state": "resolved",
+            "resolvedByMessageId": "answer-message",
+            "atMs": 20,
+            "options": ["Friday", "Monday"]
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &unanswered, &NoFaults));
+    // A bare question resolves with no choice, as before.
+    let bare = envelope(
+        "poll-no-answer",
+        1,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "question-message",
+            "state": "resolved",
+            "resolvedByMessageId": "answer-message",
+            "atMs": 21
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &bare, &NoFaults).expect("apply bare question"),
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
+    );
+
+    // A file-linked thread is always a post, whatever lane the op claims.
+    let file_chat_lane = envelope(
+        "file-thread-lane",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "thread-file",
+            "title": "About a file",
+            "createdAtMs": 30,
+            "linkedPath": "docs/plan.md",
+            "linkedAtMs": 30,
+            "lane": "chat"
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &file_chat_lane, &NoFaults));
+}
+
+#[test]
 fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
     for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
         let (_scratch, _path, mut engine) = open_store();

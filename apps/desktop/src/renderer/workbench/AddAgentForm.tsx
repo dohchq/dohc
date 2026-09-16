@@ -67,7 +67,7 @@ export function AddAgentForm(props: {
     try {
       await onSave({
         ...settings,
-        profile: { preferredName },
+        profile: { ...settings.profile, preferredName },
         runner: { ...settings.runner, command: trimmedCommand, enabled: true },
       });
       return true;

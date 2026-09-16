@@ -16,6 +16,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
 // PR 18 share grants: the server-side filter that decides which replicated
 // ops (and which blobs) a share RECIPIENT may see. This module is the
@@ -213,11 +214,16 @@ export function validateGroupShareSelector(
 ): GroupSelectorValidation {
   const channel = validateChatChannelShareSelector({ channelWireId: input.channelWireId }, chat);
   if (!channel.ok) return channel;
-  if (chat?.channelKind(channel.selector.channelWireId) === "dm") {
+  // A group grants a folder, so at creation its channel must be one the
+  // owner's log already names as an ordinary channel. An unknown wire could
+  // later be created as a direct message and carry the folder grant with it.
+  // A stored selector is re-read without a resolver; the read filter's own
+  // kind gate covers it then.
+  if (chat && chat.channelKind(channel.selector.channelWireId) !== "channel") {
     return {
       ok: false,
       code: RELAY_ERRORS.invalid_channel.code,
-      message: "a direct message has no folder to share",
+      message: "a group shares a channel the workspace already has",
     };
   }
   const files = validateShareSelector({ paths: input.paths, versionId: null });
@@ -290,6 +296,16 @@ export function validateChatChannelShareSelector(
   // from the owner's log. Unknown/pre-provisioned wires remain grantable for
   // the existing create-before-sync flow, but a positively identified agent
   // channel is never eligible for the per-recipient share lane.
+  // The general channel is every workspace's personal channel, minted with
+  // the same wire id everywhere, so a share of it would merge strangers'
+  // personal chats. The desktop refuses it too; the relay is the authority.
+  if (wireId === GENERAL_CHANNEL_WIRE_ID) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_channel.code,
+      message: "the general channel is personal to each workspace",
+    };
+  }
   const resolvedKind = chat?.channelKind(wireId);
   if (resolvedKind === "agent") {
     return {
@@ -758,6 +774,7 @@ function filterChatOpForChannelShare(
   opKind: string,
   payload: unknown,
   chat: ChatShareThreadResolver | undefined,
+  servesFolder = false,
 ): ShareOpDecision {
   // No resolver wired = no way to scope by channel = nothing is served.
   if (!chat) return { allowed: false };
@@ -774,8 +791,11 @@ function filterChatOpForChannelShare(
     if (record.kind !== channelKind) return { allowed: false };
     return {
       allowed: true,
+      // The folder path is the folder half's fact: a group carries it, a
+      // chat-only share does not name a folder.
       payload: pickServed(record, [
-        "channelId", "name", "slug", "kind", "createdAtMs", "wireId", "type", "purpose", "folderPath",
+        "channelId", "name", "slug", "kind", "createdAtMs", "wireId", "type", "purpose",
+        ...(servesFolder ? ["folderPath"] : []),
       ]),
       blobSha256s: [],
     };
@@ -1009,6 +1029,8 @@ export function filterOpForShare(
   opKind: string,
   payloadJson: string,
   chat?: ChatShareThreadResolver,
+  // For a group: serve only this half. A page is read one half at a time.
+  half?: "chat" | "files",
 ): ShareOpDecision {
   const parsed = parseShareOpPayloadWithReferencedPaths(payloadJson);
   if (!parsed) return { allowed: false };
@@ -1019,8 +1041,10 @@ export function filterOpForShare(
     // A chat op that is not the channel's is not served through the
     // folder either: a group's chat is one channel.
     if (opKind.startsWith("chat.")) {
-      return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat);
+      if (half === "files") return { allowed: false };
+      return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat, true);
     }
+    if (half === "chat") return { allowed: false };
     return filterOpForShare(fileHalfOfGroup(selector), opKind, payloadJson, chat);
   }
   if (isChatChannelSelector(selector)) {

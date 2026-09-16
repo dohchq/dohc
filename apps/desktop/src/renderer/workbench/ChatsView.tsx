@@ -1976,6 +1976,7 @@ export function ChatsView(props: {
     nav,
     props.onError,
     replyTarget,
+    resolveChosenOption,
     resolveTargetMessageId,
     sendContextKey,
     sending,
@@ -2212,6 +2213,7 @@ export function ChatsView(props: {
       dmDraft,
       replyTarget,
       resolveTargetMessageId,
+      resolveChosenOption,
     });
   }, [
     composer,
@@ -2220,6 +2222,7 @@ export function ChatsView(props: {
     newThreadBody,
     onDraftsChange,
     replyTarget,
+    resolveChosenOption,
     resolveTargetMessageId,
   ]);
 
@@ -2256,6 +2259,7 @@ export function ChatsView(props: {
       // decision resolution) as a plain top-level comment.
       setReplyTarget(drafts.replyTarget);
       setResolveTargetMessageId(drafts.resolveTargetMessageId);
+      setResolveChosenOption(drafts.resolveChosenOption ?? null);
     }
   }, [
     openChannel,

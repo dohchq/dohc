@@ -1209,8 +1209,10 @@ fn apply_thread(
             reason: "chat thread lane is invalid",
         })?,
     };
-    // A file-linked thread has no lane of its own; it is always a post.
-    if lane == ChatThreadLane::Chat && channel_id.is_none() {
+    // A file-linked thread has no lane of its own; it is always a post. The
+    // owner shape above already refuses a thread that names both a channel
+    // and a file, so a chat lane needs a channel and nothing linked.
+    if lane == ChatThreadLane::Chat && (channel_id.is_none() || linked_object_id.is_some()) {
         return Err(SyncError::InvalidInput {
             reason: "only a channel thread has a chat lane",
         });
@@ -1566,7 +1568,15 @@ fn apply_decision(
     let options = normalize_poll_options(p.options.as_deref().unwrap_or(&[]))
         .map_err(|error| map_chat_rule(error, "chat decision options are invalid"))?;
     let chosen_option = match p.chosen_option.as_deref() {
-        None => None,
+        None => {
+            // A resolved poll names its answer; a bare question has none.
+            if p.state == "resolved" && !options.is_empty() {
+                return Err(SyncError::InvalidInput {
+                    reason: "chat decision choice is invalid",
+                });
+            }
+            None
+        }
         Some(chosen) => {
             if p.state != "resolved" || !options.iter().any(|option| option == chosen) {
                 return Err(SyncError::InvalidInput {

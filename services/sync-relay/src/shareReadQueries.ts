@@ -172,6 +172,7 @@ export function createShareReadQueries(
     since: number,
     limit: number,
     audience: "authenticated" | "accountless",
+    half?: "chat" | "files",
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -215,6 +216,7 @@ export function createShareReadQueries(
           row.opKind,
           row.payloadJson,
           chatResolver,
+          half,
         );
         const payload = decision.allowed
           ? accountlessProjection

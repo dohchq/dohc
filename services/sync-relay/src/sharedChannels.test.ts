@@ -1,3 +1,4 @@
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
@@ -42,8 +43,14 @@ const PRIVATE_WIRE = "wire-private-channel";
 function channelCreate(wireId: string, name: string, kind: "channel" | "dm" | "agent" = "channel") {
   return logOp(
     "chat.channel.create",
-    chatChannelCreate(wireId, { channelId: `chan-${wireId}`, name, slug: name.toLowerCase(), kind })
-      .payload,
+    chatChannelCreate(wireId, {
+      channelId: `chan-${wireId}`,
+      name,
+      slug: name.toLowerCase(),
+      kind,
+      // An ordinary channel is a group with a folder named for it.
+      ...(kind === "channel" ? { type: "both", purpose: "", folderPath: name.toLowerCase() } : {}),
+    }).payload,
   );
 }
 
@@ -227,6 +234,16 @@ describe("a group share is one grant for the channel and its folder", () => {
     expect(chatBodies).toContain("welcome to the shared channel");
     expect(chatBodies).not.toContain("SENTINEL");
     expect(chatBodies).not.toContain("team/plan.md");
+    // The group names its folder; a chat-only share of the same channel
+    // does not.
+    expect(chat.find((op) => op.opKind === "chat.channel.create")).toMatchObject({
+      payload: { folderPath: "team" },
+    });
+    const chatOnly = await createChannelShare(h, MEMBER_B);
+    const chatOnlyPage = await fetchSharePage(h, MEMBER_B, chatOnly);
+    const create = chatOnlyPage.find((op) => op.opKind === "chat.channel.create");
+    expect(create).toBeTruthy();
+    expect(create!.payload).not.toHaveProperty("folderPath");
     // Naming another channel is a miss, as it is for a channel share.
     const other = await h(
       request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=wire-other`),
@@ -268,7 +285,7 @@ describe("a group share is one grant for the channel and its folder", () => {
     expect(after.status).toBe(404);
   });
 
-  it("refuses a group share on a direct message or an agent channel", async () => {
+  it("refuses a group share on a direct message, an unknown channel, the general channel, or an agent channel", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
@@ -292,6 +309,27 @@ describe("a group share is one grant for the channel and its folder", () => {
     );
     expect(dm.status).toBe(400);
     expect((await json(dm)).code).toBe("invalid_channel");
+    // A wire the log has not named yet could become a direct message later
+    // and carry the folder grant with it, so a group needs a known channel.
+    const unknown = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "wire-not-yet", paths: ["people"] }),
+      ),
+    );
+    expect(unknown.status).toBe(400);
+    expect((await json(unknown)).code).toBe("invalid_channel");
+    // The general channel is personal to each workspace, as a chat share or
+    // as a group.
+    for (const body of [
+      { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID },
+      { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID, paths: ["general"] },
+    ]) {
+      const general = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
+      expect(general.status).toBe(400);
+      expect((await json(general)).code).toBe("invalid_channel");
+    }
     const empty = await h(
       request(
         OWNER,

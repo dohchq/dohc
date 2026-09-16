@@ -757,10 +757,23 @@ describe("chat-channel share op filter", () => {
     });
     expect(channel.allowed).toBe(true);
     if (!channel.allowed) return;
+    // A chat-only share carries the group's type and purpose, not its folder.
     expect(channel.payload).toEqual({
       channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared",
-      type: "both", purpose: "Ship it.", folderPath: "team",
+      type: "both", purpose: "Ship it.",
     });
+    const group = filterOpForShare(
+      { kind: "group", channelWireId: "wire-shared", paths: ["team"], versionId: null, access: "read-write" },
+      "chat.channel.create",
+      JSON.stringify({
+        channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared",
+        type: "both", purpose: "Ship it.", folderPath: "team",
+      }),
+      resolver,
+    );
+    expect(group.allowed).toBe(true);
+    if (!group.allowed) return;
+    expect(group.payload).toMatchObject({ folderPath: "team" });
     const thread = decide("chat.thread.create", {
       threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
     });

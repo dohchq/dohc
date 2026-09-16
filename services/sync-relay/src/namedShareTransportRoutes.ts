@@ -7,9 +7,7 @@ import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./r
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
-  chatHalfOfGroup,
   chatSideOf,
-  fileHalfOfGroup,
   filterOpForShareAppend,
   isGroupSelector,
   type ChatShareThreadResolver,
@@ -76,19 +74,20 @@ export function createNamedShareTransportRoutes(
       // channel and gets its chat; the folder mount names nothing and gets
       // its files. Each client refuses the other half's ops, so one page
       // carrying both would only produce refusals.
-      const served = isGroupSelector(share.selector)
+      const half = isGroupSelector(share.selector)
         ? channelWireId !== null
-          ? chatHalfOfGroup(share.selector)
-          : fileHalfOfGroup(share.selector)
-        : share.selector;
+          ? ("chat" as const)
+          : ("files" as const)
+        : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
       const page = filteredLogPage(
         share.workspaceId,
-        served,
+        share.selector,
         since,
         limit,
         "authenticated",
+        half,
       );
       // Re-check revocation immediately before returning the body: a revoke
       // that raced with this in-flight read (after the entry check, while
