@@ -7,6 +7,8 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import {
   NOW,
   channel,
+  personalFeedItem,
+  shareListing,
   thread,
   message,
   bridgeMock,
@@ -94,6 +96,64 @@ describe("ChatsView My agent", () => {
     expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
     await user.click(screen.getByTestId("chats-agent-screen-manage"));
     expect(onSetupAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists other people's agents from joined channels, read-only, under who shared them", async () => {
+    const user = userEvent.setup();
+    const shared = channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), shared], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-team",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          ...personalFeedItem("Rebuilt the index.", "message-their-agent"),
+          message: message({
+            id: "message-their-agent",
+            authorKind: "agent",
+            authorDisplayName: "Owner",
+            body: "Rebuilt the index.",
+          }),
+          channel: { id: "channel-team", wireId: "wire-team", name: "team", slug: "team", kind: "channel" as const },
+        },
+        // The user's own agent in their own channel is not someone else's.
+        {
+          ...personalFeedItem("Checked the exports.", "message-my-agent"),
+          message: message({
+            id: "message-my-agent",
+            authorKind: "agent",
+            authorDisplayName: "You",
+            body: "Checked the exports.",
+          }),
+        },
+      ],
+    });
+    renderView();
+
+    // Home reads what arrived; the nav lists the agents among it.
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Rebuilt the index.");
+    await user.click(screen.getByTestId("chats-feed-back"));
+    const rows = await screen.findAllByTestId("chats-other-agent");
+    expect(rows).toHaveLength(1);
+    expect(screen.getByTestId("chats-other-agent-name").textContent).toBe("Owner's agent");
+    expect(rows[0]!.dataset.owner).toBe("owner@example.com");
+    expect(rows[0]!.textContent).toContain("via owner@example.com");
+    // Opening one goes to its latest work; there is nothing here to configure.
+    await user.click(rows[0]!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-add-agent")).toBeNull();
   });
 
   it("adds an agent from Agents: name, runner, check, and one settings write", async () => {

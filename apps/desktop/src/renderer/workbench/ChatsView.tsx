@@ -61,6 +61,7 @@ import type {
   ChatChannelShareGrantRow,
   ChatDecisionRecord,
   ChatDispatchStateForThreadResult,
+  ChatFeedItemRecord,
   ChatMessageRecord,
   ChatBookmarkRecord,
   ChatReactionRecord,
@@ -529,7 +530,6 @@ export function ChatsView(props: {
     loadPersonalFeed,
     resetForWorkspace,
     prepareOpen,
-    clearRows,
     invalidate,
     setMessageReactions,
   } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
@@ -2502,6 +2502,26 @@ export function ChatsView(props: {
     overview.status === "ready"
       ? overview.channels.find((channel) => channel.kind === "agent") ?? null
       : null;
+  // Other people's agents that reach this workspace: an agent that posted in
+  // a channel shared to the user belongs to whoever shared it. Derived from
+  // the Home items already read, so it costs nothing and lists exactly the
+  // agents whose work the user has seen arrive. Read-only: nothing here runs
+  // or configures them.
+  const otherAgents = useMemo(() => {
+    const seen = new Map<string, { label: string; owner: string; latest: ChatFeedItemRecord }>();
+    for (const item of personalFeed) {
+      if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
+      const joined = joinedByWire.get(item.channel.wireId);
+      if (!joined) continue;
+      const owner = joined.granterEmail ?? "someone else";
+      const key = `${owner}\u0000${item.message.authorDisplayName}`;
+      const known = seen.get(key);
+      if (!known || known.latest.message.createdAtMs < item.message.createdAtMs) {
+        seen.set(key, { label: chatAuthorLabel(item.message), owner, latest: item });
+      }
+    }
+    return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [joinedByWire, personalFeed]);
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
   // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
@@ -2893,7 +2913,8 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
-      clearRows();
+      // Home's rows stay: the nav lists other people's agents from them, and
+      // opening Home again reloads them before it paints.
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -2905,7 +2926,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [clearRows, nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
+  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
   // The conversation drops out of `dms` immediately; the next
@@ -4398,7 +4419,7 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChannel || props.userSettings ? (
+          {agentChannel || props.userSettings || otherAgents.length > 0 ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mb-1 mt-4 px-4">
                 Agents
@@ -4430,6 +4451,51 @@ export function ChatsView(props: {
                     </>
                   }
                 />
+              ) : null}
+              {otherAgents.length > 0 ? (
+                <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
+                  {otherAgents.map((agent) => (
+                    <li key={`${agent.owner}:${agent.label}`}>
+                      <NavRow
+                        testId="chats-other-agent"
+                        data={{ "data-owner": agent.owner }}
+                        active={false}
+                        onClick={() => {
+                          const item = agent.latest;
+                          if (!item.channel) return;
+                          openConversation({
+                            level: "thread",
+                            channel: {
+                              ...item.channel,
+                              wireId: item.channel.wireId,
+                              createdAtMs: 0,
+                              updatedAtMs: 0,
+                              threadCount: 0,
+                              unreadCount: 0,
+                            },
+                            thread: {
+                              ...item.thread,
+                              channelId: item.channel.id,
+                              messageCount: 0,
+                              lastReadSequence: 0,
+                              unreadCount: 0,
+                            },
+                            focusMessageId: item.message.id,
+                          });
+                        }}
+                        icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
+                        label={agent.label}
+                        labelTestId="chats-other-agent-name"
+                        muted
+                        trailing={
+                          <span className="shrink-0 truncate font-mono text-[10px] text-subtle">
+                            via {agent.owner}
+                          </span>
+                        }
+                      />
+                    </li>
+                  ))}
+                </ul>
               ) : null}
               {addingAgent && props.userSettings && props.onSaveUserSettings ? (
                 <AddAgentForm
