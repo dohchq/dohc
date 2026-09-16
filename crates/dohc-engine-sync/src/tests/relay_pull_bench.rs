@@ -74,19 +74,19 @@ fn relay_large_blob_pull_benchmark() {
             assert_eq!(pending_cursor.expect("pending cursor").cursor, 1);
             engine
                 .read_with(|conn| {
-                    let count: usize = conn.query_row(
+                    let count: i64 = conn.query_row(
                         "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND version_id='bench-version'",
                         [],
                         |row| row.get(0),
                     )?;
-                    assert_eq!(count, blobs.len());
+                    assert_eq!(usize::try_from(count).expect("snapshot count"), blobs.len());
                     for (sha256, bytes) in &blobs {
-                        let (length, text): (usize, String) = conn.query_row(
+                        let (length, text): (i64, String) = conn.query_row(
                             "SELECT byte_length,text FROM blobs WHERE sha256=?1",
                             [sha256],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )?;
-                        assert_eq!(length, bytes.len());
+                        assert_eq!(usize::try_from(length).expect("blob length"), bytes.len());
                         assert_eq!(text.as_bytes(), bytes);
                     }
                     Ok::<_, rusqlite::Error>(())
