@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, PluginKey, TextSelection, type Plugin } from "@tiptap/pm/state";
-import { EditorView } from "@tiptap/pm/view";
+import { DecorationSet, EditorView } from "@tiptap/pm/view";
 import { history, undo, redo } from "@tiptap/pm/history";
 import { Node as PMNode } from "@tiptap/pm/model";
 import { boldText, codeBlock, codeMarkText, doc, hardBreak, paragraph, schema } from "./testDocs";
@@ -170,6 +170,62 @@ describe("wikilink decoration reuse", () => {
 });
 
 describe("editor chrome reuse", () => {
+  it.each([
+    { name: "insert at start", from: 1, to: 1, text: "prefix " },
+    { name: "insert at end", from: 6, to: 6, text: " suffix" },
+    { name: "replace marked text", from: 2, to: 5, text: "🙂" },
+    { name: "clear paragraph", from: 1, to: 6, text: "" },
+  ])("maps gutter positions for $name without rebuilding decorations", ({ from, to, text }) => {
+    const insert = vi.fn();
+    const plugin = makeBlockControlsPlugin({ onInsertRef: { current: insert }, onOpenMenuRef: { current: () => {} } });
+    const view = mount(doc(paragraph(boldText("first")), paragraph("second"), codeBlock("third")), [history(), plugin]);
+    view.setProps({ handleScrollToSelection: () => true });
+    const controls = [...view.dom.querySelectorAll(".dohc-block-affordance")];
+    const build = vi.spyOn(DecorationSet, "create");
+    view.dispatch(view.state.tr.insertText(text, from, to).setMeta("remote-origin", true));
+    expect(build).not.toHaveBeenCalled();
+    const assertControls = () => {
+      expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance"), controls);
+      view.state.doc.forEach((node, position, index) => {
+        expect(controls[index].getAttribute("data-dohc-block-index")).toBe(String(index));
+        expect((view.nodeDOM(position) as HTMLElement).getAttribute("data-dohc-block-index")).toBe(String(index));
+        (controls[index].querySelector(".dohc-block-plus") as HTMLButtonElement).click();
+        expect(insert).toHaveBeenLastCalledWith(position);
+      });
+    };
+    assertControls();
+    expect(undo(view.state, view.dispatch)).toBe(true);
+    assertControls();
+    expect(redo(view.state, view.dispatch)).toBe(true);
+    assertControls();
+  });
+
+  it("rebuilds gutters for structural slices, nested changes, and node markup", () => {
+    const view = mount(doc(paragraph("first"), schema.nodes.blockquote.create(null, paragraph("nested")), codeBlock("code")), [blockControls()]);
+    const build = vi.spyOn(DecorationSet, "create");
+    view.dispatch(view.state.tr.split(3));
+    expect(build).toHaveBeenCalled();
+    build.mockClear();
+    let quotePosition = 0;
+    view.state.doc.forEach((node, position) => { if (node.type.name === "blockquote") quotePosition = position; });
+    view.dispatch(view.state.tr.insertText("x", quotePosition + 2));
+    expect(build).toHaveBeenCalled();
+    build.mockClear();
+    const codePosition = view.state.doc.content.size - view.state.doc.lastChild!.nodeSize;
+    view.dispatch(view.state.tr.setNodeMarkup(codePosition, undefined, { language: "python" }));
+    expect(build).toHaveBeenCalled();
+    expect(view.dom.querySelectorAll(".dohc-block-affordance")).toHaveLength(view.state.doc.childCount);
+  });
+
+  it("rebuilds when a replacement crosses duplicate block objects", () => {
+    const duplicate = paragraph("same");
+    const view = mount(doc(duplicate, duplicate, paragraph("last")), [blockControls()]);
+    view.dispatch(view.state.tr.insertText("joined", 2, duplicate.nodeSize + 3));
+    expect(view.state.doc.childCount).toBe(2);
+    expect(view.dom.querySelectorAll(".dohc-block-affordance")).toHaveLength(2);
+    expect([...view.dom.querySelectorAll(".dohc-block-affordance")].map((control) => control.getAttribute("data-dohc-block-index"))).toEqual(["0", "1"]);
+  });
+
   it("does not reconcile callout titles during selection-only or metadata updates", () => {
     const callout = schema.nodes.callout.create({ title: "Before" }, paragraph("body"));
     const view = mount(doc(paragraph("lead"), callout), [makeCalloutChromePlugin()]);
