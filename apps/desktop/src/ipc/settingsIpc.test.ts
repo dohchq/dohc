@@ -100,6 +100,7 @@ async function harness() {
     stateDir: () => stateDirectory, enqueueUserSettingsWrite, setCachedPreferredName,
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
+    broadcastUserSettings: () => undefined,
   });
   const zoom = createZoomMutation({
     enqueue: enqueueUserSettingsWrite,

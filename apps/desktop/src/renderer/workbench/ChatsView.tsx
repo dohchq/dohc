@@ -83,6 +83,8 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { AddAgentForm } from "./AddAgentForm";
+import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
@@ -335,10 +337,16 @@ export function ChatsView(props: {
   workspaceFiles?: readonly WorkspaceFileEntry[];
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
-  // Main-derived settings/status summary. The CTA only navigates to settings;
-  // Chats never configures executables or grants capabilities itself.
+  // Main-derived settings/status summary. The Agents section reads it to
+  // say whether the user's agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // The user settings the add-agent form writes, and the save that persists
+  // them. Absent in embedded surfaces, which then offer no add-agent form.
+  userSettings?: DesktopUserSettings | null;
+  onSaveUserSettings?: (settings: DesktopUserSettings) => Promise<void>;
+  // What the agent reaches: the workspace folder its runner is started in.
+  workspacePath?: string;
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -451,6 +459,7 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
   // is on (signed in + relay) or a DM already exists locally — a solo user
   // sees none of it.
@@ -3788,6 +3797,9 @@ export function ChatsView(props: {
     );
   }
 
+  // An agent is set up when it has a name to post as and something runs it.
+  const agentReady = Boolean(props.agentSetup?.preferredName && props.agentSetup.runnerEnabled);
+
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
@@ -3877,45 +3889,39 @@ export function ChatsView(props: {
         />
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
-            data-testid="chats-agent-setup-card"
-            data-state={
-              props.agentSetup.preferredName && props.agentSetup.runnerEnabled
-                ? "ready"
-                : "needs-setup"
-            }
-            className="flex shrink-0 items-center gap-3 border-b border-line bg-panel-2/50 px-3 py-2.5"
+            data-testid="chats-agent-screen"
+            data-state={agentReady ? "ready" : "needs-setup"}
+            className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
-            <span className="grid size-7 shrink-0 place-items-center rounded-md border border-agent/30 bg-bg text-agent">
-              <Bot size={14} aria-hidden />
+            <Bot size={12} aria-hidden className="shrink-0 text-agent" />
+            <span data-testid="chats-agent-screen-runner" className="min-w-0 flex-1 truncate">
+              {agentReady
+                ? props.userSettings?.runner.command.trim()
+                  ? `Runs ${props.userSettings.runner.command.trim()}`
+                  : "Runner on"
+                : props.agentSetup.runnerConfigured
+                  ? "Runner configured · dispatch is off"
+                  : props.agentSetup.mcpEnabled
+                    ? "Workspace MCP on · connect an agent to reply here"
+                    : "No runner yet · add an agent under Agents"}
             </span>
-            <div className="min-w-0 flex-1">
-              <p data-testid="chats-agent-setup-name" className="m-0 truncate text-[12px] font-medium text-ink">
-                {props.agentSetup.preferredName
-                  ? agentDisplayLabel(props.agentSetup.preferredName)
-                  : "Set up your agent"}
-              </p>
-              <p className="m-0 mt-0.5 truncate text-[10px] text-subtle">
-                {!props.agentSetup.preferredName
-                  ? "Choose your name so agent work is attributed correctly."
-                  : props.agentSetup.runnerEnabled
-                    ? "Chat runner ready"
-                    : props.agentSetup.runnerConfigured
-                        ? "Runner configured · dispatch is off"
-                        : props.agentSetup.mcpEnabled
-                          ? "Workspace MCP enabled · copy its config into your agent."
-                          : "Connect a local agent to reply and work in this workspace."}
-              </p>
-            </div>
+            {props.workspacePath ? (
+              <span
+                data-testid="chats-agent-screen-reach"
+                title={props.workspacePath}
+                className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
+              >
+                reaches {props.workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? props.workspacePath}
+              </span>
+            ) : null}
             {props.onSetupAgent ? (
               <button
                 type="button"
-                data-testid="chats-agent-setup-action"
+                data-testid="chats-agent-screen-manage"
                 onClick={props.onSetupAgent}
-                className="shrink-0 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink"
+                className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible"
               >
-                {props.agentSetup.preferredName && props.agentSetup.runnerEnabled
-                  ? "Manage"
-                  : "Set up"}
+                Manage
               </button>
             ) : null}
           </div>
@@ -4392,29 +4398,69 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChannel ? (
+          {agentChannel || props.userSettings ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mb-1 mt-4 px-4">
                 Agents
               </SectionLabel>
-              <NavRow
-                testId="chats-my-agent"
-                data={{ "data-channel-id": agentChannel.id }}
-                active={selectedChannelId === agentChannel.id}
-                onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
-                label={agentLabel}
-                labelTestId="chats-my-agent-name"
-                trailing={
-                  <>
-                    <AgentPresenceHint
-                      activity={agentSummaryActivity}
-                      testId="chats-my-agent-presence"
-                    />
-                    <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
-                  </>
-                }
-              />
+              {agentChannel ? (
+                <NavRow
+                  testId="chats-my-agent"
+                  data={{ "data-channel-id": agentChannel.id }}
+                  active={selectedChannelId === agentChannel.id}
+                  onClick={() => openConversation({ level: "channel", channel: agentChannel })}
+                  icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
+                  label={agentLabel}
+                  labelTestId="chats-my-agent-name"
+                  trailing={
+                    <>
+                      {agentReady ? null : (
+                        <span
+                          data-testid="chats-my-agent-state"
+                          className="shrink-0 font-mono text-[10px] text-subtle"
+                        >
+                          not set up
+                        </span>
+                      )}
+                      <AgentPresenceHint
+                        activity={agentSummaryActivity}
+                        testId="chats-my-agent-presence"
+                      />
+                      <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
+                    </>
+                  }
+                />
+              ) : null}
+              {addingAgent && props.userSettings && props.onSaveUserSettings ? (
+                <AddAgentForm
+                  workspaceId={workspaceId}
+                  settings={props.userSettings}
+                  onSave={props.onSaveUserSettings}
+                  onDone={() => setAddingAgent(false)}
+                  onCancel={() => setAddingAgent(false)}
+                />
+              ) : props.userSettings && props.onSaveUserSettings ? (
+                <button
+                  type="button"
+                  data-testid={agentReady ? "chats-manage-agent" : "chats-add-agent-open"}
+                  onClick={() =>
+                    agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
+                  }
+                  className="mx-2 flex h-7 w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  {agentReady ? (
+                    <>
+                      <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
+                      Manage agent
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={13} aria-hidden className="shrink-0 text-subtle" />
+                      Add an agent
+                    </>
+                  )}
+                </button>
+              ) : null}
             </section>
           ) : null}
         </nav>

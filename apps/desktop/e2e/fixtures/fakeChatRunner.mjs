@@ -30,10 +30,20 @@ if (mode === "silent-fail") {
   process.exit(3);
 }
 
-if (mode !== "report") {
+if (mode !== "report" && mode !== "ask") {
   console.error(`unknown fake chat runner mode: ${mode ?? "missing"}`);
   process.exit(2);
 }
+
+// In ask mode the prompt decides: a taken choice renders as "- [x] <choice>"
+// in the thread markdown, so the second run reports it; the first run asks.
+const taken = mode === "ask" ? /^- \[x\] (.+)$/mu.exec(prompt)?.[1] : undefined;
+const replyArgs =
+  mode === "report"
+    ? ["done: checked the exports"]
+    : taken
+      ? [`going with ${taken}`]
+      : ["--needs-decision", "--option", "Friday", "--option", "Monday", "Which day do we ship?"];
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(fixtureDir, "../../../..");
@@ -46,7 +56,7 @@ const child = spawn(
     "reply",
     threadId,
     "--as-agent",
-    "done: checked the exports",
+    ...replyArgs,
   ],
   {
     cwd: process.cwd(),

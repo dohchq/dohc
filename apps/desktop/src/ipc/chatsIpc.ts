@@ -531,6 +531,8 @@ export function registerChatsIpcHandlers<
         ...(decision.resolvedByMessageId
           ? { resolvedByMessageId: decision.resolvedByMessageId }
           : {}),
+        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
         atMs: decision.atMs,
       })),
     });
@@ -565,6 +567,8 @@ export function registerChatsIpcHandlers<
         ...(decision.resolvedByMessageId
           ? { resolvedByMessageId: decision.resolvedByMessageId }
           : {}),
+        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
         atMs: decision.atMs,
       },
     });

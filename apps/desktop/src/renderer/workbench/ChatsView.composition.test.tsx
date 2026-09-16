@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import {
   NOW,
   channel,
@@ -52,7 +53,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
   });
 
-  it("shows setup guidance and a configured owner label in My agent", async () => {
+  it("names a set-up agent under Agents and offers Manage, with no card in the conversation", async () => {
     const user = userEvent.setup();
     const onSetupAgent = vi.fn();
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -74,47 +75,64 @@ describe("ChatsView My agent", () => {
         mcpEnabled: false,
       },
       onSetupAgent,
+      userSettings: DEFAULT_USER_SETTINGS,
+      onSaveUserSettings: vi.fn(async () => undefined),
+      workspacePath: "C:\\people\\ice\\work",
     });
 
-    await user.click(await screen.findByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe("ready");
-    expect(screen.getByTestId("chats-agent-setup-name").textContent).toBe("Ice's agent");
-    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Manage");
-    await user.click(screen.getByTestId("chats-agent-setup-action"));
+    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe("Ice's agent");
+    expect(screen.queryByTestId("chats-my-agent-state")).toBeNull();
+    await user.click(screen.getByTestId("chats-manage-agent"));
     expect(onSetupAgent).toHaveBeenCalledOnce();
+    await user.click(screen.getByTestId("chats-my-agent"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.queryByTestId("chats-agent-setup-card")).toBeNull();
+    // The agent's screen says what runs it and what it reaches.
+    const agentScreen = screen.getByTestId("chats-agent-screen");
+    expect(agentScreen.dataset.state).toBe("ready");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner on");
+    expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
+    await user.click(screen.getByTestId("chats-agent-screen-manage"));
+    expect(onSetupAgent).toHaveBeenCalledTimes(2);
   });
 
-  it("does not present an enabled MCP server as a connected agent", async () => {
+  it("adds an agent from Agents: name, runner, check, and one settings write", async () => {
     const user = userEvent.setup();
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [
-        channel({
-          id: "channel-agent",
-          name: "agent-internal",
-          slug: "agent",
-          kind: "agent",
-        }),
-      ],
-      fileThreads: [],
-    });
+    const onSaveUserSettings = vi.fn(async () => undefined);
+    const runnerSelfTest = vi.fn(async () => ({ ok: true, detail: "The runner answered." }));
+    vi.stubGlobal("dohcDesktop", { ...(globalThis as { dohcDesktop?: object }).dohcDesktop, runnerSelfTest });
+    // An enabled MCP server is not a set-up agent.
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
-        preferredName: "Ice",
         runnerConfigured: false,
         runnerEnabled: false,
         mcpEnabled: true,
       },
       onSetupAgent: vi.fn(),
+      userSettings: DEFAULT_USER_SETTINGS,
+      onSaveUserSettings,
     });
 
-    await user.click(await screen.findByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe(
-      "needs-setup",
+    await user.click(await screen.findByTestId("chats-add-agent-open"));
+    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Your agent");
+    await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
+    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Ice's agent");
+    await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
+    await user.click(screen.getByTestId("chats-add-agent-check"));
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-add-agent-check-result").dataset.state).toBe("ok"),
     );
-    expect(screen.getByTestId("chats-agent-setup-card").textContent).toContain(
-      "Workspace MCP enabled · copy its config into your agent.",
-    );
-    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Set up");
+    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" });
+    await user.click(screen.getByTestId("chats-add-agent-submit"));
+    await waitFor(() => expect(screen.queryByTestId("chats-add-agent")).toBeNull());
+    // The check and the add each wrote the same settings: the name, the
+    // command, dispatch on.
+    expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
+    expect(onSaveUserSettings).toHaveBeenLastCalledWith({
+      ...DEFAULT_USER_SETTINGS,
+      profile: { preferredName: "Ice" },
+      runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
+    });
   });
 });
 

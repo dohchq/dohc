@@ -4366,6 +4366,11 @@ function registerIpcHandlers(): void {
     setCachedPreferredName: (preferredName) => { cachedPreferredName = preferredName; },
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService, withRendererWorkspaceOperation,
+    broadcastUserSettings: (result) => {
+      for (const window of workspaceWindows.allLive()) {
+        window.webContents.send(CHANNELS.userSettingsChanged, result);
+      }
+    },
   });
   settingsIpc.registerSettingsIpcHandlers();
 
