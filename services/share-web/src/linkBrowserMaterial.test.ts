@@ -59,11 +59,11 @@ describe("link browser credential material", () => {
     const { session, cookie } = await f.exchange();
     const resolve = () => f.application.resolveLinkBrowserMaterial(session, cookie, signal());
     const material = await resolve();
-    expect(material).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null });
+    expect(material).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
     if (!material.ok) throw new Error("missing material");
     material.capabilityToken = "changed";
     material.profileSecret = "changed";
-    expect(await resolve()).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null });
+    expect(await resolve()).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
     expect(f.fetchRelay).toHaveBeenCalledTimes(1);
   });
 
@@ -118,7 +118,7 @@ describe("link browser credential material", () => {
     if (!result.ok) throw new Error("missing material");
     const httpResponse = await http;
     expect(httpResponse.status).toBe(200);
-    expect(result).toEqual({ ok: true, capabilityToken: renewed, profileSecret: profile, setCookie: httpResponse.headers.get("set-cookie") });
+    expect(result).toEqual({ ok: true, capabilityToken: renewed, profileSecret: profile, setCookie: httpResponse.headers.get("set-cookie"), currentCapability: expect.any(Function) });
     expect(result.setCookie).toContain("Secure; HttpOnly; SameSite=Strict");
     expect(result.setCookie).toContain("Path=/; Max-Age=");
     expect(refreshRequest.headers.get("authorization")).toBe(`LinkCapability ${capability}`);
@@ -140,7 +140,7 @@ describe("link browser credential material", () => {
     const { session, cookie } = await f.exchange();
     f.setNow(601_001);
     f.fetchRelay.mockResolvedValue(new Response(null, { status: 503 }));
-    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null });
+    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
   });
 
   it("refuses after the renewal grace period without contacting the relay", async () => {
@@ -218,4 +218,16 @@ describe("link browser credential material", () => {
     response.resolve(Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: renewed, capabilityExpiresAtMs: 1_801_001 }));
     expect(await material).toEqual({ ok: false, status: 404 });
   });
+});
+
+it("retains a server handle through refresh and refuses expired or evicted sessions", async () => {
+  const f = fixture({maxSessions: 1}), {session, cookie} = await f.exchange();
+  const first = await f.application.resolveLinkBrowserMaterial(session, cookie, signal());
+  if (!first.ok) throw Error("missing session");
+  expect(await first.currentCapability()).toBe(capability);
+  f.setNow(601_000);
+  await f.application.resolveLinkBrowserMaterial(session, cookie, signal());
+  expect(await first.currentCapability()).toBe(renewed);
+  await f.exchange();
+  expect(await first.currentCapability()).toBeNull();
 });

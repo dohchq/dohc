@@ -83,9 +83,9 @@ export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest):
     throw new TypeError("live authority requires an authenticated actor");
   }
   if (kind.value === "link") {
-    const actor = ticketRecord(outer.actor, ["kind", "sessionId", "capabilityHash", "profileTokenHash", "grantId", "workspaceId"]);
+    const actor = ticketRecord(outer.actor, ["kind", "sessionId", "profileTokenHash", "grantId", "workspaceId"]);
     return { document, actor: { kind: "link", sessionId: parseLiveUpdateIdentifier(actor.sessionId, "session ID"),
-      capabilityHash: parseTicketHash(actor.capabilityHash), profileTokenHash: parseTicketHash(actor.profileTokenHash),
+      profileTokenHash: parseTicketHash(actor.profileTokenHash),
       grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
   }
   const actor = ticketRecord(outer.actor,
@@ -351,7 +351,9 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
 function currentLinkEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>) {
   const now = Date.now();
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid link authority clock.");
-  const enrollment = readLinkEnrollment(storage, actor, now);
+  const session = storage.db.prepare("SELECT capability_hash FROM sync_relay_link_sessions WHERE session_id=?").get(actor.sessionId);
+  if (!session) return null;
+  const enrollment = readLinkEnrollment(storage, {capabilityHash: String(session.capability_hash), profileTokenHash: actor.profileTokenHash}, now);
   if (!enrollment || enrollment.authority.session_id !== actor.sessionId || enrollment.authority.grant_id !== actor.grantId ||
     enrollment.authority.workspace_id !== actor.workspaceId || linkWriteRefusal(enrollment)) return null;
   const authorized = authorizeLinkShareAction({ storage, grantId: actor.grantId, action: "live-edit" });

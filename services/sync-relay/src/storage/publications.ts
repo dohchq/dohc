@@ -141,8 +141,13 @@ export interface ListAppPublicationsInput {
   appRoot?: string;
 }
 export type AppPublicationListRow = {
-  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null;
+  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null;
 } & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
+
+function publicationLinkIsCurrent(storage: StorageContext, owner: PublicationOwner): boolean {
+  try { authority(storage, owner); return true; }
+  catch (error) { if (error instanceof RelayError && error.code === "not_found") return false; throw error; }
+}
 
 export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
   return storage.readTx(() => {
@@ -163,12 +168,12 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
         return [{publicationId, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
           shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
-          sourceRevision: publication.candidate.sourceRevision, active: publication.active, collectionCapability}];
+          sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability}];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
         const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
         return [{publicationId, authorityRevision: state.authorityRevision, manifestUnavailable: true,
-          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, collectionCapability}];
+          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability}];
       }
     });
     return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};

@@ -2,7 +2,7 @@ import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 // The relay builder bundles this declared dependency without publishing its private validator.
-import {createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import {liveValidation} from "./liveValidation.js";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {SyncRelayStorage} from "./storage.js";
@@ -38,7 +38,7 @@ export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly str
     maxDeleteClientGroupVisits: positive(validation.maxDeleteClientGroupVisits),maxDeleteIntervalVisits: positive(validation.maxDeleteIntervalVisits),
     maxIndexOperations: positive(validation.maxIndexOperations),
   };
-  const validate = createLiveMarkdownJournalValidator(policy);
+  const validate = liveValidation.validator(policy);
   const admission: OwnerOutboxAdmission = {shares,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),validate};
   return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
 }

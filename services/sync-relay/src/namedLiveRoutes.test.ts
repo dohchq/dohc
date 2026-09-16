@@ -341,7 +341,7 @@ it("answers control ping within its explicit budget and rejects text application
 });
 
 
-it("binds a link socket to its exact session and closes it when that session is refreshed", async () => {
+it("keeps a link socket through bearer refresh and closes it on revocation", async () => {
   const f = await fixture(limits, true), minted = await f.mint(), browser = f.connect(minted.token);
   expect(await browser.status).toBe(101);
   await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
@@ -350,9 +350,17 @@ it("binds a link socket to its exact session and closes it when that session is 
   const serialized = JSON.stringify({ frames: browser.received, ticket: f.raw.prepare("SELECT * FROM sync_relay_live_session_tickets").get() });
   for (const secret of [f.bearer, f.profile, hashLinkBearer(f.bearer, key), hashLinkProfileSecret(f.profile, key)]) expect(serialized).not.toContain(secret);
   const old = f.storage.findLinkSessionByCapabilityHash(hashLinkBearer(f.bearer, key))!;
-  const closed = once(browser.ws, "close");
-  expect(f.storage.replaceLinkSession({ currentSession: old, session: { sessionId: "new-link-session", capabilityHash: hashLinkBearer("fresh", key),
+  expect(f.storage.replaceLinkSession({ currentSession: old, session: { sessionId: old.sessionId, capabilityHash: hashLinkBearer("fresh", key),
     grantId: old.grantId, generation: old.generation, mintedAtMs: 1000, expiresAtMs: 70_000 }, guard() {} })).toBe(true);
+  f.changes.notify();
+  expect(f.storage.findLinkSessionByCapabilityHash(old.capabilityHash)).toBeNull();
+  expect((await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId})).status).toBe(404);
+  const pong = once(browser.ws, "pong"); browser.ws.ping("still-connected"); await pong;
+  const {provider, until} = await startProvider(browser);
+  await until(() => provider.state().status === "live");
+  expect(provider.state().binding?.workspaceId).toBe(`link:${scope.grantId}`);
+  const closed = once(browser.ws, "close");
+  f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1001});
   f.changes.notify(); await closed;
   expect(f.invalidated.signal.aborted).toBe(false);
   expect(f.raw.prepare("SELECT link_session_id FROM sync_relay_live_session_tickets").get()).toEqual({ link_session_id: old.sessionId });
@@ -503,4 +511,18 @@ it("refuses a native capture for a different owner document", async () => {
   f.captureNative.mockImplementationOnce(async () => ({...f.native, binding: {...f.native.binding, objectId: "other-object"}}));
   expect(await f.connect("").status).toBe(404);
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});
+
+it("projects file-only link sync metadata before it reaches the browser provider", async () => {
+  const f = await fixture(limits, true);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}));
+  const minted = await f.tickets.mint({objectId: binding.objectId}, f.currentScope);
+  expect(minted).not.toBeNull();
+  const browser = f.connect(minted!.token); expect(await browser.status).toBe(101);
+  const {provider, until} = await startProvider(browser);
+  await until(() => provider.state().status === "live");
+  expect(provider.state().binding).toMatchObject({workspaceId: `link:${scope.grantId}`, currentPath: "a.md", selectorPaths: ["a.md"], objectId: binding.objectId});
+  expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
+  expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
+  expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
 });

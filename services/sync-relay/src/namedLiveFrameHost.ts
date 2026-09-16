@@ -10,6 +10,7 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
+import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
@@ -104,6 +105,11 @@ function captureLiveFrameHost(options: {
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
+  // The wire binding describes the public selection. Private authority always uses binding.
+  const projection = actor.kind === "link"
+    ? createAccountlessPathProjection({ paths: [...binding.selectorPaths], versionId: null, access: "edit" }) : null;
+  const wireBinding = projection && actor.kind === "link" ? parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
+    currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths }) : binding;
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;
@@ -158,7 +164,7 @@ function captureLiveFrameHost(options: {
       const feed = new AbortController();
       const feedSignal = AbortSignal.any([signal, feed.signal]);
       return {
-        binding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
+        binding: wireBinding, hostVector: initial.hostVector, missingStateUpdate: initial.missingStateUpdate,
         appliedThroughJournalCursor: position.journalCursor,
         close() { feed.abort(); },
         async nextApplied(callerSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> {
@@ -205,8 +211,8 @@ function captureLiveFrameHost(options: {
         if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
           return { result: "refused", reason: "capacity-refused" };
         }
-        const validation = validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
-          suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes });
+        const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
+          suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes }, signal);
         check(signal);
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
           metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });

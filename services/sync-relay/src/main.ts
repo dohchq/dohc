@@ -21,6 +21,7 @@ import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
 import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig";
+import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { openRelayDeployment } from "./relayDeployment";
@@ -520,6 +521,7 @@ installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
     await serviceHost?.close();
+    await liveValidation.close();
     storage.close();
     try {
       await pool?.end();

@@ -13,7 +13,7 @@ export interface OwnerOutboxAdmission {
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
-  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}): LiveJournalValidation;
+  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}, signal?: AbortSignal): LiveJournalValidation | Promise<LiveJournalValidation>;
 }
 
 /** Runs within one authenticated device delivery and rechecks standing at every await. */
@@ -78,8 +78,8 @@ export async function drainOwnerOutbox(options: {
       if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
-      const validation = admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
-        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update});
+      const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
+        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update}, signal);
       check();
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
         metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);

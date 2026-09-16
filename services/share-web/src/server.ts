@@ -91,7 +91,7 @@ export interface CreateShareWebApplicationOptions {
 }
 
 export type LinkBrowserMaterial =
-  | { ok: true; capabilityToken: string; profileSecret: string; setCookie: string | null }
+  | { ok: true; capabilityToken: string; profileSecret: string; setCookie: string | null; currentCapability(): Promise<string | null> }
   | { ok: false; status: 404 | 503 };
 
 export interface ShareWebApplication {
@@ -991,7 +991,12 @@ export function createShareWebApplication({
       if (!sessions.isCurrent(discriminator, authenticated.token, capabilityToken, nowMs())) {
         return { ok: false, status: 404 };
       }
-      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null };
+      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null,
+        async currentCapability() {
+          await refreshes.get(sessionKey(discriminator, authenticated.token));
+          const current = sessions.get(discriminator, authenticated.token, nowMs());
+          return current === authenticated.session && current.expiresAtMs > nowMs() ? current.capabilityToken : null;
+        } };
     } finally {
       signal.removeEventListener("abort", abort);
     }
