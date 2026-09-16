@@ -5232,7 +5232,12 @@ export function DesktopWorkspaceShell(props: {
                 </Suspense>
               ) : (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView {...chatsNavigatorProps} />
+                  <LazyChatsView
+                    // The panel re-seeds from the shell's destination each
+                    // time ownership of chat moves between it and a tab.
+                    key={`${workspaceId}:${chatsTabIsLive ? "tab" : "panel"}`}
+                    {...chatsNavigatorProps}
+                  />
                 </Suspense>
               )}
             </ErrorBoundary>

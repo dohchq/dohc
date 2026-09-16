@@ -18,10 +18,12 @@ function Harness(props: {
   onSend?: () => void;
   onEscape?: () => void;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
+  surface?: "post";
 }) {
   const [value, setValue] = useState("");
   return (
     <MentionComposer
+      {...(props.surface ? { surface: props.surface, authorName: "You" } : {})}
       testIdPrefix="chats"
       composerId="chats-composer"
       value={value}
@@ -208,5 +210,16 @@ describe("MentionComposer autocomplete", () => {
     await oldHeadings;
     expect(screen.queryByTestId("chats-mention-menu")).toBeNull();
     expect(screen.queryByTestId("chats-file-mention-heading")).toBeNull();
+  });
+
+  it("offers the file choices from the File button", async () => {
+    render(<Harness surface="post" />);
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.click(screen.getByTestId("chats-open"));
+    await userEvent.click(await screen.findByRole("button", { name: "Attach a file" }));
+    expect(await screen.findByTestId("chats-file-mention-option")).toBeTruthy();
+    await userEvent.click(screen.getByTestId("chats-file-mention-option"));
+    await userEvent.click(await screen.findByTestId("chats-file-mention-whole"));
+    expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
   });
 });

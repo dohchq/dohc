@@ -1,5 +1,5 @@
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
-import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
 import { ChatAvatar } from "./ChatAvatar";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
@@ -41,6 +41,7 @@ import {
   MessageSquare,
   MessagesSquare,
   Plus,
+  SmilePlus,
   Square,
   Users,
   X,
@@ -517,6 +518,7 @@ export function ChatsView(props: {
     prepareOpen,
     clearRows,
     invalidate,
+    setThreadReactions,
   } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
@@ -1993,6 +1995,40 @@ export function ChatsView(props: {
     [nav, props.onError, viewerAuthorId, workspaceId],
   );
 
+  // Like from Home. The viewer id may still be unknown here (it arrives with
+  // the first reaction listing), so the write goes first and the listing that
+  // answers it repaints the item and names the viewer.
+  const toggleHomeReaction = useCallback(
+    (threadId: string, messageId: string, liked: boolean) => {
+      if (nav.level !== "feed") return;
+      const token = liveToken.current;
+      const cellKey = `${messageId}\u0000${LIKE_EMOJI}`;
+      const seq = (reactionSeq.current.get(cellKey) ?? 0) + 1;
+      reactionSeq.current.set(cellKey, seq);
+      const isCurrent = () =>
+        token === liveToken.current && reactionSeq.current.get(cellKey) === seq;
+      void bridge()
+        .setChatReaction({
+          workspaceId,
+          threadId,
+          messageId,
+          emoji: LIKE_EMOJI,
+          state: liked ? "removed" : "added",
+        })
+        .then(() => bridge().listChatReactions({ workspaceId, threadId }))
+        .then((result) => {
+          if (!isCurrent()) return;
+          setThreadReactions(threadId, result.reactions);
+          setViewerAuthorId(result.viewerAuthorId);
+        })
+        .catch((error) => {
+          if (token !== liveToken.current) return;
+          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
+        });
+    },
+    [nav.level, props.onError, setThreadReactions, workspaceId],
+  );
+
   const toggleFeedReaction = useCallback(
     (
       threadId: string,
@@ -3159,6 +3195,19 @@ export function ChatsView(props: {
                 const isAgent = item.message.authorKind === "agent";
                 const isComment = item.message.parentMessageId !== undefined;
                 const time = formatChatTime(item.message.createdAtMs);
+                const itemReactions = item.reactions.filter(
+                  (reaction) => reaction.messageId === item.message.id,
+                );
+                const byEmoji = new Map<string, number>();
+                for (const reaction of itemReactions) {
+                  byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
+                }
+                const liked =
+                  viewerAuthorId !== "" &&
+                  itemReactions.some(
+                    (reaction) =>
+                      reaction.emoji === LIKE_EMOJI && reaction.authorId === viewerAuthorId,
+                  );
                 const where = item.channel
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
@@ -3254,7 +3303,34 @@ export function ChatsView(props: {
                       {hasFileMentions ? null : body}
                     </button>
                     {hasFileMentions ? body : null}
-                    <div className="mt-2.5 flex items-stretch border-t border-line">
+                    {byEmoji.size > 0 ? (
+                      <div
+                        data-testid="chats-feed-item-footer"
+                        className="mt-2.5 flex items-center gap-1.5 py-1.5 text-[12px] text-subtle"
+                      >
+                        {[...byEmoji.entries()].map(([emoji, count]) => (
+                          <span
+                            key={emoji}
+                            data-testid="chats-feed-reaction-pill"
+                            data-emoji={emoji}
+                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted"
+                          >
+                            <span aria-hidden>{emoji}</span>
+                            <span className="tabular-nums">{count}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="block h-2.5" />
+                    )}
+                    <div className="flex items-stretch border-t border-line">
+                      <ActionButton
+                        testId="chats-feed-like"
+                        label="Like"
+                        icon={<SmilePlus size={15} strokeWidth={1.9} aria-hidden />}
+                        active={liked}
+                        onClick={() => toggleHomeReaction(item.thread.id, item.message.id, liked)}
+                      />
                       <ActionButton
                         label={isComment ? "Reply" : "Comment"}
                         icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}

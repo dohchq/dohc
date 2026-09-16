@@ -122,7 +122,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
-    await expect(panel.getByTestId("chats-channel")).toContainText("2 chats");
+    await expect(panel.getByTestId("chats-channel")).toHaveAttribute("data-thread-count", "2");
     await panel.getByTestId("chats-channel").click();
     // Two threads exist now (the agent seeded one between sessions), so pick
     // the composer-created one by its snippet title.

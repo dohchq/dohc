@@ -493,7 +493,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         <span className="absolute left-0 top-0">
           {isSystem ? (
             <span
-              aria-hidden
+              role="img"
+              aria-label="Run failed"
               className="grid size-7 place-items-center rounded-full border border-warning/40 bg-bg text-warning"
             >
               <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
@@ -722,35 +723,30 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </div>
         <h1
           data-testid="chats-thread-post-title"
-          className={`mb-0 mt-3 whitespace-pre-wrap break-words text-ink ${
+          className={
             openingIsPlain
-              ? "text-[15px] font-normal leading-relaxed"
-              : "text-[17px] font-semibold leading-snug tracking-[-0.01em]"
-          }`}
+              ? "sr-only"
+              : "mb-0 mt-3 whitespace-pre-wrap break-words text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink"
+          }
         >
           {nav.thread.title}
         </h1>
-        {openingIsPlain ? null : (
-          <p
-            data-testid="chats-message-body"
-            className="mb-0 mt-2 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
-          >
-            <MentionText
-              body={openingMessage.body}
-              candidates={mentionCandidates}
-              attachments={openingAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-            />
-          </p>
-        )}
-        {openingIsPlain ? (
-          // The title is the whole message. Keep the body node for drivers
-          // that read the message text, without repeating it on screen.
-          <p data-testid="chats-message-body" className="sr-only">
-            {openingMessage.body}
-          </p>
-        ) : null}
+        {/* A plain post is its body; the title above repeats it for the
+            heading only. */}
+        <p
+          data-testid="chats-message-body"
+          className={`mb-0 select-text cursor-text whitespace-pre-wrap break-words text-ink ${
+            openingIsPlain ? "mt-3 text-[15px] leading-relaxed" : "mt-2 text-[14px] leading-relaxed"
+          }`}
+        >
+          <MentionText
+            body={openingMessage.body}
+            candidates={mentionCandidates}
+            attachments={openingAttachments}
+            testId="chats-message-body"
+            onOpenPath={props.onOpenPath}
+          />
+        </p>
         {openingAttachments.length > 0 ? (
           <div
             data-testid="chats-message-attachments"

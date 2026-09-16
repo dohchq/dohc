@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { type ChatsNav } from "./ChatsView";
 import {
+  NOW,
   channel,
   thread,
   message,
@@ -291,5 +292,94 @@ describe("ChatsView hybrid feed", () => {
 
     await user.click(cards[0]!);
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+  });
+
+  it("likes a post from Home and shows who reacted", async () => {
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [personalFeedItem("A post to like", "message-like")],
+    });
+    bridgeMock.setChatReaction.mockResolvedValue({
+      reaction: {
+        reactionId: "reaction-like",
+        messageId: "message-like",
+        threadId: "thread-1",
+        emoji: "👍",
+        authorId: "author-you",
+        authorKind: "human",
+        authorDisplayName: "You",
+        state: "added",
+      },
+      viewerAuthorId: "author-you",
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [
+        {
+          reactionId: "reaction-like",
+          messageId: "message-like",
+          threadId: "thread-1",
+          emoji: "👍",
+          authorId: "author-you",
+          authorKind: "human",
+          authorDisplayName: "You",
+        },
+      ],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const like = await screen.findByTestId("chats-feed-like");
+    expect(like.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(like);
+
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+      messageId: "message-like",
+      emoji: "👍",
+      state: "added",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-feed-like").getAttribute("aria-pressed")).toBe("true"),
+    );
+    const pill = screen.getByTestId("chats-feed-reaction-pill");
+    expect(pill.dataset.emoji).toBe("👍");
+    expect(pill.textContent).toContain("1");
+  });
+
+  it("keeps Saved beside Open file once a post is saved", async () => {
+    const onOpenPath = vi.fn();
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [
+        {
+          bookmarkId: "bookmark-thread-1",
+          targetKind: "thread",
+          targetId: "thread-1",
+          threadId: "thread-1",
+          mode: "live",
+          destinationPath: "Bookmarks/Chats/Friday--thread-1.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread()],
+      viewerAuthorId: "author-you",
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    expect(saved.textContent).toContain("Saved");
+    await userEvent.click(screen.getByTestId("chats-post-bookmark-open"));
+    expect(onOpenPath).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md");
+    // Saved is still the reverse path.
+    await userEvent.click(saved);
+    expect(bridgeMock.archiveChatBookmark).toHaveBeenCalled();
   });
 });

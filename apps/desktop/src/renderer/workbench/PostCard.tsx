@@ -36,7 +36,7 @@ export function postExcerpt(title: string, body: string): string {
   return newline === -1 ? "" : body.slice(newline + 1).trim();
 }
 
-const LIKE_EMOJI = "👍";
+export const LIKE_EMOJI = "👍";
 
 export function ActionButton(props: {
   testId?: string;
@@ -80,28 +80,27 @@ export function SaveAsFileActions(props: {
   onToggle?: (mode: "live" | "snapshot") => void;
   onOpen?: () => void;
 }) {
-  if (props.bookmark && props.onOpen) {
-    return (
-      <ActionButton
-        testId={`${props.testIdPrefix}-open`}
-        label="Open file"
-        icon={<FileText size={15} strokeWidth={1.9} aria-hidden />}
-        active
-        onClick={props.onOpen}
-      />
-    );
-  }
-  if (!props.onToggle) return null;
+  if (!props.onToggle && !(props.bookmark && props.onOpen)) return null;
   return (
     <>
-      <ActionButton
-        testId={props.testIdPrefix}
-        label={props.bookmark ? "Saved" : "Save as file"}
-        icon={<Save size={15} strokeWidth={1.9} aria-hidden />}
-        active={Boolean(props.bookmark)}
-        disabled={props.busy}
-        onClick={() => props.onToggle?.("live")}
-      />
+      {props.onToggle ? (
+        <ActionButton
+          testId={props.testIdPrefix}
+          label={props.bookmark ? "Saved" : "Save as file"}
+          icon={<Save size={15} strokeWidth={1.9} aria-hidden />}
+          active={Boolean(props.bookmark)}
+          disabled={props.busy}
+          onClick={() => props.onToggle?.("live")}
+        />
+      ) : null}
+      {props.bookmark && props.onOpen ? (
+        <ActionButton
+          testId={`${props.testIdPrefix}-open`}
+          label="Open file"
+          icon={<FileText size={15} strokeWidth={1.9} aria-hidden />}
+          onClick={props.onOpen}
+        />
+      ) : null}
       {!props.bookmark ? (
         <button
           type="button"

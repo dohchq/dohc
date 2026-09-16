@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { ChatFeedItemRecord } from "../../ipc/bridgeContract";
+import type { ChatFeedItemRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
@@ -33,6 +33,19 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
   const invalidate = useCallback(() => {
     feedRefreshSeq.current += 1;
   }, []);
+
+  // A reaction answered for one thread: every Home item in that thread
+  // takes the fresh list.
+  const setThreadReactions = useCallback(
+    (threadId: string, reactions: ChatReactionRecord[]) => {
+      setPersonalFeed((current) =>
+        current.map((item) =>
+          item.thread.id === threadId ? { ...item, reactions } : item,
+        ),
+      );
+    },
+    [],
+  );
 
   const loadPersonalFeed = useCallback(
     async (cursor?: string) => {
@@ -80,5 +93,6 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     prepareOpen,
     clearRows,
     invalidate,
+    setThreadReactions,
   };
 }

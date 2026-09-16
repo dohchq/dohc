@@ -491,7 +491,7 @@ export function MentionComposer(props: {
                 disabled={props.sending}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  insertAtCaret("@[");
+                  insertAtCaret("@");
                 }}
                 className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"
               >

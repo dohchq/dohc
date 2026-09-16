@@ -422,7 +422,7 @@ export function MessageReactions(props: {
       onClick={(event) => event.stopPropagation()}
       className={
         props.overlayWhenEmpty && byEmoji.length === 0
-          ? "absolute -top-1 right-0 flex items-center"
+          ? "absolute -right-6 top-0 flex items-center"
           : `relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`
       }
     >
@@ -615,7 +615,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                       />
                     )}
                   </span>
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 pr-6">
                     {!continues ? (
                       <span className="flex items-baseline gap-1.5">
                         <span
