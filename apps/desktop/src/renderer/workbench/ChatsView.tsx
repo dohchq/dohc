@@ -3749,12 +3749,27 @@ export function ChatsView(props: {
               <button
                 type="button"
                 data-testid="chats-share-channel"
-                title="Share this channel"
+                title={channelGrants.length > 0 ? "Members" : "Add members"}
+                aria-expanded={sharePanelOpen}
                 onClick={() => setSharePanelOpen((open) => !open)}
-                className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                className="flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
               >
-                <Users size={11} aria-hidden />
-                {channelGrants.length > 0 ? `Shared · ${channelGrants.length}` : "Share"}
+                {channelGrants.length > 0 ? (
+                  <span className="flex items-center -space-x-1.5">
+                    {channelGrants.slice(0, 3).map((grant) => (
+                      <ChatAvatar
+                        key={grant.shareId}
+                        name={grant.recipientEmail ?? "?"}
+                        kind="human"
+                        size="strip"
+                        className="ring-2 ring-panel"
+                      />
+                    ))}
+                  </span>
+                ) : (
+                  <Users size={13} aria-hidden />
+                )}
+                {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
               </button>
             ) : undefined
           }
@@ -3809,7 +3824,7 @@ export function ChatsView(props: {
             data-testid="chats-joined-banner"
             className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
           >
-            <Users size={11} aria-hidden className="shrink-0 text-subtle" />
+            <ChatAvatar name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
               {joinedChannelLabel(channelJoined)}
             </span>
@@ -3845,19 +3860,20 @@ export function ChatsView(props: {
                   <li
                     key={grant.shareId}
                     data-testid="chats-share-member"
-                    className="flex items-center gap-1.5 py-0.5"
+                    className="flex h-7 items-center gap-2"
                   >
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                    <ChatAvatar name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
                     ) : null}
                     <button
                       type="button"
                       data-testid="chats-share-revoke"
                       onClick={() => void revokeShare(grant.shareId)}
-                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible"
                     >
                       Remove
                     </button>
@@ -3873,7 +3889,7 @@ export function ChatsView(props: {
               }}
             >
               <label className="sr-only" htmlFor="chats-share-email">
-                Share with email
+                Add a member by email
               </label>
               <input
                 id="chats-share-email"
@@ -3882,7 +3898,7 @@ export function ChatsView(props: {
                 value={shareEmail}
                 disabled={shareGrantsBlocked}
                 maxLength={320}
-                placeholder="teammate@example.com"
+                placeholder="Add by email"
                 onChange={(event) => setShareEmail(event.target.value)}
                 className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
               />
@@ -3903,13 +3919,9 @@ export function ChatsView(props: {
                 }
                 className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
-                Share
+                Add
               </button>
             </form>
-            <p className="mb-0 mt-1 text-[10px] leading-4 text-subtle">
-              They see this whole channel and can post in it{shareReadOnly ? " (view only)" : ""}.
-              You can remove anyone later.
-            </p>
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -3948,14 +3960,7 @@ export function ChatsView(props: {
                 className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-xs text-muted">Nothing here yet.</span>
-                <span className="text-[11px] text-subtle">
-                  {channelLocked
-                    ? "There are no posts to read."
-                    : nav.channel.kind === "agent"
-                      ? "Ask for a change, a summary, or a plan — your agent replies here."
-                      : "Start a post above."}
-                </span>
+                <span className="text-[13px] text-subtle">No posts yet</span>
               </div>
             ) : (
               <ul className="m-0 flex list-none flex-col gap-3 p-0">
