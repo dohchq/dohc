@@ -1,4 +1,4 @@
-import { Send } from "lucide-react";
+import { AtSign, FileText, Send } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
@@ -8,6 +8,7 @@ import {
 } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
+import { ChatAvatar } from "./ChatAvatar";
 
 interface FileMentionCandidate {
   path: string;
@@ -41,7 +42,13 @@ export function MentionComposer(props: {
   // Channel feeds place the start-post composer inside a card instead of on a
   // full-width divider. Defaults preserve DMs and Linked Chats exactly.
   surface?: "stream" | "post";
+  // The post surface starts as one line and opens on focus or content. The
+  // textarea is always mounted so its pinned test id and drivers keep working.
+  authorName?: string;
+  authorKind?: "human" | "agent";
 }) {
+  const [focused, setFocused] = useState(false);
+  const expanded = props.surface !== "post" || focused || props.value.length > 0;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -243,11 +250,25 @@ export function MentionComposer(props: {
         ? `${listboxId}-${matches[boundedHighlight]?.id}`
         : `${listboxId}-file-${boundedHighlight - matches.length}`;
 
+  const insertAtCaret = (text: string) => {
+    const node = textareaRef.current;
+    if (!node) return;
+    const at = node.selectionStart ?? props.value.length;
+    const next = `${props.value.slice(0, at)}${text}${props.value.slice(at)}`;
+    pendingCaret.current = at + text.length;
+    props.onChange(next);
+    openMenuFromCaret();
+  };
+
+  const isPost = props.surface === "post";
   return (
     <form
+      data-expanded={isPost ? expanded : undefined}
       className={
-        props.surface === "post"
-          ? "relative flex shrink-0 items-end gap-1.5 rounded-xl border border-line bg-panel px-3 py-2"
+        isPost
+          ? `relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
+              expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
+            }`
           : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
       }
       onSubmit={(event) => {
@@ -255,6 +276,25 @@ export function MentionComposer(props: {
         props.onSend();
       }}
     >
+      {isPost && props.authorName ? (
+        <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
+          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} />
+          {expanded ? (
+            <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
+          ) : (
+            // The one-line pill. Clicking focuses the real textarea below.
+            <button
+              type="button"
+              data-testid={`${props.testIdPrefix}-open`}
+              aria-label="Write a post"
+              onClick={() => textareaRef.current?.focus()}
+              className="h-9 min-w-0 flex-1 rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted dohc-focus-visible"
+            >
+              {props.placeholder}
+            </button>
+          )}
+        </div>
+      ) : null}
       {showMenu ? (
         <ul
           id={listboxId}
@@ -409,48 +449,116 @@ export function MentionComposer(props: {
             node ? activeMentionQuery(node.value, node.selectionStart ?? 0) !== null : false,
           );
         }}
+        onFocus={() => setFocused(true)}
         onBlur={() => {
           fileRequest.current += 1;
           setMenuOpen(false);
           setFileStage(null);
+          setFocused(false);
         }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
-      />
-      <button
-        type="button"
-        aria-label="Mention"
-        title="Mention a person or agent"
-        tabIndex={-1}
-        disabled={props.sending}
-        onMouseDown={(event) => {
-          // Insert "@" and open the roster without stealing textarea focus.
-          event.preventDefault();
-          const node = textareaRef.current;
-          if (!node) return;
-          const at = node.selectionStart ?? props.value.length;
-          const next = `${props.value.slice(0, at)}@${props.value.slice(at)}`;
-          pendingCaret.current = at + 1;
-          props.onChange(next);
-          openMenuFromCaret();
-        }}
-        className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
-      >
-        <span aria-hidden className="text-[13px] font-semibold">
-          @
-        </span>
-      </button>
-      <button
-        type="submit"
-        data-testid={`${props.testIdPrefix}-send`}
-        aria-label={props.sendLabel}
-        title={props.sendLabel}
-        disabled={
-          props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
+        className={
+          isPost
+            ? `w-full resize-none bg-transparent text-[15px] leading-relaxed text-ink placeholder:text-subtle dohc-focus-input ${
+                expanded ? "min-h-16 px-0 py-0" : "absolute inset-0 h-full opacity-0"
+              }`
+            : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
         }
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        <Send size={13} aria-hidden />
-      </button>
+      />
+      {isPost ? (
+        expanded ? (
+          <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
+            <button
+              type="button"
+              aria-label="Mention"
+              title="Mention a person or agent"
+              tabIndex={-1}
+              disabled={props.sending}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                insertAtCaret("@");
+              }}
+              className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"
+            >
+              <AtSign size={14} strokeWidth={1.9} aria-hidden />
+              Mention
+            </button>
+            {props.fileCandidates ? (
+              <button
+                type="button"
+                aria-label="Attach a file"
+                title="Attach a file"
+                tabIndex={-1}
+                disabled={props.sending}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  insertAtCaret("@[");
+                }}
+                className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"
+              >
+                <FileText size={14} strokeWidth={1.9} aria-hidden />
+                File
+              </button>
+            ) : null}
+            <span className="flex-1" />
+            <button
+              type="submit"
+              data-testid={`${props.testIdPrefix}-send`}
+              aria-label={props.sendLabel}
+              title={props.sendLabel}
+              disabled={
+                props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
+              }
+              className="h-7 cursor-pointer rounded-md bg-accent px-3 text-[12px] font-medium text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Post
+            </button>
+          </div>
+        ) : (
+          // Collapsed: the pinned send target still exists for drivers that
+          // fill the textarea and submit without focusing it first.
+          <button
+            type="submit"
+            data-testid={`${props.testIdPrefix}-send`}
+            aria-label={props.sendLabel}
+            className="sr-only"
+            disabled={props.sending || props.value.trim().length === 0}
+          >
+            Post
+          </button>
+        )
+      ) : (
+        <>
+          <button
+            type="button"
+            aria-label="Mention"
+            title="Mention a person or agent"
+            tabIndex={-1}
+            disabled={props.sending}
+            onMouseDown={(event) => {
+              // Insert "@" and open the roster without stealing textarea focus.
+              event.preventDefault();
+              insertAtCaret("@");
+            }}
+            className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
+          >
+            <span aria-hidden className="text-[13px] font-semibold">
+              @
+            </span>
+          </button>
+          <button
+            type="submit"
+            data-testid={`${props.testIdPrefix}-send`}
+            aria-label={props.sendLabel}
+            title={props.sendLabel}
+            disabled={
+              props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
+            }
+            className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Send size={13} aria-hidden />
+          </button>
+        </>
+      )}
     </form>
   );
 }

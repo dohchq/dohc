@@ -3992,10 +3992,11 @@ export function ChatsView(props: {
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
+                  authorName={collaboration?.displayName || "You"}
                   placeholder={
                     nav.channel.kind === "agent"
                       ? "Message your agent…"
-                      : `Start a post in #${nav.channel.name}…`
+                      : `What's happening in #${nav.channel.name}?`
                   }
                   sendLabel="Start post"
                   candidates={mentionCandidates}
