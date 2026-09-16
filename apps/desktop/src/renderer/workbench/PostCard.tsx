@@ -1,4 +1,4 @@
-import { FileText, MessageSquare, Save, SmilePlus } from "lucide-react";
+import { CircleHelp, FileText, MessageSquare, Save, SmilePlus } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
@@ -220,9 +220,10 @@ export function PostCard(props: {
             {openDecision ? (
               <span
                 data-testid="chats-post-decision-open"
-                className="font-mono text-[11px] text-warning"
+                className="inline-flex items-center gap-1 text-[11px] text-warning"
               >
-                needs decision
+                <CircleHelp size={11} strokeWidth={2} aria-hidden />
+                Poll open
               </span>
             ) : null}
             <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" />

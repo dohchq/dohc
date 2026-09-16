@@ -279,7 +279,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(agentBubble).toHaveClass(/border-l-2/);
     await expect(agentBubble).toHaveAttribute("style", /--dohc-agent/);
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
-      "needs decision",
+      "Poll open",
     );
 
     // The feed summary reflects the same open decision, and reopening keeps
@@ -287,20 +287,20 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveText(
-      "needs decision",
+      "Poll open",
     );
     await decisionCard.click();
     await expect(agentComment).toBeVisible();
 
     await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
     await expect(view.getByTestId("chats-resolving-mode")).toContainText(
-      "Resolving decision — your reply records it",
+      "Answering the poll",
     );
     await composer.fill(resolutionBody);
     await composer.press("Enter");
     await expect(
       ownBubble(agentComment).getByTestId("chats-comment-decision-resolved"),
-    ).toHaveText("resolved");
+    ).toHaveText("Answered");
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
 
     const show = await runDohcCli(temp, ["chat", "show", threadId, "--peek"]);
@@ -374,7 +374,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       .toHaveClass(/border-l-2/);
     await expect(
       ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
-    ).toHaveText("resolved");
+    ).toHaveText("Answered");
     await expect(view.getByTestId("chats-comment-decision-open")).toHaveCount(0);
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
   } finally {

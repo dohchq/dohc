@@ -3617,9 +3617,7 @@ export function ChatsView(props: {
                 data-testid="chats-resolving-mode"
                 className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
               >
-                <span className="min-w-0 flex-1">
-                  Resolving decision — your reply records it ·
-                </span>
+                <span className="min-w-0 flex-1">Answering the poll</span>
                 <button
                   type="button"
                   data-testid="chats-resolving-cancel"

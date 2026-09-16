@@ -1,4 +1,4 @@
-import { Bookmark, Copy, FileText, TriangleAlert } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
 import { memo, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -120,9 +120,10 @@ function DecisionStatus(props: {
     return (
       <span
         data-testid={`${props.testIdPrefix}-decision-resolved`}
-        className="rounded-md border border-success/40 bg-success/10 px-1.5 py-0.5 font-mono text-[10px] text-success"
+        className="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
       >
-        resolved
+        <CircleCheck size={11} strokeWidth={2} aria-hidden />
+        Answered
       </span>
     );
   }
@@ -130,18 +131,19 @@ function DecisionStatus(props: {
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <span
         data-testid={`${props.testIdPrefix}-decision-open`}
-        className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
+        className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
       >
-        needs decision
+        <CircleHelp size={11} strokeWidth={2} aria-hidden />
+        Poll open
       </span>
       {props.onResolve ? (
         <button
           type="button"
           data-testid={`${props.testIdPrefix}-decision-resolve`}
           onClick={props.onResolve}
-          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+          className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
         >
-          Resolve
+          Answer
         </button>
       ) : null}
     </span>

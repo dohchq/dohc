@@ -273,7 +273,7 @@ describe("ChatsView hybrid feed", () => {
       "2 comments",
     );
     expect(screen.getByTestId("chats-post-decision-open").textContent).toBe(
-      "needs decision",
+      "Poll open",
     );
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");

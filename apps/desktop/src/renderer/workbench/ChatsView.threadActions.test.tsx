@@ -48,7 +48,7 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
     await user.click(screen.getByTestId("chats-message-decision-resolve"));
     expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
-      "Resolving decision — your reply records it",
+      "Answering the poll",
     );
     expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
       "Replying to You",
