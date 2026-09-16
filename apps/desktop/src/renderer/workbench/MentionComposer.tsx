@@ -459,7 +459,7 @@ export function MentionComposer(props: {
         className={
           isPost
             ? `w-full resize-none bg-transparent text-[15px] leading-relaxed text-ink placeholder:text-subtle dohc-focus-input ${
-                expanded ? "min-h-16 px-0 py-0" : "absolute inset-0 h-full opacity-0"
+                expanded ? "min-h-16 px-0 py-0" : "pointer-events-none absolute inset-0 h-full opacity-0"
               }`
             : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
         }

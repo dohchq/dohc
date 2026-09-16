@@ -57,12 +57,13 @@ function ActionButton(props: {
         event.stopPropagation();
         props.onClick();
       }}
-      className={`flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
+      title={props.label}
+      className={`flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
         props.active ? "text-accent" : "text-muted hover:bg-panel-2 hover:text-ink"
       }`}
     >
       {props.icon}
-      <span>{props.label}</span>
+      <span className="truncate @[360px]:inline hidden">{props.label}</span>
       {props.count ? (
         <span className="font-mono text-[11px] font-normal text-subtle">{props.count}</span>
       ) : null}
@@ -120,7 +121,7 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className="group cursor-pointer rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 text-left transition-colors duration-75 hover:border-muted/50 dohc-focus-visible"
+      className="group @container cursor-pointer rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 text-left transition-colors duration-75 hover:border-muted/50 dohc-focus-visible"
     >
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The card itself is the semantic button. */}
