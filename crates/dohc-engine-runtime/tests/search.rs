@@ -785,6 +785,80 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
 }
 
 #[test]
+fn file_and_chat_line_continuations_preserve_dense_and_sparse_results() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    let db = engine_db_path(&scratch).expect("database path");
+    let mut store = open(&db, 1);
+    let mut text = String::from("heading\r\n");
+    for index in 0..90 {
+        text.push_str(if index < 30 || index % 3 == 0 {
+            "😀 É NEEDLE 🚀"
+        } else {
+            "ordinary"
+        });
+        text.push_str(match index % 3 {
+            0 => "\r\n",
+            1 => "\r",
+            _ => "\n",
+        });
+    }
+    write_file(&mut store, "mixed-lines", "mixed.txt", &text, 10);
+    start_thread(&mut store, "mixed-channel", "mixed-thread", &text, 20);
+    ensure_index(&mut store, root, 30);
+    let expected = store
+        .read_with(|conn| {
+            search_workspace_page(conn, root, WS, V, "needle", Some(1000), 40, None, None)
+        })
+        .expect("all matches");
+    assert!(
+        expected
+            .results
+            .iter()
+            .any(|hit| hit.key.surface == SearchSurface::File)
+    );
+    assert!(
+        expected
+            .results
+            .iter()
+            .any(|hit| hit.key.surface == SearchSurface::Chat)
+    );
+    assert!(!expected.has_more);
+    for size in [1, 7, 25] {
+        let mut actual = Vec::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .read_with(|conn| {
+                    search_workspace_page(
+                        conn,
+                        root,
+                        WS,
+                        V,
+                        "needle",
+                        Some(size),
+                        40,
+                        Some(expected.generation),
+                        after,
+                    )
+                })
+                .expect("continued page");
+            assert_eq!(page.disposition, SearchPageDisposition::Results);
+            assert!(!page.results.is_empty());
+            actual.extend(page.results);
+            if !page.has_more {
+                break;
+            }
+            let next = page.continuation.expect("continuation");
+            assert_ne!(after, Some(next), "cursor must advance");
+            after = Some(next);
+            assert!(actual.len() <= expected.results.len());
+        }
+        assert_eq!(actual, expected.results);
+    }
+}
+
+#[test]
 fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
