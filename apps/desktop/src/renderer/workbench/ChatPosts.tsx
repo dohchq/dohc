@@ -1,4 +1,4 @@
-import { Bookmark, Copy, FileText } from "lucide-react";
+import { Bookmark, Copy, FileText, TriangleAlert } from "lucide-react";
 import { memo, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -69,6 +69,35 @@ function buildThreadCommentTree(
 function pathBasename(pathHint: string | undefined): string {
   if (!pathHint) return "attachment";
   return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
+}
+
+// The dispatcher writes a failure as the agent, so the thread has a record.
+// It reads as a notice from dohc, never as something the agent said.
+function isRunnerFailure(body: string): boolean {
+  return body.startsWith("⚠ Agent run failed");
+}
+
+// What the agent ran, under its reply: the chip that opens the details,
+// with the outcome in a word.
+function RunLine(props: { run: ChatRunRecord }) {
+  const running = props.run.endedAtMs === undefined;
+  const failed = !running && props.run.exitCode !== 0;
+  return (
+    <div
+      data-testid="chats-run-line"
+      data-state={running ? "running" : failed ? "failed" : "done"}
+      className="mt-1 flex items-center gap-2 px-2 text-[11px] text-subtle"
+    >
+      <span
+        aria-hidden
+        className={`size-1.5 rounded-full ${
+          running ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
+        }`}
+      />
+      <span>{running ? "Running" : failed ? "Failed" : "Done"}</span>
+      <RunChip run={props.run} />
+    </div>
+  );
 }
 
 function AgentBadge(props: { testIdPrefix: string }) {
@@ -440,6 +469,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
     const isAgent = comment.authorKind === "agent";
+    const isSystem = isAgent && isRunnerFailure(comment.body);
     const replyCount = node.replies.length;
     const commentBookmark = bookmarkFor("message", comment.id);
     const commentBookmarkKey = `message:${comment.id}`;
@@ -459,11 +489,20 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         }`}
       >
         <span className="absolute left-0 top-0">
-          <ChatAvatar
-            name={comment.authorDisplayName}
-            kind={comment.authorKind}
-            size="comment"
-          />
+          {isSystem ? (
+            <span
+              aria-hidden
+              className="grid size-7 place-items-center rounded-full border border-warning/40 bg-bg text-warning"
+            >
+              <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
+            </span>
+          ) : (
+            <ChatAvatar
+              name={comment.authorDisplayName}
+              kind={comment.authorKind}
+              size="comment"
+            />
+          )}
         </span>
         {parent ? (
           <button
@@ -493,8 +532,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 }
               : undefined
           }
-          className={`w-fit max-w-[92%] rounded-2xl border border-line bg-bg px-3.5 py-2 ${
-            isAgent ? "border-l-2" : ""
+          data-system={isSystem ? "true" : undefined}
+          className={`w-fit max-w-[92%] rounded-2xl border px-3.5 py-2 ${
+            isSystem
+              ? "border-dashed border-warning/40 bg-warning/5"
+              : isAgent
+                ? "border-l-2 border-line bg-bg"
+                : "border-line bg-bg"
           }`}
         >
           <div className="flex flex-wrap items-baseline gap-1.5">
@@ -601,8 +645,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {replyCount} {replyCount === 1 ? "reply" : "replies"}
             </span>
           ) : null}
-          {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
         </div>
+        {runRecords[comment.id] ? <RunLine run={runRecords[comment.id]} /> : null}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
