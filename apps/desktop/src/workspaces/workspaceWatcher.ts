@@ -1,4 +1,8 @@
-import type { WatcherEvent } from "@dohc/workspace-core";
+import {
+  isDatabaseFile,
+  isDatabaseSidecar,
+  type WatcherEvent,
+} from "@dohc/workspace-core";
 import {
   collapseSqliteSidecars,
   shouldIgnoreWatchPath,
@@ -54,11 +58,11 @@ async function pathsToEvents(
     }
     if (kind === "absent") {
       events.push({ path, operation: "delete" });
-    } else if (kind === "file") {
+    } else if (kind === "file" && !isDatabaseFile(path) && !isDatabaseSidecar(path)) {
       events.push({ path, operation: "update", sha256: await sha256OrUndefined(absolute) });
     } else {
-      // Directories and unreadable-but-present entries: record the change
-      // without a hash rather than fabricating a delete.
+      // Database hashes are discarded by collapseSqliteSidecars. Directories
+      // and unreadable-but-present entries also remain updates without a hash.
       events.push({ path, operation: "update" });
     }
   }
