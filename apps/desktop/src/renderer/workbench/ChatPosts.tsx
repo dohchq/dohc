@@ -13,6 +13,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
 import { bridge } from "../bridge";
 import { formatChatTime } from "../time";
+import { ChatAvatar } from "./ChatAvatar";
 import {
   MentionText,
   MessageReactions,
@@ -420,6 +421,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
+  const openingIsAgent = openingMessage.authorKind === "agent";
+  const openingIsPlain =
+    openingMessage.body.trim() === nav.thread.title.trim();
+  const commentCount = messages.length - 1;
+
+  // A comment: avatar column, then a bubble that holds the name and body,
+  // then the quiet action row, then any replies as a nested list. The DOM
+  // shape is what the e2e helpers walk: the bubble is the item's direct
+  // child, the action row is a direct div, replies are a sibling ol.
   const renderThreadComment = (
     node: ThreadCommentNode,
     depth: number,
@@ -442,12 +452,19 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-parent-message-id={comment.parentMessageId}
         data-thread-depth={depth}
         data-author-kind={comment.authorKind}
-        className={`group flex min-w-0 flex-col transition-shadow ${
+        className={`group relative flex min-w-0 flex-col pl-9 transition-shadow ${
           flashMessageId === comment.id
             ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
         }`}
       >
+        <span className="absolute left-0 top-0">
+          <ChatAvatar
+            name={comment.authorDisplayName}
+            kind={comment.authorKind}
+            size="comment"
+          />
+        </span>
         {parent ? (
           <button
             type="button"
@@ -461,7 +478,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
@@ -476,7 +493,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 }
               : undefined
           }
-          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
+          className={`w-fit max-w-[92%] rounded-2xl border border-line bg-bg px-3.5 py-2 ${
             isAgent ? "border-l-2" : ""
           }`}
         >
@@ -529,7 +546,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </div>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
+        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 text-[11px] text-subtle">
           <MessageReactions
             testIdPrefix="chats"
             messageId={comment.id}
@@ -542,7 +559,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               type="button"
               data-testid="chats-comment-reply"
               onClick={() => beginReply(comment)}
-              className="rounded hover:text-ink dohc-focus-visible"
+              className="rounded font-medium hover:text-ink dohc-focus-visible"
             >
               Reply
             </button>
@@ -581,6 +598,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             data-testid="chats-message-time"
             dateTime={commentTime.iso}
             title={commentTime.iso}
+            className="font-mono"
           >
             {commentTime.label}
           </time>
@@ -589,8 +607,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <ol
             data-testid="chats-replies"
             aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
-              depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
+            className={`relative mt-3 list-none space-y-3 p-0 ${
+              depth < 3 ? "" : "-ml-9"
             }`}
           >
             {node.replies.map((reply) =>
@@ -608,7 +626,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-testid="chats-message"
         data-message-id={openingMessage.id}
         data-author-kind={openingMessage.authorKind}
-        className={`group pt-5 transition-shadow ${
+        className={`group pt-4 transition-shadow ${
           flashMessageId === openingMessage.id
             ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
@@ -616,52 +634,77 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       >
         <p
           data-testid="chats-thread-eyebrow"
-          className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
+          className="sr-only"
         >
           {nav.channel.kind === "agent"
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
+        <div className="flex items-center gap-2.5">
+          <ChatAvatar
+            name={openingMessage.authorDisplayName}
+            kind={openingMessage.authorKind}
+          />
+          <div className="flex min-w-0 flex-1 flex-col leading-tight">
+            <span className="flex items-center gap-1.5">
+              <span
+                data-testid="chats-message-author"
+                data-author-kind={openingMessage.authorKind}
+                className={`truncate text-[14px] font-semibold ${
+                  openingIsAgent ? "text-agent" : "text-ink"
+                }`}
+              >
+                {chatAuthorLabel(openingMessage)}
+              </span>
+              {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" /> : null}
+            </span>
+            <span className="flex items-center gap-1.5 text-[12px] text-subtle">
+              <span className="truncate font-mono text-[11px]">
+                {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
+              </span>
+              <span aria-hidden>·</span>
+              <time
+                data-testid="chats-message-time"
+                dateTime={openingTime.iso}
+                title={openingTime.iso}
+                className="shrink-0"
+              >
+                {openingTime.label}
+              </time>
+            </span>
+          </div>
+        </div>
         <h1
           data-testid="chats-thread-post-title"
-          className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
+          className={`mb-0 mt-3 whitespace-pre-wrap break-words font-serif text-ink ${
+            openingIsPlain
+              ? "text-[17px] font-normal leading-relaxed"
+              : "text-[19px] font-semibold leading-snug"
+          }`}
         >
           {nav.thread.title}
         </h1>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span
-            data-testid="chats-message-author"
-            data-author-kind={openingMessage.authorKind}
-            className={`text-[13px] font-medium ${
-              openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
-            }`}
+        {openingIsPlain ? null : (
+          <p
+            data-testid="chats-message-body"
+            className="mb-0 mt-2 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
           >
-            {chatAuthorLabel(openingMessage)}
-          </span>
-          {openingMessage.authorKind === "agent" ? (
-            <AgentBadge testIdPrefix="chats-message" />
-          ) : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={openingTime.iso}
-            title={openingTime.iso}
-            className="font-mono text-[10px] text-subtle"
-          >
-            {openingTime.label}
-          </time>
-        </div>
-        <p
-          data-testid="chats-message-body"
-          className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
-        >
-          <MentionText
-            body={openingMessage.body}
-            candidates={mentionCandidates}
-            attachments={openingAttachments}
-            testId="chats-message-body"
-            onOpenPath={props.onOpenPath}
-          />
-        </p>
+            <MentionText
+              body={openingMessage.body}
+              candidates={mentionCandidates}
+              attachments={openingAttachments}
+              testId="chats-message-body"
+              onOpenPath={props.onOpenPath}
+            />
+          </p>
+        )}
+        {openingIsPlain ? (
+          // The title is the whole message. Keep the body node for drivers
+          // that read the message text, without repeating it on screen.
+          <p data-testid="chats-message-body" className="sr-only">
+            {openingMessage.body}
+          </p>
+        ) : null}
         {openingAttachments.length > 0 ? (
           <div
             data-testid="chats-message-attachments"
@@ -727,15 +770,16 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 
       <div
         data-testid="chats-comments-divider"
-        className="mb-1 mt-5 flex items-center gap-2"
+        className="mb-1 mt-5 flex items-center gap-2 border-t border-line pt-3"
       >
-        <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
-          Comments
+        <span className="text-[12px] text-subtle">
+          {commentCount === 0
+            ? "No comments yet"
+            : `${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}
         </span>
-        <span aria-hidden className="h-px flex-1 bg-line" />
       </div>
 
-      <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
+      <ol data-testid="chats-comments" className="m-0 list-none space-y-4 p-0 pt-2">
         {commentTree.map((node) => renderThreadComment(node, 0, null))}
       </ol>
       <div ref={messagesEndRef} />

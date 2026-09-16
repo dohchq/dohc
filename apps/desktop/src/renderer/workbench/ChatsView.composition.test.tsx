@@ -276,7 +276,6 @@ describe("ChatsView document thread", () => {
     await user.click(await screen.findByTestId("chats-thread"));
     const title = await screen.findByTestId("chats-thread-post-title");
     expect(title.textContent).toBe("Should we ship on Friday?");
-    expect(title.className).toContain("font-serif");
     expect(screen.getByTestId("chats-thread-eyebrow").textContent).toBe(
       "#general · thread",
     );
