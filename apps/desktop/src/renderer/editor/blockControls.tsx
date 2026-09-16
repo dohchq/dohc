@@ -1,3 +1,4 @@
+import { mapWidgetOwners } from "./widgetOwnership";
 import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
@@ -97,11 +98,14 @@ function buildBlockControlDecorations(
   onInsertRef: RefObject<(pos: number) => void>,
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
   ghostSlot: DragGhostSlot,
+  owners: Map<number, string>,
+  nextOwnerKey: () => string,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
   doc.forEach((node, offset, index) => {
     const pos = offset;
+    const ownerKey = owners.get(pos) ?? nextOwnerKey();
     decorations.push(
       Decoration.node(pos, pos + node.nodeSize, {
         class: "dohc-block-node",
@@ -111,7 +115,7 @@ function buildBlockControlDecorations(
     decorations.push(
       Decoration.widget(
         pos,
-        (view) => {
+        (view, getPos) => {
           const wrap = document.createElement("span");
           wrap.className = "dohc-block-affordance";
           wrap.setAttribute("data-dohc-block-index", String(index));
@@ -125,7 +129,9 @@ function buildBlockControlDecorations(
           plus.addEventListener("mousedown", stopEditorMouseEvent);
           plus.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            onInsertRef.current(pos);
+            const currentPos = getPos();
+            if (currentPos === undefined) return;
+            onInsertRef.current(currentPos);
           });
 
           const handle = document.createElement("button");
@@ -145,7 +151,12 @@ function buildBlockControlDecorations(
               dragEvent.preventDefault();
               return;
             }
-            const node = view.state.doc.nodeAt(pos);
+            const currentPos = getPos();
+            if (currentPos === undefined) {
+              dragEvent.preventDefault();
+              return;
+            }
+            const node = view.state.doc.nodeAt(currentPos);
             if (!node) {
               dragEvent.preventDefault();
               return;
@@ -155,7 +166,7 @@ function buildBlockControlDecorations(
             removeBlockDragGhost(ghostSlot);
             ghostSlot.current = startBlockDrag(
               view,
-              pos,
+              currentPos,
               handle,
               dragEvent.dataTransfer,
             );
@@ -166,20 +177,22 @@ function buildBlockControlDecorations(
 
           handle.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            if (view.state.doc.nodeAt(pos)) {
+            const currentPos = getPos();
+            if (currentPos === undefined) return;
+            if (view.state.doc.nodeAt(currentPos)) {
               view.dispatch(
                 view.state.tr.setSelection(
-                  NodeSelection.create(view.state.doc, pos),
+                  NodeSelection.create(view.state.doc, currentPos),
                 ),
               );
             }
-            onOpenMenuRef.current(pos, handle.getBoundingClientRect());
+            onOpenMenuRef.current(currentPos, handle.getBoundingClientRect());
           });
 
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${index}-${pos}` },
+        { side: -1, key: `dohc-block-controls-${ownerKey}-${index}`, ownerKey },
       ),
     );
   });
@@ -237,6 +250,8 @@ export function makeBlockControlsPlugin({
 }) {
   let activeBlockIndex: string | null | undefined;
   const ghostSlot: DragGhostSlot = { current: null };
+  let nextId = 0;
+  const nextOwnerKey = () => String(nextId++);
   return new Plugin({
     key: blockControlsKey,
     state: {
@@ -246,6 +261,8 @@ export function makeBlockControlsPlugin({
           onInsertRef,
           onOpenMenuRef,
           ghostSlot,
+          new Map(),
+          nextOwnerKey,
         );
       },
       apply(tr, old) {
@@ -256,6 +273,8 @@ export function makeBlockControlsPlugin({
           onInsertRef,
           onOpenMenuRef,
           ghostSlot,
+          mapWidgetOwners(old, tr.mapping),
+          nextOwnerKey,
         );
       },
     },

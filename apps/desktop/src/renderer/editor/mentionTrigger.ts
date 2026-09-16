@@ -1,5 +1,5 @@
+import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
-import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // Notion-style `@`-mention trigger for page wikilinks.
 //
 // A second trigger surface over the same wikilink node used by the
@@ -11,7 +11,7 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // click-to-open, and broken-link styling all come from the existing
 // node — this module only detects the trigger.
 //
-// Detection mirrors wikilinkPlugin's `detectAutocomplete`: walk to
+// Detection mirrors wikilinkPlugin's `detectAutocomplete`: resolve
 // the text node under the cursor, look at the text before it, apply
 // the same code-block / inline-code-mark exclusions. The one added
 // rule `@` doesn't need: a WORD-BOUNDARY check before the `@` —
@@ -19,7 +19,7 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // in prose (emails, handles), so it must not fire mid-word (e.g.
 // `user@example`).
 
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
 import {
   type AutocompleteState,
@@ -43,26 +43,18 @@ const MENTION_RE = /(?<=^|\s)@([^\s@[]*)$/
 export function detectMentionAutocomplete(
   doc: ProseMirrorNode,
   cursorPos: number,
+  position?: ResolvedPos,
 ): AutocompleteState {
-  let found: AutocompleteState = { active: false }
-  doc.descendants((node, pos, parent) => {
-    if (!node.isText || !node.text) return
-    if (isCodeBlock(parent)) return
-    if (node.marks.some(isCodeMark)) return
-    const nodeStart = pos
-    const nodeEnd = pos + node.text.length
-    if (cursorPos < nodeStart || cursorPos > nodeEnd) return
-    const before = node.text.slice(0, cursorPos - nodeStart)
-    const m = MENTION_RE.exec(before)
-    if (!m) return
-    found = {
-      active: true,
-      from: nodeStart + before.length - m[0].length,
-      query: m[1] ?? '',
-    }
-    return false // stop descending
-  })
-  return found
+  const run = cursorText(doc, cursorPos, position)
+  if (!run) return { active: false }
+  const before = run.text
+  const m = MENTION_RE.exec(before)
+  if (!m) return { active: false }
+  return {
+    active: true,
+    from: run.from + before.length - m[0].length,
+    query: m[1] ?? '',
+  }
 }
 
 /** Build the mention-trigger plugin. Detection-only — no
