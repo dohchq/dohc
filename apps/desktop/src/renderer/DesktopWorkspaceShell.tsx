@@ -4212,6 +4212,10 @@ export function DesktopWorkspaceShell(props: {
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     isChatsTabPath(group.activeTab),
   );
+  // The panel owns chat: it navigates in place and reports its destination
+  // and drafts, the same seam the page uses, so expanding to a tab picks up
+  // where the panel is. While a Chats tab is live the page owns the surface;
+  // the panel goes back to being a navigator that hands clicks to that tab.
   const chatsNavigatorProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -4219,7 +4223,18 @@ export function DesktopWorkspaceShell(props: {
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
     dmReadRevision: chatsDmReadRevision,
-    onOpenInTab: openChatsNavInTab,
+    ...(chatsTabIsLive
+      ? { onOpenInTab: openChatsNavInTab }
+      : {
+          initialNav: chatsNav.current ?? undefined,
+          initialDrafts: chatsDrafts.current ?? undefined,
+          onNavChange: onChatsNav,
+          onNavCommand: onChatsNavCommand,
+          onDraftsChange: onChatsDrafts,
+          onThreadRead: onChatsThreadRead,
+          onThreadStarted: onChatsThreadStarted,
+          onDmRead: onChatsDmRead,
+        }),
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: onChatsError,
