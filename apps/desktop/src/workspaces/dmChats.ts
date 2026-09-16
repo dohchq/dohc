@@ -50,7 +50,7 @@ export async function requireShareableChatChannel(input: {
   workspaceId: string;
   channelId: string;
   store: Pick<LinkedChatStore, "listChannels">;
-}): Promise<void> {
+}): Promise<Awaited<ReturnType<LinkedChatStore["listChannels"]>>[number]> {
   const channel = (await input.store.listChannels({ workspaceId: input.workspaceId })).find(
     (candidate) => candidate.id === input.channelId,
   );
@@ -63,6 +63,7 @@ export async function requireShareableChatChannel(input: {
   if (channel.kind !== "channel") {
     throw new Error("Only ordinary channels can be shared.");
   }
+  return channel;
 }
 
 // The single running conversation (the anti-forum rule): the oldest thread in

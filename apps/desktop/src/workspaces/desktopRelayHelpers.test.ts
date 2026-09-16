@@ -285,6 +285,44 @@ describe("desktop relay helpers", () => {
     ).rejects.toBeInstanceOf(ShareUnavailableError);
   });
 
+  it("reads a group grant as its folder half, at the access the group states", async () => {
+    const body = (access: string) =>
+      Response.json({
+        shareId: "share-group",
+        granterUserId: "user-a",
+        granterEmail: "owner@example.com",
+        genericChatWritable: true,
+        selector: { kind: "group", channelWireId: "wire-g", paths: ["team"], versionId: null },
+        access,
+        createdAtMs: 84,
+      });
+    await expect(
+      fetchShareViewInfo({
+        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body("read-write"))),
+        shareId: "share-group",
+      }),
+    ).resolves.toMatchObject({ selector: { paths: ["team"], versionId: null, access: "edit" } });
+    await expect(
+      fetchShareViewInfo({
+        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body("read-only"))),
+        shareId: "share-group",
+      }),
+    ).resolves.toMatchObject({ selector: { paths: ["team"], versionId: null, access: "view" } });
+    // A file access word on a group is not a group the relay issued.
+    await expect(
+      fetchShareViewInfo({
+        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body("edit"))),
+        shareId: "share-group",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      fetchSharedChannelInfo({
+        relay: relay(vi.fn<typeof globalThis.fetch>(async () => body("read-write"))),
+        shareId: "share-group",
+      }),
+    ).resolves.toMatchObject({ channelWireId: "wire-g", access: "read-write", kind: "group" });
+  });
+
   it("fetches shared-channel information with its access mode", async () => {
     await expect(
       fetchSharedChannelInfo({
@@ -311,6 +349,7 @@ describe("desktop relay helpers", () => {
       granterEmail: null,
       channelWireId: "wire-a",
       access: "read-only",
+      kind: "chat-channel",
       createdAtMs: 84,
     });
   });

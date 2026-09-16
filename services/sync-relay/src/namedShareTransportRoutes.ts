@@ -7,8 +7,11 @@ import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./r
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
-  filterOpForShareAppend,
+  chatHalfOfGroup,
   chatSideOf,
+  fileHalfOfGroup,
+  filterOpForShareAppend,
+  isGroupSelector,
   type ChatShareThreadResolver,
   type ThreadFileBinding,
 } from "./shareFilter";
@@ -69,11 +72,20 @@ export function createNamedShareTransportRoutes(
       }
       const since = parseCursor(url.searchParams.get("since"));
       const limit = parseLimit(url.searchParams.get("limit"));
+      // A group is read one half at a time. The channel pull names the
+      // channel and gets its chat; the folder mount names nothing and gets
+      // its files. Each client refuses the other half's ops, so one page
+      // carrying both would only produce refusals.
+      const served = isGroupSelector(share.selector)
+        ? channelWireId !== null
+          ? chatHalfOfGroup(share.selector)
+          : fileHalfOfGroup(share.selector)
+        : share.selector;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
       const page = filteredLogPage(
         share.workspaceId,
-        share.selector,
+        served,
         since,
         limit,
         "authenticated",

@@ -18,9 +18,10 @@
 
 type ShareRow = Record<string, unknown>;
 
-/** A row whose selector the relay could read, naming a chat-channel grant. */
+/** A row whose selector the relay could read, naming a chat-channel or group grant. */
 export function isReadableChatChannelRow(row: ShareRow): boolean {
-  return (row.selector as { kind?: unknown } | undefined)?.kind === "chat-channel";
+  const kind = (row.selector as { kind?: unknown } | undefined)?.kind;
+  return kind === "chat-channel" || kind === "group";
 }
 
 /** A row the relay could not read at all. */
@@ -35,7 +36,10 @@ export function pathShareLanes(listing: {
   return {
     granted: (listing.granted ?? []).filter((row) => !isReadableChatChannelRow(row)),
     received: (listing.received ?? []).filter(
-      (row) => !isReadableChatChannelRow(row) && row.selectorKind !== "chat-channel",
+      (row) =>
+        !isReadableChatChannelRow(row) &&
+        row.selectorKind !== "chat-channel" &&
+        row.selectorKind !== "group",
     ),
   };
 }

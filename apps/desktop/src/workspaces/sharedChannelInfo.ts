@@ -14,6 +14,8 @@ export interface SharedChannelInfo {
   granterEmail: string | null;
   channelWireId: string;
   access: ChatShareAccess;
+  // A group grant carries the channel's folder too; joining one mounts it.
+  kind: "chat-channel" | "group";
   createdAtMs: number;
 }
 
@@ -52,7 +54,7 @@ export async function fetchSharedChannelInfo(input: {
       ? (body.selector as Record<string, unknown>)
       : {};
   if (
-    selector.kind !== "chat-channel" ||
+    (selector.kind !== "chat-channel" && selector.kind !== "group") ||
     typeof selector.channelWireId !== "string" ||
     selector.channelWireId.length === 0 ||
     !isChatShareAccessValue(body.access)
@@ -65,6 +67,7 @@ export async function fetchSharedChannelInfo(input: {
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     channelWireId: selector.channelWireId,
     access: body.access,
+    kind: selector.kind,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }

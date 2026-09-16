@@ -681,6 +681,7 @@ describe("DM request decisions", () => {
         granterEmail: "granter@example.com",
         channelWireId: "wire-c",
         access: "read-write",
+        kind: "chat-channel" as const,
         createdAtMs: 1,
       }),
       pull,
@@ -705,6 +706,7 @@ describe("DM request decisions", () => {
       granterEmail: "granter@example.com",
       channelWireId: "wire-race",
       access: "read-write" as const,
+      kind: "chat-channel" as const,
       createdAtMs: 1,
     };
     const fetchResolvers: Array<(value: typeof info) => void> = [];
@@ -809,6 +811,7 @@ describe("DM request decisions", () => {
           granterEmail: "owner@example.com",
           channelWireId: "wire-x",
           access: "read-write",
+          kind: "chat-channel" as const,
           createdAtMs: 1,
         }),
         pull: async () => ({ applied: 0 }),
@@ -883,6 +886,7 @@ describe("DM request decisions", () => {
           granterEmail: "owner@example.com",
           channelWireId: "wire-x",
           access: "read-write",
+          kind: "chat-channel" as const,
           createdAtMs: 1,
         }),
         pull: async () => ({ applied: 0 }),
@@ -943,6 +947,7 @@ describe("DM request decisions", () => {
         granterEmail: "x@example.com",
         channelWireId: "wire-x",
         access: "read-write",
+        kind: "chat-channel" as const,
         createdAtMs: 1,
       }),
       pull,
@@ -1026,6 +1031,7 @@ describe("DM request decisions", () => {
         granterEmail: "x@example.com",
         channelWireId: "wire-live",
         access: "read-write",
+        kind: "chat-channel" as const,
         createdAtMs: 1,
       }),
       pull: async () => ({ applied: 0 }),
@@ -1056,7 +1062,7 @@ describe("requireShareableChatChannel", () => {
     });
     await expect(
       requireShareableChatChannel({ workspaceId: WS, channelId: "channel-1", store }),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ id: "channel-1" });
 
     await seed({
       method: CHATS_METHOD.channelCreate,

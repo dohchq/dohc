@@ -80,6 +80,8 @@ export interface ShareMountCommands<WorkspaceSummary> {
   mount(input: {
     workspace: ShareMountCommandWorkspace;
     shareCode: string;
+    // What to call the folder under shared-with-me. Defaults to the granter.
+    labelHint?: string;
     assertCurrent(): void;
   }): Promise<{
     workspace: WorkspaceSummary;
@@ -262,7 +264,7 @@ export function createShareMountCommands<WorkspaceSummary>(
   return {
     filesLifecycle,
 
-    mount({ workspace, shareCode, assertCurrent }) {
+    mount({ workspace, shareCode, labelHint, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
         assertCurrent();
         const parsed = parseShareCode(shareCode);
@@ -323,6 +325,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 storedMounts: existing,
                 onDiskNames: onDisk,
                 granterEmail: info.granterEmail,
+                ...(labelHint === undefined ? {} : { labelHint }),
               }),
               granterEmail: info.granterEmail,
               relayUrl,

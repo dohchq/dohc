@@ -28,7 +28,7 @@ import {
   liveSharedChannelHoldersByShareId, otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId, reserveAndPullSharedChannel,
 } from "../workspaces/dmRequests";
-import { fetchSharedChannelInfo } from "../workspaces/sharedChannelInfo";
+import { fetchSharedChannelInfo, type SharedChannelInfo } from "../workspaces/sharedChannelInfo";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import { shareMountRecordsForId } from "../workspaces/shareMounts";
 import { storedShareMounts } from "../workspaces/shareViewFilesTarget";
@@ -73,6 +73,11 @@ export function registerSharedChannelsIpcHandlers<
   peekReceivedGrantKindForShare(relay: SyncRelayConnection, shareId: string): Promise<DmPeekResult>;
   acknowledgeWorkspaceShareSkips(workspaceId: string, shareId: string | undefined, generation: number): unknown;
   notifyRenderer(input: { workspaceId: string }): void;
+  // Mounts a group's folder under shared-with-me, the way a pasted share
+  // code does. Joining a group is one action: the channel, then its folder.
+  mountShareFolder(input: {
+    workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
+  }): Promise<unknown>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -81,7 +86,7 @@ export function registerSharedChannelsIpcHandlers<
     relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer,
+    notifyRenderer, mountShareFolder,
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
@@ -105,7 +110,7 @@ export function registerSharedChannelsIpcHandlers<
         operation.assertCurrent();
         assertWritableWorkspace(workspace);
         const store = linkedChatStoreFor(workspace);
-        await requireShareableChatChannel({
+        const channel = await requireShareableChatChannel({
           workspaceId: workspace.workspaceId,
           channelId: input.channelId,
           store,
@@ -147,9 +152,12 @@ export function registerSharedChannelsIpcHandlers<
               `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
                 method: "POST",
+                // A channel with a folder is a group: one grant covers
+                // the channel and the folder together.
                 body: JSON.stringify({
                   recipientEmail: input.recipientEmail,
                   channelWireId: wireId,
+                  ...(channel.folderPath ? { paths: [channel.folderPath] } : {}),
                   ...(input.access ? { access: input.access } : {}),
                 }),
               },
@@ -251,7 +259,7 @@ export function registerSharedChannelsIpcHandlers<
     shareId: string;
     recipientUserId: string;
     relayUrl: string;
-    preWrite?: (info: { channelWireId: string }) => void;
+    preWrite?: (info: SharedChannelInfo) => void;
   }): Promise<JoinedSharedChannel> {
     const workspace = input.operation.workspace;
     const assertCurrent = input.assertCurrent ?? input.operation.assertCurrent;
@@ -431,6 +439,15 @@ export function registerSharedChannelsIpcHandlers<
     );
   });
 
+  // The joined channel's name, for the folder's label. A replicated channel
+  // keeps the originating store's channel id, which is its wire id. The
+  // channel was just pulled, so it is in the store; if the pull brought
+  // nothing yet, the label falls back to the granter.
+  async function groupFolderName(workspace: RegistryEntry, channelWireId: string): Promise<string> {
+    const channels = await linkedChatStoreFor(workspace).listChannels({ workspaceId: workspace.workspaceId });
+    return channels.find((channel) => channel.id === channelWireId)?.name ?? "";
+  }
+
   registerHandler(CHANNELS.joinSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = JoinSharedChannelPayload.parse(payload);
@@ -479,6 +496,9 @@ export function registerSharedChannelsIpcHandlers<
           fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
         };
         let joined: JoinedSharedChannel;
+        // Filled by preWrite. Held in an object so the closure's assignment
+        // survives TypeScript's narrowing of a plain `let`.
+        const grant: { info: SharedChannelInfo | null } = { info: null };
         try {
           joined = await reserveAndPullSharedChannelForWorkspace({
             operation,
@@ -487,6 +507,9 @@ export function registerSharedChannelsIpcHandlers<
             shareId: input.shareId,
             recipientUserId: joinedRecipientUserId,
             relayUrl: joinedRelayUrl,
+            preWrite: (info) => {
+              grant.info = info;
+            },
           });
           assertCurrentJoinSession();
         } catch (error) {
@@ -495,6 +518,28 @@ export function registerSharedChannelsIpcHandlers<
             throw new Error("That shared channel isn't available anymore.");
           }
           throw error;
+        }
+        // A group's folder follows its channel. The channel is joined and
+        // its row written, so a folder that cannot be added leaves the chat
+        // usable and says what is missing.
+        if (
+          grant.info?.kind === "group" &&
+          shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length === 0
+        ) {
+          try {
+            await mountShareFolder({
+              workspace: operation.workspace,
+              shareId: input.shareId,
+              relayUrl: joinedRelayUrl,
+              labelHint: await groupFolderName(operation.workspace, joined.channelWireId),
+              assertCurrent: assertCurrentJoinSession,
+            });
+          } catch (error) {
+            assertCurrentJoinSession();
+            const reason = error instanceof Error ? error.message : String(error);
+            throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
+          }
+          assertCurrentJoinSession();
         }
         return JoinSharedChannelResult.parse({
           joined: { ...joined, ended: false },

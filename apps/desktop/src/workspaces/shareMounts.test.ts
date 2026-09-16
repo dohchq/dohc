@@ -242,6 +242,15 @@ describe("mount labels", () => {
     // classifier would suppress (prod.env -> secret).
     expect(allocate("prod.env@example.com")).toBe("prod-env");
     expect(allocate(".env@example.com")).toBe("env");
+    // A group's folder is labeled by its channel name.
+    expect(
+      allocateShareMountLabel({
+        storedMounts: [],
+        onDiskNames: ["launch-team"],
+        granterEmail: "alex@example.com",
+        labelHint: "Launch Team",
+      }),
+    ).toBe("launch-team (2)");
   });
 
   it("reserves every string label held by damaged registry records", () => {

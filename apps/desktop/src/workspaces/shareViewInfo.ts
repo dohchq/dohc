@@ -9,6 +9,7 @@ import {
   ShareUnavailableError,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
 
 export interface ShareViewSelector {
   paths: string[];
@@ -88,6 +89,25 @@ function parseSelector(
     versionId?: unknown;
   };
   if (record.kind === "chat-channel") return null;
+  if (record.kind === "group") {
+    // A group's folder half. The relay states one access for the whole
+    // group: read-write edits the folder, read-only views it. The channel
+    // half is joined from Chats and never reaches a mount.
+    if (
+      !Array.isArray(record.paths) ||
+      record.paths.length === 0 ||
+      !isShareablePathList(record.paths) ||
+      (record.versionId !== null && record.versionId !== undefined) ||
+      !isChatShareAccessValue(access)
+    ) {
+      throw new ShareSelectorInvalidError(shareId);
+    }
+    return {
+      paths: record.paths as string[],
+      versionId: null,
+      access: access === "read-write" ? "edit" : "view",
+    };
+  }
   if (!Array.isArray(record.paths)) throw new ShareSelectorInvalidError(shareId);
   // Same shared rule as the registry read-back: a path the relay could not
   // have issued is a response this client cannot enforce.

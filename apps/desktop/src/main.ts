@@ -197,7 +197,7 @@ import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
 import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
-import { relayUrlsMatch } from "./workspaces/syncCode";
+import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
 import {
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
@@ -4135,6 +4135,13 @@ function registerIpcHandlers(): void {
     peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
+    mountShareFolder: ({ workspace, shareId, relayUrl, labelHint, assertCurrent }) =>
+      shareMountCommands.mount({
+        workspace,
+        shareCode: buildShareCode({ shareId, relayUrl }),
+        ...(labelHint.length > 0 ? { labelHint } : {}),
+        assertCurrent,
+      }),
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({

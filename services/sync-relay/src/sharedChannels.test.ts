@@ -187,7 +187,7 @@ describe("a group share is one grant for the channel and its folder", () => {
         metadata: { origin: "user" },
         beforePresent: "null",
       });
-    const files = await h(
+    const written = await h(
       request(
         OWNER,
         `/sync/${WORKSPACE}/log`,
@@ -197,20 +197,41 @@ describe("a group share is one grant for the channel and its folder", () => {
         }),
       ),
     );
-    expect(files.status).toBe(200);
+    expect(written.status).toBe(200);
 
     const shareId = await createGroupShare(h, MEMBER_A);
-    const ops = await fetchSharePage(h, MEMBER_A, shareId);
-    const kinds = ops.map((op: { opKind: string }) => op.opKind);
-    expect(kinds).toContain("chat.channel.create");
-    expect(kinds).toContain("chat.message.append");
-    expect(kinds).toContain("moment.append");
-    const bodies = JSON.stringify(ops);
-    expect(bodies).toContain("welcome to the shared channel");
-    expect(bodies).toContain("team/plan.md");
-    expect(bodies).not.toContain("SENTINEL");
-    expect(bodies).not.toContain("private");
-    expect(bodies).not.toContain(".env.local");
+    // The folder half is what a mount pulls: it names no channel.
+    const files = await fetchSharePage(h, MEMBER_A, shareId);
+    const fileKinds = files.map((op) => op.opKind);
+    expect(fileKinds).toContain("moment.append");
+    expect(fileKinds.some((kind) => kind.startsWith("chat."))).toBe(false);
+    const fileBodies = JSON.stringify(files);
+    expect(fileBodies).toContain("team/plan.md");
+    expect(fileBodies).not.toContain("SENTINEL");
+    expect(fileBodies).not.toContain("private");
+    expect(fileBodies).not.toContain(".env.local");
+    // The chat half is what the channel pull names.
+    const chatResponse = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${SHARED_WIRE}`,
+      ),
+    );
+    expect(chatResponse.status).toBe(200);
+    const chat = (await json(chatResponse)).ops as Array<{ opKind: string }>;
+    const chatKinds = chat.map((op) => op.opKind);
+    expect(chatKinds).toContain("chat.channel.create");
+    expect(chatKinds).toContain("chat.message.append");
+    expect(chatKinds).not.toContain("moment.append");
+    const chatBodies = JSON.stringify(chat);
+    expect(chatBodies).toContain("welcome to the shared channel");
+    expect(chatBodies).not.toContain("SENTINEL");
+    expect(chatBodies).not.toContain("team/plan.md");
+    // Naming another channel is a miss, as it is for a channel share.
+    const other = await h(
+      request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=wire-other`),
+    );
+    expect(other.status).toBe(404);
 
     // The recipient posts into the group's channel through the same grant.
     const append = await h(

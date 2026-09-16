@@ -72,14 +72,15 @@ export function validMountLabel(label: unknown): label is string {
   return validated.ok && validated.normalized === label && !label.includes("/");
 }
 
-// Derive a mount label from the granter: the email local part reduced to a
-// conservative charset, deduplicated against existing labels the same way
-// imports deduplicate basenames ("alex", "alex (2)", …).
+// Derive a mount label from a name: the granter's email local part, or a
+// group's channel name. The name is reduced to a conservative charset and
+// deduplicated against existing labels the same way imports deduplicate
+// basenames ("alex", "alex (2)", …).
 function mountLabelFor(
-  granterEmail: string | null,
+  name: string | null,
   existingLabels: readonly string[],
 ): string {
-  const localPart = (granterEmail ?? "").split("@")[0] ?? "";
+  const localPart = (name ?? "").split("@")[0] ?? "";
   let base =
     localPart
       .toLowerCase()
@@ -142,8 +143,10 @@ export function allocateShareMountLabel<Mount>(input: {
   storedMounts: readonly Mount[];
   onDiskNames: readonly string[];
   granterEmail: string | null;
+  // A group's folder is labeled by its channel name, not its granter.
+  labelHint?: string;
 }): string {
-  return mountLabelFor(input.granterEmail, [
+  return mountLabelFor(input.labelHint ?? input.granterEmail, [
     ...reservedShareMountLabels(input.storedMounts),
     ...input.onDiskNames,
   ]);

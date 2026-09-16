@@ -475,7 +475,12 @@ function mapRelayShareListing(
     const selector = row.selector as
       | { kind?: unknown; channelWireId?: unknown }
       | undefined;
-    if (selector?.kind !== "chat-channel" || typeof selector.channelWireId !== "string") {
+    const kind = selector?.kind;
+    if (
+      !selector ||
+      (kind !== "chat-channel" && kind !== "group") ||
+      typeof selector.channelWireId !== "string"
+    ) {
       return null;
     }
     // A readable chat selector whose grant access is unreadable is a

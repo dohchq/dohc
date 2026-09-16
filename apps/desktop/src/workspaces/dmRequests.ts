@@ -339,7 +339,7 @@ export async function reserveAndPullSharedChannel(input: {
     run: () => Promise<void>,
   ) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
-  preWrite?: (info: { channelWireId: string }) => void;
+  preWrite?: (info: SharedChannelInfo) => void;
 }): Promise<JoinedSharedChannel> {
   const info = await input.fetchInfo({
     relay: input.relay,
