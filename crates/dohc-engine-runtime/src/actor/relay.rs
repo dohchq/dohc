@@ -402,6 +402,10 @@ impl RelayTransport for DeferredRelayTransport {
 }
 
 #[cfg(test)]
+#[path = "relay_bench.rs"]
+mod relay_bench;
+
+#[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
 
