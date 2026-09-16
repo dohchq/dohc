@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createDebouncedSaver,
   initialChromeTheme,
+  MANAGER_WINDOW_SIZE,
   parseWindowState,
   planWindowPlacement,
   serializeWindowState,
@@ -39,6 +40,18 @@ describe("parseWindowState", () => {
     expect(
       parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}'),
     ).toBeNull();
+  });
+
+  it("round-trips the manager default against the manager minimum", () => {
+    const manager: WindowState = {
+      bounds: { x: 100, y: 80, ...MANAGER_WINDOW_SIZE },
+      isMaximized: false,
+    };
+    const raw = serializeWindowState(manager);
+    expect(parseWindowState(raw, MANAGER_WINDOW_SIZE)).toEqual(manager);
+    // The workspace minimum is taller than the manager default; it still
+    // guards workspace windows.
+    expect(parseWindowState(raw)).toBeNull();
   });
 
   it("round-trips the chrome theme and drops foreign theme values", () => {

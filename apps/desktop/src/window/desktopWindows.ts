@@ -296,7 +296,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   let managerWindow: BrowserWindow | null = null;
   function showOrCreateManagerWindow(): BrowserWindow {
     if (managerWindow && !managerWindow.isDestroyed()) {
-      managerWindow.focus();
+      focusShareHandoffWindow(managerWindow);
       return managerWindow;
     }
     const window = createMainWindow({
@@ -318,7 +318,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   ): Promise<BrowserWindow> {
     const existing = workspaceWindows.allLive().find(isShowing);
     if (existing) {
-      existing.focus();
+      focusShareHandoffWindow(existing);
       return existing;
     }
     const window = trackWorkspaceWindow(

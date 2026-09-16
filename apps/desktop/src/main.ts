@@ -1445,12 +1445,7 @@ function registerReservedPhysicalWorkspace(
 // registry row. The folder is untouched; opening it again re-adopts the
 // manifest and its identity.
 async function forgetWorkspace(workspaceId: string): Promise<void> {
-  const lease = workspaceAuthorities.acquire(workspaceId);
-  try {
-    await removePhysicalWorkspace(lease.binding);
-  } finally {
-    lease.release();
-  }
+  await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
   notifyRenderer();
 }
 

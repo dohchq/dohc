@@ -190,6 +190,27 @@ describe("desktop workspace windows", () => {
     expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
   });
 
+  it("restores a minimized manager window instead of creating a second one", () => {
+    const f = fixture();
+    const first = f.windows.showOrCreateManagerWindow();
+    const native = f.all[0]!;
+    expect(f.createdOptions[0]?.role).toBe("manager");
+    native.minimized = true;
+    expect(f.windows.showOrCreateManagerWindow()).toBe(first);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    expect(native.restore).toHaveBeenCalledOnce(); expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([]);
+  });
+
+  it("restores a minimized window already showing the workspace instead of creating one", async () => {
+    const f = fixture(); const existing = new Window(); existing.minimized = true;
+    f.windows.trackWorkspaceWindow(existing.native);
+    expect(await f.windows.openWorkspaceInWindow(workspace("a"), (window) => window === existing.native)).toBe(existing.native);
+    expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
+    expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
+    expect(existing.webContents.send).not.toHaveBeenCalled();
+  });
+
   it("re-prioritizes an accepted reload only after the actual renderer retirement drains", async () => {
     const f = fixture(); const sender = new Contents(); const held = deferred();
     const rows = [workspace("a"), workspace("b")];

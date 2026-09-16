@@ -34,14 +34,19 @@ export function DesktopRoot() {
       await bridge().getWorkspaceRegistry(),
     );
     if (request < committedRegistryRequest.current) return registry.workspaces;
+    // Whichever response commits first is startup: it may pick the opening
+    // workspace, since the mount read below loses if this one wins.
+    const startup = committedRegistryRequest.current === 0;
     committedRegistryRequest.current = request;
     setWorkspaces(registry.workspaces);
     // An open workspace that left the registry (forgotten, or its binding
     // retired) must not keep the shell alive with nothing to open: drop to
-    // first run, or to whichever workspace remains.
+    // first run, or to whichever workspace remains. Once first run is
+    // visible, a newly registered workspace is only listed; a join or share
+    // still populating it activates it when it finishes.
     setWorkspace((current) => {
-      if (registry.workspaces.length === 0) return null;
-      if (!current) return registry.workspaces[0] ?? null;
+      if (startup) return current ?? registry.workspaces[0] ?? null;
+      if (!current || registry.workspaces.length === 0) return null;
       return (
         registry.workspaces.find((candidate) => candidate.workspaceId === current.workspaceId) ??
         registry.workspaces[0] ??
@@ -204,12 +209,11 @@ export function DesktopRoot() {
         onDismissShareHandoff={dismissShareHandoff}
         onShareHandoffOpened={dismissShareHandoff}
         onForgot={refreshWorkspaceRegistry}
-        onOpenWorkspace={(next) => {
-          void bridge()
+        onOpenWorkspace={(next) =>
+          bridge()
             .openWorkspaceWindow({ workspaceId: next.workspaceId })
             .then(() => bridge().closeThisWindow())
-            .catch(() => undefined);
-        }}
+        }
       />
     );
   }

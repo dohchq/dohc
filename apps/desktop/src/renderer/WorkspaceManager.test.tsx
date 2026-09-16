@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Workspace } from "./DesktopWorkspaceShell";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
 
 const bridge = {
@@ -293,6 +294,37 @@ describe("workspace manager with registered workspaces", () => {
     expect(bridge.forgetWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-b" });
     expect(onForgot).toHaveBeenCalledOnce();
     expect(await screen.findByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
+  });
+
+  it("stays open with the reason when opening fails, then lets the person retry", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi
+      .fn<(workspace: Workspace) => Promise<void>>()
+      .mockRejectedValueOnce(
+        new Error("Error invoking remote method 'desktop:open-workspace-window': Error: That folder is gone."),
+      )
+      .mockResolvedValueOnce(undefined);
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} />,
+    );
+    await user.click(await screen.findByText("team"));
+    expect((await screen.findByRole("alert")).textContent).toBe("That folder is gone.");
+    expect(screen.getAllByTestId("workspace-manager-row")).toHaveLength(2);
+
+    await user.click(screen.getByText("team"));
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("shows a failed open from the create route instead of dropping it", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn(async () => {
+      throw new Error("No window for that workspace.");
+    });
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onOpen} />);
+    await user.click(await screen.findByRole("button", { name: /create workspace/i }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("No window for that workspace.");
   });
 
   it("reveals a workspace folder from the row menu", async () => {

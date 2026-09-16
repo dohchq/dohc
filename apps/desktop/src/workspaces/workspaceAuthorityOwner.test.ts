@@ -348,6 +348,23 @@ describe("workspace authority owner", () => {
     expect(removeBinding).toHaveBeenCalledOnce();
   });
 
+  it("retires a binding looked up by id without a lease holding retirement open", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "A",
+    });
+    const binding = test.owner.currentBinding("workspace");
+    const removeBinding = vi.fn(() => test.replace(null));
+
+    await test.owner.retireBinding(binding, { removeBinding });
+
+    expect(removeBinding).toHaveBeenCalledOnce();
+    expect(test.disposed).toEqual([binding.attachmentId]);
+    expect(test.owner.workspaceIds()).toEqual([]);
+    expect(() => test.owner.currentBinding("workspace")).toThrow("Unknown workspace");
+  });
+
   it("keeps the registry and tombstone until every finalizer finishes", async () => {
     let workspace: Workspace | null = {
       workspaceId: "workspace",

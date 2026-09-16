@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { ipcErrorMessage } from "./ipcError";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
@@ -143,7 +144,7 @@ function WorkspaceRow(props: {
         {props.workspace.lastOpenedAt !== undefined ? (
           <time
             dateTime={new Date(props.workspace.lastOpenedAt).toISOString()}
-            className={`col-start-1 row-start-1 text-[11px] tabular-nums text-subtle transition-opacity ${
+            className={`pointer-events-none col-start-1 row-start-1 text-[11px] tabular-nums text-subtle transition-opacity ${
               menuOpen ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
             }`}
           >
@@ -200,7 +201,8 @@ export function WorkspaceManager(props: {
   // The workspace open behind the manager, when there is one. Back returns
   // to it; forgetting it drops to whatever remains.
   current: Workspace | null;
-  onOpenWorkspace: (workspace: Workspace) => void;
+  // May reject: the manager stays open and shows why.
+  onOpenWorkspace: (workspace: Workspace) => void | Promise<void>;
   onForgot: () => Promise<unknown>;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
@@ -228,11 +230,20 @@ export function WorkspaceManager(props: {
     setOpeningShare(false);
   }, [handoffStatus.status]);
 
+  async function open(workspace: Workspace) {
+    setError(null);
+    try {
+      await props.onOpenWorkspace(workspace);
+    } catch (cause) {
+      setError(ipcErrorMessage(cause, "Couldn't open the workspace."));
+    }
+  }
+
   async function openExisting() {
     setError(null);
     try {
       const workspace = await openExistingFolder();
-      if (workspace) props.onOpenWorkspace(workspace);
+      if (workspace) await open(workspace);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -259,21 +270,22 @@ export function WorkspaceManager(props: {
     }
   }
 
+  const onWorkspaceReady = (workspace: Workspace) => void open(workspace);
   const routes =
     handoffStatus.status !== "idle" ? (
       <ShareHandoffSurface
         status={handoffStatus}
-        onWorkspaceReady={props.onOpenWorkspace}
+        onWorkspaceReady={onWorkspaceReady}
         onBack={() => props.onDismissShareHandoff?.()}
         onOpened={() => props.onShareHandoffOpened?.()}
       />
     ) : joining ? (
-      <JoinSyncedWorkspace onWorkspaceReady={props.onOpenWorkspace} onBack={() => setJoining(false)} />
+      <JoinSyncedWorkspace onWorkspaceReady={onWorkspaceReady} onBack={() => setJoining(false)} />
     ) : openingShare ? (
-      <OpenSharedView onWorkspaceReady={props.onOpenWorkspace} onBack={() => setOpeningShare(false)} />
+      <OpenSharedView onWorkspaceReady={onWorkspaceReady} onBack={() => setOpeningShare(false)} />
     ) : (
       <div className="flex w-full flex-col gap-5">
-        <NewWorkspaceCard onWorkspaceReady={props.onOpenWorkspace} />
+        <NewWorkspaceCard onWorkspaceReady={onWorkspaceReady} />
         <div className="flex flex-col divide-y divide-line">
           <RouteRow
             icon={<FolderOpen size={15} strokeWidth={1.9} aria-hidden />}
@@ -300,11 +312,6 @@ export function WorkspaceManager(props: {
             onClick={() => setOpeningShare(true)}
           />
         </div>
-        {error ? (
-          <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-            {error}
-          </p>
-        ) : null}
       </div>
     );
 
@@ -329,7 +336,7 @@ export function WorkspaceManager(props: {
                   key={workspace.workspaceId}
                   workspace={workspace}
                   current={workspace.workspaceId === props.current?.workspaceId}
-                  onOpen={() => props.onOpenWorkspace(workspace)}
+                  onOpen={() => void open(workspace)}
                   onReveal={() => void reveal(workspace)}
                   onForget={() => void forget(workspace)}
                 />
@@ -386,6 +393,13 @@ export function WorkspaceManager(props: {
           <div className="m-auto flex w-105 max-w-full flex-col items-center gap-8">
             <DohcMark size={32} className="text-ink" />
             {routes}
+            {/* Below every route: a failed open from the list or a finished
+                route must stay visible with the manager. */}
+            {error ? (
+              <p role="alert" className="m-0 w-full text-xs leading-relaxed text-danger">
+                {error}
+              </p>
+            ) : null}
           </div>
         </div>
       </div>

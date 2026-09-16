@@ -81,9 +81,9 @@ export function OpenSharedView(props: {
   );
   const [code, setCode] = useState("");
   // The folder the person chose, or the default dohc suggested for this
-  // share. `chosen` wins; `suggested` follows the share id.
+  // share. `chosen` wins; `suggested` counts only for the share it answers.
   const [chosen, setChosen] = useState<string | null>(null);
-  const [suggested, setSuggested] = useState<string | null>(null);
+  const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
   const [mode, setMode] = useState<"mount" | "separate">(
     props.mountInto && !props.liveEditing ? "mount" : "separate",
   );
@@ -129,17 +129,15 @@ export function OpenSharedView(props: {
   const shareId = props.resolvedShare?.shareId ?? parseShareCode(shareCode)?.shareId ?? null;
 
   // Ask main for the default folder whenever the share id changes. Main
-  // approves the path, so opening into it needs no dialog.
+  // approves the path, so opening into it needs no dialog. Any change
+  // retires the request in flight, so an old answer never lands.
   useEffect(() => {
-    if (mounting || shareId === null) {
-      setSuggested(null);
-      return;
-    }
     const request = suggestRequestRef.next();
+    if (mounting || shareId === null) return;
     void bridge()
       .getDefaultShareRoot({ shareId })
       .then((root) => {
-        if (suggestRequestRef.isCurrent(request)) setSuggested(root);
+        if (suggestRequestRef.isCurrent(request)) setSuggested({ shareId, root });
       })
       .catch(() => {
         if (suggestRequestRef.isCurrent(request)) setSuggested(null);
@@ -148,7 +146,8 @@ export function OpenSharedView(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounting, shareId]);
 
-  const folder = chosen ?? suggested;
+  const folder =
+    chosen ?? (!mounting && suggested?.shareId === shareId ? suggested.root : null);
 
   async function chooseFolder() {
     const request = folderRequestRef.next();

@@ -130,7 +130,10 @@ function loadPlacement(role: WindowRole = "workspace") {
   } catch {
     // First launch / unreadable state: centered default.
   }
-  const state = parseWindowState(raw);
+  const state = parseWindowState(
+    raw,
+    role === "manager" ? MANAGER_WINDOW_SIZE : MIN_WINDOW_SIZE,
+  );
   const displays = screen.getAllDisplays().map((display) => display.bounds);
   return {
     ...planWindowPlacement(state, displays),
