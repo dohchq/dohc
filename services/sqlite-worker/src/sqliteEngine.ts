@@ -445,23 +445,27 @@ export async function createSqliteEngine() {
       const { tableName, snapshot, bytes } = result
       const sourceHash = sha256Hex(input.body)
       const table = snapshot[tableName]
-      return {
-        ok: true as const,
-        tableName,
-        sourceMediaType: input.mediaType,
-        rowCount: table.rows.length,
-        sourceHash,
-        tableSchema: table.columns,
-        snapshot,
-        operation: {
-          op: 'import_data',
-          table: tableName,
+      try {
+        return {
+          ok: true as const,
+          tableName,
+          sourceMediaType: input.mediaType,
           rowCount: table.rows.length,
           sourceHash,
-        },
-        bytesBase64: bytes.toString('base64'),
-        size: bytes.byteLength,
-        sha256: sha256Hex(bytes),
+          tableSchema: table.columns,
+          snapshot,
+          operation: {
+            op: 'import_data',
+            table: tableName,
+            rowCount: table.rows.length,
+            sourceHash,
+          },
+          bytesBase64: bytes.toString('base64'),
+          size: bytes.byteLength,
+          sha256: sha256Hex(bytes),
+        }
+      } catch (cause) {
+        return error('sqlite-materialize-failed', cause instanceof Error ? cause.message : 'Could not materialize SQLite database.')
       }
     },
   }
