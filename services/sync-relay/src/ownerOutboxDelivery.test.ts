@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
-import { drainOwnerOutbox } from "./ownerOutboxDelivery.js";
+import { drainOwnerOutbox, type OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -47,7 +47,8 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000) {
     readLiveUpdateJournalCut: () => ({kind: "cut",cut: {checkpoint: {bytes: new Uint8Array([0,0])},suffix: []}}),
     commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => ({result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}})),
   };
-  return {requests,receipts,storage,state,applyThrough,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate: () => ({} as never)},workspace: "handle",host: host as never,registrationId: 1,binding,nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
+  const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
+  return {requests,receipts,storage,state,applyThrough,validate,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate},workspace: "handle",host: host as never,registrationId: 1,binding,nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
 
 it("drains small edits when their immutable base exceeds the aggregate drain budget", async () => {
@@ -133,4 +134,17 @@ it.each([
   f.applyThrough.mockImplementationOnce(async receipt => ({...receipt,localYDocSequence: 1,applicationReplayed: true,...changed}) as LiveUpdateHostApplicationAck);
   await expect(f.run()).rejects.toThrow("ACK identity changed");
   expect(f.receipts).toEqual([]);
+});
+
+it("waits for worker capacity without committing or acknowledging and resumes the same head", async () => {
+  const f = fixture(1); let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => {entered = resolve;});
+  const capacity = new Promise<void>(resolve => {release = resolve;});
+  f.validate.mockReturnValueOnce({kind: "retry", reason: "admission-unavailable", waitForCapacity: () => {entered(); return capacity;}});
+  const first = f.run(); await waiting;
+  expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  expect(f.receipts).toEqual([]);
+  release(); expect(await first).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}]);
 });

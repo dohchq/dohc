@@ -177,3 +177,10 @@ it("checks owner standing before returning an earlier application error", async 
   expect(f.outboxAcks).toEqual([]);
   expect(f.retained).toEqual(f.ownerEntries);
 });
+
+it("schedules another owner pass after worker capacity returns even without prior progress", async () => {
+  const f = fixture();
+  vi.mocked(drainOwnerOutbox).mockResolvedValueOnce({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "pending", continueDrain: true});
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done", continueDrain: false});
+});

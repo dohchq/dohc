@@ -1,5 +1,6 @@
 import { createLiveFrameSession, type LiveFrameSessionPolicy } from "@dohc/live-session-contract/live-frame";
-import { createLiveMarkdownJournalValidator, type OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import { liveValidation } from "./liveValidation.js";
 import { parseNamedLiveRouteLimits } from "./namedLiveRoutes.js";
 import type { NamedFrameHostBounds } from "./namedLiveFrameHost.js";
 
@@ -29,7 +30,7 @@ export function parseNamedLiveConfig(value: unknown) {
   const validation = record(config.validation, ["maxStructVisits", "maxValueNodeVisits", "maxDecodedPayloadByteVisits", "maxStructClientGroupVisits",
     "maxDeleteClientGroupVisits", "maxDeleteIntervalVisits", "maxIndexOperations"]) as unknown as OrderedLiveUpdateCutPolicy;
   for (const number of Object.values(validation)) positive(number);
-  const validate = createLiveMarkdownJournalValidator(validation);
+  const validate = liveValidation.validator(validation);
   const maxListeners = positive(config.maxListeners);
   if (maxListeners < 2 * transport.maxConnections || transport.maxPendingBytes < frames.receive.maxFrameBytes) throw new TypeError("Named transport budgets cannot cover configured connections and frames.");
   return { tickets, transport, frames, host, validate, maxListeners };

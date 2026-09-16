@@ -18,7 +18,11 @@ On September 12, 2026, the owner chose to reconsider that promise in favor of th
 
 ## Builds remain a separate trust boundary
 
-Builds are part of the trust boundary: Vite runs arbitrary code at build time through config, plugins, and dependency hooks, so builds never run inside `share-web`. The build trust model (owner builds locally, a fixed no-plugin compiler, or an isolated credential-free builder) is chosen when the app phase is planned. The local option is acceptable only sandboxed — credential-free, network-denied, limited to declared build inputs — because in a shared workspace, building app source someone else edited is running their code with the owner's authority.
+The implementation uses a fixed compiler with no app-provided config, plugins, dependency hooks, or source execution. It reads captured, declared inputs and bundles approved dependencies. Builds never run inside `share-web`.
+
+The installed compiler currently supports Windows x64. Its process supervisor limits memory, child processes, and execution time and supplies a minimal environment. It does not enforce OS network denial. The boundary relies on the fixed compiler not executing app code; it is not a sandbox for arbitrary build scripts.
+
+A future arbitrary-code builder must be credential-free, network-denied, and limited to declared inputs before it can run shared source. The current fixed compiler does not authorize adding app-provided build hooks.
 
 ## Phase boundary
 

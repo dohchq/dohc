@@ -10,7 +10,7 @@ const outdir = fileURLToPath(new URL("../dist", import.meta.url));
 
 await rm(outdir, { recursive: true, force: true });
 await build({
-  entryPoints: { main: entry, "device-host-connect": connectEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
+  entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
   outdir,
   bundle: true,
   platform: "node",

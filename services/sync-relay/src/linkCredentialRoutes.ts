@@ -232,7 +232,7 @@ export function createLinkCredentialRoutes(
     const replaced = storage.replaceLinkSession({
       currentSession: current.session,
       session: {
-        sessionId: newId(),
+        sessionId: current.session.sessionId,
         capabilityHash: hashLinkBearer(capabilityToken, refreshLinkKey),
         grantId: authorized.grant.grantId,
         generation: authorized.grant.generation,

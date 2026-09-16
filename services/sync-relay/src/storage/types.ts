@@ -51,7 +51,7 @@ export interface CurrentLiveBindingRequest {
   readonly actor:
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
-    | { readonly kind: "link"; readonly sessionId: string; readonly capabilityHash: string;
+    | { readonly kind: "link"; readonly sessionId: string;
         readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 

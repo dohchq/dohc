@@ -495,7 +495,7 @@ export function replaceLinkSession(storage: StorageContext, input: {
     if (
       !currentSession.capabilityHash ||
       !session.capabilityHash ||
-      currentSession.sessionId === session.sessionId ||
+      currentSession.sessionId !== session.sessionId ||
       currentSession.capabilityHash === session.capabilityHash ||
       currentSession.grantId !== session.grantId ||
       currentSession.generation !== session.generation ||
@@ -508,57 +508,13 @@ export function replaceLinkSession(storage: StorageContext, input: {
     }
     return storage.tx(() => {
       input.guard();
-      const storedCurrent = storage.db
-        .prepare(
-          `SELECT principal_id
-           FROM sync_relay_link_sessions
-           WHERE session_id = ?
-             AND capability_hash = ?
-             AND grant_id = ?
-             AND generation = ?
-             AND expires_at_ms >= ?`,
-        )
-        .get(
-          currentSession.sessionId,
-          currentSession.capabilityHash,
-          currentSession.grantId,
-          currentSession.generation,
-          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
-        );
-      if (!storedCurrent) return false;
-      const retired = storage.db
-        .prepare(
-          `DELETE FROM sync_relay_link_sessions
-           WHERE session_id = ?
-             AND capability_hash = ?
-             AND grant_id = ?
-             AND generation = ?
-             AND expires_at_ms >= ?`,
-        )
-        .run(
-          currentSession.sessionId,
-          currentSession.capabilityHash,
-          currentSession.grantId,
-          currentSession.generation,
-          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
-        );
-      if (Number(retired.changes ?? 0) !== 1) return false;
-      storage.db
-        .prepare(
-          `INSERT INTO sync_relay_link_sessions (
-             session_id, capability_hash, grant_id, generation, minted_at_ms,
-             expires_at_ms, principal_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          session.sessionId,
-          session.capabilityHash,
-          session.grantId,
-          session.generation,
-          Math.trunc(session.mintedAtMs),
-          Math.trunc(session.expiresAtMs),
-          storedCurrent.principal_id ?? null,
-        );
+      const replaced = storage.db.prepare(`UPDATE sync_relay_link_sessions
+        SET capability_hash=?, minted_at_ms=?, expires_at_ms=?
+        WHERE session_id=? AND capability_hash=? AND grant_id=? AND generation=? AND expires_at_ms>=?`)
+        .run(session.capabilityHash, Math.trunc(session.mintedAtMs), Math.trunc(session.expiresAtMs),
+          currentSession.sessionId, currentSession.capabilityHash, currentSession.grantId, currentSession.generation,
+          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
+      if (Number(replaced.changes ?? 0) !== 1) return false;
       upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
       return true;
     });

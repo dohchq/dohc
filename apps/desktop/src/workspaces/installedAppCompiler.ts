@@ -8,7 +8,7 @@ export async function createInstalledAppCompiler(resourcesRoot: string) {
   if (!isAbsolute(resourcesRoot)) throw new Error("Compiler resources path must be absolute.");
   const root = join(resourcesRoot, "app-compiler");
   if (process.platform !== "win32" || process.arch !== "x64") {
-    throw new Error("App compilation is not available on this platform.");
+    throw new Error("Publishing apps currently requires Windows x64.");
   }
   // This installed module and its dependencies stay outside app.asar. It
   // resolves the worker and supervisor assets relative to its own location.

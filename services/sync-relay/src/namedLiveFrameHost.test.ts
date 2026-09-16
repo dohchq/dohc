@@ -390,3 +390,24 @@ it("checks authority globally while waking native readers only for their documen
   changes.notify({...binding, workspaceId: "other-workspace"}); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledTimes(3); expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
 });
+
+it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {
+  const f = await setup(), commit = journal(f), waiting = deferred<void>();
+  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate: async () => {await waiting.promise; return {kind: "refused", reason: "invalid-update", source: "candidate"};}});
+  cleanup.push(async () => capture.close());
+  const submitting = capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run(scope.grantId);
+  waiting.resolve(); await expect(submitting).rejects.toThrow("standing changed");
+  expect(commit).not.toHaveBeenCalled();
+});
+
+it("returns transient worker saturation as retry before calling the journal commit", async () => {
+  const f = await setup(), commit = journal(f);
+  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate: () => ({kind: "retry", reason: "admission-unavailable", waitForCapacity: async () => {}})});
+  cleanup.push(async () => capture.close());
+  expect(await capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .toEqual({result: "retry", reason: "admission-unavailable"});
+  expect(commit).not.toHaveBeenCalled();
+});

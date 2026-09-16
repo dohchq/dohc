@@ -15,7 +15,7 @@ function request(body: unknown = metadata, path = "/api/live/link-document", hea
 }
 function fixture(fetchRelay = vi.fn(async (_request: Request) => Response.json({objectId: "object-a"}))) {
   const resolveMaterial = vi.fn(async (_discriminator: string, _cookie: string | null, _signal: AbortSignal) =>
-    ({ok: true as const, capabilityToken, profileSecret, setCookie: null}));
+    ({ok: true as const, capabilityToken, profileSecret, setCookie: null,currentCapability:async()=>capabilityToken}));
   return {fetchRelay, resolveMaterial, client: createLinkLiveClient({relayUrl: "https://relay.example.test", publicOrigin: origin,
     exchangeKey, limits, browserLimits, resolveMaterial, fetchRelay})};
 }
