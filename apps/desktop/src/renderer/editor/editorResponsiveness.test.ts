@@ -9,11 +9,33 @@ import { detectAutocomplete, makeWikilinkPlugin, wikilinkPluginKey, type Wikilin
 import { detectMentionAutocomplete } from "./mentionTrigger";
 import { detectCompleteEmojiShortcode, detectEmojiAutocomplete } from "./emojiTrigger";
 import { makeTriggerPlugin } from "./triggerPlugin";
+import { makeBlockControlsPlugin } from "./blockControls";
 import { makeCodeBlockChromePlugin } from "./codeBlockChrome";
 import { makeCalloutChromePlugin } from "./calloutChrome";
+import { makeSlashCommandPlugin, CLOSED_SLASH_COMMAND_STATE } from "./slashCommands";
+import { makeHeadingFlashPlugin } from "./OutlinePanel";
+import { makeLinkMenuPlugin, CLOSED_LINK_MENU_STATE } from "./linkMenu";
+import { makeBlockExitPlugin } from "./blockExit";
+import { makeCodeBlockContinuationPlugin, makeEmptyListItemFocusPlugin } from "./codeBlockChrome";
+import { makeCodeHighlightPlugin } from "./codeHighlight";
+import { makeMermaidPreviewPlugin } from "./mermaidRender";
+import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
+import { makeTableControlsPlugin } from "./tableControls";
+import { makeMentionPlugin } from "./mentionTrigger";
+import { makeEmojiPlugin } from "./emojiTrigger";
 import { isCodeBlock, isCodeMark } from "./pmHelpers";
 
 const views: EditorView[] = [];
+const blockControls = () => makeBlockControlsPlugin({ onInsertRef: { current: () => {} }, onOpenMenuRef: { current: () => {} } });
+function chromePlugins(): Plugin[] {
+  return [
+    makeSlashCommandPlugin({ stateRef: { current: CLOSED_SLASH_COMMAND_STATE }, setState: () => {}, runCommandRef: { current: () => {} } }),
+    blockControls(), makeWikilinkPlugin(() => new Map(), () => {}), makeMentionPlugin(() => {}), makeEmojiPlugin(() => {}),
+    makeHeadingFlashPlugin(), makeLinkMenuPlugin({ stateRef: { current: CLOSED_LINK_MENU_STATE }, setState: () => {} }),
+    makeCodeBlockChromePlugin(), makeBlockExitPlugin(), makeCodeBlockContinuationPlugin(), makeCalloutChromePlugin(),
+    makeCodeHighlightPlugin(), makeMermaidPreviewPlugin(), makeEmptyListItemFocusPlugin(), makeInlineAtomPlugin(), makeTableControlsPlugin(),
+  ];
+}
 function expectSameElements(actual: NodeListOf<Element>, expected: Element[]) {
   expect(actual).toHaveLength(expected.length);
   actual.forEach((node, index) => expect(node).toBe(expected[index]));
@@ -160,7 +182,7 @@ describe("editor chrome reuse", () => {
   });
 
   it("preserves 50 toolbars through preceding text edits, code edits, undo, and redo", () => {
-    const view = mount(doc(paragraph("lead"), ...Array.from({ length: 50 }, (_, i) => codeBlock(`code ${i}`, "javascript"))), [history(), makeCodeBlockChromePlugin()]);
+    const view = mount(doc(paragraph("lead"), ...Array.from({ length: 50 }, (_, i) => codeBlock(`code ${i}`, "javascript"))), [history(), ...chromePlugins()]);
     const toolbars = [...view.dom.querySelectorAll(".dohc-code-block-toolbar")];
     view.dispatch(view.state.tr.insertText("x", 2));
     expectSameElements(view.dom.querySelectorAll(".dohc-code-block-toolbar"), toolbars);
@@ -171,10 +193,48 @@ describe("editor chrome reuse", () => {
     expectSameElements(view.dom.querySelectorAll(".dohc-code-block-toolbar"), toolbars);
   });
 
+  it("retained block controls use current positions for insert, menu, and drag after edits and reorder", () => {
+    const onInsert = vi.fn();
+    const onMenu = vi.fn();
+    const view = mount(doc(paragraph("lead"), codeBlock("first", "javascript"), codeBlock("second", "javascript")), [
+      makeBlockControlsPlugin({ onInsertRef: { current: onInsert }, onOpenMenuRef: { current: onMenu } }),
+      makeCodeBlockChromePlugin(),
+    ]);
+    const controls = [...view.dom.querySelectorAll(".dohc-block-affordance")];
+    view.dispatch(view.state.tr.insertText("extra ", 2));
+    expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance"), controls);
+    const checkActions = () => {
+      const currentPos = view.state.doc.child(0).nodeSize;
+      const control = view.dom.querySelectorAll(".dohc-block-affordance")[1];
+      (control.querySelector(".dohc-block-plus") as HTMLButtonElement).click();
+      expect(onInsert).toHaveBeenLastCalledWith(currentPos);
+      const handle = control.querySelector(".dohc-block-handle") as HTMLButtonElement;
+      handle.click();
+      expect(onMenu.mock.lastCall?.[0]).toBe(currentPos);
+      expect(view.state.selection.from).toBe(currentPos);
+      const dataTransfer = { clearData: vi.fn(), setData: vi.fn(), setDragImage: vi.fn(), effectAllowed: "" };
+      const event = new Event("dragstart", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+      handle.dispatchEvent(event);
+      expect(view.dragging?.slice.content.firstChild?.textContent).toBe(view.state.doc.child(1).textContent);
+      expect(view.state.selection.from).toBe(currentPos);
+      handle.dispatchEvent(new Event("dragend", { bubbles: true }));
+    };
+    checkActions();
+    const start = view.state.doc.child(0).nodeSize;
+    view.dispatch(view.state.tr.insert(start, paragraph("inserted")));
+    checkActions();
+    view.dispatch(view.state.tr.delete(start, start + view.state.doc.child(1).nodeSize));
+    checkActions();
+    const first = view.state.doc.child(1), second = view.state.doc.child(2);
+    view.dispatch(view.state.tr.replaceWith(start, view.state.doc.content.size, [second, first]));
+    checkActions();
+  });
+
   it("copy and language actions target the current blocks after insertion, removal, and reorder", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    const view = mount(doc(paragraph("lead"), codeBlock("first", "javascript"), codeBlock("second", "javascript")), [makeCodeBlockChromePlugin()]);
+    const view = mount(doc(paragraph("lead"), codeBlock("first", "javascript"), codeBlock("second", "javascript")), [blockControls(), makeCodeBlockChromePlugin()]);
     const assertCopies = (expected: string[]) => {
       writeText.mockClear();
       for (const button of view.dom.querySelectorAll<HTMLButtonElement>(".dohc-code-copy-btn")) button.click();
