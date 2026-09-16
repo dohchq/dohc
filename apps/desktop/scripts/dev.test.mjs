@@ -42,7 +42,7 @@ test("desktop dev starts electron-vite from the desktop package", () => {
   const options = electronViteSpawnOptions({ KEEP_ME: "yes" });
 
   assert.equal(options.cwd, resolve(import.meta.dirname, ".."));
-  assert.deepEqual(options.env, { KEEP_ME: "yes" });
+  assert.deepEqual(options.env, { KEEP_ME: "yes", DOHC_DEV_TOOLS: "1" });
   assert.equal(options.stdio, "inherit");
 });
 
