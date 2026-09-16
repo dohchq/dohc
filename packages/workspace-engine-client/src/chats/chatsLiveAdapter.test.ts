@@ -197,6 +197,7 @@ const threadWire = {
   title: "Thread",
   createdAtMs: 1,
   updatedAtMs: 2,
+  lane: "posts",
   channelId: "channel",
   linkedObjectId: null,
 };
@@ -503,6 +504,7 @@ describe("ChatsLiveAdapter", () => {
             title: "Linked",
             createdAtMs: 11,
             updatedAtMs: 12,
+            lane: "posts",
             channelId: null,
             linkedObjectId: "object-1",
           },
@@ -512,6 +514,7 @@ describe("ChatsLiveAdapter", () => {
             title: "Channel",
             createdAtMs: 21,
             updatedAtMs: 22,
+            lane: "chat",
             channelId: "channel-1",
             linkedObjectId: null,
           },
@@ -530,6 +533,7 @@ describe("ChatsLiveAdapter", () => {
         title: "Linked",
         createdAtMs: 11,
         updatedAtMs: 12,
+        lane: "posts",
         linkedFile: {
           objectId: "object-1",
           // thread_json has no linkedAtMs, so the adapter substitutes createdAtMs.
@@ -542,6 +546,7 @@ describe("ChatsLiveAdapter", () => {
         title: "Channel",
         createdAtMs: 21,
         updatedAtMs: 22,
+        lane: "chat",
         channelId: "channel-1",
       },
     ]);

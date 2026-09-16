@@ -454,12 +454,12 @@ const ChatActorSchema = mutableStruct({
   kind: ActorKindSchema,
   displayName: Schema.String,
 });
+const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
   objectId: Schema.String,
   pathHint: Schema.optionalKey(Schema.String),
   linkedAtMs: AnyInt,
 });
-const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatThreadSchema = mutableStruct({
   id: Schema.String,
   workspaceId: Schema.String,
@@ -612,6 +612,7 @@ const ChatThreadWireRecordSchema = mutableStruct({
   title: Schema.String,
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
+  lane: ThreadLaneSchema,
   channelId: NullableString,
   linkedObjectId: NullableString,
 });

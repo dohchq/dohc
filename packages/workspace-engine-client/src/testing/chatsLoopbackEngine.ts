@@ -1297,6 +1297,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         title: thread.title,
         createdAtMs: thread.createdAtMs,
         updatedAtMs: thread.updatedAtMs,
+        lane: thread.lane ?? "posts",
         channelId: thread.channelId ?? null,
         linkedObjectId: thread.linkedFile?.objectId ?? null,
       }));

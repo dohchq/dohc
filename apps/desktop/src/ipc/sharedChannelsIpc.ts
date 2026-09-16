@@ -521,25 +521,29 @@ export function registerSharedChannelsIpcHandlers<
         }
         // A group's folder follows its channel. The channel is joined and
         // its row written, so a folder that cannot be added leaves the chat
-        // usable and says what is missing.
+        // usable and says what is missing. The mount re-reads and adopts the
+        // session itself, which advances the credential generation, so after
+        // it only workspace liveness is checked here.
         if (
           grant.info?.kind === "group" &&
           shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length === 0
         ) {
+          const labelHint = await groupFolderName(operation.workspace, joined.channelWireId);
+          assertCurrentJoinSession();
           try {
             await mountShareFolder({
               workspace: operation.workspace,
               shareId: input.shareId,
               relayUrl: joinedRelayUrl,
-              labelHint: await groupFolderName(operation.workspace, joined.channelWireId),
-              assertCurrent: assertCurrentJoinSession,
+              labelHint,
+              assertCurrent: operation.assertCurrent,
             });
           } catch (error) {
-            assertCurrentJoinSession();
+            operation.assertCurrent();
             const reason = error instanceof Error ? error.message : String(error);
             throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
           }
-          assertCurrentJoinSession();
+          operation.assertCurrent();
         }
         return JoinSharedChannelResult.parse({
           joined: { ...joined, ended: false },

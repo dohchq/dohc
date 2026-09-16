@@ -1062,6 +1062,7 @@ export class ChatsLiveAdapter {
       title: thread.title,
       createdAtMs: thread.createdAtMs,
       updatedAtMs: thread.updatedAtMs,
+      lane: thread.lane,
       ...(thread.channelId !== null ? { channelId: thread.channelId } : {}),
       ...(thread.linkedObjectId !== null
         ? {

@@ -750,6 +750,32 @@ describe("chat-channel share op filter", () => {
     return filterOpForShare(channelShare, opKind, JSON.stringify(payload), resolver);
   }
 
+  it("serves a group's type, purpose, folder, lane and poll choices with their ops", () => {
+    const channel = decide("chat.channel.create", {
+      channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared",
+      type: "both", purpose: "Ship it.", folderPath: "team", internalMeta: "SENTINEL",
+    });
+    expect(channel.allowed).toBe(true);
+    if (!channel.allowed) return;
+    expect(channel.payload).toEqual({
+      channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared",
+      type: "both", purpose: "Ship it.", folderPath: "team",
+    });
+    const thread = decide("chat.thread.create", {
+      threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
+    });
+    expect(thread.allowed).toBe(true);
+    if (!thread.allowed) return;
+    expect(thread.payload).toMatchObject({ lane: "chat" });
+    const poll = decide("chat.decision.set", {
+      threadId: "thread-in", messageId: "m1", state: "resolved", resolvedByMessageId: "m2", atMs: 3,
+      options: ["A", "B"], chosenOption: "B",
+    });
+    expect(poll.allowed).toBe(true);
+    if (!poll.allowed) return;
+    expect(poll.payload).toMatchObject({ options: ["A", "B"], chosenOption: "B" });
+  });
+
   it("allows exactly the granted channel's chat ops and nothing else", () => {
     expect(
       decide("chat.channel.create", { channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared" }).allowed,

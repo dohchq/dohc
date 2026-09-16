@@ -185,6 +185,8 @@ export interface ChatsDrafts {
   dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
+  // The poll choice taken with the answer, when the poll had choices.
+  resolveChosenOption?: string | null;
 }
 
 interface ThreadSnapshot {
@@ -443,6 +445,7 @@ export function ChatsView(props: {
   const [composer, setComposer] = useState("");
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
+  const [resolveChosenOption, setResolveChosenOption] = useState<string | null>(null);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
@@ -1827,11 +1830,13 @@ export function ChatsView(props: {
     if (nav.level !== "thread") return;
     const trimmedBody = composer.trim();
     const resolvingMessageId = resolveTargetMessageId;
+    const chosenOption = resolvingMessageId !== null ? resolveChosenOption : null;
+    // An answer with no words of its own says the choice, or the fact.
     const body =
       trimmedBody.length > 0
         ? trimmedBody
         : resolvingMessageId !== null
-          ? "Resolved ✓"
+          ? chosenOption ?? "Resolved ✓"
           : "";
     if (
       body.length === 0 ||
@@ -1861,6 +1866,7 @@ export function ChatsView(props: {
       if (latest.resolveTargetMessageId === resolvingMessageId) {
         next.resolveTargetMessageId = null;
         setResolveTargetMessageId(null);
+        setResolveChosenOption(null);
       }
       latestComposerState.current = next;
     };
@@ -1889,6 +1895,7 @@ export function ChatsView(props: {
           threadId: nav.thread.id,
           messageId: resolvingMessageId,
           resolvedByMessageId: result.message.id,
+          ...(chosenOption ? { chosenOption } : {}),
         });
         if (!requestOwnsActiveContext()) return;
         resolvedDecision = resolution.decision;
@@ -2854,7 +2861,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [openChannel, props.onError, props.onNavCommand, workspaceId],
+    [newGroupPurpose, newGroupType, openChannel, props.onError, props.onNavCommand, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -3033,8 +3040,9 @@ export function ChatsView(props: {
     });
   }, []);
 
-  const beginResolve = useCallback((message: ChatMessageRecord) => {
+  const beginResolve = useCallback((message: ChatMessageRecord, option?: string) => {
     setResolveTargetMessageId(message.id);
+    setResolveChosenOption(option ?? null);
     // A resolving message is also an explicit reply to the decision-bearing
     // message, preserving both pieces of causal structure in one send.
     setReplyTarget({
@@ -3704,7 +3712,11 @@ export function ChatsView(props: {
                 data-testid="chats-resolving-mode"
                 className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
               >
-                <span className="min-w-0 flex-1">Answering the poll</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {resolveChosenOption
+                    ? `Answering the poll · ${resolveChosenOption}`
+                    : "Answering the poll"}
+                </span>
                 <button
                   type="button"
                   data-testid="chats-resolving-cancel"
@@ -3714,6 +3726,7 @@ export function ChatsView(props: {
                       setReplyTarget(null);
                     }
                     setResolveTargetMessageId(null);
+                    setResolveChosenOption(null);
                   }}
                   className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
                 >
@@ -3802,6 +3815,7 @@ export function ChatsView(props: {
       <div
         data-testid="chats-channel-view"
         data-variant={variant}
+        data-group-type={groupType}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >

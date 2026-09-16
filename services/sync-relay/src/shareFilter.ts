@@ -774,7 +774,9 @@ function filterChatOpForChannelShare(
     if (record.kind !== channelKind) return { allowed: false };
     return {
       allowed: true,
-      payload: pickServed(record, ["channelId", "name", "slug", "kind", "createdAtMs", "wireId"]),
+      payload: pickServed(record, [
+        "channelId", "name", "slug", "kind", "createdAtMs", "wireId", "type", "purpose", "folderPath",
+      ]),
       blobSha256s: [],
     };
   }
@@ -797,7 +799,9 @@ function filterChatOpForChannelShare(
     // channel thread never carries a linked-file owner (enforced above).
     return {
       allowed: true,
-      payload: pickServed(record, ["threadId", "title", "createdAtMs", "channelSlug", "channelWireId"]),
+      payload: pickServed(record, [
+        "threadId", "title", "createdAtMs", "channelSlug", "channelWireId", "lane",
+      ]),
       blobSha256s: [],
     };
   }
@@ -853,7 +857,9 @@ const SERVED_CHAT_FIELDS = {
     "state",
     "atMs",
   ],
-  "chat.decision.set": ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"],
+  "chat.decision.set": [
+    "threadId", "messageId", "state", "resolvedByMessageId", "atMs", "options", "chosenOption",
+  ],
   "chat.attachment.add": [
     "attachmentId",
     "threadId",
