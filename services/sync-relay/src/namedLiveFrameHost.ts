@@ -214,6 +214,7 @@ function captureLiveFrameHost(options: {
         const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes }, signal);
         check(signal);
+        if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
           metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };

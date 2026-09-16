@@ -401,3 +401,13 @@ it("rechecks revocation after asynchronous validation and never commits its stal
   waiting.resolve(); await expect(submitting).rejects.toThrow("standing changed");
   expect(commit).not.toHaveBeenCalled();
 });
+
+it("returns transient worker saturation as retry before calling the journal commit", async () => {
+  const f = await setup(), commit = journal(f);
+  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate: () => ({kind: "retry", reason: "admission-unavailable", waitForCapacity: async () => {}})});
+  cleanup.push(async () => capture.close());
+  expect(await capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .toEqual({result: "retry", reason: "admission-unavailable"});
+  expect(commit).not.toHaveBeenCalled();
+});

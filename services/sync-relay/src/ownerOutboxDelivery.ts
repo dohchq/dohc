@@ -8,12 +8,18 @@ import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.j
 import type { LiveJournalValidation } from "./storage/types.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 
+export type LiveAdmissionValidation = LiveJournalValidation | {
+  readonly kind: "retry";
+  readonly reason: "admission-unavailable";
+  waitForCapacity(signal?: AbortSignal): Promise<void>;
+};
+
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
-  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}, signal?: AbortSignal): LiveJournalValidation | Promise<LiveJournalValidation>;
+  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
 /** Runs within one authenticated device delivery and rechecks standing at every await. */
@@ -23,7 +29,7 @@ export async function drainOwnerOutbox(options: {
   binding: LiveObjectBinding; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
   assertCurrent(): void;
   applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
-}): Promise<{admittedEntries: number; hasMore: boolean}> {
+}): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
   const {storage,admission,client,registrationId,binding,host,signal} = options;
   for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
@@ -81,6 +87,10 @@ export async function drainOwnerOutbox(options: {
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update}, signal);
       check();
+      if (validation.kind === "retry") {
+        await validation.waitForCapacity(signal); check();
+        return {admittedEntries, hasMore: true, retryReady: true};
+      }
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
         metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
