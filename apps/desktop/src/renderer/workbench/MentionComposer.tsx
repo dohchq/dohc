@@ -10,7 +10,7 @@ import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
 
-interface FileMentionCandidate {
+export interface FileMentionCandidate {
   path: string;
   label: string;
 }

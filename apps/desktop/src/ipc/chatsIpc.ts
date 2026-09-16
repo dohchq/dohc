@@ -990,6 +990,7 @@ export function registerChatsIpcHandlers<
     const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
+      ...(input.lane ? { lane: input.lane } : {}),
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map((thread) =>
@@ -1035,6 +1036,7 @@ export function registerChatsIpcHandlers<
         store.startChannelThread({
           workspaceId: workspace.workspaceId,
           channelId: input.channelId,
+          ...(input.lane ? { lane: input.lane } : {}),
           author: { kind: "human", displayName: localUserDisplayName() },
           ...(authorUserId ? { authorUserId } : {}),
           body: input.body,

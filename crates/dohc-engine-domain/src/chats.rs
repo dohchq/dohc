@@ -1848,6 +1848,7 @@ impl<'a> LinkedChatStore<'a> {
 
     /// [`Self::create_channel`] with the group fields set. A `dm` or `agent`
     /// channel carries no folder.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_group(
         &mut self,
         workspace_id: &str,
@@ -5462,6 +5463,7 @@ pub struct PendingChatRefusal {
     pub reason: &'static str,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_channel(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -6127,6 +6129,7 @@ fn validate_chosen_option(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn journal_decision_set(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -6240,6 +6243,18 @@ fn relay_log_has_authored_message(
     .map_err(DomainError::sql_corrupt)
 }
 
+/// One thread row as the export path reads it: title, created_at_ms,
+/// channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane.
+type ThreadStructureRow = (
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    String,
+);
+
 fn ensure_thread_structure_exported(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -6253,15 +6268,8 @@ fn ensure_thread_structure_exported(
         return Ok(());
     }
 
-    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane): (
-        String,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        String,
-    ) = tx
+    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane): ThreadStructureRow =
+        tx
         .query_row(
             "SELECT title, created_at_ms, channel_id, linked_object_id, \
                     linked_path_hint, linked_at_ms, lane \

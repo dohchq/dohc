@@ -14,6 +14,7 @@ use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_channel_create(
         &self,
         workspace_id: String,

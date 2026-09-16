@@ -2288,7 +2288,10 @@ mod tests {
                     |r| r.get(0),
                 )
                 .expect("probe");
-            assert!(present, "{table}.{column} must exist after the groups migration");
+            assert!(
+                present,
+                "{table}.{column} must exist after the groups migration"
+            );
         }
         // Old rows keep their meaning through the defaults.
         conn.execute(
@@ -2304,7 +2307,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .expect("read");
-        assert_eq!((kind.as_str(), purpose.as_str(), folder), ("posts", "", None));
+        assert_eq!(
+            (kind.as_str(), purpose.as_str(), folder),
+            ("posts", "", None)
+        );
     }
 
     #[test]
@@ -2373,7 +2379,9 @@ mod tests {
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run");
         assert_eq!(
             out,
-            MigrationOutcome::Applied { newly_applied: BASELINE_MIGRATIONS.len() as u32 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32
+            }
         );
         // Second run is a no-op: already applied, checksum matches.
         let out2 = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run2");
@@ -2712,7 +2720,9 @@ mod tests {
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("recover");
         assert_eq!(
             out,
-            MigrationOutcome::Applied { newly_applied: BASELINE_MIGRATIONS.len() as u32 }
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_MIGRATIONS.len() as u32
+            }
         );
     }
 
@@ -2752,10 +2762,11 @@ mod tests {
             assert_eq!(base, 1, "baseline must be durably recorded");
         }
 
-        // Resume: the baseline is skipped (idempotent) and only the probe applies.
+        // Resume: the baseline is skipped (idempotent); the groups migration
+        // and the probe apply.
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",

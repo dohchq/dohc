@@ -1,6 +1,7 @@
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
 import { ChatAvatar } from "./ChatAvatar";
+import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
   AgentPresenceHint,
@@ -2810,18 +2811,28 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
+  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
+  // Which lane a "both" group shows. A chat group is always its lane; a posts
+  // group has none.
+  const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
+  const [newGroupPurpose, setNewGroupPurpose] = useState("");
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
       if (trimmed.length === 0) return;
       const token = liveToken.current;
       try {
+        const purpose = newGroupPurpose.trim();
         const result = await bridge().createChatChannel({
           workspaceId,
           name: trimmed,
+          type: newGroupType,
+          ...(purpose ? { purpose } : {}),
         });
         if (token !== liveToken.current) return;
         setCreatingChannel(null);
+        setNewGroupType("posts");
+        setNewGroupPurpose("");
         setOverview((current) =>
           current.status === "ready"
             ? { ...current, channels: [...current.channels, result.channel] }
@@ -3767,6 +3778,8 @@ export function ChatsView(props: {
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
+    const groupType = nav.channel.type ?? "posts";
+    const showLane = groupType === "chat" || (groupType === "both" && groupLane === "chat");
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -3998,6 +4011,49 @@ export function ChatsView(props: {
             </form>
           </div>
         ) : null}
+        {groupType === "both" ? (
+          <div
+            role="tablist"
+            aria-label="Group lanes"
+            className="flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
+          >
+            {(
+              [
+                ["posts", "Posts"],
+                ["chat", "Chat"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={groupLane === value}
+                data-testid={`chats-group-lane-${value}`}
+                onClick={() => setGroupLane(value)}
+                className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
+                  groupLane === value
+                    ? "bg-panel-2 text-ink"
+                    : "text-muted hover:bg-panel-2 hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {showLane ? (
+          <ChatLane
+            workspaceId={workspaceId}
+            channel={nav.channel}
+            locked={channelLocked}
+            mentionCandidates={mentionCandidates}
+            fileCandidates={fileMentionCandidates}
+            loadFileHeadings={loadFileHeadings}
+            onOpenPath={props.onOpenPath}
+            onError={props.onError}
+            revision={props.threadRevision ?? 0}
+          />
+        ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             data-testid="chats-feed-column"
@@ -4083,7 +4139,8 @@ export function ChatsView(props: {
             )}
           </div>
         </div>
-        {channelLocked ? (
+        )}
+        {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
               ? "This channel is no longer shared with you. You can still read it."
@@ -4385,6 +4442,61 @@ export function ChatsView(props: {
               }}
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
+            <label className="sr-only" htmlFor="chats-new-channel-purpose">
+              Purpose
+            </label>
+            <input
+              id="chats-new-channel-purpose"
+              data-testid="chats-new-channel-purpose"
+              value={newGroupPurpose}
+              maxLength={200}
+              placeholder="What it's for"
+              onChange={(event) => setNewGroupPurpose(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  setCreatingChannel(null);
+                }
+              }}
+              className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
+            />
+            <div
+              role="radiogroup"
+              aria-label="Group type"
+              className="mt-1.5 flex gap-1"
+            >
+              {(
+                [
+                  ["posts", "Posts"],
+                  ["chat", "Chat"],
+                  ["both", "Both"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={newGroupType === value}
+                  data-testid={`chats-new-channel-type-${value}`}
+                  onClick={() => setNewGroupType(value)}
+                  className={`h-7 flex-1 rounded-md border text-[12px] transition-colors dohc-focus-visible ${
+                    newGroupType === value
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line text-muted hover:bg-panel-2 hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="submit"
+              data-testid="chats-new-channel-submit"
+              disabled={creatingChannel.trim().length === 0}
+              className="mt-1.5 h-7 w-full rounded-md bg-ink text-[12px] font-medium text-bg hover:opacity-90 disabled:opacity-40 dohc-focus-visible"
+            >
+              Create group
+            </button>
           </form>
         )}
       </div>

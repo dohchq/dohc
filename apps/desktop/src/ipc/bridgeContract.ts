@@ -1930,6 +1930,8 @@ export type CreateChatChannelResult = z.infer<typeof CreateChatChannelResult>;
 export const ListChannelThreadsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
+  // The posts lane unless named.
+  lane: z.enum(["posts", "chat"]).optional(),
 });
 export type ListChannelThreadsPayload = z.infer<typeof ListChannelThreadsPayload>;
 
@@ -1947,6 +1949,7 @@ export const StartChannelThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
   body: CHAT_BODY,
+  lane: z.enum(["posts", "chat"]).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
