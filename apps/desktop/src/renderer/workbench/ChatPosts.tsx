@@ -497,7 +497,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             isAgent ? "border-l-2" : ""
           }`}
         >
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-baseline gap-1.5">
             <span
               data-testid="chats-message-author"
               data-author-kind={comment.authorKind}
@@ -508,6 +508,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {chatAuthorLabel(comment)}
             </span>
             {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            <time
+              data-testid="chats-message-time"
+              dateTime={commentTime.iso}
+              title={commentTime.iso}
+              className="text-[11px] text-subtle"
+            >
+              {commentTime.label}
+            </time>
           </div>
           <p
             data-testid="chats-message-body"
@@ -594,14 +602,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </span>
           ) : null}
           {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={commentTime.iso}
-            title={commentTime.iso}
-            className="font-mono"
-          >
-            {commentTime.label}
-          </time>
         </div>
         {replyCount > 0 ? (
           <ol
@@ -676,10 +676,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </div>
         <h1
           data-testid="chats-thread-post-title"
-          className={`mb-0 mt-3 whitespace-pre-wrap break-words font-serif text-ink ${
+          className={`mb-0 mt-3 whitespace-pre-wrap break-words text-ink ${
             openingIsPlain
-              ? "text-[17px] font-normal leading-relaxed"
-              : "text-[19px] font-semibold leading-snug"
+              ? "text-[15px] font-normal leading-relaxed"
+              : "text-[17px] font-semibold leading-snug tracking-[-0.01em]"
           }`}
         >
           {nav.thread.title}
