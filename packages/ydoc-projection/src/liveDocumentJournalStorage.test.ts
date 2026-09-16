@@ -800,7 +800,7 @@ it('keeps real admitted-cut capacity distinct without changing accepted history'
       "maxStructClientGroupVisits": 6,
       "maxDeleteClientGroupVisits": 1,
       "maxDeleteIntervalVisits": 1,
-      "maxIndexOperations": 1565
+      "maxIndexOperations": 1000
     },
     "stateUpdate": [
       1,

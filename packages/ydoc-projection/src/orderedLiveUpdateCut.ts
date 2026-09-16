@@ -2707,15 +2707,11 @@ class ReplayFrontier {
         budget,
         stage,
       ))
-      this.unsafe.set(
-        clientId,
-        mergePointLists(
-          this.unsafe.get(clientId) ?? [],
-          retained,
-          budget,
-          stage,
-        ),
+      const merged = mergePointLists(
+        this.unsafe.get(clientId) ?? [], retained, budget, stage,
       )
+      if (merged.length === 0) this.unsafe.delete(clientId)
+      else this.unsafe.set(clientId, merged)
     }
 
     const candidateDeletes = mapRanges(normalizeRanges([
@@ -2728,13 +2724,16 @@ class ReplayFrontier {
         ...ranges,
       ], budget, stage))
     }
-    this.live = mapLive(retireSpans(
-      Array.from(this.live.values()).flat(),
-      this.deletes,
-      budget,
-      stage,
-    ))
-    for (const [clientId, points] of this.unsafe) {
+    // Existing spans and newly added spans already exclude prior deletions.
+    // Only clients with deletions in this input can lose more live content.
+    for (const clientId of candidateDeletes.keys()) {
+      const retainedSpans = retireSpans(
+        this.live.get(clientId) ?? [], this.deletes, budget, stage,
+      )
+      if (retainedSpans.length === 0) this.live.delete(clientId)
+      else this.live.set(clientId, retainedSpans)
+      const points = this.unsafe.get(clientId)
+      if (points === undefined) continue
       const retained = points.filter(point => !rangeCovered(
         this.deletes.get(clientId) ?? [],
         point,
@@ -2820,16 +2819,6 @@ class ReplayFrontier {
     return true
   }
 
-}
-
-function mapLive(spans: readonly LiveSpan[]): Map<number, LiveSpan[]> {
-  const result = new Map<number, LiveSpan[]>()
-  for (const span of spans) {
-    const client = result.get(span.clientId) ?? []
-    client.push(span)
-    result.set(span.clientId, client)
-  }
-  return result
 }
 
 function rangeMapEquivalent(

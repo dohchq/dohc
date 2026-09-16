@@ -14,6 +14,36 @@ function firstUnescapedIndex(src: string, pattern: RegExp): number {
   return match.index + (match[1]?.length ?? 0)
 }
 
+function lineMarkerStart(src: string, marker: string): number {
+  let markerIndex = src.indexOf(marker)
+  while (markerIndex >= 0) {
+    if (markerIndex === 0 || src[markerIndex - 1] === '\n') {
+      return markerIndex <= 1 ? 0 : markerIndex
+    }
+    markerIndex = src.indexOf(marker, markerIndex + marker.length)
+  }
+  return -1
+}
+
+function calloutStart(src: string): number {
+  let markerIndex = src.indexOf('[!')
+  while (markerIndex >= 0) {
+    let quoteIndex = markerIndex - 1
+    if (quoteIndex >= 0 && /\s/u.test(src[quoteIndex]!)) quoteIndex -= 1
+    if (quoteIndex >= 0 && src[quoteIndex] === '>') {
+      let lineStart = quoteIndex
+      while (lineStart > 0 && quoteIndex - lineStart < 3 && src[lineStart - 1] === ' ') {
+        lineStart -= 1
+      }
+      if (lineStart === 0 || src[lineStart - 1] === '\n') {
+        return lineStart <= 1 ? 0 : lineStart
+      }
+    }
+    markerIndex = src.indexOf('[!', markerIndex + 2)
+  }
+  return -1
+}
+
 function findClosingWikilink(src: string): number {
   for (let index = 2; index < src.length - 1; index += 1) {
     if (src[index] === '\\') {
@@ -549,11 +579,7 @@ const DohcCallout = Node.create({
   markdownTokenizer: {
     name: 'callout',
     level: 'block',
-    start(src) {
-      const match = /(?:^|\n)( {0,3}>\s?\[!)/.exec(src)
-      if (!match) return -1
-      return match.index === 0 ? 0 : match.index + 1
-    },
+    start: calloutStart,
     tokenize(src, _tokens, helpers) {
       const newline = src.indexOf('\n')
       const first = newline < 0 ? src : src.slice(0, newline)
@@ -846,11 +872,7 @@ const DohcMathBlock = Node.create({
   markdownTokenizer: {
     name: 'mathBlock',
     level: 'block',
-    start(src) {
-      const match = /(?:^|\n)(\$\$)/.exec(src)
-      if (!match) return -1
-      return match.index === 0 ? 0 : match.index + 1
-    },
+    start: src => lineMarkerStart(src, '$$'),
     tokenize(src) {
       if (!src.startsWith('$$')) return undefined
       const closing = src.indexOf('$$', 2)

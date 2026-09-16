@@ -935,7 +935,7 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     expect(result.kind).toBe('accepted')
     if (result.kind !== 'accepted') return
     const registration = createLiveMarkdownRegistrationValidator(policy)(input(result.evidence.stateUpdate))
-    if (suffixCount === 0) {
+    if (suffixCount <= 1) {
       expect(registration).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
       expect(createLiveMarkdownJournalValidator(policy)({
         ...input(result.evidence.stateUpdate), suffix: [], candidate: new Uint8Array([0, 0]),
