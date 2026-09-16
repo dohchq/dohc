@@ -14,11 +14,11 @@ use crate::cursor::{
     write_pushed_seq,
 };
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
+use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::{
-    ApplyDisposition, ApplyOutcome, BlobContent, BlobHydration, BlobKind, ObservedBytes,
-    RelayError, ReplicationEnvelope, ShareDisposition, SyncError, blob_ceiling,
-    hydrate_blob_content,
+    ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
+    ShareDisposition, SyncError, blob_ceiling,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2375,38 +2375,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         observed: ObservedBytes::Exact(response.bytes.len()),
                     });
                 }
-                if hex_sha256(&response.bytes) != blob.sha256 {
-                    return Err(RelayError::BlobInvalid);
-                }
+                let verified = VerifiedBlob::verify(&blob.sha256, &response.bytes)
+                    .map_err(|_| RelayError::BlobInvalid)?;
                 for kind in &blob.kinds {
-                    let content = match kind {
-                        BlobKind::Text => String::from_utf8(response.bytes.clone())
-                            .map(BlobContent::Text)
-                            .map_err(|_| RelayError::BlobInvalid)?,
-                        BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
-                        BlobKind::Ydoc => BlobContent::Ydoc(response.bytes.clone()),
-                    };
-                    match hydrate_blob_content(
-                        store,
-                        &BlobHydration {
-                            sha256: blob.sha256.clone(),
-                            content,
-                        },
-                        faults,
-                    )
-                    .map_err(|error| match error {
-                        SyncError::BlobInvalid => RelayError::BlobInvalid,
-                        SyncError::BlobTooLarge {
-                            constraint,
-                            limit_bytes,
-                            observed_bytes,
-                        } => RelayError::BlobTooLarge {
-                            constraint,
-                            limit_bytes,
-                            observed: ObservedBytes::Exact(observed_bytes),
-                        },
-                        other => local(other),
-                    })? {
+                    match verified
+                        .hydrate(store, *kind, faults)
+                        .map_err(|error| match error {
+                            SyncError::BlobInvalid => RelayError::BlobInvalid,
+                            SyncError::BlobTooLarge {
+                                constraint,
+                                limit_bytes,
+                                observed_bytes,
+                            } => RelayError::BlobTooLarge {
+                                constraint,
+                                limit_bytes,
+                                observed: ObservedBytes::Exact(observed_bytes),
+                            },
+                            other => local(other),
+                        })? {
                         TxnOutcome::Committed(()) => {}
                         TxnOutcome::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));

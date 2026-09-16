@@ -80,74 +80,242 @@ pub fn hydrate_blob_content(
         BlobContent::Text(text) => text.as_bytes(),
         BlobContent::Binary(bytes) | BlobContent::Ydoc(bytes) => bytes.as_slice(),
     };
-    let (constraint, limit_bytes) = blob_ceiling(blob.content.kind());
-    if bytes.len() > limit_bytes {
+    check_ceiling(blob.content.kind(), bytes.len())?;
+    let verified = VerifiedBlob::verify(&blob.sha256, bytes)?;
+    let text = match &blob.content {
+        BlobContent::Text(text) => Some(text.as_str()),
+        BlobContent::Binary(_) | BlobContent::Ydoc(_) => None,
+    };
+    verified.persist(store, text, faults)
+}
+
+fn check_ceiling(kind: BlobKind, observed_bytes: usize) -> Result<(), SyncError> {
+    let (constraint, limit_bytes) = blob_ceiling(kind);
+    if observed_bytes > limit_bytes {
         return Err(SyncError::BlobTooLarge {
             constraint,
             limit_bytes,
-            observed_bytes: bytes.len(),
+            observed_bytes,
         });
     }
-    if hex_sha256(bytes) != blob.sha256 {
-        return Err(SyncError::BlobInvalid);
+    Ok(())
+}
+
+/// Borrows an immutable response after its digest has been checked once.
+pub(crate) struct VerifiedBlob<'a> {
+    sha256: &'a str,
+    bytes: &'a [u8],
+}
+
+impl<'a> VerifiedBlob<'a> {
+    pub(crate) fn verify(sha256: &'a str, bytes: &'a [u8]) -> Result<Self, SyncError> {
+        if hex_sha256(bytes) != sha256 {
+            return Err(SyncError::BlobInvalid);
+        }
+        Ok(Self { sha256, bytes })
     }
-    let outcome = store.write_with(faults, |tx| {
-        match &blob.content {
-            BlobContent::Text(text) => {
-                let existing: Option<(i64, String)> = tx
-                    .query_row(
-                        "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                        [&blob.sha256],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(SyncError::corrupt)?;
-                let byte_length = i64::try_from(text.len()).map_err(|_| SyncError::BlobInvalid)?;
-                if let Some((stored_len, stored)) = existing {
-                    if stored_len != byte_length || stored != text.as_str() {
-                        return Err(SyncError::BlobInvalid);
+
+    pub(crate) fn hydrate(
+        &self,
+        store: &mut EngineStore,
+        kind: BlobKind,
+        faults: &dyn FaultInjector,
+    ) -> Result<TxnOutcome<()>, SyncError> {
+        // Relay text decoding precedes the per-kind ceiling, as in owned ingestion.
+        let text = match kind {
+            BlobKind::Text => {
+                Some(std::str::from_utf8(self.bytes).map_err(|_| SyncError::BlobInvalid)?)
+            }
+            BlobKind::Binary | BlobKind::Ydoc => None,
+        };
+        check_ceiling(kind, self.bytes.len())?;
+        self.persist(store, text, faults)
+    }
+
+    fn persist(
+        &self,
+        store: &mut EngineStore,
+        text: Option<&str>,
+        faults: &dyn FaultInjector,
+    ) -> Result<TxnOutcome<()>, SyncError> {
+        let sha256 = self.sha256;
+        let bytes = self.bytes;
+        let outcome = store.write_with(faults, |tx| {
+            match text {
+                Some(text) => {
+                    let existing: Option<(i64, String)> = tx
+                        .query_row(
+                            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
+                            [sha256],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(SyncError::corrupt)?;
+                    let byte_length =
+                        i64::try_from(text.len()).map_err(|_| SyncError::BlobInvalid)?;
+                    if let Some((stored_len, stored)) = existing {
+                        if stored_len != byte_length || stored != text {
+                            return Err(SyncError::BlobInvalid);
+                        }
+                    } else {
+                        tx.execute(
+                            "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                            params![sha256, byte_length, text],
+                        )
+                        .map_err(SyncError::persist)?;
                     }
-                } else {
-                    tx.execute(
-                        "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                        params![blob.sha256, byte_length, text],
-                    )
-                    .map_err(SyncError::persist)?;
+                }
+                // A Y.Doc payload shares `binary_blobs` with a captured file: the
+                // table is content-addressed and kind-free. Only the CEILING is
+                // per-kind, and that was already applied above.
+                None => {
+                    let existing: Option<(i64, Vec<u8>)> = tx
+                        .query_row(
+                            "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
+                            [sha256],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(SyncError::corrupt)?;
+                    let byte_length =
+                        i64::try_from(bytes.len()).map_err(|_| SyncError::BlobInvalid)?;
+                    if let Some((stored_len, stored)) = existing {
+                        if stored_len != byte_length || stored.as_slice() != bytes {
+                            return Err(SyncError::BlobInvalid);
+                        }
+                    } else {
+                        tx.execute(
+                            "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,?2,?3)",
+                            params![sha256, byte_length, bytes],
+                        )
+                        .map_err(SyncError::persist)?;
+                    }
                 }
             }
-            // A Y.Doc payload shares `binary_blobs` with a captured file: the
-            // table is content-addressed and kind-free. Only the CEILING is
-            // per-kind, and that was already applied above.
-            BlobContent::Binary(bytes) | BlobContent::Ydoc(bytes) => {
-                let existing: Option<(i64, Vec<u8>)> = tx
-                    .query_row(
-                        "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
-                        [&blob.sha256],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(SyncError::corrupt)?;
-                let byte_length = i64::try_from(bytes.len()).map_err(|_| SyncError::BlobInvalid)?;
-                if let Some((stored_len, stored)) = existing {
-                    if stored_len != byte_length || stored.as_slice() != bytes.as_slice() {
-                        return Err(SyncError::BlobInvalid);
-                    }
-                } else {
-                    tx.execute(
-                        "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,?2,?3)",
-                        params![blob.sha256, byte_length, bytes],
-                    )
-                    .map_err(SyncError::persist)?;
-                }
+            if crashes(faults, FaultPoint::SyncBeforeBlobHydrateCommit) {
+                return Err(SyncError::FaultCrash);
+            }
+            Ok(())
+        });
+        match outcome {
+            Err(SyncError::FaultCrash) => Ok(TxnOutcome::Crashed { committed: false }),
+            other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_storage::NoFaults;
+    use dohc_engine_testkit::open_store;
+
+    #[test]
+    fn public_hydration_still_rejects_wrong_digests_for_every_kind() {
+        let (_scratch, _path, mut store) = open_store();
+        for content in [
+            BlobContent::Text("body".to_owned()),
+            BlobContent::Binary(b"body".to_vec()),
+            BlobContent::Ydoc(b"body".to_vec()),
+        ] {
+            assert!(matches!(
+                hydrate_blob_content(
+                    &mut store,
+                    &BlobHydration {
+                        sha256: hex_sha256(b"other"),
+                        content,
+                    },
+                    &NoFaults
+                ),
+                Err(SyncError::BlobInvalid)
+            ));
+        }
+    }
+
+    #[test]
+    fn verified_hydration_checks_utf8_and_each_requested_kind_ceiling() {
+        let (_scratch, _path, mut store) = open_store();
+        let bytes = [0xff];
+        let sha256 = hex_sha256(&bytes);
+        let blob = VerifiedBlob::verify(&sha256, &bytes).expect("valid digest");
+        assert!(matches!(
+            blob.hydrate(&mut store, BlobKind::Text, &NoFaults),
+            Err(SyncError::BlobInvalid)
+        ));
+        assert_eq!(
+            blob.hydrate(&mut store, BlobKind::Binary, &NoFaults)
+                .expect("binary"),
+            TxnOutcome::Committed(())
+        );
+        let bytes = vec![b'a'; MAX_TEXT_BYTES + 1];
+        let sha256 = hex_sha256(&bytes);
+        let blob = VerifiedBlob::verify(&sha256, &bytes).expect("valid digest");
+        assert!(matches!(
+            blob.hydrate(&mut store, BlobKind::Text, &NoFaults),
+            Err(SyncError::BlobTooLarge {
+                constraint: "MAX_TEXT_BYTES",
+                ..
+            })
+        ));
+        let mut bytes = bytes;
+        bytes[0] = 0xff;
+        let sha256 = hex_sha256(&bytes);
+        let blob = VerifiedBlob::verify(&sha256, &bytes).expect("valid digest");
+        assert!(
+            matches!(
+                blob.hydrate(&mut store, BlobKind::Text, &NoFaults),
+                Err(SyncError::BlobInvalid)
+            ),
+            "invalid UTF-8 still precedes the per-kind ceiling"
+        );
+    }
+
+    #[test]
+    fn verified_hydration_rejects_poisoned_rows_without_replacing_them() {
+        for kind in [BlobKind::Text, BlobKind::Binary, BlobKind::Ydoc] {
+            for wrong_length in [false, true] {
+                let (_scratch, _path, mut store) = open_store();
+                let bytes = b"body";
+                let sha256 = hex_sha256(bytes);
+                let stored = if wrong_length { b"body" } else { b"fake" };
+                let length = if wrong_length { 99 } else { 4 };
+                store
+                    .read_with(|conn| match kind {
+                        BlobKind::Text => conn.execute(
+                            "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                            params![sha256, length, std::str::from_utf8(stored).expect("text")],
+                        ),
+                        BlobKind::Binary | BlobKind::Ydoc => conn.execute(
+                            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,?2,?3)",
+                            params![sha256, length, stored.as_slice()],
+                        ),
+                    })
+                    .expect("seed poisoned row");
+                let blob = VerifiedBlob::verify(&sha256, bytes).expect("valid digest");
+                assert!(matches!(
+                    blob.hydrate(&mut store, kind, &NoFaults),
+                    Err(SyncError::BlobInvalid)
+                ));
+                store
+                    .read_with(|conn| {
+                        let (actual_length, actual): (i64, Vec<u8>) = match kind {
+                            BlobKind::Text => conn.query_row(
+                                "SELECT byte_length,CAST(text AS BLOB) FROM blobs WHERE sha256=?1",
+                                [&sha256],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            ),
+                            BlobKind::Binary | BlobKind::Ydoc => conn.query_row(
+                                "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
+                                [&sha256],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            ),
+                        }?;
+                        assert_eq!(actual_length, length);
+                        assert_eq!(actual, stored);
+                        Ok::<_, rusqlite::Error>(())
+                    })
+                    .expect("poison unchanged");
             }
         }
-        if crashes(faults, FaultPoint::SyncBeforeBlobHydrateCommit) {
-            return Err(SyncError::FaultCrash);
-        }
-        Ok(())
-    });
-    match outcome {
-        Err(SyncError::FaultCrash) => Ok(TxnOutcome::Crashed { committed: false }),
-        other => other,
     }
 }
