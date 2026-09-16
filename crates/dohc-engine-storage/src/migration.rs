@@ -2019,13 +2019,41 @@ CREATE INDEX owner_ydoc_outbox_entries_pending
     ON owner_ydoc_outbox_entries(outbox_id, sequence) WHERE pending=1;
 ";
 
+/// Migration 1: a channel is a group. It has a type (what it holds), a
+/// purpose (one line), and a folder path. A thread has a lane: the posts
+/// lane is the feed; the chat lane is one running conversation per group. A
+/// decision can carry options and the one chosen.
+///
+/// Every column defaults, so rows written before this migration keep their
+/// meaning: a channel is a posts group with no folder, a thread is a post,
+/// a decision is a bare question.
+pub(crate) const V2_GROUPS_MIGRATION_ID: &str = "v2-groups";
+const V2_GROUPS_DDL: &str = "\
+ALTER TABLE chat_channels ADD COLUMN type TEXT NOT NULL DEFAULT 'posts'
+    CHECK (type IN ('posts', 'chat', 'both'));
+ALTER TABLE chat_channels ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+ALTER TABLE chat_channels ADD COLUMN folder_path TEXT;
+ALTER TABLE chat_threads ADD COLUMN lane TEXT NOT NULL DEFAULT 'posts'
+    CHECK (lane IN ('posts', 'chat'));
+ALTER TABLE chat_decisions ADD COLUMN options_json TEXT;
+ALTER TABLE chat_decisions ADD COLUMN chosen_option TEXT;
+";
+
 /// The frozen, ordered list of migrations this build knows.
-pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[Migration {
-    ordinal: 0,
-    id: BASELINE_MIGRATION_ID,
-    sql: V2_BASELINE_DDL,
-    sets_user_version: Some(ENGINE_SCHEMA_VERSION),
-}];
+pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        ordinal: 0,
+        id: BASELINE_MIGRATION_ID,
+        sql: V2_BASELINE_DDL,
+        sets_user_version: Some(ENGINE_SCHEMA_VERSION),
+    },
+    Migration {
+        ordinal: 1,
+        id: V2_GROUPS_MIGRATION_ID,
+        sql: V2_GROUPS_DDL,
+        sets_user_version: None,
+    },
+];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
@@ -2225,6 +2253,61 @@ mod tests {
     /// every migration, so a malformed list already fails closed at runtime,
     /// but that failure would first be seen by whoever opened a store.
     #[test]
+    fn a_baseline_only_store_gains_the_groups_columns() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        let baseline_only = &BASELINE_MIGRATIONS[..1];
+        run_migrations(&mut conn, baseline_only, &ctx, &NoFaults).expect("baseline");
+        let has_type: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('chat_channels') WHERE name = 'type'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("probe");
+        assert!(!has_type, "the baseline alone has no type column");
+
+        let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("groups");
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        for (table, column) in [
+            ("chat_channels", "type"),
+            ("chat_channels", "purpose"),
+            ("chat_channels", "folder_path"),
+            ("chat_threads", "lane"),
+            ("chat_decisions", "options_json"),
+            ("chat_decisions", "chosen_option"),
+        ] {
+            let present: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"
+                    ),
+                    [column],
+                    |r| r.get(0),
+                )
+                .expect("probe");
+            assert!(present, "{table}.{column} must exist after the groups migration");
+        }
+        // Old rows keep their meaning through the defaults.
+        conn.execute(
+            "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+             VALUES ('w', 'c', 'general', 'general', 'channel', 1, 1)",
+            [],
+        )
+        .expect("insert");
+        let (kind, purpose, folder): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT type, purpose, folder_path FROM chat_channels WHERE channel_id = 'c'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read");
+        assert_eq!((kind.as_str(), purpose.as_str(), folder), ("posts", "", None));
+    }
+
+    #[test]
     fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
     }
@@ -2272,7 +2355,7 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,
@@ -2288,7 +2371,10 @@ mod tests {
 
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied { newly_applied: BASELINE_MIGRATIONS.len() as u32 }
+        );
         // Second run is a no-op: already applied, checksum matches.
         let out2 = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run2");
         assert_eq!(out2, MigrationOutcome::Applied { newly_applied: 0 });
@@ -2624,7 +2710,10 @@ mod tests {
         // Reopen and re-run with no fault: recovers cleanly and applies the baseline.
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("recover");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied { newly_applied: BASELINE_MIGRATIONS.len() as u32 }
+        );
     }
 
     #[cfg(feature = "fault-injection")]
