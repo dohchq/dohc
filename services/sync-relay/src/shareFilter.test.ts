@@ -774,6 +774,23 @@ describe("chat-channel share op filter", () => {
     expect(group.allowed).toBe(true);
     if (!group.allowed) return;
     expect(group.payload).toMatchObject({ folderPath: "team" });
+    // A group whose channel resolves as a direct message serves nothing on
+    // either half: a dm has no folder, and a grant minted before the log
+    // named the channel must not follow it into one.
+    const dmGroup = { kind: "group" as const, channelWireId: "wire-dm", paths: ["team"], versionId: null, access: "read-write" as const };
+    const dmResolver = { ...resolver, channelKind: (wireId: string) => (wireId === "wire-dm" ? ("dm" as const) : resolver.channelKind(wireId)) };
+    expect(
+      filterOpForShare(dmGroup, "chat.channel.create", JSON.stringify({
+        channelId: "c-dm", name: "someone", slug: "someone", kind: "dm", createdAtMs: 1, wireId: "wire-dm",
+      }), dmResolver).allowed,
+    ).toBe(false);
+    expect(
+      filterOpForShare(dmGroup, "moment.append", JSON.stringify({
+        momentId: "m1", versionId: "main", objectId: "o1", path: "team/a.md", recordedAtMs: 1, operation: "write",
+        payloadBeforeBlobSha256: null, payloadBeforePath: null, payloadAfterBlobSha256: "a".repeat(64), payloadAfterPath: "team/a.md",
+        metadata: { origin: "user" }, beforePresent: "null",
+      }), dmResolver).allowed,
+    ).toBe(false);
     const thread = decide("chat.thread.create", {
       threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
     });

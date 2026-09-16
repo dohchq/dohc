@@ -1037,6 +1037,11 @@ export function filterOpForShare(
   const { payload, referencedPaths } = parsed;
 
   if (isGroupSelector(selector)) {
+    // A group is a grant on an ordinary channel and its folder. Whatever
+    // the channel later resolves as, anything else serves nothing: a direct
+    // message has no folder, and a grant minted before the log named the
+    // channel must not follow it into one.
+    if (chat?.channelKind(selector.channelWireId) !== "channel") return { allowed: false };
     // The group's channel carries its chat; its folder carries its files.
     // A chat op that is not the channel's is not served through the
     // folder either: a group's chat is one channel.
@@ -1187,6 +1192,7 @@ export function filterOpForShareAppend(
     return { allowed: false };
   }
   if (isGroupSelector(selector)) {
+    if (chat?.channelKind(selector.channelWireId) !== "channel") return { allowed: false };
     return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat);
   }
   return isChatChannelSelector(selector)
