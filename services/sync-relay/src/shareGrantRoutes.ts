@@ -7,7 +7,7 @@ import type { createLinkResponseStreams } from "./linkResponseStreams";
 import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
-import { parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector } from "./shareFilter";
+import { parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 import { MAX_ORIGIN_ID_CHARS, MAX_SHARE_ID_CHARS } from "./wireLimits";
@@ -523,15 +523,34 @@ export function createShareGrantRoutes(
       // path/version grant. The recipient addressing, pending-invite, and
       // anti-enumeration behavior below is identical for both.
       const { selector, access } = (() => {
+        if (input.channelWireId !== undefined && input.paths !== undefined) {
+          // One share for a group: the channel and its folder together.
+          if (input.versionId !== undefined && input.versionId !== null) {
+            throw relayError("ambiguous_selector", "a group share follows the live folder, never a version");
+          }
+          const groupValidation = validateGroupShareSelector(
+            { channelWireId: input.channelWireId, paths: input.paths },
+            { channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId) },
+          );
+          if (!groupValidation.ok) {
+            throw relayError(groupValidation.code, groupValidation.message);
+          }
+          const accessValidation = validateChatShareAccess(input.access);
+          if (!accessValidation.ok) {
+            throw relayError(accessValidation.code, accessValidation.message);
+          }
+          const selector = groupValidation.selector;
+          if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
+            throw relayError("invalid_channel", "channel is not shareable");
+          }
+          return { selector, access: accessValidation.access };
+        }
         if (input.channelWireId !== undefined) {
           // Fail closed on an ambiguous body: a chat-channel selector must not
-          // also carry a path/version selector. Silently preferring
-          // channelWireId (and dropping the paths) would turn a stale/leftover
-          // `paths` field into a full chat-channel grant — a silent intent
-          // mismatch. Reject it instead (hardens regular shared-channel grants
-          // too).
-          if (input.paths !== undefined || input.versionId !== undefined) {
-            throw relayError("ambiguous_selector", "a chat-channel share must not also carry paths or versionId");
+          // also carry a version selector. (A channel with paths is a group
+          // share, handled above.)
+          if (input.versionId !== undefined) {
+            throw relayError("ambiguous_selector", "a chat-channel share must not also carry versionId");
           }
           const chatValidation = validateChatChannelShareSelector({
             channelWireId: input.channelWireId,

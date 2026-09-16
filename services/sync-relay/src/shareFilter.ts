@@ -72,8 +72,26 @@ export interface ChatChannelShareSelector extends StoredChatChannelShareSelector
   access: ChatShareAccess;
 }
 
-export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
-export type StoredAnyShareSelector = StoredShareSelector | StoredChatChannelShareSelector;
+// One share for a group: its chat channel and its folder together. The
+// chat half scopes like a chat-channel grant; the file half scopes like a
+// path grant on the folder. Access is the chat vocabulary; the file side
+// reads read-write as edit and read-only as view.
+export interface StoredGroupShareSelector {
+  kind: "group";
+  channelWireId: string;
+  paths: string[];
+  versionId: null;
+}
+
+export interface GroupShareSelector extends StoredGroupShareSelector {
+  access: ChatShareAccess;
+}
+
+export type AnyShareSelector = ShareSelector | ChatChannelShareSelector | GroupShareSelector;
+export type StoredAnyShareSelector =
+  | StoredShareSelector
+  | StoredChatChannelShareSelector
+  | StoredGroupShareSelector;
 
 export function effectiveShareSelector(
   selector: StoredAnyShareSelector,
@@ -83,6 +101,38 @@ export function effectiveShareSelector(
     return isChatShareAccessValue(access) ? { ...selector, access } : null;
   }
   return isShareAccessValue(access) ? { ...selector, access } : null;
+}
+
+export function isGroupSelector(selector: AnyShareSelector): selector is GroupShareSelector {
+  return "kind" in selector && (selector as { kind?: unknown }).kind === "group";
+}
+
+// The chat half of a group grant, for the code paths that scope chat ops.
+export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareSelector {
+  return { kind: "chat-channel", channelWireId: selector.channelWireId, access: selector.access };
+}
+
+// The file half of a group grant. read-write edits the folder; read-only
+// views it.
+export function fileHalfOfGroup(selector: GroupShareSelector): ShareSelector {
+  return {
+    paths: selector.paths,
+    versionId: null,
+    access: selector.access === "read-write" ? "edit" : "view",
+  };
+}
+
+// A selector with a file side: a path grant, or a group's folder.
+export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
+  if (isGroupSelector(selector)) return fileHalfOfGroup(selector);
+  return isChatChannelSelector(selector) ? null : selector;
+}
+
+// A selector with a chat-channel side: a chat-channel grant, or a group's
+// channel.
+export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector | null {
+  if (isGroupSelector(selector)) return chatHalfOfGroup(selector);
+  return isChatChannelSelector(selector) ? selector : null;
 }
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
@@ -135,10 +185,59 @@ export function isChatChannelSelector(
 export function isLiveEditShareSelector(
   selector: AnyShareSelector,
 ): selector is ShareSelector {
-  return !isChatChannelSelector(selector)
-    && selector.access === "edit"
+  if ("kind" in selector) return false;
+  return selector.access === "edit"
     && selector.versionId === null
     && selector.paths.length > 0;
+}
+
+export type GroupSelectorValidation =
+  | { ok: true; selector: StoredGroupShareSelector }
+  | {
+      ok: false;
+      code:
+        | typeof RELAY_ERRORS.invalid_channel.code
+        | typeof RELAY_ERRORS.invalid_path.code
+        | typeof RELAY_ERRORS.secret_path.code
+        | typeof RELAY_ERRORS.too_many_paths.code
+        | typeof RELAY_ERRORS.invalid_version.code
+        | typeof RELAY_ERRORS.empty_selector.code;
+      message: string;
+    };
+
+// A group grant names its channel and its folder. Both halves pass their
+// own validator; the folder is one path, live, never a version.
+export function validateGroupShareSelector(
+  input: { channelWireId?: unknown; paths?: unknown },
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+): GroupSelectorValidation {
+  const channel = validateChatChannelShareSelector({ channelWireId: input.channelWireId }, chat);
+  if (!channel.ok) return channel;
+  if (chat?.channelKind(channel.selector.channelWireId) === "dm") {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_channel.code,
+      message: "a direct message has no folder to share",
+    };
+  }
+  const files = validateShareSelector({ paths: input.paths, versionId: null });
+  if (!files.ok) return files;
+  if (files.selector.paths.length === 0) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.empty_selector.code,
+      message: "a group share names its folder",
+    };
+  }
+  return {
+    ok: true,
+    selector: {
+      kind: "group",
+      channelWireId: channel.selector.channelWireId,
+      paths: files.selector.paths,
+      versionId: null,
+    },
+  };
 }
 
 export type ChatChannelSelectorValidation =
@@ -381,6 +480,14 @@ export function parseStoredAnyShareSelectorJson(
       );
       return validation.ok ? validation.selector : null;
     }
+    if ((parsed as { kind?: unknown }).kind === "group") {
+      if ((parsed as { access?: unknown }).access !== undefined) return null;
+      if ((parsed as { versionId?: unknown }).versionId !== null) return null;
+      const validation = validateGroupShareSelector(
+        parsed as { channelWireId?: unknown; paths?: unknown },
+      );
+      return validation.ok ? validation.selector : null;
+    }
   } catch {
     return null;
   }
@@ -489,6 +596,14 @@ export function presenceTopicAllowedForShare(
     } else if (chat.channelKind(topic) === "agent") {
       return false;
     }
+  }
+  // A group answers for both of its halves: a chat topic through its
+  // channel, a path topic through its folder.
+  if (isGroupSelector(selector)) {
+    return (
+      presenceTopicAllowedForShare(chatHalfOfGroup(selector), topic, chat) ||
+      presenceTopicAllowedForShare(fileHalfOfGroup(selector), topic, chat)
+    );
   }
   if (isChatChannelSelector(selector)) {
     // A chat presence scope is shareable only after the owner's log proves a
@@ -893,6 +1008,15 @@ export function filterOpForShare(
   if (!parsed) return { allowed: false };
   const { payload, referencedPaths } = parsed;
 
+  if (isGroupSelector(selector)) {
+    // The group's channel carries its chat; its folder carries its files.
+    // A chat op that is not the channel's is not served through the
+    // folder either: a group's chat is one channel.
+    if (opKind.startsWith("chat.")) {
+      return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat);
+    }
+    return filterOpForShare(fileHalfOfGroup(selector), opKind, payloadJson, chat);
+  }
   if (isChatChannelSelector(selector)) {
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
   }
@@ -1032,6 +1156,9 @@ export function filterOpForShareAppend(
   } catch {
     return { allowed: false };
   }
+  if (isGroupSelector(selector)) {
+    return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat);
+  }
   return isChatChannelSelector(selector)
     ? filterChatOpForChannelShare(selector, opKind, payload, chat)
     : filterFileChatOpForPathShare(selector, opKind, payload, chat);
@@ -1084,6 +1211,9 @@ export function filterProposedChangeForShare(
 ): ProposedChangeDecision {
   // A chat-channel grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
+  if (isGroupSelector(selector)) {
+    return filterProposedChangeForShare(fileHalfOfGroup(selector), raw);
+  }
   // Changes follow PATHS. A version share names none, so it proposes nothing.
   if (selector.paths.length === 0) return { allowed: false };
   const record = asRecord(raw);

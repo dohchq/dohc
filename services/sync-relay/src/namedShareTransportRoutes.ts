@@ -8,7 +8,7 @@ import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } fr
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   filterOpForShareAppend,
-  isChatChannelSelector,
+  chatSideOf,
   type ChatShareThreadResolver,
   type ThreadFileBinding,
 } from "./shareFilter";
@@ -60,10 +60,10 @@ export function createNamedShareTransportRoutes(
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
+      const chatSide = chatSideOf(share.selector);
       if (
         channelWireId !== null &&
-        (!isChatChannelSelector(share.selector) ||
-          share.selector.channelWireId !== channelWireId)
+        (!chatSide || chatSide.channelWireId !== channelWireId)
       ) {
         throw notFound();
       }
@@ -183,9 +183,10 @@ export function createNamedShareTransportRoutes(
             linkedPath?: unknown;
           };
           const threadId = created.threadId;
+          const chatSideForBinding = chatSideOf(share.selector);
           if (typeof threadId === "string" && threadId.length > 0) {
-            if (isChatChannelSelector(share.selector)) {
-              pendingThreadBindings.set(threadId, share.selector.channelWireId);
+            if (chatSideForBinding) {
+              pendingThreadBindings.set(threadId, chatSideForBinding.channelWireId);
             } else if (
               typeof created.linkedPath === "string" &&
               created.linkedPath.length > 0
