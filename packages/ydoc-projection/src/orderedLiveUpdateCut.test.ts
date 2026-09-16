@@ -2298,8 +2298,8 @@ describe('validateOrderedLiveUpdateCut', () => {
         )],
       },
     ])
-    const totalIndexOperations = 225
-    const graphIndexOperations = 105
+    const totalIndexOperations = 215
+    const graphIndexOperations = 100
     const exact = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy(),
     ))
@@ -2461,6 +2461,48 @@ describe('validateOrderedLiveUpdateCut', () => {
     }
   })
 
+  it('accepts replay of deleted astral text without a repeated delete set', () => {
+    const checkpoint = updateWithText('💩')
+    const item = firstStringItem(checkpoint)
+    const deletion = makeStructUpdate(1, 0, [], [{
+      clientId: item.id.client, startClock: item.id.clock, length: item.length,
+    }])
+    const cut = accepted(validateOrderedLiveUpdateCut({
+      mode: 'journal-candidate', checkpoint, suffix: [deletion],
+      candidate: replacementItemFrom(item),
+    }, highPolicy()))
+    try {
+      expect(cut.document.getXmlFragment('body').toString()).toBe('')
+      expect(cut.finishAfterProjection().kind).toBe('accepted')
+    } finally { cut.document.destroy() }
+  })
+
+  it('does not revisit unchanged document content for each empty journal entry', () => {
+    const extraWork = (size: number) => {
+      const source = new Y.Doc({ gc: false })
+      source.clientID = 44_001
+      for (let index = 0; index < size; index += 1) {
+        source.getMap('frontmatter').set(`key-${index}`, index)
+      }
+      const checkpoint = Y.encodeStateAsUpdate(source)
+      source.destroy()
+      const measure = (count: number) => {
+        const cut = accepted(validateOrderedLiveUpdateCut({
+          mode: 'journal-candidate', checkpoint,
+          suffix: Array.from({ length: count }, () => new Uint8Array([0, 0])),
+          candidate: new Uint8Array([0, 0]),
+        }, highPolicy()))
+        try {
+          expect(Object.keys(cut.document.getMap('frontmatter').toJSON())).toHaveLength(size)
+          expect(cut.finishAfterProjection().kind).toBe('accepted')
+          return cut.usage.indexOperations
+        } finally { cut.document.destroy() }
+      }
+      return measure(32) - measure(0)
+    }
+    expect(extraWork(1024)).toBeLessThanOrEqual(extraWork(64) * 2)
+  })
+
   it('bounds alternating tombstone overlap work independently of the observed usage', () => {
     for (const count of [64, 2_048]) {
       const clientId = 44_000
@@ -2494,10 +2536,10 @@ describe('validateOrderedLiveUpdateCut', () => {
     const cut = accepted(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy(),
     ))
-    const evidenceAndFrontierOperations = 119
-    const finalProofOperations = 130
+    const evidenceAndFrontierOperations = 114
+    const finalProofOperations = 125
     const exactIndexOperations = evidenceAndFrontierOperations + finalProofOperations
-    expect(exactIndexOperations).toBe(249)
+    expect(exactIndexOperations).toBe(239)
     expect(cut.usage.indexOperations).toBe(exactIndexOperations)
     expect(validateOrderedLiveUpdateCut(
       { mode: 'registration', checkpoint }, highPolicy({
@@ -2547,7 +2589,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     const cut = accepted(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,
     }, highPolicy()))
-    const exactIndexOperations = 521
+    const exactIndexOperations = 504
     expect(cut.usage.indexOperations).toBe(exactIndexOperations)
     expect(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,
