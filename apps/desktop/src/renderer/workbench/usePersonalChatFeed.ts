@@ -3,10 +3,12 @@ import type { ChatFeedItemRecord, ChatReactionRecord } from "../../ipc/bridgeCon
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
-export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
+export function usePersonalChatFeed({ workspaceId, liveToken, onError, onViewer }: {
   workspaceId: string;
   liveToken: Readonly<{ current: number }>;
   onError: (message: string) => void;
+  // The listing names the viewer; Home draws a Like as theirs from it.
+  onViewer: (viewerAuthorId: string) => void;
 }) {
   const [personalFeed, setPersonalFeed] = useState<ChatFeedItemRecord[]>([]);
   const [personalFeedLoading, setPersonalFeedLoading] = useState(false);
@@ -73,6 +75,7 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
         if (!requestIsCurrent()) return;
         setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
         setPersonalFeedNextCursor(page.nextCursor);
+        if (page.viewerAuthorId) onViewer(page.viewerAuthorId);
         if (!cursor && page.headCursor) {
           void bridge()
             .markPersonalChatFeedSeen({
@@ -91,7 +94,7 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
         if (requestIsCurrent()) setPersonalFeedLoading(false);
       }
     },
-    [liveToken, onError, workspaceId],
+    [liveToken, onError, onViewer, workspaceId],
   );
 
   return {

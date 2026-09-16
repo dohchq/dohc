@@ -1887,6 +1887,10 @@ export const ListPersonalChatFeedResult = z.object({
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),
+  // Who the viewer is, so Home can draw a Like as theirs. Each item's
+  // reactions are normalized to it the way listChatReactions does; a joined
+  // shared channel resolves per thread. Optional for older fixtures.
+  viewerAuthorId: OPAQUE_ID.optional(),
 });
 export type ListPersonalChatFeedResult = z.infer<
   typeof ListPersonalChatFeedResult

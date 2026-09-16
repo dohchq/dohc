@@ -359,9 +359,6 @@ describe("ChatsView hybrid feed", () => {
     };
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
       items: [{ ...personalFeedItem("Already liked", "message-liked"), reactions: [mine] }],
-    });
-    bridgeMock.listChatReactions.mockResolvedValue({
-      reactions: [mine],
       viewerAuthorId: "author-you",
     });
     renderView();

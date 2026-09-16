@@ -519,7 +519,12 @@ export function ChatsView(props: {
     clearRows,
     invalidate,
     setMessageReactions,
-  } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
+  } = usePersonalChatFeed({
+    workspaceId,
+    liveToken,
+    onError: props.onError,
+    onViewer: setViewerAuthorId,
+  });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
@@ -2142,25 +2147,6 @@ export function ChatsView(props: {
   useEffect(() => {
     if (nav.level === "feed") void loadPersonalFeed();
   }, [loadPersonalFeed, nav.level]);
-
-  // Home needs to know who the viewer is to draw a Like as theirs. The feed
-  // listing does not say; the first item's reaction listing does. One read
-  // per Home open, guarded like every other.
-  useEffect(() => {
-    if (nav.level !== "feed" || viewerAuthorId !== "") return;
-    const first = personalFeed[0];
-    if (!first) return;
-    const token = liveToken.current;
-    void bridge()
-      .listChatReactions({ workspaceId, threadId: first.thread.id })
-      .then((result) => {
-        if (token !== liveToken.current) return;
-        setViewerAuthorId(result.viewerAuthorId);
-      })
-      .catch(() => {
-        // Likes draw unpressed until a write answers with the viewer.
-      });
-  }, [nav.level, personalFeed, viewerAuthorId, workspaceId]);
 
   const openConversation = useCallback(
     (
