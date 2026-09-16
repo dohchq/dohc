@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createSqliteEngine } from './sqliteEngine'
 
 function sha256(value: string) {
@@ -25,6 +25,33 @@ async function readTable(bytesBase64: string, table: string) {
 }
 
 describe('sqlite worker data imports', () => {
+  it('keeps raw materialization usable when the encoded response fails', async () => {
+    const engine = await createSqliteEngine()
+    const input = {
+      name: 'data.csv',
+      mediaType: 'text/csv',
+      body: 'id,value\na,1',
+      tableName: 'rows',
+    }
+    const originalToString = Buffer.prototype.toString
+    const spy = vi.spyOn(Buffer.prototype, 'toString').mockImplementation(function (this: Buffer, ...args: unknown[]) {
+      if (args[0] === 'base64') throw new RangeError('synthetic base64 conversion failure')
+      return originalToString.apply(this, args as [BufferEncoding?, number?, number?])
+    } as typeof Buffer.prototype.toString)
+    try {
+      await expect(engine.importData(input)).resolves.toMatchObject({
+        ok: false,
+        code: 'sqlite-materialize-failed',
+        message: 'synthetic base64 conversion failure',
+      })
+      await expect(engine.materializeImport(input)).resolves.toMatchObject({
+        ok: true, tableName: 'rows', rowCount: 1,
+      })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it.each([
     { name: 'quoted.csv', mediaType: 'text/csv', body: 'id,note,amount\na,"one,two",4.5\nb,"line one\nline two",8' },
     { name: 'data.json', mediaType: 'application/json', body: '[{"id":"a","value":true},{"id":"b","value":false}]' },
