@@ -1,3 +1,4 @@
+import { mapWidgetOwners } from "./widgetOwnership";
 import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
@@ -159,13 +160,15 @@ function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
   return state.selection.$from.parentOffset >= block.node.textContent.length;
 }
 
-function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
+function buildCodeLanguageDecorations(
+  doc: ProseMirrorNode,
+  owners: Map<number, string>,
+  nextOwnerKey: () => string,
+): DecorationSet {
   const decorations: Decoration[] = [];
-  let ordinal = 0;
-
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return;
-    const index = ordinal++;
+    const ownerKey = owners.get(pos) ?? nextOwnerKey();
 
     const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
     decorations.push(
@@ -251,7 +254,7 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
           copy.addEventListener("mousedown", stopEditorMouseEvent);
           copy.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            // The widget key uses block order and language, not code text, so
+            // The widget key uses block ownership and language, not code text, so
             // ProseMirror reuses this DOM (and its captured `node`) across
             // pure text edits. Read the live node at click time so "copy"
             // never writes pre-edit content.
@@ -279,7 +282,8 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
         {
           side: -1,
           // Prose edits before this block preserve its toolbar and live getPos.
-          key: `code-lang-${index}-${language}`,
+          key: `code-lang-${ownerKey}-${language}`,
+          ownerKey,
           ignoreSelection: true,
           stopEvent: () => true,
         },
@@ -291,17 +295,19 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
 }
 
 export function makeCodeBlockChromePlugin() {
+  let nextId = 0;
+  const nextOwnerKey = () => String(nextId++);
   return new Plugin({
     key: codeLanguageKey,
     state: {
       init(_, instance) {
-        return buildCodeLanguageDecorations(instance.doc);
+        return buildCodeLanguageDecorations(instance.doc, new Map(), nextOwnerKey);
       },
       apply(tr, old) {
         if (!tr.docChanged && !tr.getMeta(codeLanguageKey)) {
           return old.map(tr.mapping, tr.doc);
         }
-        return buildCodeLanguageDecorations(tr.doc);
+        return buildCodeLanguageDecorations(tr.doc, mapWidgetOwners(old, tr.mapping), nextOwnerKey);
       },
     },
     view(view) {

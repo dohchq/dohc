@@ -231,6 +231,57 @@ describe("editor chrome reuse", () => {
     checkActions();
   });
 
+  it.each(["insert", "remove", "reorder", "replace", "split", "join", "multi-step"].flatMap(
+    (operation) => ["language", "gutter"].map((control) => ({ operation, control })),
+  ))("does not retarget focused $control after $operation", ({ operation, control }) => {
+    const onInsert = vi.fn();
+    const view = mount(doc(paragraph("lead"), codeBlock("first", "javascript"), codeBlock("second", "javascript")), [
+      makeBlockControlsPlugin({ onInsertRef: { current: onInsert }, onOpenMenuRef: { current: () => {} } }),
+      makeCodeBlockChromePlugin(),
+    ]);
+    view.setProps({ handleScrollToSelection: () => true });
+    const select = view.dom.querySelectorAll<HTMLSelectElement>(".dohc-code-language-select")[1];
+    const plus = view.dom.querySelectorAll<HTMLButtonElement>(".dohc-block-plus")[2];
+    const focused = control === "language" ? select : plus;
+    focused.focus();
+    const start = view.state.doc.child(0).nodeSize;
+    const first = view.state.doc.child(1), second = view.state.doc.child(2);
+    const target = start + first.nodeSize;
+    const tr = view.state.tr;
+    if (operation === "insert") tr.insert(target, codeBlock("inserted", "javascript"));
+    if (operation === "remove") tr.delete(start, target);
+    if (operation === "reorder") tr.replaceWith(start, tr.doc.content.size, [second, first]);
+    if (operation === "replace") tr.replaceWith(start, tr.doc.content.size, [codeBlock("second", "javascript"), codeBlock("first", "javascript")]);
+    if (operation === "split") tr.split(start + 3);
+    if (operation === "join") tr.join(target);
+    if (operation === "multi-step") tr.insertText("extra", 2).insert(target + 5, codeBlock("inserted", "javascript"));
+    view.dispatch(tr);
+    if (select.isConnected) {
+      select.value = "python";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      const changed: string[] = [];
+      view.state.doc.forEach((node) => { if (node.attrs.language === "python") changed.push(node.textContent); });
+      expect(changed).toEqual(["second"]);
+    } else {
+      const document = view.state.doc;
+      select.value = "python";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      expect(view.state.doc).toBe(document);
+    }
+    if (!focused.isConnected) expect(document.activeElement).not.toBe(focused);
+    if (plus.isConnected) {
+      plus.click();
+      expect(view.state.doc.nodeAt(onInsert.mock.lastCall![0])?.textContent).toBe("second");
+    } else {
+      plus.click();
+      expect(onInsert).not.toHaveBeenCalled();
+    }
+    if (operation === "reorder" || operation === "replace" || operation === "join") {
+      expect(select.isConnected).toBe(false);
+      expect(plus.isConnected).toBe(false);
+    }
+  });
+
   it.each([false, true])("updates retained language controls when initial editability %s changes", (initialEditable) => {
     const host = document.body.appendChild(document.createElement("div"));
     const view = new EditorView(host, {

@@ -1,3 +1,4 @@
+import { mapWidgetOwners } from "./widgetOwnership";
 import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
@@ -97,11 +98,14 @@ function buildBlockControlDecorations(
   onInsertRef: RefObject<(pos: number) => void>,
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
   ghostSlot: DragGhostSlot,
+  owners: Map<number, string>,
+  nextOwnerKey: () => string,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
   doc.forEach((node, offset, index) => {
     const pos = offset;
+    const ownerKey = owners.get(pos) ?? nextOwnerKey();
     decorations.push(
       Decoration.node(pos, pos + node.nodeSize, {
         class: "dohc-block-node",
@@ -188,7 +192,7 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${index}` },
+        { side: -1, key: `dohc-block-controls-${ownerKey}-${index}`, ownerKey },
       ),
     );
   });
@@ -246,6 +250,8 @@ export function makeBlockControlsPlugin({
 }) {
   let activeBlockIndex: string | null | undefined;
   const ghostSlot: DragGhostSlot = { current: null };
+  let nextId = 0;
+  const nextOwnerKey = () => String(nextId++);
   return new Plugin({
     key: blockControlsKey,
     state: {
@@ -255,6 +261,8 @@ export function makeBlockControlsPlugin({
           onInsertRef,
           onOpenMenuRef,
           ghostSlot,
+          new Map(),
+          nextOwnerKey,
         );
       },
       apply(tr, old) {
@@ -265,6 +273,8 @@ export function makeBlockControlsPlugin({
           onInsertRef,
           onOpenMenuRef,
           ghostSlot,
+          mapWidgetOwners(old, tr.mapping),
+          nextOwnerKey,
         );
       },
     },
