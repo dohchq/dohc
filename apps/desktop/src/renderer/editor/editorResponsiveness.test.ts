@@ -231,6 +231,44 @@ describe("editor chrome reuse", () => {
     checkActions();
   });
 
+  it.each([false, true])("updates retained language controls when initial editability %s changes", (initialEditable) => {
+    const host = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView(host, {
+      state: EditorState.create({
+        doc: doc(paragraph("lead"), codeBlock("first", "javascript")),
+        plugins: [blockControls(), makeCodeBlockChromePlugin()],
+      }),
+      editable: () => initialEditable,
+    });
+    views.push(view);
+    const select = view.dom.querySelector<HTMLSelectElement>(".dohc-code-language-select")!;
+    const toolbar = view.dom.querySelector(".dohc-code-block-toolbar");
+    expect(select.disabled).toBe(!initialEditable);
+    const scan = vi.spyOn(view.dom, "querySelectorAll");
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)));
+    view.dispatch(view.state.tr.insertText("x", 2));
+    expect(scan).not.toHaveBeenCalled();
+    view.setProps({ editable: () => !initialEditable });
+    expect(select.disabled).toBe(initialEditable);
+    expect(scan).toHaveBeenCalledTimes(1);
+    view.dispatch(view.state.tr.insertText("y", 2));
+    expect(view.dom.querySelector(".dohc-code-block-toolbar")).toBe(toolbar);
+    expect(view.dom.querySelector(".dohc-code-language-select")).toBe(select);
+    expect(scan).toHaveBeenCalledTimes(1);
+    view.setProps({ editable: () => true });
+    expect(select.disabled).toBe(false);
+    select.value = "python";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(view.state.doc.child(1).attrs.language).toBe("python");
+    view.setProps({ editable: () => false });
+    const readonlySelect = view.dom.querySelector<HTMLSelectElement>(".dohc-code-language-select")!;
+    expect(readonlySelect.disabled).toBe(true);
+    readonlySelect.value = "rust";
+    readonlySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(view.state.doc.child(1).attrs.language).toBe("python");
+    expect(view.dom.querySelector<HTMLButtonElement>(".dohc-code-copy-btn")!.disabled).toBe(false);
+  });
+
   it("copy and language actions target the current blocks after insertion, removal, and reorder", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });

@@ -208,9 +208,6 @@ function buildCodeLanguageDecorations(doc: ProseMirrorNode): DecorationSet {
           select.value = language;
 
           const commit = () => {
-            // The decoration only rebuilds on doc/meta transactions, so a
-            // select built while editable can outlive an editability flip.
-            // Refuse to mutate the block once the view is read-only.
             if (view.editable === false) return;
             const blockPos = getPos();
             if (blockPos === undefined) return;
@@ -306,6 +303,20 @@ export function makeCodeBlockChromePlugin() {
         }
         return buildCodeLanguageDecorations(tr.doc);
       },
+    },
+    view(view) {
+      let editable = view.editable;
+      return {
+        update(nextView) {
+          if (nextView.editable === editable) return;
+          editable = nextView.editable;
+          for (const select of nextView.dom.querySelectorAll<HTMLSelectElement>(
+            ".dohc-code-language-select",
+          )) {
+            select.disabled = !editable;
+          }
+        },
+      };
     },
     props: {
       decorations(state) {
