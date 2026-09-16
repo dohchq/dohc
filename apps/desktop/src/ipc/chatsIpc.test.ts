@@ -65,6 +65,8 @@ function fixture(kind: ScopeKind = "local") {
       message: { ...message, ...input, attachments: storedAttachments(input.attachments) },
     })),
     listBookmarks: vi.fn<DesktopLinkedChatStore["listBookmarks"]>(async () => [bookmark]),
+    ensureDefaultChannelFollows: vi.fn<DesktopLinkedChatStore["ensureDefaultChannelFollows"]>(async () => undefined),
+    listPersonalFeed: vi.fn<DesktopLinkedChatStore["listPersonalFeed"]>(async () => ({ items: [] })),
     saveBookmark: vi.fn<DesktopLinkedChatStore["saveBookmark"]>(async input => ({ ...bookmark, ...input })),
     setFollow: vi.fn<DesktopLinkedChatStore["setFollow"]>(async input => ({ ...input, updatedAtMs: 5 })),
     markPersonalFeedSeen: vi.fn<DesktopLinkedChatStore["markPersonalFeedSeen"]>(async input => ({ ...input, lastSeenCreatedAtMs: 3, lastSeenMessageId: "message", updatedAtMs: 5 })),
@@ -127,7 +129,10 @@ function fixture(kind: ScopeKind = "local") {
     warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Ice",
     localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
     verifiedChatAuthorUserIdFor, revalidateChatWrite,
-    chatRelayIdentityFor: async () => ({ joinedChannel: null, authorUserId: "verified-owner" }),
+    chatRelayIdentityFor: async (_workspaceId, target) =>
+      "threadId" in target && target.threadId === "thread-joined"
+        ? { joinedChannel: null, authorUserId: "recipient" }
+        : { joinedChannel: null, authorUserId: "verified-owner" },
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
@@ -150,6 +155,31 @@ const mutations = [
   { name: "decision", channel: CHANNELS.resolveChatDecision, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", resolvedByMessageId: "reply" }, method: "resolveChatDecision" },
   { name: "reaction", channel: CHANNELS.setChatReaction, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added" }, method: "setReaction" },
 ] as const;
+
+describe("the personal feed names each item's viewer", () => {
+  it("normalizes each item's reactions to its thread's viewer", async () => {
+    const test = fixture();
+    const reaction = (threadId: string, messageId: string, authorId: string) => ({
+      reactionId: `reaction-${messageId}-${authorId}`, threadId, messageId,
+      emoji: "👍", author: { authorId, kind: "human" as const, displayName: "Ice" },
+      state: "added" as const, atMs: 4,
+    });
+    const item = (threadId: string, messageId: string, authorId: string) => ({
+      message: { ...test.message, id: messageId, threadId },
+      thread: { ...test.thread, id: threadId },
+      reactions: [reaction(threadId, messageId, authorId)],
+      matchedBy: ["thread" as const],
+    });
+    test.storeMethods.listPersonalFeed.mockResolvedValueOnce({
+      items: [item("thread", "message-own", "local-owner"), item("thread-joined", "message-joined", "local-owner")],
+    });
+    const result = await test.invoke(CHANNELS.listPersonalChatFeed, { workspaceId: "workspace" }) as {
+      items: Array<{ viewerAuthorId?: string; reactions: Array<{ authorId: string }> }>;
+    };
+    expect(result.items.map((row) => row.viewerAuthorId)).toEqual(["verified-owner", "recipient"]);
+    expect(result.items.map((row) => row.reactions[0]?.authorId)).toEqual(["verified-owner", "recipient"]);
+  });
+});
 
 describe("registered chat write gates", () => {
   for (const kind of ["view", "comment", "edit", "ended", "damaged"] as const) {

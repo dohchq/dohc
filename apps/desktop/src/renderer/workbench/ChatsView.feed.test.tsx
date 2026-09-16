@@ -358,8 +358,13 @@ describe("ChatsView hybrid feed", () => {
       authorDisplayName: "You",
     };
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
-      items: [{ ...personalFeedItem("Already liked", "message-liked"), reactions: [mine] }],
-      viewerAuthorId: "author-you",
+      items: [
+        {
+          ...personalFeedItem("Already liked", "message-liked"),
+          reactions: [mine],
+          viewerAuthorId: "author-you",
+        },
+      ],
     });
     renderView();
 
@@ -388,8 +393,8 @@ describe("ChatsView hybrid feed", () => {
     });
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
       items: [
-        personalFeedItem("First in thread", "message-a"),
-        personalFeedItem("Second in thread", "message-b"),
+        { ...personalFeedItem("First in thread", "message-a"), viewerAuthorId: "author-you" },
+        { ...personalFeedItem("Second in thread", "message-b"), viewerAuthorId: "author-you" },
       ],
     });
     bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "author-you" });

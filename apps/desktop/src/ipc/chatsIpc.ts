@@ -835,8 +835,9 @@ export function registerChatsIpcHandlers<
     );
     // The viewer, per thread: a joined shared channel writes under the
     // grant's account, the workspace's own threads under the owner. Each
-    // item's reactions normalize to its thread's viewer, as listChatReactions
-    // does, so a Like made before sign-in still reads as the viewer's.
+    // item carries its thread's viewer and its reactions normalized to it,
+    // as listChatReactions does, so a Like made before sign-in still reads
+    // as the viewer's.
     const localFallbackAuthorId = localReactorFallbackId();
     const viewerByThread = new Map(
       await Promise.all(
@@ -851,17 +852,12 @@ export function registerChatsIpcHandlers<
         ] as const),
       ),
     );
-    const viewerAuthorId = await chatViewerAuthorId({
-      localFallbackAuthorId,
-      resolveReplicationAuthorId: async () =>
-        resolveWorkspaceRelayAuthorId(workspace, currentCredentials()),
-    });
     return ListPersonalChatFeedResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
-      viewerAuthorId,
       items: page.items.map((item) => ({
         message: chatMessageForIpc(item.message),
         thread: chatThreadForIpc(item.thread),
+        viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
         ...(item.message.authorUserId
           ? {
               authorFollowTarget: {
@@ -891,7 +887,7 @@ export function registerChatsIpcHandlers<
           ? { openingMessage: chatMessageForIpc(item.openingMessage) }
           : {}),
         reactions: reactionsForViewer(item.reactions.map(chatReactionForIpc), {
-          viewerAuthorId: viewerByThread.get(item.thread.id) ?? viewerAuthorId,
+          viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
           localFallbackAuthorId,
         }),
         matchedBy: item.matchedBy,

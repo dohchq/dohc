@@ -519,12 +519,7 @@ export function ChatsView(props: {
     clearRows,
     invalidate,
     setMessageReactions,
-  } = usePersonalChatFeed({
-    workspaceId,
-    liveToken,
-    onError: props.onError,
-    onViewer: setViewerAuthorId,
-  });
+  } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
@@ -2023,8 +2018,7 @@ export function ChatsView(props: {
         .then(() => bridge().listChatReactions({ workspaceId, threadId }))
         .then((result) => {
           if (!isCurrent()) return;
-          setMessageReactions(messageId, result.reactions);
-          setViewerAuthorId(result.viewerAuthorId);
+          setMessageReactions(messageId, result.reactions, result.viewerAuthorId);
         })
         .catch((error) => {
           if (token !== liveToken.current) return;
@@ -3207,11 +3201,12 @@ export function ChatsView(props: {
                 for (const reaction of itemReactions) {
                   byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
                 }
+                const itemViewer = item.viewerAuthorId ?? "";
                 const liked =
-                  viewerAuthorId !== "" &&
+                  itemViewer !== "" &&
                   itemReactions.some(
                     (reaction) =>
-                      reaction.emoji === LIKE_EMOJI && reaction.authorId === viewerAuthorId,
+                      reaction.emoji === LIKE_EMOJI && reaction.authorId === itemViewer,
                   );
                 const where = item.channel
                   ? item.channel.kind === "dm"

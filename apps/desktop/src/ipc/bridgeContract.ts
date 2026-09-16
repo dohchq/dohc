@@ -1871,6 +1871,10 @@ export const ChatFeedItemRecord = z.object({
   parentMessage: ChatMessageRecord.optional(),
   openingMessage: ChatMessageRecord.optional(),
   reactions: z.array(ChatReactionRecord),
+  // Who the viewer is in this item's thread: the grant's account in a joined
+  // channel, the owner elsewhere. The reactions are normalized to it, the
+  // way listChatReactions does. Optional for older fixtures.
+  viewerAuthorId: OPAQUE_ID.optional(),
   matchedBy: z.array(CHAT_FOLLOW_TARGET_KIND).max(4),
 });
 export type ChatFeedItemRecord = z.infer<typeof ChatFeedItemRecord>;
@@ -1887,10 +1891,6 @@ export const ListPersonalChatFeedResult = z.object({
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
   headCursor: z.string().max(1000).optional(),
-  // Who the viewer is, so Home can draw a Like as theirs. Each item's
-  // reactions are normalized to it the way listChatReactions does; a joined
-  // shared channel resolves per thread. Optional for older fixtures.
-  viewerAuthorId: OPAQUE_ID.optional(),
 });
 export type ListPersonalChatFeedResult = z.infer<
   typeof ListPersonalChatFeedResult
