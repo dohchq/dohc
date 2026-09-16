@@ -3225,7 +3225,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                    ON identity.workspace_id=operation.workspace_id \
                   AND identity.origin_id=operation.origin_id \
                  WHERE operation.workspace_id='ws' AND operation.imported=0 \
-                   AND json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                   AND (json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                     OR json_extract(operation.payload_json,'$.targetId')='refused-thread-id') \
                  ORDER BY operation.origin_seq",
             )?;
             statement
@@ -3258,6 +3259,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         vec![
             "chat.thread.create",
             "chat.message.append",
+            "chat.follow.set",
             "chat.message.append"
         ],
         "the current origin must export one valid structure before its messages"
@@ -3287,7 +3289,12 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                     [],
                     |row| row.get(0),
                 )?,
-                conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                // The replier's implicit follow parks until the placeholder
+                // channel is adopted; only the message's own park counts here.
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_pending_replication WHERE dependency_kind <> 'follow-target'",
+                    [],
+                    |row| {
                     row.get(0)
                 })?,
             ))

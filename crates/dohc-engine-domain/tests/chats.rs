@@ -427,6 +427,118 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
 }
 
 #[test]
+fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+
+    // The poster follows the post. (start_thread signs as user-ada.)
+    let post = start_thread(
+        "chan-1",
+        "post-1",
+        "post-msg",
+        "A post",
+        ChatActorKind::Human,
+        20,
+    );
+    chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    let follows = |chats: &LinkedChatStore<'_>, owner: &str| {
+        chats
+            .list_follows(WS, owner, Some("following"))
+            .expect("follows")
+            .into_iter()
+            .filter(|f| f.target_kind == FollowTargetKind::Thread)
+            .map(|f| f.target_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
+
+    // A commenter follows it too.
+    let mut comment = send_msg("post-1", "comment-msg", Some("post-msg"), "Nice", 30);
+    comment.author_user_id = Some("user-bob".to_owned());
+    chats.send_message(&comment, &NO_FAULTS).expect("comment");
+    assert_eq!(follows(&chats, "user-bob"), vec!["post-1"]);
+
+    // So does someone who only reacts.
+    chats
+        .set_reaction(
+            &SetReaction {
+                workspace_id: WS.to_owned(),
+                thread_id: "post-1".to_owned(),
+                message_id: "post-msg".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "user-cy".to_owned(),
+                replication_author_id: Some("user-cy".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Cy".to_owned(),
+                state: ChatReactionState::Added,
+                now_ms: 40,
+                request_id: "react-1".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("react");
+    assert_eq!(follows(&chats, "user-cy"), vec!["post-1"]);
+
+    // An agent's reply follows nobody; a local-only author has no feed owner.
+    let mut agent = send_msg("post-1", "agent-msg", None, "On it.", 50);
+    agent.author_kind = ChatActorKind::Agent;
+    agent.author_user_id = Some("user-ada".to_owned());
+    chats.send_message(&agent, &NO_FAULTS).expect("agent reply");
+    let mut local = send_msg("post-1", "local-msg", None, "offline", 60);
+    local.author_user_id = None;
+    chats.send_message(&local, &NO_FAULTS).expect("local reply");
+    assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
+
+    // An unfollow the person chose stands: commenting again does not re-follow.
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "user-bob".to_owned(),
+                replication_owner_user_id: Some("user-bob".to_owned()),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "post-1".to_owned(),
+                state: FollowState::Unfollowed,
+                now_ms: 70,
+            },
+            &NO_FAULTS,
+        )
+        .expect("unfollow");
+    let mut again = send_msg("post-1", "comment-2", None, "Still here", 80);
+    again.author_user_id = Some("user-bob".to_owned());
+    chats
+        .send_message(&again, &NO_FAULTS)
+        .expect("comment again");
+    assert!(follows(&chats, "user-bob").is_empty());
+
+    // The follow rides the wire so the person's other devices agree.
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled follows");
+    assert_eq!(journaled, 4, "three implicit follows and one unfollow");
+}
+
+#[test]
 fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -1301,7 +1413,9 @@ fn follow_lww_last_write_wins_and_lists_active() {
         .expect("f3");
     assert_eq!(active.state, FollowState::Following);
     assert!(active.origin_id.starts_with("origin_"));
-    assert_eq!(active.origin_seq, 3);
+    // The poster's implicit follow journaled first, so the three explicit
+    // writes sit one sequence later.
+    assert_eq!(active.origin_seq, 4);
 }
 
 #[test]
@@ -1402,7 +1516,9 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
             mapped.collect()
         })
         .expect("follow replication rows");
-    assert_eq!(rows.len(), 2);
+    // The poster's implicit follow is row 0; the two explicit writes follow.
+    assert_eq!(rows.len(), 3);
+    let rows = &rows[1..];
     assert_eq!(rows[1].0, rows[0].0 + 1);
     assert_eq!(rows[0].2, 0);
     assert_eq!(rows[1].2, 0);
@@ -1471,7 +1587,9 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
             })
             .expect("follow op count")
     };
-    assert_eq!(follow_ops(&store), 0);
+    // One: the poster's implicit follow of t1. The signed-out follow above
+    // journaled nothing.
+    assert_eq!(follow_ops(&store), 1);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let mismatch = chats
@@ -1489,7 +1607,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .unwrap_err();
     assert_eq!(mismatch.code(), "invalid-follow-target");
-    assert_eq!(follow_ops(&store), 0);
+    assert_eq!(follow_ops(&store), 1);
 
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1506,7 +1624,8 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
             &NO_FAULTS,
         )
         .expect("verified follow");
-    assert_eq!(follow_ops(&store), 1);
+    // The poster's implicit follow plus this one.
+    assert_eq!(follow_ops(&store), 2);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let head = chats
@@ -1825,9 +1944,10 @@ fn authored_reply_exports_structure_without_exporting_local_parent() {
                 .collect()
         })
         .expect("exported ops");
+    // Sequence 3 is the replier's implicit follow, which this query leaves out.
     assert_eq!(
         ops.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 4, 5]
     );
     assert_eq!(
         ops.iter()

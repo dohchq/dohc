@@ -1,10 +1,10 @@
 use super::{
     ChatActorKind, ChatReaction, ChatReactionState, LinkedChatStore, MAX_MESSAGE_PAGE, SetReaction,
     base32_lowercase_no_padding, bump_chat_conversation_revision, chat_after, collect, committed,
-    insert_local_replication_op, is_js_trim_ws, local_replication_coordinate, lookup_request,
-    map_reaction_row, nfc, non_empty, normalize_display_name, normalize_replicated_chat_id,
-    persisted_safe_integer, record_request, relay_log_has_authored_message, require_thread,
-    thread_has_message, validate_message_id,
+    follow_thread_implicitly, insert_local_replication_op, is_js_trim_ws,
+    local_replication_coordinate, lookup_request, map_reaction_row, nfc, non_empty,
+    normalize_display_name, normalize_replicated_chat_id, persisted_safe_integer, record_request,
+    relay_log_has_authored_message, require_thread, thread_has_message, validate_message_id,
 };
 use crate::error::DomainError;
 use crate::store::hash_fields;
@@ -507,6 +507,18 @@ impl<'a> LinkedChatStore<'a> {
                     origin_seq,
                     "chat.reaction.set",
                     &payload,
+                    at_ms,
+                )?;
+            }
+            if let Some(replication_author_id) = &input.replication_author_id
+                && input.author_kind == ChatActorKind::Human
+                && input.state == ChatReactionState::Added
+            {
+                follow_thread_implicitly(
+                    tx,
+                    &input.workspace_id,
+                    replication_author_id,
+                    &thread_id,
                     at_ms,
                 )?;
             }

@@ -2471,6 +2471,17 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                 )?;
             }
+            if let Some(author_user_id) = &author_user_c
+                && input.author_kind == ChatActorKind::Human
+            {
+                follow_thread_implicitly(
+                    tx,
+                    &input.workspace_id,
+                    author_user_id,
+                    &input.thread_id,
+                    now,
+                )?;
+            }
             if input.needs_decision || !options_c.is_empty() {
                 journal_decision_set(
                     tx,
@@ -2725,6 +2736,17 @@ impl<'a> LinkedChatStore<'a> {
                     &input.workspace_id,
                     "chat.message.append",
                     &serde_json::Value::Object(payload.clone()),
+                    now,
+                )?;
+            }
+            if let Some(author_user_id) = &author_user_c
+                && input.author_kind == ChatActorKind::Human
+            {
+                follow_thread_implicitly(
+                    tx,
+                    &input.workspace_id,
+                    author_user_id,
+                    &input.thread_id,
                     now,
                 )?;
             }
@@ -5875,6 +5897,64 @@ fn advance_read_cursor(
     };
     persist_read_state(tx, &next)?;
     Ok(next)
+}
+
+/// Following is implicit: the person who posts, comments, or reacts in a
+/// thread follows it from then on. Writes the same LWW cell `set_follow`
+/// does and journals it so the follow reaches the person's other devices.
+/// A row that already says `following` is left alone, so an explicit
+/// unfollow later still wins on its own clock. Only a relay identity can
+/// follow: a local-only author has no feed owner to follow as.
+pub(crate) fn follow_thread_implicitly(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    owner_user_id: &str,
+    thread_id: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT state FROM chat_follows \
+             WHERE workspace_id = ?1 AND owner_user_id = ?2 \
+               AND target_kind = 'thread' AND target_id = ?3",
+            params![workspace_id, owner_user_id, thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if existing.is_some() {
+        // Following already, or unfollowed on purpose: either way, the
+        // person's own choice stands.
+        return Ok(());
+    }
+    let input = SetFollow {
+        workspace_id: workspace_id.to_owned(),
+        owner_user_id: owner_user_id.clone(),
+        replication_owner_user_id: Some(owner_user_id.clone()),
+        target_kind: FollowTargetKind::Thread,
+        target_id: thread_id.to_owned(),
+        state: FollowState::Following,
+        now_ms,
+    };
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, now_ms)?;
+    upsert_follow_lww(tx, &input, now_ms, &origin_id, origin_seq)?;
+    insert_local_replication_op(
+        tx,
+        workspace_id,
+        &origin_id,
+        origin_seq,
+        "chat.follow.set",
+        &serde_json::json!({
+            "ownerUserId": owner_user_id,
+            "targetKind": "thread",
+            "targetId": thread_id,
+            "state": "following",
+            "atMs": now_ms,
+        }),
+        now_ms,
+    )?;
+    Ok(())
 }
 
 fn upsert_follow_lww(
