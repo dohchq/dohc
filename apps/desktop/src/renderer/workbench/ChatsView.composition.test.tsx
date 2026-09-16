@@ -20,7 +20,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
   });
 
-  it("renders above Channels, stays out of the channel list, and uses the agent placeholder", async () => {
+  it("renders under Agents, stays out of the group list, and uses the agent placeholder", async () => {
     const user = userEvent.setup();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [
@@ -38,7 +38,7 @@ describe("ChatsView My agent", () => {
     renderView();
 
     const agentSection = await screen.findByTestId("chats-my-agent-section");
-    expect(agentSection.compareDocumentPosition(screen.getByTestId("chats-channels-heading")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(agentSection.compareDocumentPosition(screen.getByTestId("chats-channels-heading")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     expect(screen.getByTestId("chats-my-agent-unread").textContent).toBe("2");
     expect(screen.getAllByTestId("chats-channel-name").map((node) => node.textContent)).toEqual([
       "general",

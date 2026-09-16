@@ -38,7 +38,7 @@ export function postExcerpt(title: string, body: string): string {
 
 const LIKE_EMOJI = "👍";
 
-function ActionButton(props: {
+export function ActionButton(props: {
   testId?: string;
   label: string;
   icon: React.ReactNode;
@@ -68,6 +68,57 @@ function ActionButton(props: {
         <span className="font-mono text-[11px] font-normal text-subtle">{props.count}</span>
       ) : null}
     </button>
+  );
+}
+
+// Save as file, with the snapshot alternative on hover, or Open file once
+// saved. Shared by the post card and Home so the two read the same.
+export function SaveAsFileActions(props: {
+  testIdPrefix: string;
+  bookmark?: ChatBookmarkRecord;
+  busy?: boolean;
+  onToggle?: (mode: "live" | "snapshot") => void;
+  onOpen?: () => void;
+}) {
+  if (props.bookmark && props.onOpen) {
+    return (
+      <ActionButton
+        testId={`${props.testIdPrefix}-open`}
+        label="Open file"
+        icon={<FileText size={15} strokeWidth={1.9} aria-hidden />}
+        active
+        onClick={props.onOpen}
+      />
+    );
+  }
+  if (!props.onToggle) return null;
+  return (
+    <>
+      <ActionButton
+        testId={props.testIdPrefix}
+        label={props.bookmark ? "Saved" : "Save as file"}
+        icon={<Save size={15} strokeWidth={1.9} aria-hidden />}
+        active={Boolean(props.bookmark)}
+        disabled={props.busy}
+        onClick={() => props.onToggle?.("live")}
+      />
+      {!props.bookmark ? (
+        <button
+          type="button"
+          data-testid={`${props.testIdPrefix}-snapshot`}
+          aria-label="Bookmark chat as snapshot"
+          title="Save a snapshot instead of a live file"
+          disabled={props.busy}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onToggle?.("snapshot");
+          }}
+          className="grid h-8 w-7 shrink-0 place-items-center rounded-md font-mono text-[10px] text-subtle opacity-0 transition-opacity hover:bg-panel-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 dohc-focus-visible disabled:opacity-50"
+        >
+          snap
+        </button>
+      ) : null}
+    </>
   );
 }
 
@@ -261,42 +312,13 @@ export function PostCard(props: {
           icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
           onClick={props.onOpen}
         />
-        {props.bookmark && props.onOpenBookmark ? (
-          <ActionButton
-            testId="chats-post-bookmark-open"
-            label="Open file"
-            icon={<FileText size={15} strokeWidth={1.9} aria-hidden />}
-            active
-            onClick={props.onOpenBookmark}
-          />
-        ) : props.onToggleBookmark ? (
-          <>
-            <ActionButton
-              testId="chats-post-bookmark"
-              label={props.bookmark ? "Saved" : "Save as file"}
-              icon={<Save size={15} strokeWidth={1.9} aria-hidden />}
-              active={Boolean(props.bookmark)}
-              disabled={props.bookmarkBusy}
-              onClick={() => props.onToggleBookmark?.("live")}
-            />
-            {!props.bookmark ? (
-              <button
-                type="button"
-                data-testid="chats-post-bookmark-snapshot"
-                aria-label="Bookmark chat as snapshot"
-                title="Save a snapshot instead of a live file"
-                disabled={props.bookmarkBusy}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onToggleBookmark?.("snapshot");
-                }}
-                className="grid h-8 w-7 shrink-0 place-items-center rounded-md font-mono text-[10px] text-subtle opacity-0 transition-opacity hover:bg-panel-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 dohc-focus-visible disabled:opacity-50"
-              >
-                snap
-              </button>
-            ) : null}
-          </>
-        ) : null}
+        <SaveAsFileActions
+          testIdPrefix="chats-post-bookmark"
+          bookmark={props.bookmark}
+          busy={props.bookmarkBusy}
+          onToggle={props.onToggleBookmark}
+          onOpen={props.onOpenBookmark}
+        />
       </div>
     </li>
   );
