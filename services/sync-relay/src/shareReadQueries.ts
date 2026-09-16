@@ -1,9 +1,11 @@
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   filterOpForShare,
+  groupChannelIsOrdinary,
   hasValidShareMomentShape,
   fileSideOf,
   isChatChannelSelector,
+  isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
   targetVersionId,
   type AnyShareSelector,
@@ -323,6 +325,9 @@ export function createShareReadQueries(
     selector: AnyShareSelector,
     sha256: string,
   ): Uint8Array | null => {
+    if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolverFor(workspaceId))) {
+      return null;
+    }
     const fileSelector = fileSideOf(selector);
     if (!fileSelector) return null;
     selector = fileSelector;

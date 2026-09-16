@@ -791,6 +791,19 @@ describe("chat-channel share op filter", () => {
         metadata: { origin: "user" }, beforePresent: "null",
       }), dmResolver).allowed,
     ).toBe(false);
+    // Presence answers for neither half of such a group either, and a
+    // group whose channel the log has not named yet is the same.
+    expect(presenceTopicAllowedForShare(dmGroup, "wire-dm", dmResolver)).toBe(false);
+    expect(presenceTopicAllowedForShare(dmGroup, "team/a.md", dmResolver)).toBe(false);
+    const unknownGroup = { ...dmGroup, channelWireId: "wire-unknown" };
+    expect(presenceTopicAllowedForShare(unknownGroup, "team/a.md", dmResolver)).toBe(false);
+    expect(
+      filterOpForShare(unknownGroup, "moment.append", JSON.stringify({
+        momentId: "m1", versionId: "main", objectId: "o1", path: "team/a.md", recordedAtMs: 1, operation: "write",
+        payloadBeforeBlobSha256: null, payloadBeforePath: null, payloadAfterBlobSha256: "a".repeat(64), payloadAfterPath: "team/a.md",
+        metadata: { origin: "user" }, beforePresent: "null",
+      }), dmResolver).allowed,
+    ).toBe(false);
     const thread = decide("chat.thread.create", {
       threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
     });
