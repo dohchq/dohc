@@ -602,3 +602,181 @@ async fn query_page_reads_a_write_committed_through_rpc_immediately() {
     .await;
     assert_eq!(after["results"][0]["path"], "fresh.md");
 }
+
+/// Includes RPC dispatch, actor queueing, SQLite, and response construction.
+/// InProcessTransport excludes process startup and framed pipe transport.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual search pagination benchmark; run without competing workloads"]
+async fn profiles_search_rpc_first_and_late_pages() {
+    use std::time::Instant;
+
+    const RESULT_LIMIT: usize = 1_000;
+    for (surface, name, lines, spacing, unicode) in [
+        ("file", "dense", 10_000, 1, false),
+        ("file", "sparse", 10_000, 20, false),
+        ("file", "unicode-mixed-newlines", 5_000, 10, true),
+        ("chat", "dense", 2_000, 1, false),
+        ("chat", "sparse", 5_000, 10, false),
+        ("chat", "unicode-mixed-newlines", 2_000, 4, true),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let service = Arc::new(EngineService::new());
+        let transport = InProcessTransport::new(Arc::clone(&service));
+        let handle = open_workspace(&transport, &scratch, 1, "search-benchmark").await;
+        call(
+            &transport,
+            &handle,
+            4,
+            "versions.ensureMain",
+            json!({ "workspaceId": "search-benchmark" }),
+        )
+        .await;
+        let mut text = String::from("Benchmark\n");
+        for index in 0..lines {
+            text.push_str(if index % spacing == 0 {
+                if unicode {
+                    "😀 É NEEDLE 🚀"
+                } else {
+                    "needle"
+                }
+            } else {
+                "ordinary"
+            });
+            text.push_str(match index % 3 {
+                0 => "\r\n",
+                1 => "\r",
+                _ => "\n",
+            });
+        }
+        if surface == "file" {
+            let path = format!("{}.txt", "long-path-".repeat(20));
+            write(&transport, &handle, 2, "main", &path, &text).await;
+        } else {
+            call(
+                &transport,
+                &handle,
+                2,
+                "chats.channels.ensureGeneral",
+                json!({ "channelId": "benchmark-channel", "nowMs": 100 }),
+            )
+            .await;
+            call(
+                &transport,
+                &handle,
+                3,
+                "chats.threads.start",
+                json!({
+                    "channelId": "benchmark-channel",
+                    "threadId": "benchmark-thread",
+                    "messageId": "benchmark-message",
+                    "title": "界".repeat(200),
+                    "authorKind": "human",
+                    "authorDisplayName": "Alice",
+                    "body": text,
+                    "nowMs": 101,
+                }),
+            )
+            .await;
+        }
+
+        reconcile_until_settled(&transport, &handle, 10_000).await;
+
+        // Obtain opaque continuation cursors by walking actual RPC pages.
+        // Seeding, index ensure, and this walk are outside measured samples.
+        let expected_total = (lines / spacing).min(RESULT_LIMIT);
+        let mut cursor: Option<String> = None;
+        let mut late_cursor = None;
+        let mut total = 0;
+        let mut request_id = 10;
+        let mut previous_line = 0;
+        loop {
+            if cursor.is_some() {
+                late_cursor = cursor.clone();
+            }
+            let page = call(
+                &transport,
+                &handle,
+                request_id,
+                "search.queryPage",
+                json!({ "query": "needle", "limit": RESULT_LIMIT, "cursor": cursor }),
+            )
+            .await;
+            request_id += 1;
+            assert_eq!(page["restartRequired"], false);
+            let rows = page["results"].as_array().expect("results");
+            assert!(!rows.is_empty());
+            for row in rows {
+                assert_eq!(row["surface"], surface);
+                let line = row["line"].as_u64().expect("line");
+                assert!(line > previous_line, "duplicate or reordered search hit");
+                previous_line = line;
+            }
+            total += rows.len();
+            cursor = page["nextCursor"].as_str().map(ToOwned::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(total, expected_total);
+        let late_cursor = late_cursor.expect("late page cursor");
+        for (position, cursor) in [("first", None), ("late", Some(late_cursor))] {
+            let params = json!({ "query": "needle", "limit": RESULT_LIMIT, "cursor": cursor });
+            let mut expected_rows = None;
+            let mut samples_ms = Vec::new();
+            for sample in 0..36 {
+                let started = Instant::now();
+                let page = call(
+                    &transport,
+                    &handle,
+                    request_id,
+                    "search.queryPage",
+                    params.clone(),
+                )
+                .await;
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                request_id += 1;
+                assert_eq!(page["restartRequired"], false);
+                let rows = page["results"].as_array().expect("results");
+                assert!(!rows.is_empty() && rows.len() <= RESULT_LIMIT);
+                if let Some(expected) = &expected_rows {
+                    assert_eq!(rows, expected);
+                } else {
+                    expected_rows = Some(rows.clone());
+                }
+                if sample >= 5 {
+                    samples_ms.push(elapsed_ms);
+                }
+            }
+            let mut sorted = samples_ms.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "SEARCH_RPC_PROFILE {}",
+                json!({
+                    "transport": "in-process",
+                    "surface": surface,
+                    "fixture": name,
+                    "position": position,
+                    "sourceBytes": text.len(),
+                    "sourceMatches": lines / spacing,
+                    "totalReturnedMatches": total,
+                    "queryResultLimit": RESULT_LIMIT,
+                    "pageResultCount": expected_rows.as_ref().expect("rows").len(),
+                    "firstResultLine": expected_rows.as_ref().expect("rows")[0]["line"],
+                    "samplesMs": samples_ms,
+                    "medianMs": sorted[15],
+                    "p95Ms": sorted[29],
+                })
+            );
+        }
+        call(
+            &transport,
+            &handle,
+            request_id,
+            "workspace.close",
+            json!({}),
+        )
+        .await;
+        drop(transport);
+        drop(service);
+    }
+}

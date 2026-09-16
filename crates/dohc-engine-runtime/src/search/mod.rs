@@ -194,33 +194,23 @@ pub fn normalize_query(query: &str) -> String {
 
 /// Split `text` into lines the way `workspaceSearch.ts` does: `\r\n` and a lone
 /// `\r` both become `\n`, then split on `\n`.
-fn split_lines(text: &str) -> Vec<&str> {
-    // Do the newline canonicalization by iterating; a lone `\r` or `\r\n` ends a
-    // line. Avoids allocating a normalized copy.
-    let mut lines: Vec<&str> = Vec::new();
-    let bytes = text.as_bytes();
-    let mut start = 0usize;
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        match bytes[idx] {
-            b'\n' => {
-                lines.push(&text[start..idx]);
-                idx = idx.saturating_add(1);
-                start = idx;
-            }
-            b'\r' => {
-                lines.push(&text[start..idx]);
-                idx = idx.saturating_add(1);
-                if idx < bytes.len() && bytes[idx] == b'\n' {
-                    idx = idx.saturating_add(1);
-                }
-                start = idx;
-            }
-            _ => idx = idx.saturating_add(1),
+fn split_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = Some(text);
+    std::iter::from_fn(move || {
+        let text = remaining.take()?;
+        if let Some(end) = text.find(['\r', '\n']) {
+            let separator_bytes =
+                if text.as_bytes()[end] == b'\r' && text.as_bytes().get(end + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+            remaining = Some(&text[end + separator_bytes..]);
+            Some(&text[..end])
+        } else {
+            Some(text)
         }
-    }
-    lines.push(&text[start..]);
-    lines
+    })
 }
 
 /// A single line's preview window (`previewForLine`). The window is centered by
@@ -303,12 +293,21 @@ pub struct PreviewMatch {
 /// each hit's `preview` — `&preview[match_start..match_end]` is the matched text
 /// and is always on a char boundary.
 pub fn preview_line_matches(text: &str, query: &str, remaining: usize) -> Vec<PreviewMatch> {
+    preview_line_matches_after(text, query, remaining, 0)
+}
+
+fn preview_line_matches_after(
+    text: &str,
+    query: &str,
+    remaining: usize,
+    after_line: usize,
+) -> Vec<PreviewMatch> {
     let mut out: Vec<PreviewMatch> = Vec::new();
     if query.is_empty() || remaining == 0 {
         return out;
     }
     let query_len = query.chars().count();
-    for (index, line) in split_lines(text).into_iter().enumerate() {
+    for (index, line) in split_lines(text).enumerate().skip(after_line) {
         let lowered = line.to_lowercase();
         let Some(byte_idx) = lowered.find(query) else {
             continue;
@@ -447,13 +446,12 @@ pub fn search_workspace_page(
                         && anchor.rowid == rowid
                         && anchor.line > 0
                 });
-                let scan_cap = remaining
-                    .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
-                    .saturating_add(1);
-                let hits: Vec<_> = preview_line_matches(&text, &normalized, scan_cap)
-                    .into_iter()
-                    .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
-                    .collect();
+                let hits = preview_line_matches_after(
+                    &text,
+                    &normalized,
+                    remaining.saturating_add(1),
+                    anchored_lines.map_or(0, |anchor| anchor.line),
+                );
                 let candidate_has_more_lines = hits.len() > remaining;
                 for hit in hits.into_iter().take(remaining) {
                     let key = SearchResultKey {
@@ -530,13 +528,12 @@ pub fn search_workspace_page(
                         && anchor.rowid == rowid
                         && anchor.line > 0
                 });
-                let scan_cap = remaining
-                    .saturating_add(anchored_lines.map_or(0, |anchor| anchor.line))
-                    .saturating_add(1);
-                let hits: Vec<_> = preview_line_matches(&fragment.text, &normalized, scan_cap)
-                    .into_iter()
-                    .filter(|hit| anchored_lines.is_none_or(|anchor| hit.line > anchor.line))
-                    .collect();
+                let hits = preview_line_matches_after(
+                    &fragment.text,
+                    &normalized,
+                    remaining.saturating_add(1),
+                    anchored_lines.map_or(0, |anchor| anchor.line),
+                );
                 let candidate_has_more_lines = hits.len() > remaining;
                 for hit in hits.into_iter().take(remaining) {
                     let key = SearchResultKey {
@@ -796,8 +793,59 @@ mod tests {
 
     #[test]
     fn split_lines_handles_crlf_and_cr() {
-        assert_eq!(split_lines("a\r\nb\rc\nd"), vec!["a", "b", "c", "d"]);
-        assert_eq!(split_lines("only"), vec!["only"]);
+        for text in [
+            "",
+            "only",
+            "a\r\nb\rc\nd",
+            "\n",
+            "\r",
+            "\r\n",
+            "a\r\n\rb\n",
+            "😀\r\nÉ\r🚀\n",
+        ] {
+            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            assert_eq!(
+                split_lines(text).collect::<Vec<_>>(),
+                normalized.split('\n').collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn preview_continuations_keep_only_later_lines() {
+        let text = "heading\r\n😀 NEEDLE\rordinary\nÉ needle\r\nneedle\n";
+        let all = preview_line_matches(text, "needle", usize::MAX);
+        for after in [0, 1, 2, 3, 4, 5, 6, usize::MAX] {
+            for cap in [0, 1, 2, 10] {
+                let expected: Vec<_> = all
+                    .iter()
+                    .filter(|hit| hit.line > after)
+                    .take(cap)
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    preview_line_matches_after(text, "needle", cap, after),
+                    expected
+                );
+            }
+        }
+        assert!(preview_line_matches_after(text, "", 10, 1).is_empty());
+    }
+
+    #[test]
+    fn continuation_builds_only_the_requested_preview_window() {
+        let text = "needle\n".repeat(10_000);
+        let before_filter = preview_line_matches(&text, "needle", 9_901);
+        let after = preview_line_matches_after(&text, "needle", 101, 9_800);
+        assert_eq!(before_filter.len(), 9_901);
+        assert_eq!(after.len(), 101);
+        assert_eq!(
+            after,
+            before_filter
+                .into_iter()
+                .filter(|hit| hit.line > 9_800)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
