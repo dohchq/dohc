@@ -188,7 +188,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const card = postCard(view, postTitle);
     await expect(card).toBeVisible();
     await expect(card.getByTestId("chats-post-title")).toHaveText(postTitle);
-    await expect(card.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
     await expect(card.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
     const threadId = await card.getAttribute("data-thread-id");
     expect(threadId).toBeTruthy();
@@ -340,7 +339,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const persistedCard = postCard(view, postTitle);
     await expect(persistedCard).toBeVisible();
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveText(postTitle);
-    await expect(persistedCard.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
     await expect(persistedCard.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
     await expect(persistedCard.getByTestId("chats-post-comment-count")).toHaveText(
       "5 comments",

@@ -1,4 +1,5 @@
-import { PostCard, BookmarkAction, ThreadMessages, type FeedPostData } from "./ChatPosts";
+import { BookmarkAction, ThreadMessages } from "./ChatPosts";
+import { PostCard, type PostData } from "./PostCard";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
   AgentPresenceHint,
@@ -244,7 +245,7 @@ function samePollData(a: unknown, b: unknown): boolean {
 
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
-  feedPosts: Record<string, FeedPostData>;
+  feedPosts: Record<string, PostData>;
 }
 
 const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
@@ -374,7 +375,7 @@ export function ChatsView(props: {
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
-  const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
+  const [feedPosts, setFeedPosts] = useState<Record<string, PostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
   const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
   // Bookmark list reads and mutations are independent request streams. A
