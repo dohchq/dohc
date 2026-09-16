@@ -232,7 +232,11 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
             lastApplied = { ...frame.ack };
             highestObservedCursor = Math.max(highestObservedCursor, frame.ack.journalCursor);
             notify();
-          } else if (frame.result === "retry") retire("disconnected", frame.reason);
+          } else if (frame.result === "retry") {
+            // Admission did not commit, so this attempt has no ambiguous receipt to retain.
+            if (frame.reason === "admission-unavailable") update.epochs.pop();
+            retire("disconnected", frame.reason);
+          }
           else quarantine(frame.reason);
         } else if (frame.kind === "close") {
           if (frame.reason === "route-fenced" || frame.reason === "protocol-invalid") quarantine(frame.reason);

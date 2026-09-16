@@ -332,6 +332,23 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1 });
     expect(second.submissions()).toHaveLength(0);
   });
+  it("keeps a busy server from exhausting the ambiguous delivery budget", async () => {
+    const { value, host, doc } = await live(provider({ ...limits(), maxDeliveryAttempts: 1 }));
+    edit(value, " draft");
+    let current = host;
+    const first = await current.submitted();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const item = await current.submitted();
+      if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+      await current.send({ kind: "result", result: "retry", deliveryId: item.begin.deliveryId,
+        updateDigest: item.begin.digest, reason: "admission-unavailable" });
+      expect(value.state()).toMatchObject({ status: "disconnected", pendingUpdates: 1 });
+      current = peer(value); await current.greet(); await current.initial(doc);
+      expect((await current.submitted()).bytes).toEqual(first.bytes);
+    }
+    await current.ack(await current.submitted());
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
+  });
   it("quarantines a sync cut that predates observed host application", async () => {
     const { value, host, doc } = await live(); edit(value, " applied"); const item = await host.submitted();
     Y.applyUpdate(doc, item.bytes); await host.ack(item, 1, 8); host.route.disconnect(); await host.route.settled();
