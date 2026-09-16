@@ -43,7 +43,7 @@ Recorded so no phase re-litigates them.
 
 ## Phase 1: renderer, posts and groups
 
-**Status: not started.**
+**Status: implemented on `feat/chat-overhaul`; in review.**
 
 Redraw chat on the existing engine contract. No engine change. No IPC change except where a field is already on the wire and unused.
 
