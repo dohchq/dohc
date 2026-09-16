@@ -146,9 +146,7 @@ async function materializeSnapshotToBytes(
       const bytes = await readFile(file)
       return {
         ok: true as const,
-        bytesBase64: bytes.toString('base64'),
-        size: bytes.byteLength,
-        sha256: sha256Hex(bytes),
+        bytes,
       }
     } catch (cause) {
       try {
@@ -404,30 +402,47 @@ function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, un
 export async function createSqliteEngine() {
   const { DatabaseSync } = await sqliteModule()
 
+  async function prepareImport(input: ImportDataInput) {
+    const tableName = safeIdentifier(input.tableName, 'rows')
+    try {
+      quoteIdent(tableName)
+    } catch (cause) {
+      return error('invalid-table-name', cause instanceof Error ? cause.message : 'Invalid table name.')
+    }
+    const rows = rowsForImport(input)
+    if (!rows) {
+      return error('unsupported-import-source', 'Could not parse this import source.')
+    }
+    if (rows.length === 0) {
+      return error('empty-import-source', 'Import source did not contain any rows.')
+    }
+    let snapshot: DatabaseSnapshot
+    try {
+      snapshot = snapshotForImport({ ...input, tableName }, rows)
+      assertSnapshot(snapshot)
+    } catch (cause) {
+      return error('invalid-import-schema', cause instanceof Error ? cause.message : 'Import schema is invalid.')
+    }
+    const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
+    if (!materialized.ok) return materialized
+    return { ok: true as const, tableName, snapshot, bytes: materialized.bytes }
+  }
+
   return {
+    async materializeImport(input: ImportDataInput) {
+      const result = await prepareImport(input)
+      if (!result.ok) return result
+      return {
+        ok: true as const,
+        tableName: result.tableName,
+        rowCount: result.snapshot[result.tableName].rows.length,
+        bytes: result.bytes,
+      }
+    },
     async importData(input: ImportDataInput) {
-      const tableName = safeIdentifier(input.tableName, 'rows')
-      try {
-        quoteIdent(tableName)
-      } catch (cause) {
-        return error('invalid-table-name', cause instanceof Error ? cause.message : 'Invalid table name.')
-      }
-      const rows = rowsForImport(input)
-      if (!rows) {
-        return error('unsupported-import-source', 'Could not parse this import source.')
-      }
-      if (rows.length === 0) {
-        return error('empty-import-source', 'Import source did not contain any rows.')
-      }
-      let snapshot: DatabaseSnapshot
-      try {
-        snapshot = snapshotForImport({ ...input, tableName }, rows)
-        assertSnapshot(snapshot)
-      } catch (cause) {
-        return error('invalid-import-schema', cause instanceof Error ? cause.message : 'Import schema is invalid.')
-      }
-      const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
-      if (!materialized.ok) return materialized
+      const result = await prepareImport(input)
+      if (!result.ok) return result
+      const { tableName, snapshot, bytes } = result
       const sourceHash = sha256Hex(input.body)
       const table = snapshot[tableName]
       return {
@@ -444,9 +459,9 @@ export async function createSqliteEngine() {
           rowCount: table.rows.length,
           sourceHash,
         },
-        bytesBase64: materialized.bytesBase64,
-        size: materialized.size,
-        sha256: materialized.sha256,
+        bytesBase64: bytes.toString('base64'),
+        size: bytes.byteLength,
+        sha256: sha256Hex(bytes),
       }
     },
   }

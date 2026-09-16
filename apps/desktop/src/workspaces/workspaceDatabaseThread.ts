@@ -40,10 +40,9 @@ async function run(
     case "import-data": {
       const { createSqliteEngine } = await import("@dohc/sqlite-worker");
       const engine = await createSqliteEngine();
-      const result = await engine.importData(request.input);
+      const result = await engine.materializeImport(request.input);
       if (!result.ok) throw new Error(`Import failed (${result.code}): ${result.message}`);
-      const bytes = Buffer.allocUnsafeSlow(Buffer.byteLength(result.bytesBase64, "base64"));
-      bytes.write(result.bytesBase64, "base64");
+      const bytes = Uint8Array.from(result.bytes);
       return { bytes, rowCount: result.rowCount, tableName: result.tableName };
     }
     case "read-path":
