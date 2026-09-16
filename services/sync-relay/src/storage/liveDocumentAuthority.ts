@@ -405,7 +405,8 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveBrowser
     const share = grant && storage.getShare(grant.shareId);
     return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
       (scope.kind === "named" ? authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: scope.userId, grantId: scope.grantId }).ok :
-        currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
+        !!storage.db.prepare("SELECT 1 FROM sync_relay_link_sessions WHERE session_id=? AND capability_hash=?")
+          .get(scope.sessionId, scope.capabilityHash) && currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
   }
 
 export function currentTicketAuthority(storage: StorageContext, scope: LiveBrowserContext, objectId: string, report: TicketHostReport):

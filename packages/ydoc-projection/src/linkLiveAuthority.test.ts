@@ -120,24 +120,40 @@ it("rolls enrollment, profile binding, accounting and activity revision back if 
   expect(f.rowCount("sync_relay_live_session_tickets")).toBe(0);
 });
 
-it("keeps old ticket evidence through refresh, refuses it under both sessions, and permits a new ticket with profile continuity", async () => {
+it("keeps ticket and profile continuity through refresh while retiring the old bearer", async () => {
   const f = setup(), minted = await f.mint();
   const old = f.storage.findLinkSessionByCapabilityHash(f.scope.capabilityHash)!;
-  const next = { ...f.scope, sessionId: "refreshed-session", capabilityHash: hashLinkBearer(Buffer.alloc(32, 4).toString("base64url"), key) };
+  const next = { ...f.scope, capabilityHash: hashLinkBearer(Buffer.alloc(32, 4).toString("base64url"), key) };
   expect(f.storage.replaceLinkSession({ currentSession: old, session: { sessionId: next.sessionId, capabilityHash: next.capabilityHash,
     grantId: next.grantId, generation: 4, mintedAtMs: 1000, expiresAtMs: 70_000 }, guard() {} })).toBe(true);
   expect(f.rowCount("sync_relay_live_session_tickets")).toBe(1);
+  expect(f.storage.findLinkSessionByCapabilityHash(old.capabilityHash)).toBeNull();
+  expect(f.storage.findLinkSessionByCapabilityHash(next.capabilityHash)).toMatchObject({ sessionId: old.sessionId, principalId: old.principalId });
   expect(await f.tickets.redeem(minted!.token, f.scope)).toBeNull();
-  expect(await f.tickets.redeem(minted!.token, next)).toBeNull();
   const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async (context, objectId) => {
     const current = f.storage.resolveLiveObjectHostBinding(context, objectId);
     return current.kind === "current" ? { connection: current.host, binding: current.binding } : null;
   } } });
+  expect((await tickets.redeem(minted!.token, next))?.authority.principalId).toBe(old.principalId);
+  expect(await tickets.redeem(minted!.token, next)).toBeNull();
   const fresh = await tickets.mint({ objectId: f.input.evidence.document.objectId }, next);
   const redeemed = await tickets.redeem(fresh!.token, next);
   expect(redeemed?.authority.principalId).toBe(old.principalId);
   expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "refreshed-edit", liveBrowserActor(next))).result.kind).toBe("accepted");
   expect(f.rowCount("sync_relay_link_principals")).toBe(1);
+});
+
+it.each(["mint", "redeem"] as const)("rejects a credential renewed during the %s host report", async operation => {
+  const f = setup(), minted = await f.mint(), held = await f.report();
+  const old = f.storage.findLinkSessionByCapabilityHash(f.scope.capabilityHash)!;
+  f.hostReports.currentBinding.mockImplementationOnce(async () => {
+    expect(f.storage.replaceLinkSession({ currentSession: old, session: { ...old,
+      capabilityHash: hashLinkBearer("renewed-during-report", key), mintedAtMs: 1000, expiresAtMs: 70_000 }, guard() {} })).toBe(true);
+    return held;
+  });
+  expect(await (operation === "mint" ? f.mint() : f.tickets.redeem(minted!.token, f.scope))).toBeNull();
+  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({ redeemed_at_ms: null });
+  expect(f.rowCount("sync_relay_live_session_tickets")).toBe(1);
 });
 
 it("rejects profile/session/grant/workspace/kind replay and consumes exactly once", async () => {
