@@ -59,6 +59,64 @@ test("workspace manager creates another window and forgets a workspace without d
     })).toEqual([first.workspaceId]);
     expect(await readFile(retainedFile, "utf8")).toBe("Keep this file.\n");
     await expect(second.getByTestId("workspace-switcher")).not.toContainText("second");
+    const quit = desktop.app.waitForEvent("close");
+    await desktop.app.evaluate(({ app }) => { app.quit(); });
+    await quit;
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
+test("workspace manager keeps bottom-row menus reachable by keyboard and follows zoom", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    await openWorkspaceFromFirstRun(desktop.page, workspace);
+    await desktop.page.evaluate(async () => {
+      if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
+      await window.dohcDesktop.stepWindowZoom({ step: "in" });
+      const root = await window.dohcDesktop.getDefaultWorkspaceRoot();
+      for (let index = 0; index < 12; index += 1) {
+        await window.dohcDesktop.createLocalWorkspace({
+          rootPath: `${root}/menu-${index}`,
+          kind: "personal",
+        });
+      }
+    });
+    await desktop.page.getByTestId("workspace-switcher").click();
+    const managerOpened = desktop.app.waitForEvent("window");
+    await desktop.page.getByTestId("workspace-switcher-manage").click();
+    const manager = await managerOpened;
+    await expect(manager.getByTestId("workspace-manager-row")).toHaveCount(13);
+    const zoomLevels = () => desktop!.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed())
+        .map((window) => window.webContents.getZoomLevel()),
+    );
+    await expect.poll(zoomLevels).toEqual([1, 1]);
+    await manager.evaluate(async () => {
+      if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
+      await window.dohcDesktop.stepWindowZoom({ step: "out" });
+    });
+    await expect.poll(zoomLevels).toEqual([0, 0]);
+    const trigger = manager.getByTestId("workspace-manager-row").last().getByRole("button", { name: /^More for / });
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.focus();
+    await manager.keyboard.press("Enter");
+    const reveal = manager.getByRole("menuitem", { name: "Reveal in folder", exact: true });
+    const forget = manager.getByRole("menuitem", { name: "Forget", exact: true });
+    await expect(reveal).toBeFocused();
+    await expect(forget).toBeInViewport();
+    await forget.click({ trial: true });
+    await manager.screenshot({ path: testInfo.outputPath("bottom-row-menu.png") });
+    await manager.keyboard.press("Escape");
+    await expect(reveal).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    await manager.keyboard.press("Enter");
+    await manager.keyboard.press("Tab");
+    await manager.keyboard.press("Tab");
+    await expect(reveal).not.toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }

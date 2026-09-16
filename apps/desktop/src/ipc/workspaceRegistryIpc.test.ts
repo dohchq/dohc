@@ -15,7 +15,7 @@ import { deferred } from "../testing/deferred";
 
 type Event = { trusted: boolean };
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 async function registryHarness() {
   const home = await createTestScratch("registry-ipc-");
@@ -200,11 +200,26 @@ describe("registered workspace open", () => {
     h.activity.mockImplementation(() => { started.resolve(); return held.promise; });
     const result = h.invoke();
     await started.promise;
+    expect(h.opened).not.toHaveBeenCalled();
     if (kind === "physical") h.retirePhysical();
     else await h.sessions.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, documentId);
     held.resolve(status);
     await expect(result).rejects.toThrow();
     expect(h.warmup).not.toHaveBeenCalled();
+    expect(h.opened).not.toHaveBeenCalled();
+  });
+
+  it("stamps the last open only after the open succeeds, and a stamp failure does not fail it", async () => {
+    const h = openHarness();
+    h.activity.mockRejectedValueOnce(new Error("activity refused"));
+    await expect(h.invoke()).rejects.toThrow("activity refused");
+    expect(h.opened).not.toHaveBeenCalled();
+
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    h.opened.mockImplementationOnce(() => { throw new Error("registry is read-only"); });
+    await expect(h.invoke()).resolves.toEqual(status);
+    expect(h.opened).toHaveBeenCalledWith("workspace");
+    expect(h.warmup).toHaveBeenCalledOnce();
   });
 
   it("skips plugin warmup for shared views and successor attachments", async () => {

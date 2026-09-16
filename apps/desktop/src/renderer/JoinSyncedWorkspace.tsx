@@ -122,9 +122,7 @@ export function JoinSyncedWorkspace(props: {
     folder !== null &&
     (!needsPassphrase || passphrase.length > 0);
 
-  // Step two stays current until a code exists; step three until a folder
-  // does. Both fields remain editable after, so "done" only changes the
-  // marker and never hides the input.
+  // Both fields stay visible and editable after sign-in.
   const codeState = !signedIn ? "pending" : "current";
   const folderState = !signedIn ? "pending" : "current";
 

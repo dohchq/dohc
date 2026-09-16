@@ -36,18 +36,65 @@ import {
   type ChromeTheme,
 } from "./windowState";
 
-// The theme the native chrome was last told about: persisted-on-disk theme at
-// launch, then whatever the renderer's theme.ts reports on every flip. A
-// single window owns the chrome, so module state + one persist hook suffice.
-let chromeTheme: ChromeTheme = "light";
-let persistCurrentWindow: (() => void) | null = null;
+// The theme the native chrome was last told about: the persisted theme at
+// launch, then whatever the renderer's theme.ts reports on every flip. One
+// theme for the app. A flip patches the theme into every role's state file
+// on disk, open or closed, without touching that file's geometry, so the
+// next launch of either role paints the current theme.
+let chromeTheme: ChromeTheme | null = null;
+const WINDOW_ROLES = ["workspace", "manager"] as const;
+type StateFileIo = {
+  read(file: string): string | null;
+  write(file: string, contents: string): void;
+};
+let stateFileIo: StateFileIo = {
+  read(file) {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  write: writeFileSync,
+};
+
+function writeThemeIntoStateFile(role: WindowRole, theme: ChromeTheme): void {
+  const file = windowStateFile(role);
+  const state = parseWindowState(
+    stateFileIo.read(file),
+    role === "manager" ? MANAGER_WINDOW_SIZE : MIN_WINDOW_SIZE,
+  );
+  // A role never opened has no geometry to keep; its first window writes
+  // the running theme with its own bounds.
+  if (!state) return;
+  try {
+    stateFileIo.write(file, serializeWindowState({ ...state, theme }));
+  } catch {
+    // Window state is a convenience; a read-only disk must not break the app.
+  }
+}
 
 // Called by the desktop:set-titlebar-theme IPC handler so the next launch
 // paints the correct chrome before any renderer JS runs.
 export function rememberChromeTheme(theme: ChromeTheme): void {
   if (chromeTheme === theme) return;
   chromeTheme = theme;
-  persistCurrentWindow?.();
+  for (const role of WINDOW_ROLES) writeThemeIntoStateFile(role, theme);
+}
+
+// Test seam: the module theme is app-run scoped, and the test replaces disk.
+export function resetChromeThemeForTests(io?: StateFileIo): void {
+  chromeTheme = null;
+  stateFileIo = io ?? {
+    read(file) {
+      try {
+        return readFileSync(file, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    write: writeFileSync,
+  };
 }
 
 // The OS-drawn window controls (Windows/Linux overlay) re-tint with the app
@@ -124,14 +171,9 @@ export function isAllowedLoopbackFrameUrl(targetUrl: string): boolean {
 }
 
 function loadPlacement(role: WindowRole = "workspace") {
-  let raw: string | null = null;
-  try {
-    raw = readFileSync(windowStateFile(role), "utf8");
-  } catch {
-    // First launch / unreadable state: centered default.
-  }
+  // First launch / unreadable state: centered default.
   const state = parseWindowState(
-    raw,
+    stateFileIo.read(windowStateFile(role)),
     role === "manager" ? MANAGER_WINDOW_SIZE : MIN_WINDOW_SIZE,
   );
   const displays = screen.getAllDisplays().map((display) => display.bounds);
@@ -141,21 +183,36 @@ function loadPlacement(role: WindowRole = "workspace") {
   };
 }
 
-function trackWindowState(window: BrowserWindow, role: WindowRole = "workspace"): void {
+interface TrackedWindow {
+  isDestroyed(): boolean;
+  getNormalBounds(): { x: number; y: number; width: number; height: number };
+  isMaximized(): boolean;
+  on(
+    event: "resize" | "move" | "maximize" | "unmaximize" | "close" | "closed",
+    listener: () => void,
+  ): unknown;
+}
+
+// Exported for the window-state test; production calls it through
+// createMainWindow. Each window writes only its own file, so two windows of
+// one role cannot overwrite each other's newer geometry on a theme flip.
+export function trackWindowState(
+  window: TrackedWindow,
+  role: WindowRole = "workspace",
+): void {
   const persist = () => {
     if (window.isDestroyed()) return;
     const state = {
       bounds: window.getNormalBounds(),
       isMaximized: window.isMaximized(),
-      theme: chromeTheme,
+      ...(chromeTheme ? { theme: chromeTheme } : {}),
     };
     try {
-      writeFileSync(windowStateFile(role), serializeWindowState(state));
+      stateFileIo.write(windowStateFile(role), serializeWindowState(state));
     } catch {
       // Window state is a convenience; a read-only disk must not break the app.
     }
   };
-  persistCurrentWindow = persist;
   const saver = createDebouncedSaver(persist, 400);
   window.on("resize", saver.schedule);
   window.on("move", saver.schedule);
@@ -168,6 +225,14 @@ function trackWindowState(window: BrowserWindow, role: WindowRole = "workspace")
   });
 }
 
+// Exported for the theme test: the same read a launch performs.
+export function persistedChromeTheme(role: WindowRole): ChromeTheme | undefined {
+  return parseWindowState(
+    stateFileIo.read(windowStateFile(role)),
+    role === "manager" ? MANAGER_WINDOW_SIZE : MIN_WINDOW_SIZE,
+  )?.theme;
+}
+
 export type WindowRole = "workspace" | "manager";
 
 export function createMainWindow(options?: {
@@ -175,13 +240,18 @@ export function createMainWindow(options?: {
   // The manager is a smaller window that renders only the workspace
   // manager. It keeps its own bounds so it never fights the main window.
   role?: WindowRole;
+  // Main-derived facts the preload reads from process.argv.
+  preloadArguments?: readonly string[];
 }): BrowserWindow {
   const role: WindowRole = options?.role ?? "workspace";
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
   const placement = loadPlacement(role);
   // Native chrome paints the launch theme (persisted user choice, else the OS
   // preference) before any renderer JS — no light flash on dark launches.
-  chromeTheme = placement.theme;
+  // A window opened later follows the theme the app already runs in rather
+  // than its own file, which may be older.
+  chromeTheme ??= placement.theme;
+  const theme = chromeTheme;
   // The executable and Wayland launcher keep the static packaging icon. Live
   // Windows/X11 window icons follow the OS appearance where the shell allows.
   const iconDirectory = resolveDesktopIconDirectory({
@@ -199,7 +269,7 @@ export function createMainWindow(options?: {
     ...(placement.bounds ?? (role === "manager" ? MANAGER_WINDOW_SIZE : DEFAULT_WINDOW_SIZE)),
     minWidth: role === "manager" ? MANAGER_WINDOW_SIZE.width : MIN_WINDOW_SIZE.width,
     minHeight: role === "manager" ? MANAGER_WINDOW_SIZE.height : MIN_WINDOW_SIZE.height,
-    backgroundColor: palette[placement.theme].bg,
+    backgroundColor: palette[theme].bg,
     ...(iconPath ? { icon: iconPath } : {}),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
     // strip); the OS draws only its window controls.
@@ -210,9 +280,9 @@ export function createMainWindow(options?: {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: titleBarOverlayOptions(placement.theme),
+          titleBarOverlay: titleBarOverlayOptions(theme),
         }),
-    webPreferences: createMainWindowWebPreferences(preloadPath),
+    webPreferences: createMainWindowWebPreferences(preloadPath, options?.preloadArguments),
   });
 
   // BrowserWindow's `icon` option is ignored on macOS; set the Dock icon after

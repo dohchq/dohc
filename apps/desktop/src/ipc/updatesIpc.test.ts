@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerUpdatesIpcHandlers } from "./updatesIpc";
 import { CHANNELS } from "./channels";
-import { createQuitGuard, createRecoveryChecker } from "../quitGuard";
+import { createExitRounds, createQuitGuard, type ExitRoundMessage } from "../quitGuard";
 import { startAutoUpdates, publicUpdateState, type AutoUpdateController } from "../updates/electronUpdater";
 import { initialUpdateState } from "../updates/updateMachine";
 import { deferred } from "../testing/deferred";
@@ -25,19 +25,28 @@ function harness() {
   const controllers: AutoUpdateController[] = [];
   const requests: number[] = [];
   const requested = deferred<number>();
+  // The single workspace window's standing answer: blocked (hold), clear,
+  // or null to answer by hand. Mirrors the old boundary re-check shape.
   let decision: boolean | null = false;
   let controller: AutoUpdateController | null = null;
   const fallback = { ...publicUpdateState(initialUpdateState, { currentVersion: "1.2.3", channel: "latest" }), canCheck: false, canInstall: false };
   const askRenderer = vi.fn();
-  const quitGuard = createQuitGuard({
-    askRenderer, confirmForceQuit: async () => false, quit: vi.fn(), forceQuit: vi.fn(), timeoutMs: 60 * 60_000,
-  });
-  const recoveryChecker = createRecoveryChecker({
-    send: (id) => {
-      requests.push(id);
-      requested.resolve(id);
-      if (decision !== null) recoveryChecker.answer(id, decision);
-      return true;
+  const quitGuard = createQuitGuard({ ask: askRenderer, quit: vi.fn(), forceQuit: vi.fn() });
+  const participant = { id: 1 };
+  const closings: Array<ExitRoundMessage & { to: number }> = [];
+  const exitRounds = createExitRounds<typeof participant>({
+    participants: () => [participant],
+    participantId: (entry) => entry.id,
+    send: (entry, message: ExitRoundMessage) => {
+      if (message.kind !== "request") {
+        closings.push({ ...message, to: entry.id });
+        return;
+      }
+      if (entry.id !== 1) return;
+      requests.push(message.roundId);
+      requested.resolve(message.roundId);
+      if (decision === null) return;
+      queueMicrotask(() => exitRounds.answer(1, message.roundId, decision ? "hold" : "clear"));
     },
     confirmProceed: async () => false, timeoutMs: 60 * 60_000,
   });
@@ -51,7 +60,7 @@ function harness() {
       handlers.set(channel, handler);
     },
     assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
-    currentUpdateState, recoveryChecker, quitGuard,
+    currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return readController(); },
   });
   const invoke = (channel: string, payload?: unknown, trusted = true) => {
@@ -83,16 +92,17 @@ function harness() {
     return result === "proceed";
   };
   cleanup.push(async () => {
-    for (const id of requests) recoveryChecker.answer(id, true);
+    for (const id of requests) exitRounds.answer(1, id, "cancel");
     try { await Promise.allSettled([...pending]); }
     finally {
       for (const owner of controllers) owner.stop();
       quitGuard.hold();
     }
   });
+  const answer = (roundId: number, blocked: boolean) => exitRounds.answer(1, roundId, blocked ? "cancel" : "clear");
   return {
     handlers, invoke, start, fallback, currentUpdateState, readController,
-    quitGuard, approve, revoke, recoveryChecker, requests, requested, canQuit,
+    quitGuard, approve, revoke, exitRounds, answer, requests, requested, canQuit, closings,
     setDecision: (value: boolean | null) => { decision = value; },
     setController: (value: AutoUpdateController | null) => { controller = value; },
   };
@@ -183,30 +193,50 @@ describe("registered updater IPC", () => {
       const requestId = await h.requested.promise;
       expect(h.approve).not.toHaveBeenCalled();
       expect(updater.quitAndInstall).not.toHaveBeenCalled();
-      h.recoveryChecker.answer(requestId, false);
+      h.answer(requestId, false);
       await expect(result).resolves.toMatchObject({ accepted: true, state: { status: "ready", version: "1.2.4" } });
       expect(updater.quitAndInstall).toHaveBeenCalledExactlyOnceWith(false, true);
       expect(h.revoke).not.toHaveBeenCalled();
     } finally {
-      for (const id of h.requests) h.recoveryChecker.answer(id, true);
+      for (const id of h.requests) h.answer(id, true);
       await Promise.allSettled([result]);
     }
   });
 
-  it("returns current state when recovery blocks installation and leaves quit unapproved", async () => {
+  it("settles a cancelled round as a decision, not a failure, and leaves quit unapproved", async () => {
     const h = harness();
     const { updater } = await h.start();
     updater.emit("checking-for-update");
     updater.emit("update-downloaded", { version: "1.2.4" });
-    h.setDecision(true);
-    await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: false, state: { status: "ready" } });
+    h.setDecision(null);
+    const result = h.invoke(CHANNELS.installUpdate);
+    const requestId = await h.requested.promise;
+    // The window held (its dialog opened), then the user went back.
+    h.exitRounds.answer(1, requestId, "hold");
+    h.exitRounds.answer(1, requestId, "cancel");
+    await expect(result).resolves.toMatchObject({ accepted: false, cancelled: true, state: { status: "ready" } });
     expect(h.requests).toHaveLength(1);
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
     expect(h.approve).not.toHaveBeenCalled();
     expect(h.canQuit()).toBe(false);
   });
 
-  it("resolves the shared controller again after recovery settles", async () => {
+  it("shares one staging between concurrent install requests", async () => {
+    const h = harness();
+    const { updater } = await h.start();
+    updater.emit("checking-for-update");
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    h.setDecision(null);
+    const first = h.invoke(CHANNELS.installUpdate);
+    const second = h.invoke(CHANNELS.installUpdate);
+    const requestId = await h.requested.promise;
+    h.answer(requestId, false);
+    await expect(first).resolves.toMatchObject({ accepted: true });
+    await expect(second).resolves.toMatchObject({ accepted: true });
+    expect(updater.quitAndInstall).toHaveBeenCalledOnce();
+  });
+
+  it("stages through the controller the request was made against", async () => {
     const h = harness();
     const first = await h.start();
     first.updater.emit("checking-for-update");
@@ -215,20 +245,22 @@ describe("registered updater IPC", () => {
     const result = h.invoke(CHANNELS.installUpdate);
     try {
       const requestId = await h.requested.promise;
+      // A controller swapped in mid-round is a different update: the round
+      // that was asked about 1.2.4 must not stage 1.2.5 unasked.
       const second = await h.start();
       second.updater.emit("checking-for-update");
       second.updater.emit("update-downloaded", { version: "1.2.5" });
-      h.recoveryChecker.answer(requestId, false);
-      await expect(result).resolves.toMatchObject({ accepted: true, state: { version: "1.2.5" } });
-      expect(first.updater.quitAndInstall).not.toHaveBeenCalled();
-      expect(second.updater.quitAndInstall).toHaveBeenCalledOnce();
+      h.answer(requestId, false);
+      await expect(result).resolves.toMatchObject({ accepted: true, state: { version: "1.2.4" } });
+      expect(first.updater.quitAndInstall).toHaveBeenCalledOnce();
+      expect(second.updater.quitAndInstall).not.toHaveBeenCalled();
     } finally {
-      for (const id of h.requests) h.recoveryChecker.answer(id, true);
+      for (const id of h.requests) h.answer(id, true);
       await Promise.allSettled([result]);
     }
   });
 
-  it("revokes approval when the real controller refuses an install", async () => {
+  it("revokes approval and retracts the round when the real controller refuses an install", async () => {
     const h = harness();
     const { updater } = await h.start();
     await expect(h.invoke(CHANNELS.installUpdate)).resolves.toMatchObject({ accepted: false, state: { status: "idle" } });
@@ -236,6 +268,27 @@ describe("registered updater IPC", () => {
     expect(h.revoke).toHaveBeenCalledOnce();
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
     expect(h.canQuit()).toBe(false);
+    // Every participant hears the round is off, after the proceed it heard.
+    expect(h.closings.map((message) => message.kind)).toEqual(["proceed", "cancelled"]);
+    expect(h.closings[1]?.roundId).toBe(h.requests[0]);
+  });
+
+  it("retracts a refused staging to a window that enrolled after the round began", async () => {
+    const h = harness();
+    await h.start();
+    h.setDecision(null);
+    const result = h.invoke(CHANNELS.installUpdate);
+    const requestId = await h.requested.promise;
+    // A second window opens while the first holds; it is asked too, and
+    // both clear. The updater then refuses.
+    const late = { id: 2 };
+    h.exitRounds.enroll(late);
+    h.exitRounds.answer(1, requestId, "clear");
+    h.exitRounds.answer(2, requestId, "clear");
+    await expect(result).resolves.toMatchObject({ accepted: false });
+    const forLate = h.closings.filter((message) => message.to === 2).map((message) => message.kind);
+    expect(forLate, "a late member keeps a Restart intent no retraction reaches").toEqual(["proceed", "cancelled"]);
+    expect(h.closings.filter((message) => message.to === 1).map((message) => message.kind)).toEqual(["proceed", "cancelled"]);
   });
 
   it("keeps approval until an awaited install refusal arrives", async () => {
@@ -290,12 +343,12 @@ describe("registered updater IPC", () => {
     expect(h.canQuit()).toBe(true);
   });
 
-  it("propagates recovery failure before approving quit", async () => {
+  it("propagates a failed round start before approving quit", async () => {
     const h = harness();
     const { updater } = await h.start();
-    const error = new Error("recovery failed");
-    vi.spyOn(h.recoveryChecker, "ask").mockRejectedValueOnce(error);
-    await expect(h.invoke(CHANNELS.installUpdate)).rejects.toBe(error);
+    const error = new Error("round failed");
+    vi.spyOn(h.exitRounds, "begin").mockImplementationOnce(() => { throw error; });
+    await expect(Promise.resolve().then(() => h.invoke(CHANNELS.installUpdate))).rejects.toBe(error);
     expect(h.approve).not.toHaveBeenCalled();
     expect(updater.quitAndInstall).not.toHaveBeenCalled();
   });
@@ -307,7 +360,7 @@ describe("registered updater IPC", () => {
     await expect(h.invoke(CHANNELS.checkForUpdates)).rejects.toThrow();
   });
 
-  it.each(["rejection", "malformed result"])("preserves install %s ordering after quit approval", async mode => {
+  it.each(["rejection", "malformed result"])("revokes and retracts after an install %s", async mode => {
     const h = harness();
     const { controller } = await h.start();
     const install = vi.spyOn(controller, "installUpdate");
@@ -315,7 +368,10 @@ describe("registered updater IPC", () => {
     else install.mockResolvedValueOnce({ accepted: false, state: { ...controller.publicState(), message: "" } });
     await expect(h.invoke(CHANNELS.installUpdate)).rejects.toThrow();
     expect(h.approve).toHaveBeenCalledOnce();
-    expect(h.revoke).not.toHaveBeenCalled();
-    expect(h.canQuit()).toBe(true);
+    // A staging that threw never started a quit: the approval is off and
+    // the participants drop their restart intent.
+    expect(h.revoke).toHaveBeenCalledOnce();
+    expect(h.canQuit()).toBe(false);
+    expect(h.closings.map((message) => message.kind)).toEqual(["proceed", "cancelled"]);
   });
 });

@@ -290,7 +290,6 @@ export function registerOpenWorkspaceIpcHandler<
         input.rendererDocumentId,
       );
       setPreferredWorkspaceId(workspace.workspaceId);
-      markWorkspaceOpened(workspace.workspaceId);
       const status = SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,
@@ -301,6 +300,16 @@ export function registerOpenWorkspaceIpcHandler<
       if (!rendererSession.isCurrent()) {
         throw new Error(
           "Workspace open stopped because this window changed workspaces.",
+        );
+      }
+      // The recency stamp is a manager convenience: only a finished open
+      // earns it, and a registry write refusal must not fail the open.
+      try {
+        markWorkspaceOpened(workspace.workspaceId);
+      } catch (error) {
+        console.error(
+          `[desktop] could not stamp the last open of ${workspace.workspaceId}:`,
+          error,
         );
       }
       if (!sharedViewOf(workspace.workspaceId)) {

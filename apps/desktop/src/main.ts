@@ -8,7 +8,11 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
-import { devToolsEnabled, registerDevToolsIpcHandlers } from "./ipc/devToolsIpc";
+import {
+  devToolsEnabled,
+  devToolsPreloadArguments,
+  registerDevToolsIpcHandlers,
+} from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -108,8 +112,9 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
 import {
+  createExitRounds,
   createQuitGuard,
-  createRecoveryChecker,
+  type ExitKind,
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
@@ -685,13 +690,20 @@ function workspaceSummaries(): WorkspaceSummary[] {
   return workspaceSummariesFrom(listWorkspaces());
 }
 
+// Main's single dev-tools decision: gates the dev channels and is handed to
+// every renderer's preload, so a packaged app with the env var set shows
+// nothing.
+const devToolsGranted = devToolsEnabled(process.env, app);
+
 const desktopWindows = createDesktopWindows({
   app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, writeUserSettingsFile, createMainWindow,
+  preloadArguments: devToolsPreloadArguments(devToolsGranted),
   get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
+  get exitRounds() { return exitRounds; },
 });
 const {
   workspaceWindows,
@@ -3592,7 +3604,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   windows: {
     create: () => trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
+      createMainWindow({
+        beforeRendererReload: prepareAfterRendererCrash,
+        preloadArguments: devToolsPreloadArguments(devToolsGranted),
+      }),
     ),
     whenLoaded: (window) => new Promise<void>((resolve) => {
       window.webContents.once("did-finish-load", resolve);
@@ -3601,7 +3616,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
     hasAny: () => BrowserWindow.getAllWindows().length !== 0,
     showOrCreate: showOrCreateMainWindow,
-    activate: sendWorkspaceActivated,
+    activate: (window, workspace) => {
+      void sendWorkspaceActivated(window, workspace).catch((error: unknown) =>
+        desktopWindows.reportActivationFailure(workspace, error),
+      );
+    },
   },
   workspaces: {
     openPath: openWorkspacePath,
@@ -3758,7 +3777,7 @@ async function openWorkspacePath(
   const rootPath = workspaceRootForOpenPath(path);
   if (!rootPath) return null;
   const workspace = await ensureWorkspaceRegistered(rootPath);
-  sendWorkspaceActivated(window, workspace);
+  await sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
 }
@@ -3809,73 +3828,57 @@ const senderWorkspaceAuthority = {
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
-// Quit-ask guard: shared by the before-quit interceptor and the IPC
-// handlers the renderer answers through. The state machine lives in
+// Exit rounds: every WORKSPACE window answers before a quit or an update
+// install, never the manager or the PDF export's hidden preload-less window,
+// which would answer nothing while the user sees the unresponsive dialog
+// over drafts that were fully available. The state machine lives in
 // quitGuard.ts so the busy-renderer promise is a tested fact: a silent ACK
-// window opens a MAIN-side dialog that names the loss — it never quits by
+// window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
-const quitGuard = createQuitGuard({
-  askRenderer: () => {
-    // The WORKSPACE window, never an arbitrary live one: the PDF export's
-    // hidden preload-less window would answer nothing and the user would get
-    // the unresponsive dialog over drafts that were fully available (#579
-    // review, r12).
-    liveWorkspaceWindow()?.webContents.send(CHANNELS.quitRequested);
+const exitRounds = createExitRounds<BrowserWindow>({
+  participants: () => workspaceWindows.allLive(),
+  participantId: (window) => window.webContents.id,
+  send: (window, message) => {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
   },
-  confirmForceQuit: async () => {
+  confirmProceed: async (kind: ExitKind) => {
+    const verb = kind === "quit" ? "Quitting" : "Installing";
     const { response } = await dialog.showMessageBox({
       type: "warning",
       message: "dohc isn't responding.",
-      detail:
-        "Quitting now can lose unsaved recovery text. Wait, or quit anyway.",
-      buttons: ["Wait", "Quit anyway"],
+      detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
+      buttons: ["Wait", kind === "quit" ? "Quit anyway" : "Install anyway"],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
     });
     return response === 1;
-  },
-  quit: () => app.quit(),
-  // The user chose "quit anyway" over a renderer that never answered. Destroy
-  // the workspace windows first: a destroyed window runs no beforeunload, so
-  // a renderer that wakes cannot veto the decision and open a second warning.
-  // App.quit() still follows, so the will-quit teardown —
-  // engine sessions, stores, WAL locks — runs exactly as for any other quit.
-  forceQuit: () => {
-    for (const window of workspaceWindows.allLive()) window.destroy();
-    app.quit();
   },
 });
 
-// Recovery re-check at the quit boundary. The renderer's
-// own check happens before it asks for the install, and a reopen can set an
-// edit aside in the gap between the two — separate processes, and a queued
-// render lands inside it. So main asks again here, and only then approves the
-// quit that quitAndInstall starts.
-//
-// A renderer that misses the ACK window may be busy, not dead, and no
-// deadline tells those apart. Silence therefore asks the
-// USER rather than refusing the install the user just asked for — the same
-// escalation the quit ask uses, with the loss named.
-const recoveryChecker = createRecoveryChecker({
-  send: (requestId) => {
-    const window = liveWorkspaceWindow();
-    if (!window) return false;
-    window.webContents.send(CHANNELS.recoveryCheckRequested, requestId);
-    return true;
-  },
-  confirmProceed: async () => {
-    const { response } = await dialog.showMessageBox({
-      type: "warning",
-      message: "dohc isn't responding.",
-      detail:
-        "Installing now can lose unsaved recovery text. Wait, or install anyway.",
-      buttons: ["Wait", "Install anyway"],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
+const quitGuard = createQuitGuard({
+  ask: () => {
+    const round = exitRounds.begin("quit");
+    if (!round.created) return;
+    void round.outcome.then((outcome) => {
+      if (outcome === "proceed") quitGuard.resume();
+      else if (outcome === "forced") quitGuard.force();
     });
-    return response === 1;
+  },
+  quit: () => app.quit(),
+  // The user chose "quit anyway" over a renderer that never answered. Destroy
+  // the windows that dialog named first: a destroyed window runs no
+  // beforeunload, so a renderer that wakes cannot veto the decision and open
+  // a second warning. A window the dialog did not cover answered clear for
+  // itself and unloads through its own guard, which can still stop the quit
+  // over a draft it captured since. App.quit() then follows, so the
+  // will-quit teardown — engine sessions, stores, WAL locks — runs exactly
+  // as for any other quit.
+  forceQuit: () => {
+    for (const window of exitRounds.takeForcedParticipants()) {
+      if (!window.isDestroyed()) window.destroy();
+    }
+    app.quit();
   },
 });
 
@@ -3884,7 +3887,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
-    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, recoveryChecker,
+    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
   });
   windowIpc.registerReload();
@@ -3915,7 +3918,7 @@ function registerIpcHandlers(): void {
   });
 
   registerDevToolsIpcHandlers<IpcMainInvokeEvent>({
-    enabled: devToolsEnabled(process.env, app),
+    enabled: devToolsGranted,
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
     listWorkspaces,
@@ -4397,7 +4400,7 @@ function registerIpcHandlers(): void {
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, currentUpdateState, recoveryChecker, quitGuard,
+    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return autoUpdateController; },
   });
 

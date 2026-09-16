@@ -5402,9 +5402,31 @@ export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
 export const UpdateActionResult = z.object({
   accepted: z.boolean(),
+  // True when the exit round was cancelled: a window's recovery dialog
+  // went back. A decision, not an install failure.
+  cancelled: z.boolean().optional(),
   state: UpdateStateEvent,
 });
 export type UpdateActionResult = z.infer<typeof UpdateActionResult>;
+
+// One exit round message from main. `request` asks this window whether a
+// quit or update may lose its set-aside drafts; `proceed` and `cancelled`
+// close the round.
+export const ExitRoundMessage = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("request"),
+    roundId: z.number().int().positive(),
+    exit: z.enum(["quit", "update"]),
+  }),
+  z.object({ kind: z.literal("proceed"), roundId: z.number().int().positive() }),
+  z.object({ kind: z.literal("cancelled"), roundId: z.number().int().positive() }),
+]);
+export type ExitRoundMessage = z.infer<typeof ExitRoundMessage>;
+export const ExitRoundAnswerPayload = z.object({
+  roundId: z.number().int().positive(),
+  decision: z.enum(["clear", "hold", "cancel"]),
+});
+export type ExitRoundAnswerPayload = z.infer<typeof ExitRoundAnswerPayload>;
 
 export const UpdateCheckResult = z.object({
   checked: z.boolean(),
@@ -5919,9 +5941,10 @@ export interface DohcDesktopBridge {
   // manager window; "workspace" is an ordinary window. Read from the load
   // URL by the preload, never from the renderer.
   windowRole: "workspace" | "manager";
-  // Constant: true only when main launched with DOHC_DEV_TOOLS=1 in an
-  // unpackaged build. The renderer shows the debug panel on it; every dev
-  // channel is separately gated in main, so this is a hint, not authority.
+  // Constant: main's own dev-tools decision (DOHC_DEV_TOOLS=1 in an
+  // unpackaged build), handed to the preload at window creation. The
+  // renderer shows the debug panel on it; every dev channel is separately
+  // gated in main, so this is a hint, not authority.
   devTools: boolean;
   reloadRenderer(): Promise<void>;
   devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
@@ -6408,18 +6431,16 @@ export interface DohcDesktopBridge {
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
   installUpdate(): Promise<UpdateActionResult>;
-  // Quit interception: main asks before a quit proceeds so set-aside
-  // drafts can warn first — electron-updater's quitAndInstall is one-shot,
-  // so the decision must come before any destructive call. The renderer
-  // either holds the quit (its dialog owns the decision) or resumes it.
-  onQuitRequested(listener: () => void): () => void;
-  // Main re-checks recovery drafts at the quit boundary:
-  // the renderer answers whether any unresolved set-aside edit would be lost.
-  onRecoveryCheckRequested(listener: (requestId: number) => void): () => void;
-  answerRecoveryCheck(payload: {
-    requestId: number;
-    blocked: boolean;
-  }): Promise<void>;
+  // Exit rounds: before a quit proceeds or an update installs, main asks
+  // every workspace window whether set-aside drafts would be lost.
+  // electron-updater's quitAndInstall is one-shot, so the decision comes
+  // before any destructive call. Each window answers clear, hold (its
+  // dialog owns the decision), or cancel (the user went back) with the
+  // round id it was asked under.
+  onExitRound(listener: (message: ExitRoundMessage) => void): () => void;
+  answerExitRound(payload: ExitRoundAnswerPayload): Promise<void>;
+  // A late draft vetoes an approved exit's unload; the renderer tells main
+  // the approval is off, and resumes the quit once the user confirms.
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
   // Workspace content search. Answers accepted after the rg child

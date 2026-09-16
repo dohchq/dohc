@@ -1,17 +1,17 @@
 import type { BrowserWindow as ElectronWindow } from "electron";
 import {
-  DesktopUserSettingsResult, DesktopMarksResult, LaunchMarksResult,
+  DesktopUserSettingsResult, DesktopMarksResult, ExitRoundAnswerPayload, LaunchMarksResult,
   OpenExternalUrlPayload, ReloadRendererRequestPayload, SetTitlebarThemePayload,
   StepWindowZoomPayload, WriteClipboardTextPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { isSafeExternalUrl } from "../security/electronSecurity";
 import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "../settings/userSettings";
-import type { createQuitGuard, createRecoveryChecker } from "../quitGuard";
+import type { createExitRounds, createQuitGuard } from "../quitGuard";
 import type { rememberChromeTheme as RememberChromeTheme, titleBarOverlayOptions as TitleBarOverlayOptions } from "../window/createMainWindow";
 
 export function createWindowIpc<
-  Sender extends { isDestroyed(): boolean; reload(): void },
+  Sender extends { id: number; isDestroyed(): boolean; reload(): void },
   Event extends { sender: Sender },
   PaintEvent extends { senderFrame?: { url: string } | null },
 >(dependencies: {
@@ -25,8 +25,8 @@ export function createWindowIpc<
   rememberChromeTheme: typeof RememberChromeTheme;
   titleBarOverlayOptions: typeof TitleBarOverlayOptions;
   stepWindowZoom(step: ZoomStep): Promise<UserSettingsResult>;
-  recoveryChecker: ReturnType<typeof createRecoveryChecker>;
-  quitGuard: ReturnType<typeof createQuitGuard>;
+  exitRounds: Pick<ReturnType<typeof createExitRounds<unknown>>, "answer">;
+  quitGuard: Pick<ReturnType<typeof createQuitGuard>, "hold" | "resume">;
   isTrustedFrame(url: string): boolean;
   launchMarks: Pick<typeof import("../performance/launchMarks").launchMarks, "firstPaint" | "snapshot">;
   desktopMarks: Pick<typeof import("../performance/desktopMarks").desktopMarks, "markOnce" | "snapshot">;
@@ -36,7 +36,7 @@ export function createWindowIpc<
   const {
     registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
     shell, clipboard, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
-    stepWindowZoom, recoveryChecker, quitGuard, isTrustedFrame, launchMarks,
+    stepWindowZoom, exitRounds, quitGuard, isTrustedFrame, launchMarks,
     desktopMarks, logLaunchMarksOnce, app,
   } = dependencies;
 
@@ -102,22 +102,20 @@ export function createWindowIpc<
   }
 
   function registerQuitAndMarks(): void {
-    registerHandler(CHANNELS.recoveryCheckAnswer, (event, payload: unknown) => {
+    // The answer is keyed to the sender and the round it was asked under: a
+    // reply from a window outside the round, or for an older round, counts
+    // for nothing.
+    registerHandler(CHANNELS.exitRoundAnswer, (event, payload: unknown) => {
       assertTrustedSender(event);
-      const answer = payload as { requestId?: unknown; blocked?: unknown };
-      if (
-        typeof answer?.requestId !== "number" ||
-        typeof answer?.blocked !== "boolean"
-      ) {
-        return;
-      }
-      recoveryChecker.answer(answer.requestId, answer.blocked);
+      const answer = ExitRoundAnswerPayload.safeParse(payload);
+      if (!answer.success) return;
+      exitRounds.answer(event.sender.id, answer.data.roundId, answer.data.decision);
     });
 
     registerHandler(CHANNELS.holdQuit, (event) => {
       assertTrustedSender(event);
-      // The renderer's recovery dialog owns the decision now; the quit stays
-      // cancelled until the user resumes it (or never).
+      // A late draft vetoed an approved exit's unload; the approval is off
+      // until the user resumes it (or never).
       quitGuard.hold();
     });
 

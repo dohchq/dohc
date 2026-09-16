@@ -34,6 +34,10 @@ class Window extends EventEmitter {
   isMinimized() { return this.minimized; }
   destroy() { this.destroyed = true; this.emit("closed"); }
   get native(): BrowserWindow { return this as unknown as BrowserWindow; }
+  finishLoad() { this.webContents.emit("did-finish-load"); }
+  failLoad(isMainFrame = true) {
+    this.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "app://renderer", isMainFrame);
+  }
 }
 
 type Dependencies = Parameters<typeof createDesktopWindows>[0];
@@ -93,6 +97,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
       createdOptions.push(options);
       const window = new Window(); all.push(window); return window.native;
     }),
+    preloadArguments: ["--dohc-dev-tools"],
     get pluginSurfaces() { return pluginSurfaces; },
     get rendererWorkspaceSessions() { return currentSessions; },
   };
@@ -154,11 +159,11 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(undefined)).toBe(utility.native);
   });
 
-  it("activates the target window and prioritizes that workspace without changing the input list", () => {
+  it("activates the target window and prioritizes that workspace without changing the input list", async () => {
     const f = fixture(); const window = new Window(); f.windows.trackWorkspaceWindow(window.native);
     const rows = [workspace("a"), workspace("b"), workspace("c")];
     expect(f.windows.prioritizePreferredWorkspace(rows)).toBe(rows);
-    f.windows.sendWorkspaceActivated(undefined, rows[1]!);
+    await f.windows.sendWorkspaceActivated(undefined, rows[1]!);
     expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[1]);
     expect(f.windows.prioritizePreferredWorkspace(rows)).toEqual([rows[1], rows[0], rows[2]]);
     expect(rows.map((row) => row.workspaceId)).toEqual(["a", "b", "c"]);
@@ -168,26 +173,147 @@ describe("desktop workspace windows", () => {
     expect(f.windows.prioritizePreferredWorkspace(rows)).toBe(rows);
   });
 
-  it("remembers activation even when there is no window yet", () => {
+  it("activates into a new workspace window when only the manager or a utility window is live", async () => {
     const f = fixture(); const rows = [workspace("a"), workspace("b")];
-    f.windows.sendWorkspaceActivated(undefined, rows[1]!);
+    const utility = new Window(); f.all.push(utility);
+    const manager = f.windows.showOrCreateManagerWindow(); const managerWindow = f.all[1]!;
+    const pending = f.windows.sendWorkspaceActivated(manager, rows[1]!);
     expect(f.windows.prioritizePreferredWorkspace(rows)[0]).toBe(rows[1]);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
+    const created = f.all[2]!;
+    expect(f.createdOptions[1]?.role).toBeUndefined();
+    created.finishLoad();
+    expect(await pending).toBe(created.native);
+    expect(created.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[1]);
+    expect(managerWindow.webContents.send).not.toHaveBeenCalled();
+    expect(utility.webContents.send).not.toHaveBeenCalled();
+    expect(created.focus).toHaveBeenCalledOnce();
   });
 
-  it("focuses an existing window and creates a tracked window only when none exists", async () => {
-    const f = fixture(); const existing = new Window(); existing.minimized = true; f.all.push(existing);
+  it("reports a failed activation as a dialog, not silence", () => {
+    const f = fixture();
+    f.windows.reportActivationFailure(workspace("a"), new Error("load failed"));
+    expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Open workspace", expect.stringContaining("C:\\work\\a"));
+  });
+
+  it("focuses an existing workspace window and creates a tracked window only when none exists", async () => {
+    const f = fixture(); const existing = new Window(); existing.minimized = true;
+    f.windows.trackWorkspaceWindow(existing.native); f.all.push(existing);
     expect(await f.windows.showOrCreateMainWindow()).toBe(existing.native);
     expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
-    f.all.length = 0;
+    existing.destroy(); f.all.length = 0;
+    // A live manager alone is not a place for a handoff to land.
+    f.windows.showOrCreateManagerWindow();
     f.windows.seedZoomLevel(2);
-    const created = await f.windows.showOrCreateMainWindow(); const native = f.all[0]!;
+    const created = await f.windows.showOrCreateMainWindow(); const native = f.all[1]!;
+    expect(created).toBe(native.native);
     expect(f.windows.workspaceWindows.allLive()).toEqual([created]);
-    expect(f.createdOptions[0]?.beforeRendererReload).toBe(f.windows.prepareAfterRendererCrash);
+    expect(f.createdOptions[1]?.beforeRendererReload).toBe(f.windows.prepareAfterRendererCrash);
     expect(native.webContents.setZoomLevel).toHaveBeenCalledWith(2);
     expect(native.show).not.toHaveBeenCalled();
     native.emit("ready-to-show");
     expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
+  });
+
+  it("hands the manager the app zoom and settings broadcasts, never the utility window", async () => {
+    const f = fixture(); f.windows.seedZoomLevel(1);
+    const manager = f.windows.showOrCreateManagerWindow(); const utility = new Window(); f.all.push(utility);
+    const managerWindow = f.all[0]!;
+    expect(managerWindow.webContents.setZoomLevel).toHaveBeenCalledWith(1);
+    expect(f.createdOptions[0]?.preloadArguments).toEqual(["--dohc-dev-tools"]);
+    f.windows.applyZoomLevelToWindows(3);
+    expect(managerWindow.webContents.setZoomLevel).toHaveBeenLastCalledWith(3);
+    expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([]);
+    await f.windows.stepWindowZoom("in");
+    expect(managerWindow.webContents.send).toHaveBeenCalledWith(CHANNELS.userSettingsChanged, expect.objectContaining({ source: "stored" }));
+    expect(utility.webContents.send).not.toHaveBeenCalled();
+    managerWindow.destroy();
+    expect(manager.isDestroyed()).toBe(true);
+    f.windows.applyZoomLevelToWindows(2);
+    expect(managerWindow.webContents.setZoomLevel).not.toHaveBeenCalledWith(2);
+  });
+
+  it("rejects an open whose window closes or fails to load, and cleans up", async () => {
+    const f = fixture();
+    const closed = f.windows.openWorkspaceInWindow(workspace("a"), () => false);
+    const first = f.all[0]!;
+    const loadListeners = first.webContents.listenerCount("did-finish-load");
+    first.destroy();
+    await expect(closed).rejects.toThrow("closed before it finished loading");
+    // The open's own listeners are gone: a late load sends nothing.
+    expect(first.webContents.listenerCount("did-finish-load")).toBe(loadListeners - 1);
+    expect(first.webContents.listenerCount("did-fail-load")).toBe(0);
+    first.finishLoad();
+    expect(first.webContents.send).not.toHaveBeenCalled();
+
+    const failed = f.windows.openWorkspaceInWindow(workspace("a"), () => false);
+    const second = f.all[1]!;
+    second.failLoad(false);
+    second.failLoad(true);
+    await expect(failed).rejects.toThrow("ERR_NAME_NOT_RESOLVED");
+    expect(second.destroyed).toBe(true);
+    expect(second.webContents.listenerCount("did-fail-load")).toBe(0);
+    expect(second.webContents.send).not.toHaveBeenCalled();
+    expect(f.windows.workspaceWindows.allLive()).toEqual([]);
+  });
+
+  it("coalesces concurrent opens of one workspace until activation lands", async () => {
+    const f = fixture();
+    const first = f.windows.openWorkspaceInWindow(workspace("a"), () => false);
+    const second = f.windows.openWorkspaceInWindow(workspace("a"), () => false);
+    const other = f.windows.openWorkspaceInWindow(workspace("b"), () => false);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
+    f.all[0]!.finishLoad(); f.all[1]!.finishLoad();
+    expect(await first).toBe(await second);
+    expect(await other).not.toBe(await first);
+    expect(f.all[0]!.webContents.send).toHaveBeenCalledTimes(1);
+  });
+
+  // Activation is sent, but the renderer has not opened its session yet, so
+  // the caller's session lookup still says nothing shows the workspace.
+  async function activatedWithoutSession(f: ReturnType<typeof fixture>, id = "a") {
+    const opened = await (() => { const p = f.windows.openWorkspaceInWindow(workspace(id), () => false); f.all.at(-1)!.finishLoad(); return p; })();
+    const showing = (window: BrowserWindow) => f.sessions.current(window.webContents)?.workspaceId === id;
+    return { opened, showing, native: f.all.at(-1)! };
+  }
+
+  it("keeps a second open on the same window between activation and session establishment", async () => {
+    const f = fixture();
+    const { opened, showing, native } = await activatedWithoutSession(f);
+    native.minimized = true;
+    native.focus.mockClear();
+    expect(await f.windows.openWorkspaceInWindow(workspace("a"), showing)).toBe(opened);
+    expect(native.restore).toHaveBeenCalledOnce();
+    expect(native.focus).toHaveBeenCalledOnce();
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(1);
+    expect(native.webContents.send).toHaveBeenCalledTimes(1);
+    // The renderer opens its session: the association retires and the lookup
+    // takes over.
+    await f.sessions.open(native.webContents.native, { workspaceId: "a", attachmentId: Symbol("a") }, "document");
+    expect(await f.windows.openWorkspaceInWindow(workspace("a"), showing)).toBe(opened);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it("frees the association when the window switches to another workspace", async () => {
+    const f = fixture();
+    const { showing, native } = await activatedWithoutSession(f);
+    await f.sessions.open(native.webContents.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
+    const again = f.windows.openWorkspaceInWindow(workspace("a"), showing);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
+    f.all[1]!.finishLoad();
+    expect(await again).not.toBe(native.native);
+  });
+
+  it("frees the association when the activated window closes before its session opens", async () => {
+    const f = fixture();
+    const { showing, native } = await activatedWithoutSession(f);
+    native.destroy();
+    const again = f.windows.openWorkspaceInWindow(workspace("a"), showing);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
+    f.all[1]!.finishLoad();
+    expect(await again).toBe(f.all[1]!.native);
   });
 
   it("restores a minimized manager window instead of creating a second one", () => {
@@ -209,6 +335,19 @@ describe("desktop workspace windows", () => {
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
     expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
     expect(existing.webContents.send).not.toHaveBeenCalled();
+  });
+
+  it("routes menu commands and recents through a workspace window, restoring it when minimized", async () => {
+    const f = fixture(); const window = new Window(); window.minimized = true;
+    f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
+    const manager = f.windows.showOrCreateManagerWindow();
+    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    click(recent, manager);
+    await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b")));
+    expect(f.all[0]!.webContents.send).not.toHaveBeenCalled();
+    expect(window.restore).toHaveBeenCalledOnce(); expect(window.focus).toHaveBeenCalledOnce();
+    click(item(f, "Go", "Settings"), manager);
+    expect(manager.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
 
   it("re-prioritizes an accepted reload only after the actual renderer retirement drains", async () => {
@@ -419,7 +558,7 @@ describe("desktop native menus", () => {
     expect(f.templates).toHaveLength(3);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
 
-    const target = new Window();
+    const target = new Window(); f.windows.trackWorkspaceWindow(target.native);
     click(recentEntries()[1]!, target.native);
     expect(target.webContents.send).toHaveBeenCalledOnce();
     expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, attached);
@@ -441,7 +580,8 @@ describe("desktop native menus", () => {
 
   it("routes commands to the live target and opens recent workspaces through activation", () => {
     const f = fixture(); const first = new Window(); const explicit = new Window();
-    f.windows.trackWorkspaceWindow(first.native); f.windows.refreshApplicationMenu();
+    f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(explicit.native);
+    f.windows.refreshApplicationMenu();
     click(item(f, "File", "New File"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
     click(item(f, "Go", "Settings"), explicit.native);

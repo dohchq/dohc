@@ -500,7 +500,8 @@ describe("OpenSharedView", () => {
     await screen.findByText("/home/ice/dohc/shared/share-1");
     expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
     await user.click(screen.getByTestId("open-share-start"));
-    expect(await screen.findByTestId("cloud-sync-panel")).toBeTruthy();
+    const panel = await screen.findByTestId("cloud-sync-panel");
+    expect(panel.parentElement).toBe(document.activeElement);
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 });

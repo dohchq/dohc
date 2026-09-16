@@ -8,6 +8,19 @@ export function devToolsEnabled(env: NodeJS.ProcessEnv, app: { readonly isPackag
   return env.DOHC_DEV_TOOLS === "1" && !app.isPackaged;
 }
 
+// Main's decision reaches the preload as a process argument, so the renderer
+// shows the panel only when main also registered its channels. The preload
+// never reads the env var: a packaged app with it set gets no panel.
+const DEV_TOOLS_ARGUMENT = "--dohc-dev-tools";
+
+export function devToolsPreloadArguments(enabled: boolean): string[] {
+  return enabled ? [DEV_TOOLS_ARGUMENT] : [];
+}
+
+export function devToolsGranted(argv: readonly string[]): boolean {
+  return argv.includes(DEV_TOOLS_ARGUMENT);
+}
+
 export function registerDevToolsIpcHandlers<Event>(dependencies: {
   enabled: boolean;
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;

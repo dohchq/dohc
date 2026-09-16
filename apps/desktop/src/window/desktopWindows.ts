@@ -29,10 +29,18 @@ interface DesktopWindowsDependencies {
   readCachedUserSettingsFile: typeof readSettings;
   writeUserSettingsFile: typeof writeSettings;
   createMainWindow: typeof createMainWindowImplementation;
+  // Handed to every renderer window's preload (dev-tools grant).
+  preloadArguments?: readonly string[];
   readonly pluginSurfaces: { applyWebAppZoom(level: number): void };
   readonly rendererWorkspaceSessions: Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   >;
+  // A workspace window that finishes loading during a pending exit round
+  // joins it; one that closes leaves it.
+  readonly exitRounds?: {
+    enroll(window: BrowserWindow): void;
+    remove(participantId: number): void;
+  };
 }
 
 export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
@@ -84,9 +92,34 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // that seed lands, which precedes every window creation.
   let knownZoomLevel: number | null = null;
 
+  // Every window that renders dohc chrome follows the app zoom and hears
+  // settings changes: workspace windows and the manager. The hidden PDF
+  // export window is neither, so it keeps its own zoom.
+  const zoomedWindows = new Set<BrowserWindow>();
+  function liveZoomedWindows(): BrowserWindow[] {
+    return [...zoomedWindows].filter((window) => !window.isDestroyed());
+  }
+
   function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
     workspaceWindows.track(window);
-    window.on("closed", () => workspaceWindows.forget(window));
+    const participantId = window.webContents.id;
+    window.on("closed", () => {
+      workspaceWindows.forget(window);
+      dependencies.exitRounds?.remove(participantId);
+    });
+    // A window joins a pending round the moment it is tracked, so a
+    // decision made before it existed never covers it. Its renderer cannot
+    // answer until it loads; the round asks again then.
+    dependencies.exitRounds?.enroll(window);
+    window.webContents.on("did-finish-load", () => {
+      if (!window.isDestroyed()) dependencies.exitRounds?.enroll(window);
+    });
+    return followAppZoom(window);
+  }
+
+  function followAppZoom(window: BrowserWindow): BrowserWindow {
+    zoomedWindows.add(window);
+    window.on("closed", () => zoomedWindows.delete(window));
     // The persisted zoom level is a window property main owns, set
     // synchronously at creation — before any show() on either creation path —
     // so no visible frame paints at 100% and then jumps. The async read below
@@ -126,12 +159,30 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return window ?? liveWorkspaceWindow() ?? BrowserWindow.getAllWindows()[0];
   }
 
+  // Activation opens a workspace in a window that runs the workspace
+  // renderer. The manager and the hidden export window cannot, so with none
+  // live a new workspace window is created and activated once it loads.
   function sendWorkspaceActivated(
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
-  ): void {
+  ): Promise<BrowserWindow> {
     preferredWorkspaceId = workspace.workspaceId;
-    targetWindow(window)?.webContents.send(CHANNELS.workspaceActivated, workspace);
+    const target =
+      window && workspaceWindows.allLive().includes(window) ? window : liveWorkspaceWindow();
+    if (target) {
+      target.webContents.send(CHANNELS.workspaceActivated, workspace);
+      focusShareHandoffWindow(target);
+      return Promise.resolve(target);
+    }
+    return openWorkspaceInWindow(workspace, () => false);
+  }
+
+  function reportActivationFailure(workspace: WorkspaceSummary, error: unknown): void {
+    console.error(`[desktop] could not open ${workspace.rootPath}:`, error);
+    dialog.showErrorBox(
+      "Open workspace",
+      `dohc could not open ${workspace.rootPath}. Open it again from the workspace manager.`,
+    );
   }
 
   function quoteWindowsArg(value: string): string {
@@ -163,7 +214,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // mid-render would change layout with the user's keystroke.
   function applyZoomLevelToWindows(zoomLevel: number): void {
     knownZoomLevel = zoomLevel;
-    for (const window of workspaceWindows.allLive()) {
+    for (const window of liveZoomedWindows()) {
       window.webContents.setZoomLevel(zoomLevel);
     }
     // Embedded plugin content follows the window zoom: the person who
@@ -186,10 +237,14 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     step: Parameters<typeof mutateWindowZoom>[0],
   ): Promise<DesktopUserSettingsResult> {
     const result = DesktopUserSettingsResult.parse(await mutateWindowZoom(step));
-    for (const window of workspaceWindows.allLive()) {
+    broadcastUserSettings(result);
+    return result;
+  }
+
+  function broadcastUserSettings(result: DesktopUserSettingsResult): void {
+    for (const window of liveZoomedWindows()) {
       window.webContents.send(CHANNELS.userSettingsChanged, result);
     }
-    return result;
   }
 
   function refreshApplicationMenu(): void {
@@ -221,7 +276,9 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
             });
           },
           openRecentWorkspace: (window, workspace) => {
-            sendWorkspaceActivated(window, workspace);
+            void sendWorkspaceActivated(window, workspace).catch((error: unknown) =>
+              reportActivationFailure(workspace, error),
+            );
             refreshNativeWorkspaceSurfaces();
           },
           showAbout: () => {
@@ -299,10 +356,13 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       focusShareHandoffWindow(managerWindow);
       return managerWindow;
     }
-    const window = createMainWindow({
-      beforeRendererReload: prepareAfterRendererCrash,
-      role: "manager",
-    });
+    const window = followAppZoom(
+      createMainWindow({
+        beforeRendererReload: prepareAfterRendererCrash,
+        role: "manager",
+        preloadArguments: dependencies.preloadArguments,
+      }),
+    );
     window.on("closed", () => {
       if (managerWindow === window) managerWindow = null;
     });
@@ -310,38 +370,120 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return window;
   }
 
+  function createWorkspaceWindow(): BrowserWindow {
+    return trackWorkspaceWindow(
+      createMainWindow({
+        beforeRendererReload: prepareAfterRendererCrash,
+        preloadArguments: dependencies.preloadArguments,
+      }),
+    );
+  }
+
+  // Resolves once the renderer can receive activation; rejects when the
+  // window closes or its main frame fails to load. Listeners come off on
+  // every path.
+  function whenRendererLoaded(window: BrowserWindow): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const contents = window.webContents;
+      const settle = (outcome: () => void) => {
+        contents.off("did-finish-load", onLoad);
+        contents.off("did-fail-load", onFail);
+        window.off("closed", onClosed);
+        outcome();
+      };
+      const onLoad = () => settle(resolve);
+      const onClosed = () =>
+        settle(() => reject(new Error("The window closed before it finished loading.")));
+      const onFail = (
+        _event: unknown,
+        errorCode: number,
+        errorDescription: string,
+        _validatedUrl: string,
+        isMainFrame: boolean,
+      ) => {
+        if (!isMainFrame) return;
+        settle(() => reject(new Error(`The window failed to load (${errorCode} ${errorDescription}).`)));
+      };
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-fail-load", onFail);
+      window.on("closed", onClosed);
+    });
+  }
+
+  // Opens in flight, keyed by workspace: a second request for the same
+  // workspace joins the first instead of creating a second window. Sending
+  // activation does not end the open: the renderer still has to receive it
+  // and open its session, and a request in that gap must find the same
+  // window. So the entry outlives activation and is checked on each open
+  // against the window's real session: it stands while the window is live
+  // and has no session yet, and retires once the window shows this
+  // workspace (the caller's lookup finds it), shows another, or closes.
+  const pendingOpens = new Map<string, { window: BrowserWindow; opening: Promise<BrowserWindow> }>();
+
+  function pendingOpenFor(workspaceId: string): Promise<BrowserWindow> | null {
+    const pending = pendingOpens.get(workspaceId);
+    if (!pending) return null;
+    const session = dependencies.rendererWorkspaceSessions.current(pending.window.webContents);
+    if (pending.window.isDestroyed() || session !== undefined) {
+      pendingOpens.delete(workspaceId);
+      return null;
+    }
+    return pending.opening;
+  }
+
   // A window for one workspace. Reuses a live window already showing it;
   // otherwise creates one and activates the workspace in it once loaded.
-  async function openWorkspaceInWindow(
+  function openWorkspaceInWindow(
     workspace: WorkspaceSummary,
     isShowing: (window: BrowserWindow) => boolean,
   ): Promise<BrowserWindow> {
     const existing = workspaceWindows.allLive().find(isShowing);
     if (existing) {
       focusShareHandoffWindow(existing);
-      return existing;
+      return Promise.resolve(existing);
     }
-    const window = trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
-    );
-    await new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", () => resolve());
+    const pending = pendingOpenFor(workspace.workspaceId);
+    if (pending) return pending.then((window) => {
+      focusShareHandoffWindow(window);
+      return window;
     });
-    if (window.isDestroyed()) return window;
-    window.webContents.send(CHANNELS.workspaceActivated, workspace);
-    window.focus();
-    return window;
+    const window = createWorkspaceWindow();
+    const entry = {
+      window,
+      opening: (async () => {
+        try {
+          await whenRendererLoaded(window);
+        } catch (error) {
+          if (!window.isDestroyed()) window.destroy();
+          throw error;
+        }
+        window.webContents.send(CHANNELS.workspaceActivated, workspace);
+        focusShareHandoffWindow(window);
+        return window;
+      })(),
+    };
+    pendingOpens.set(workspace.workspaceId, entry);
+    const release = () => {
+      if (pendingOpens.get(workspace.workspaceId) === entry) {
+        pendingOpens.delete(workspace.workspaceId);
+      }
+    };
+    window.on("closed", release);
+    // The caller owns the rejection; a failed open frees the slot at once.
+    void entry.opening.catch(release);
+    return entry.opening;
   }
 
+  // The window a handoff or tray click should land in: a workspace window,
+  // never the manager or the hidden export window. Creates one when none
+  // is live.
   async function showOrCreateMainWindow(): Promise<BrowserWindow> {
-    const existing = targetWindow(undefined);
+    const existing = liveWorkspaceWindow();
     if (existing) {
       focusShareHandoffWindow(existing);
       return existing;
     }
-    const window = trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
-    );
+    const window = createWorkspaceWindow();
     focusShareHandoffWindowWhenReady(window);
     return window;
   }
@@ -353,10 +495,12 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     liveWorkspaceWindow,
     targetWindow,
     sendWorkspaceActivated,
+    reportActivationFailure,
     applyZoomLevelToWindows,
     bindGuestZoom,
     enqueueUserSettingsWrite,
     stepWindowZoom,
+    broadcastUserSettings,
     refreshApplicationMenu,
     refreshNativeWorkspaceSurfaces,
     prepareForRendererReload,

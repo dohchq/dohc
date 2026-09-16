@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
 
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/ice/dohc"),
-  pickWorkspaceRoot: vi.fn(async () => "/home/ice/projects/research"),
+  pickWorkspaceRoot: vi.fn(async (): Promise<string | null> => "/home/ice/projects/research"),
   createLocalWorkspace: vi.fn(async () => ({
     workspaceId: "ws-1",
     rootPath: "/home/ice/dohc/personal",
@@ -54,6 +55,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   window.localStorage.clear();
 });
@@ -164,12 +166,57 @@ describe("workspace manager", () => {
     );
   });
 
-  it("reports default workspace root failures", async () => {
+  it("reports default workspace root failures and still lets the person pick a folder", async () => {
+    const user = userEvent.setup();
     bridge.getDefaultWorkspaceRoot.mockRejectedValueOnce(new Error("No home dir"));
 
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
 
     expect(await screen.findByText("No home dir")).toBeTruthy();
+    const change = screen.getByRole("button", { name: "Change location" });
+    expect(change).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", true);
+
+    await user.click(change);
+    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
+    expect(screen.queryByText("No home dir")).toBeNull();
+    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
+  });
+
+  it("shows a picker failure and keeps a slow default from overwriting a picked folder", async () => {
+    const user = userEvent.setup();
+    const slowDefault = deferred<string>();
+    bridge.getDefaultWorkspaceRoot.mockReturnValueOnce(slowDefault.promise);
+    bridge.pickWorkspaceRoot.mockRejectedValueOnce(new Error("Dialog unavailable"));
+
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    const change = await screen.findByRole("button", { name: "Change location" });
+    await user.click(change);
+    expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
+
+    await user.click(change);
+    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
+    await act(async () => slowDefault.resolve("/home/ice/dohc"));
+    expect(screen.getByText("/home/ice/projects/research/")).toBeTruthy();
+    expect(screen.queryByText("/home/ice/dohc/")).toBeNull();
+  });
+
+  it("asks for the default again when the picker is cancelled before any default arrived", async () => {
+    const user = userEvent.setup();
+    const slowDefault = deferred<string>();
+    bridge.getDefaultWorkspaceRoot.mockReturnValueOnce(slowDefault.promise);
+    bridge.pickWorkspaceRoot.mockResolvedValueOnce(null);
+
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    const change = await screen.findByRole("button", { name: "Change location" });
+    await user.click(change);
+    expect(bridge.getDefaultWorkspaceRoot).toHaveBeenCalledTimes(2);
+    // The retired first answer lands and changes nothing; the second fills
+    // the card.
+    await act(async () => slowDefault.resolve("/home/ice/stale"));
+    expect(screen.queryByText("/home/ice/stale/")).toBeNull();
+    expect(await screen.findByText("/home/ice/dohc/")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
   it("attaches an existing folder as a workspace", async () => {
@@ -325,6 +372,52 @@ describe("workspace manager with registered workspaces", () => {
     await user.click(await screen.findByRole("button", { name: /create workspace/i }));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }));
     expect((await screen.findByRole("alert")).textContent).toBe("No window for that workspace.");
+  });
+
+  it("drives the row menu from the keyboard and returns focus to its trigger", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    const trigger = await screen.findByRole("button", { name: "More for team" });
+    trigger.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menu", { name: "More for team" })).toBeTruthy();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const reveal = screen.getByRole("menuitem", { name: "Reveal in folder" });
+    await waitFor(() => expect(document.activeElement).toBe(reveal));
+
+    await user.keyboard("{ArrowDown}");
+    const forget = screen.getByRole("menuitem", { name: "Forget" });
+    await waitFor(() => expect(document.activeElement).toBe(forget));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    expect(bridge.forgetWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-b" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("positions the row menu against the viewport so the list cannot clip it", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    const trigger = await screen.findByRole("button", { name: "More for team" });
+    // A bottom row: the trigger sits just above the window's bottom edge.
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      top: 570, bottom: 594, left: 280, right: 304, width: 24, height: 24, x: 280, y: 570, toJSON: () => ({}),
+    });
+    vi.stubGlobal("innerHeight", 600);
+    await user.click(trigger);
+    const menu = screen.getByRole("menu", { name: "More for team" });
+    // Viewport-fixed, so the scrolling list's overflow cannot clip it; a
+    // row near the bottom opens its menu upward.
+    expect(menu.className).toContain("fixed");
+    expect(Number.parseFloat(menu.style.top)).toBeLessThan(570);
+    expect(Number.parseFloat(menu.style.left)).toBe(304 - 176);
   });
 
   it("reveals a workspace folder from the row menu", async () => {

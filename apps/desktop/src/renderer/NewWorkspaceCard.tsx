@@ -2,7 +2,9 @@ import { FolderOpen, Pencil } from "lucide-react";
 import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SectionLabel } from "./ui/controls";
+import { useRequestSequence } from "./useRequestSequence";
 
 // The folder card: where the new workspace goes and what it is called, then
 // Create. Drawn as a folder, with the tab as the label and the sheet holding
@@ -36,19 +38,46 @@ export function NewWorkspaceCard(props: {
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The default suggestion and the picker race for the same field. The
+  // newest request wins: a slow default must not overwrite a folder the
+  // person already chose.
+  const rootRequests = useRequestSequence();
 
-  useEffect(() => {
+  function suggestDefaultRoot() {
+    const request = rootRequests.next();
     void bridge()
       .getDefaultWorkspaceRoot()
-      .then(setRoot)
+      .then((suggested) => {
+        if (rootRequests.isCurrent(request)) setRoot(suggested);
+      })
       .catch((cause) => {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (rootRequests.isCurrent(request)) setError(ipcErrorMessage(cause));
       });
+  }
+
+  useEffect(() => {
+    suggestDefaultRoot();
+    // rootRequests is a stable ref holder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function chooseFolder() {
-    const picked = await bridge().pickWorkspaceRoot();
-    if (picked) setRoot(picked);
+    const request = rootRequests.next();
+    let picked: string | null = null;
+    try {
+      picked = await bridge().pickWorkspaceRoot();
+    } catch (cause) {
+      if (rootRequests.isCurrent(request)) setError(ipcErrorMessage(cause));
+    }
+    if (!rootRequests.isCurrent(request)) return;
+    if (picked) {
+      setRoot(picked);
+      setError(null);
+      return;
+    }
+    // Cancelled or failed with nothing chosen yet: the default this click
+    // retired must still arrive, or the card stays stuck on "…".
+    if (root === null) suggestDefaultRoot();
   }
 
   const canCreate = root !== null && !creating && validFolderName(folderName);
@@ -88,17 +117,17 @@ export function NewWorkspaceCard(props: {
       <div className="dohc-elevated flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5">
         <div className="flex flex-col gap-2">
           {/* The parent path is the picker: click it to move the new folder
-              somewhere else. */}
+              somewhere else. It stays live when no default arrived, so the
+              person can still choose one by hand. */}
           <button
             type="button"
             aria-label="Change location"
-            disabled={root === null}
             onClick={() => void chooseFolder()}
-            className="group flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 text-left transition-colors hover:border-ink disabled:pointer-events-none"
+            className="group flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 text-left transition-colors hover:border-ink"
           >
             <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
             <code className="min-w-0 flex-1 truncate font-mono text-[13px] leading-snug text-muted group-hover:text-ink">
-              {root ? `${displayPath(root)}${separator}` : "…"}
+              {root ? `${displayPath(root)}${separator}` : error ? "Choose a folder" : "…"}
             </code>
             <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
               Change

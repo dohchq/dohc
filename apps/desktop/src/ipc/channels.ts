@@ -373,16 +373,11 @@ export const CHANNELS = {
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
-  // Quit interception: main asks the renderer before a quit proceeds,
-  // so set-aside drafts warn before any destructive teardown. The renderer
-  // answers with hold (its dialog owns the decision) or resume (quit).
-  quitRequested: "desktop:quit-requested",
-  // Recovery re-check: main asks at the quit boundary,
-  // because a reopen can set an edit aside after the renderer's own check and
-  // before the install IPC runs. Request carries an id; the answer invokes
-  // back with it.
-  recoveryCheckRequested: "desktop:recovery-check-requested",
-  recoveryCheckAnswer: "desktop:recovery-check-answer",
+  // Exit rounds: before a quit or an update install, main asks every
+  // workspace renderer whether set-aside drafts would be lost. The request
+  // carries a round id; each renderer answers clear, hold, or cancel with it.
+  exitRound: "desktop:exit-round",
+  exitRoundAnswer: "desktop:exit-round-answer",
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",

@@ -577,11 +577,14 @@ export function SettingsDialog(props: {
             >
               <button
                 type="button"
+                // Pinned accessible name; the visible label follows the
+                // product name.
+                aria-label="Open Cloud"
                 onClick={props.onOpenCloud}
                 className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
                 disabled={!props.onOpenCloud}
               >
-                Open Cloud
+                Open Drive
               </button>
             </SettingRow>
             <SettingRow

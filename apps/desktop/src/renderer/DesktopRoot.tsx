@@ -253,7 +253,7 @@ export function DesktopRoot() {
       onDismissShareHandoff={dismissShareHandoff}
       onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
-      onManageWorkspaces={() => void bridge().openWorkspaceManager().catch(() => undefined)}
+      onManageWorkspaces={() => bridge().openWorkspaceManager()}
       onSwitchWorkspace={(next) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.

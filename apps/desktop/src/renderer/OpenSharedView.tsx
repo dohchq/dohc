@@ -1,7 +1,7 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -88,12 +88,17 @@ export function OpenSharedView(props: {
     props.mountInto && !props.liveEditing ? "mount" : "separate",
   );
   const [signingIn, setSigningIn] = useState(false);
+  const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRequestSequence();
   const folderRequestRef = useRequestSequence();
   const suggestRequestRef = useRequestSequence();
   const actionRequests = useRequestSequence();
+
+  useEffect(() => {
+    if (signingIn) signInPanel.current?.focus();
+  }, [signingIn]);
 
   function checkSession() {
     const session = sessionRef.next();
@@ -319,9 +324,14 @@ export function OpenSharedView(props: {
       </PrimaryButton>
 
       {signingIn && gate.kind !== "signed-in" ? (
-        <div className="flex flex-col gap-2 rounded-md border border-line bg-bg p-3">
-          <p className="sr-only">
-            Shares are addressed to your dohc Drive account — sign in first, then enter the code you received.
+        <div
+          ref={signInPanel}
+          tabIndex={-1}
+          aria-describedby="open-share-sign-in-description"
+          className="flex flex-col gap-2 rounded-md border border-line bg-bg p-3"
+        >
+          <p id="open-share-sign-in-description" className="sr-only">
+            Shares are addressed to your dohc Drive account. Sign in to open this share.
           </p>
           <CloudLogin onConnected={checkSession} embedded untitled />
         </div>

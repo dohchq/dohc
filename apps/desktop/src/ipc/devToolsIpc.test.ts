@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
-import { devToolsEnabled, registerDevToolsIpcHandlers } from "./devToolsIpc";
+import {
+  devToolsEnabled,
+  devToolsGranted,
+  devToolsPreloadArguments,
+  registerDevToolsIpcHandlers,
+} from "./devToolsIpc";
 
 function harness(enabled: boolean) {
   type Event = { trusted: boolean };
@@ -31,6 +36,14 @@ describe("dev tools ipc", () => {
     expect(devToolsEnabled({ DOHC_DEV_TOOLS: "1" }, { isPackaged: false })).toBe(true);
     expect(devToolsEnabled({ DOHC_DEV_TOOLS: "1" }, { isPackaged: true })).toBe(false);
     expect(devToolsEnabled({}, { isPackaged: false })).toBe(false);
+  });
+
+  it("hands the preload main's decision, never the env var", () => {
+    const packaged = devToolsEnabled({ DOHC_DEV_TOOLS: "1" }, { isPackaged: true });
+    expect(devToolsGranted(devToolsPreloadArguments(packaged))).toBe(false);
+    const unpackaged = devToolsEnabled({ DOHC_DEV_TOOLS: "1" }, { isPackaged: false });
+    expect(devToolsGranted(["electron", ...devToolsPreloadArguments(unpackaged)])).toBe(true);
+    expect(devToolsGranted(["electron", "--other"])).toBe(false);
   });
 
   it("registers nothing when disabled", () => {

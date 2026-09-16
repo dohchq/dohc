@@ -929,6 +929,39 @@ describe("workspace share handoff placement", () => {
   });
 });
 
+describe("workspace manager route", () => {
+  it("shows a failed manager open in the shell error with a retry", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onManageWorkspaces = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(
+        new Error("Error invoking remote method 'desktop:open-workspace-manager': Error: No display."),
+      )
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+        onManageWorkspaces={onManageWorkspaces}
+      />,
+    );
+    await user.click(await screen.findByTestId("workspace-switcher"));
+    await user.click(screen.getByTestId("workspace-switcher-manage"));
+
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain("Couldn't open the workspace manager.");
+    expect(banner.textContent).toContain("No display.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(onManageWorkspaces).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  });
+});
+
 describe("workspace switch performance timeline", () => {
   it("reuses the bootstrap agent-status read for initial history", async () => {
     const bridge = makeBridge(Promise.resolve(null));

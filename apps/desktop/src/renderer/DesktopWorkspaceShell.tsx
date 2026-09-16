@@ -528,7 +528,8 @@ export function DesktopWorkspaceShell(props: {
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   onSwitchWorkspace: (workspace: Workspace) => void;
-  onManageWorkspaces?: () => void;
+  // May reject: the shell shows why, with a retry.
+  onManageWorkspaces?: () => void | Promise<void>;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
@@ -1277,6 +1278,15 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const { shellNotice, showShellNotice, dismissShellNotice } = useShellNotice();
+
+  const { onManageWorkspaces } = props;
+  const manageWorkspaces = useCallback(() => {
+    void Promise.resolve()
+      .then(() => onManageWorkspaces?.())
+      .catch((error: unknown) =>
+        reportShellError("Couldn't open the workspace manager.", error, manageWorkspaces),
+      );
+  }, [onManageWorkspaces, reportShellError]);
 
   const refreshSites = useCallback(() => {
     // refreshFiles's own settle bumps listingsSettled, which AppsView
@@ -4261,7 +4271,7 @@ export function DesktopWorkspaceShell(props: {
         workspaces={props.workspaces}
         onSwitchWorkspace={props.onSwitchWorkspace}
         onOpenShare={() => setOpenShareOpen(true)}
-        onManageWorkspaces={props.onManageWorkspaces}
+        onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
         onQuickOpen={() => setQuickOpenOpen(true)}
         primarySidebar={{
           visible: wb.sidebarVisible,
