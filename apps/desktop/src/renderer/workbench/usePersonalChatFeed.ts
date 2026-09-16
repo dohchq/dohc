@@ -34,13 +34,23 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     feedRefreshSeq.current += 1;
   }, []);
 
-  // A reaction answered for one thread: every Home item in that thread
-  // takes the fresh list.
-  const setThreadReactions = useCallback(
-    (threadId: string, reactions: ChatReactionRecord[]) => {
+  // A reaction listing answered for one message: only that item's rows for
+  // that message change, so two Home items in one thread never erase each
+  // other's answer.
+  const setMessageReactions = useCallback(
+    (messageId: string, reactions: ChatReactionRecord[]) => {
+      const mine = reactions.filter((reaction) => reaction.messageId === messageId);
       setPersonalFeed((current) =>
         current.map((item) =>
-          item.thread.id === threadId ? { ...item, reactions } : item,
+          item.message.id === messageId
+            ? {
+                ...item,
+                reactions: [
+                  ...item.reactions.filter((reaction) => reaction.messageId !== messageId),
+                  ...mine,
+                ],
+              }
+            : item,
         ),
       );
     },
@@ -93,6 +103,6 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     prepareOpen,
     clearRows,
     invalidate,
-    setThreadReactions,
+    setMessageReactions,
   };
 }

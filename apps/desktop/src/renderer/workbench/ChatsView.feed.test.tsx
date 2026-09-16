@@ -347,6 +347,90 @@ describe("ChatsView hybrid feed", () => {
     expect(pill.textContent).toContain("1");
   });
 
+  it("opens Home with an already-liked post pressed, and unlikes it", async () => {
+    const mine = {
+      reactionId: "reaction-mine",
+      messageId: "message-liked",
+      threadId: "thread-1",
+      emoji: "👍",
+      authorId: "author-you",
+      authorKind: "human" as const,
+      authorDisplayName: "You",
+    };
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...personalFeedItem("Already liked", "message-liked"), reactions: [mine] }],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [mine],
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const like = await screen.findByTestId("chats-feed-like");
+    await waitFor(() => expect(like.getAttribute("aria-pressed")).toBe("true"));
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "author-you" });
+    await userEvent.click(like);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "message-liked", state: "removed" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-feed-like").getAttribute("aria-pressed")).toBe("false"),
+    );
+  });
+
+  it("keeps two Home items from one thread on their own answers", async () => {
+    const reactionFor = (messageId: string) => ({
+      reactionId: `reaction-${messageId}`,
+      messageId,
+      threadId: "thread-1",
+      emoji: "👍",
+      authorId: "author-you",
+      authorKind: "human" as const,
+      authorDisplayName: "You",
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        personalFeedItem("First in thread", "message-a"),
+        personalFeedItem("Second in thread", "message-b"),
+      ],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "author-you" });
+    bridgeMock.setChatReaction.mockResolvedValue({
+      reaction: { ...reactionFor("message-a"), state: "added" },
+      viewerAuthorId: "author-you",
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const likes = await screen.findAllByTestId("chats-feed-like");
+    expect(likes).toHaveLength(2);
+
+    // A's listing lags; B's answers first with both likes on the thread.
+    let answerA!: (value: { reactions: ReturnType<typeof reactionFor>[]; viewerAuthorId: string }) => void;
+    const lateA = new Promise<{ reactions: ReturnType<typeof reactionFor>[]; viewerAuthorId: string }>(
+      (resolve) => { answerA = resolve; },
+    );
+    bridgeMock.listChatReactions
+      .mockImplementationOnce(() => lateA)
+      .mockResolvedValueOnce({
+        reactions: [reactionFor("message-a"), reactionFor("message-b")],
+        viewerAuthorId: "author-you",
+      });
+    await userEvent.click(likes[0]!);
+    await userEvent.click(likes[1]!);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-feed-like")[1]!.getAttribute("aria-pressed")).toBe("true"),
+    );
+    // A's stale listing (only A liked) lands last. B stays liked.
+    await act(async () => {
+      answerA({ reactions: [reactionFor("message-a")], viewerAuthorId: "author-you" });
+      await lateA;
+    });
+    const after = screen.getAllByTestId("chats-feed-like");
+    expect(after[0]!.getAttribute("aria-pressed")).toBe("true");
+    expect(after[1]!.getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("keeps Saved beside Open file once a post is saved", async () => {
     const onOpenPath = vi.fn();
     bridgeMock.listChatBookmarks.mockResolvedValue({
