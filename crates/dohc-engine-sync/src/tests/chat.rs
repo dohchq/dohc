@@ -550,6 +550,85 @@ fn imported_opening_message_uses_zero_based_order() {
 }
 
 #[test]
+fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
+    let (_scratch, _path, mut engine) = open_store();
+    let with_group = envelope(
+        "group-fields",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "trip",
+            "name": "Lisbon trip",
+            "slug": "lisbon-trip",
+            "kind": "channel",
+            "type": "both",
+            "purpose": "Dates and flights",
+            "folderPath": "trips/lisbon",
+            "createdAtMs": 10
+        }),
+    );
+    // An op written before the groups migration names no group fields.
+    let older = envelope(
+        "group-fields",
+        1,
+        "chat.channel.create",
+        json!({
+            "channelId": "old",
+            "name": "Old",
+            "slug": "old",
+            "kind": "channel",
+            "createdAtMs": 11
+        }),
+    );
+    for op in [&with_group, &older] {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply channel"),
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
+        );
+    }
+    let rows: Vec<(String, String, String, Option<String>)> = engine
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT channel_id, type, purpose, folder_path FROM chat_channels \
+                 WHERE workspace_id = 'ws' ORDER BY channel_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect()
+        })
+        .expect("read channels");
+    assert_eq!(
+        rows,
+        vec![
+            ("old".to_owned(), "posts".to_owned(), String::new(), None),
+            (
+                "trip".to_owned(),
+                "both".to_owned(),
+                "Dates and flights".to_owned(),
+                Some("trips/lisbon".to_owned())
+            ),
+        ]
+    );
+
+    // A group with a folder on a dm is refused.
+    let bad = envelope(
+        "group-fields-bad",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "dm-with-folder",
+            "name": "someone",
+            "slug": "someone",
+            "kind": "dm",
+            "folderPath": "people/someone",
+            "createdAtMs": 12
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &bad, &NoFaults));
+}
+
+#[test]
 fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
     for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
         let (_scratch, _path, mut engine) = open_store();

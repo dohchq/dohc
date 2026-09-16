@@ -1756,6 +1756,10 @@ export const ChatChannelRecord = z.object({
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   kind: z.enum(["channel", "dm", "agent"]),
+  // What the group holds and why it exists. Older fixtures omit them.
+  type: z.enum(["posts", "chat", "both"]).optional(),
+  purpose: z.string().max(200).optional(),
+  folderPath: PATH_STRING.optional(),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
@@ -1907,6 +1911,10 @@ export type MarkPersonalChatFeedSeenPayload = z.infer<
 export const CreateChatChannelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  type: z.enum(["posts", "chat", "both"]).optional(),
+  purpose: z.string().max(200).optional(),
+  // The group's folder. When absent main derives it from the name.
+  folderPath: PATH_STRING.optional(),
 });
 export type CreateChatChannelPayload = z.infer<typeof CreateChatChannelPayload>;
 

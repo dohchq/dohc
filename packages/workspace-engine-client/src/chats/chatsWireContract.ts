@@ -122,6 +122,9 @@ type ChatChannelCreateParams = ChatsJsonObject & {
   channelId: string;
   name: string;
   kind: "channel" | "dm" | "agent";
+  type?: "posts" | "chat" | "both";
+  purpose?: string;
+  folderPath?: string;
   nowMs?: number;
 };
 type ChatChannelEnsureParams = ChatsJsonObject & {
@@ -431,6 +434,7 @@ const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
 const ActorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
+const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
 const FollowTargetKindSchema = Schema.Literals([
   "person",
   "agent",
@@ -571,6 +575,9 @@ const ChatChannelSchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
 });
@@ -580,6 +587,9 @@ const ChatChannelSummarySchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
   threadCount: NonnegativeInt,

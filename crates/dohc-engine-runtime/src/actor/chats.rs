@@ -1,10 +1,10 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, ChannelThreadSummary, ChatAgentReadState, ChatAttachment,
-    ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary,
-    ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention,
-    ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
     ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
     LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
     SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
@@ -20,6 +20,7 @@ impl ActorHandle {
         channel_id: String,
         name: String,
         kind: ChatChannelKind,
+        group: ChannelGroup,
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
@@ -28,7 +29,15 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 LinkedChatStore::new(store)
-                    .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
+                    .create_group(
+                        &workspace_id,
+                        &channel_id,
+                        &name,
+                        kind,
+                        group,
+                        now_ms,
+                        &NoFaults,
+                    )
                     .map_err(RuntimeError::from)
             }
         })

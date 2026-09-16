@@ -551,6 +551,8 @@ type ChatChannelId = string;
 // A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
+/// What a group holds: posts, one running chat, or both.
+export type ChatChannelType = "posts" | "chat" | "both";
 
 type ChatActor =
   | { kind: "human"; displayName: string }
@@ -572,6 +574,11 @@ export interface ChatChannel {
   name: string;
   slug: string;
   kind: ChatChannelKind;
+  type: ChatChannelType;
+  purpose: string;
+  // The workspace-relative folder the group's files live in. Absent for
+  // dm and agent channels and for channels older than the groups migration.
+  folderPath?: string;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -829,6 +836,9 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     name: string;
     kind?: ChatChannelKind;
+    type?: ChatChannelType;
+    purpose?: string;
+    folderPath?: string;
   }): Promise<ChatChannel>;
   // Idempotent: creates the workspace's default "general" channel on first
   // chat use, returns the existing one afterwards.

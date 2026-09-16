@@ -62,6 +62,9 @@ type SeedChannelInput = {
   channelId: string;
   name: string;
   kind?: "channel" | "dm" | "agent";
+  type?: "posts" | "chat" | "both";
+  purpose?: string;
+  folderPath?: string;
   wireId?: string | null;
   createdAtMs?: number;
 };
@@ -544,7 +547,8 @@ function page<T>(
 
 function allowedKeys(method: string): readonly string[] {
   switch (method) {
-    case CHATS_METHOD.channelCreate: return ["channelId", "name", "kind", "nowMs"];
+    case CHATS_METHOD.channelCreate:
+      return ["channelId", "name", "kind", "type", "purpose", "folderPath", "nowMs"];
     case CHATS_METHOD.channelEnsureAgent:
     case CHATS_METHOD.channelEnsureGeneral:
       return ["channelId", "nowMs"];
@@ -680,6 +684,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name,
       slug: wantedSlug,
       kind: input.kind ?? "channel",
+      type: input.type ?? "posts",
+      purpose: input.purpose ?? "",
+      ...(input.folderPath !== undefined ? { folderPath: input.folderPath } : {}),
       createdAtMs: atMs,
       updatedAtMs: atMs,
       wireId: input.wireId === undefined ? input.channelId : input.wireId,
@@ -1091,6 +1098,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      type: channel.type,
+      purpose: channel.purpose,
+      ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
       createdAtMs: channel.createdAtMs,
       updatedAtMs: channel.updatedAtMs,
     };
@@ -1110,6 +1120,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (kind !== "channel" && kind !== "dm" && kind !== "agent") {
       throw new Error("invalid-channel-kind");
     }
+    const type = optionalString(params, "type") ?? "posts";
+    if (type !== "posts" && type !== "chat" && type !== "both") {
+      throw new Error("invalid-channel-type");
+    }
+    const purpose = (optionalString(params, "purpose") ?? "").trim();
+    const folderPath = optionalString(params, "folderPath")?.trim();
+    if (folderPath && kind !== "channel") throw new Error("invalid-channel-folder");
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const channelSlug = slug(name);
     if (
@@ -1126,6 +1143,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name,
       slug: channelSlug,
       kind,
+      type,
+      purpose,
+      ...(folderPath ? { folderPath } : {}),
       createdAtMs: atMs,
       updatedAtMs: atMs,
       wireId: channelId,

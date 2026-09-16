@@ -1,5 +1,6 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, CreateFileThread, SendMessage, StartChannelThread,
+    ChannelGroup, ChatActorKind, ChatChannelKind, CreateFileThread, SendMessage,
+    StartChannelThread,
 };
 use dohc_engine_runtime::{CancellationToken, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -18,6 +19,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
             "existing-channel".to_owned(),
             "Project".to_owned(),
             ChatChannelKind::Channel,
+            ChannelGroup::default(),
             10,
             CancellationToken::new(),
         )
@@ -106,6 +108,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
                 "cancelled-channel".to_owned(),
                 "Cancelled channel".to_owned(),
                 ChatChannelKind::Channel,
+                ChannelGroup::default(),
                 30,
                 token.clone(),
             )
@@ -196,6 +199,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
             "cancelled-channel".to_owned(),
             "Cancelled channel".to_owned(),
             ChatChannelKind::Channel,
+            ChannelGroup::default(),
             30,
             CancellationToken::new(),
         )

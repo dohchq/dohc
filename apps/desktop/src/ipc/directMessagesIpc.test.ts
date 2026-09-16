@@ -55,7 +55,7 @@ async function harness() {
   const events: string[] = [];
   const channel: ChatChannelSummary = {
     id: "channel", workspaceId: "workspace", name: "peer@example.test", slug: "peer", kind: "dm",
-    createdAtMs: 1, updatedAtMs: 2, threadCount: 1, unreadCount: 0,
+    type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 2, threadCount: 1, unreadCount: 0,
   };
   const thread: ChannelThreadSummary = {
     thread: { id: "thread", workspaceId: "workspace", channelId: "channel", title: "", createdAtMs: 1, updatedAtMs: 2 },

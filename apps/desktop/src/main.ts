@@ -126,6 +126,7 @@ import {
   resetFailedJoinFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
+import { createFolder } from "./workspaces/workspaceFiles";
 import {
   completePendingEngineStoreMove,
   EngineStoreRecoveryFailedError,
@@ -4324,6 +4325,9 @@ function registerIpcHandlers(): void {
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    ensureGroupFolder: async (workspace, folderPath) => {
+      await createFolder(workspace.rootPath, folderPath);
+    },
   });
 
   agentRunsIpc.registerChatRunRecords();

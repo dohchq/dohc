@@ -110,6 +110,9 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     name: string;
     kind?: "channel" | "dm" | "agent";
+    type?: "posts" | "chat" | "both";
+    purpose?: string;
+    folderPath?: string;
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     const channelId = this.createId("channel");
@@ -117,6 +120,9 @@ export class ChatsLiveAdapter {
       channelId,
       name: input.name,
       kind: input.kind ?? "channel",
+      ...(input.type ? { type: input.type } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      ...(input.folderPath !== undefined ? { folderPath: input.folderPath } : {}),
     });
   }
 

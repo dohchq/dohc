@@ -6,12 +6,12 @@
 //! base64url feed cursor) validated against real TS output — not Rust's own.
 
 use dohc_engine_domain::{
-    AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
-    ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
-    LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
+    ChatChannelKind, ChatChannelType, ChatReactionState, FeedCursorValue, FollowState,
+    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput, NoFaults,
+    PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
+    channel_slug_for_name, decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -107,6 +107,109 @@ fn create_list_find_channel_round_trip() {
         .find_channel_by_slug(WS, "general-chat")
         .expect("find");
     assert_eq!(found.map(|c| c.channel_id), Some("chan-1".to_owned()));
+}
+
+#[test]
+fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+
+    let group = chats
+        .create_group(
+            WS,
+            "trip",
+            "Lisbon trip",
+            ChatChannelKind::Channel,
+            ChannelGroup {
+                channel_type: ChatChannelType::Both,
+                purpose: "  Dates, flights, the flat.  ".to_owned(),
+                folder_path: Some(" trips/lisbon ".to_owned()),
+            },
+            10,
+            &NO_FAULTS,
+        )
+        .expect("create group");
+    assert_eq!(group.group.channel_type, ChatChannelType::Both);
+    assert_eq!(group.group.purpose, "Dates, flights, the flat.");
+    assert_eq!(group.group.folder_path.as_deref(), Some("trips/lisbon"));
+
+    // The row reads back the same through every channel read.
+    let listed = chats.list_channels(WS).expect("list");
+    assert_eq!(listed[0].channel.group, group.group);
+    let found = chats
+        .find_channel_by_slug(WS, "lisbon-trip")
+        .expect("find")
+        .expect("present");
+    assert_eq!(found.group, group.group);
+
+    // A bare channel is a posts group with no folder.
+    let plain = chats
+        .create_channel(
+            WS,
+            "plain",
+            "Plain",
+            ChatChannelKind::Channel,
+            11,
+            &NO_FAULTS,
+        )
+        .expect("create plain");
+    assert_eq!(plain.group, ChannelGroup::default());
+
+    // A DM carries no folder.
+    let err = chats
+        .create_group(
+            WS,
+            "dm",
+            "someone@example.test",
+            ChatChannelKind::Dm,
+            ChannelGroup {
+                folder_path: Some("people/someone".to_owned()),
+                ..ChannelGroup::default()
+            },
+            12,
+            &NO_FAULTS,
+        )
+        .expect_err("a dm has no folder");
+    assert_eq!(err.code(), "invalid-channel-folder");
+
+    // Traversal and absolute paths are refused.
+    for bad in ["../up", "/abs", "a//b", "a/./b"] {
+        let err = chats
+            .create_group(
+                WS,
+                &format!("bad-{}", bad.len()),
+                &format!("Bad {}", bad.len()),
+                ChatChannelKind::Channel,
+                ChannelGroup {
+                    folder_path: Some(bad.to_owned()),
+                    ..ChannelGroup::default()
+                },
+                13,
+                &NO_FAULTS,
+            )
+            .expect_err("bad folder");
+        assert_eq!(err.code(), "invalid-channel-folder", "{bad}");
+    }
+
+    // The create op carries the group so a replica draws it the same way.
+    let payload: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.channel.create' \
+                 ORDER BY origin_seq LIMIT 1",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled create");
+    let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+    assert_eq!(payload["type"], "both");
+    assert_eq!(payload["purpose"], "Dates, flights, the flat.");
+    assert_eq!(payload["folderPath"], "trips/lisbon");
 }
 
 #[test]
@@ -1310,6 +1413,8 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "name": "general",
             "slug": "general",
             "kind": "channel",
+            "type": "posts",
+            "purpose": "",
             "createdAtMs": 10,
             "wireId": GENERAL_CHANNEL_WIRE_ID,
         })

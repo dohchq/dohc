@@ -59,7 +59,7 @@ function fixture(kind: ScopeKind = "local") {
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
     getChannelWireId: vi.fn<DesktopLinkedChatStore["getChannelWireId"]>(async () => "wire"),
-    createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", createdAtMs: 1, updatedAtMs: 1 })),
+    createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", type: input.type ?? "posts", purpose: input.purpose ?? "", ...(input.folderPath ? { folderPath: input.folderPath } : {}), createdAtMs: 1, updatedAtMs: 1 })),
     startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async input => ({
       thread: { id: thread.id, workspaceId: thread.workspaceId, title: thread.title, createdAtMs: 1, updatedAtMs: 2, channelId: input.channelId },
       message: { ...message, ...input, attachments: storedAttachments(input.attachments) },
@@ -111,6 +111,7 @@ function fixture(kind: ScopeKind = "local") {
   const verifiedChatAuthorUserIdFor = vi.fn(async (): Promise<string | undefined> => "verified-owner");
   const revalidateChatWrite = vi.fn(async () => undefined);
   const chatDispatchService = { scanWorkspace: vi.fn(async () => undefined) };
+  const ensureGroupFolder = vi.fn(async (_workspace: RegistryEntry, _folderPath: string): Promise<void> => undefined);
   const desktopChatBookmarks = {
     materializeChatBookmark: vi.fn(async (_workspace: RegistryEntry, _capture: WorkspaceEngineCapture, saved: ChatBookmark) => ({ ...saved, projectionState: "ready" as const })),
     materializePendingChatBookmarks: vi.fn(async () => undefined),
@@ -137,13 +138,14 @@ function fixture(kind: ScopeKind = "local") {
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
     activeEngineFileIndex, activity, chatDispatchService, desktopChatBookmarks, notifyRenderer: () => undefined,
+    ensureGroupFolder,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`Missing chat handler: ${channel}`);
     return await handler(event, payload);
   }
-  return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture,
+  return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, activeEngineFileIndex, readOwnedWorkspaceText,
     warmCredentialCache, verifiedChatAuthorUserIdFor, revalidateChatWrite, chatDispatchService, desktopChatBookmarks };
@@ -336,7 +338,9 @@ describe("registered channels and personal chat projections", () => {
   it("creates local channels and their first message through the existing writers", async () => {
     const test = fixture();
     expect(await test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "General" })).toMatchObject({ channel: { id: "channel", wireId: "channel", threadCount: 0, unreadCount: 0 } });
-    expect(test.storeMethods.createChannel).toHaveBeenCalledWith({ workspaceId: "workspace", name: "General", kind: "channel" });
+    // A group is a folder: the default folder is the slug, and main creates it.
+    expect(test.storeMethods.createChannel).toHaveBeenCalledWith({ workspaceId: "workspace", name: "General", kind: "channel", folderPath: "general" });
+    expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
     expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Ice" }, authorUserId: "verified-owner" });
     expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);

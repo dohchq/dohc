@@ -8,14 +8,15 @@ use dohc_engine_domain::chats::{
     index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
-    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
-    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, has_projection_control_char,
-    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
-    normalize_channel_name, normalize_display_name, normalize_feed_identity,
-    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
+    ChatChannelKind, ChatChannelType, DomainError, FeedCoordinateResolution, FollowTargetKind,
+    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
+    channel_slug_for_name, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
+    normalize_display_name, normalize_feed_identity, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path,
 };
 
 use crate::error::local_corruption;
@@ -624,6 +625,13 @@ struct ChannelCreate {
     kind: String,
     created_at_ms: i64,
     wire_id: Option<String>,
+    /// Group fields, absent from ops written before the groups migration.
+    #[serde(rename = "type", default)]
+    channel_type: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    folder_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -825,6 +833,26 @@ fn apply_channel(
             reason: "chat channel kind is invalid",
         });
     }
+    let kind = match payload.kind.as_str() {
+        "channel" => ChatChannelKind::Channel,
+        "dm" => ChatChannelKind::Dm,
+        _ => ChatChannelKind::Agent,
+    };
+    let channel_type = match payload.channel_type.as_deref() {
+        None => ChatChannelType::default(),
+        Some(raw) => ChatChannelType::parse(raw).ok_or(SyncError::InvalidInput {
+            reason: "chat channel type is invalid",
+        })?,
+    };
+    let group = normalize_channel_group(
+        ChannelGroup {
+            channel_type,
+            purpose: payload.purpose.clone().unwrap_or_default(),
+            folder_path: payload.folder_path.clone(),
+        },
+        kind,
+    )
+    .map_err(|error| map_chat_rule(error, "chat channel group is invalid"))?;
     if !is_replicated_timestamp(payload.created_at_ms) {
         return Err(SyncError::InvalidInput {
             reason: "chat channel timestamp is invalid",
@@ -880,9 +908,20 @@ fn apply_channel(
             )?;
             debug_assert!(is_replicated_channel_slug(&slug));
             tx.execute(
-                "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6 \
+                "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6, \
+                     type = ?7, purpose = ?8, folder_path = ?9 \
                  WHERE workspace_id = ?1 AND channel_id = ?2",
-                params![op.workspace_id, channel_id, name, slug, payload.kind, payload.created_at_ms],
+                params![
+                    op.workspace_id,
+                    channel_id,
+                    name,
+                    slug,
+                    payload.kind,
+                    payload.created_at_ms,
+                    group.channel_type.as_str(),
+                    group.purpose,
+                    group.folder_path
+                ],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
@@ -897,15 +936,19 @@ fn apply_channel(
     debug_assert!(is_replicated_channel_slug(&slug));
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
-         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+          type, purpose, folder_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
         params![
             op.workspace_id,
             channel_id,
             name,
             slug,
             payload.kind,
-            payload.created_at_ms
+            payload.created_at_ms,
+            group.channel_type.as_str(),
+            group.purpose,
+            group.folder_path
         ],
     )
     .map_err(SyncError::persist)?;

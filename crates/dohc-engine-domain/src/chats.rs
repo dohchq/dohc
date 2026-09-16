@@ -83,6 +83,10 @@ pub const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
 const MAX_CHANNEL_NAME_CHARS: usize = 80;
+/// Group purpose char cap: one line.
+const MAX_CHANNEL_PURPOSE_CHARS: usize = 200;
+/// Group folder path char cap.
+const MAX_CHANNEL_FOLDER_PATH_CHARS: usize = 512;
 /// Display-name char cap (`normalizeDisplayName`).
 const MAX_DISPLAY_NAME_CHARS: usize = 200;
 /// Opaque relay user-id char cap (`normalizeAuthorUserId`).
@@ -164,6 +168,50 @@ impl ChatChannelKind {
     }
 }
 
+/// What a group holds: posts, one running chat, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatChannelType {
+    #[default]
+    Posts,
+    Chat,
+    Both,
+}
+
+impl ChatChannelType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatChannelType::Posts => "posts",
+            ChatChannelType::Chat => "chat",
+            ChatChannelType::Both => "both",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "posts" => Some(ChatChannelType::Posts),
+            "chat" => Some(ChatChannelType::Chat),
+            "both" => Some(ChatChannelType::Both),
+            _ => None,
+        }
+    }
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        Self::parse(raw).ok_or(DomainError::StateCorrupt {
+            reason: "chat channel has an unknown type",
+        })
+    }
+}
+
+/// The group fields a creator sets beyond name and kind. All default: a
+/// bare channel is a posts group with no purpose and no folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelGroup {
+    pub channel_type: ChatChannelType,
+    pub purpose: String,
+    /// The workspace-relative folder the group's files live in. `None` for
+    /// `dm` and `agent` channels, and for channels older than the groups
+    /// migration.
+    pub folder_path: Option<String>,
+}
+
 /// A chat message author kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatActorKind {
@@ -197,6 +245,7 @@ pub struct ChatChannel {
     pub name: String,
     pub slug: String,
     pub kind: ChatChannelKind,
+    pub group: ChannelGroup,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -1739,6 +1788,30 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatChannel, DomainError> {
+        self.create_group(
+            workspace_id,
+            channel_id,
+            name,
+            kind,
+            ChannelGroup::default(),
+            now_ms,
+            faults,
+        )
+    }
+
+    /// [`Self::create_channel`] with the group fields set. A `dm` or `agent`
+    /// channel carries no folder.
+    pub fn create_group(
+        &mut self,
+        workspace_id: &str,
+        channel_id: &str,
+        name: &str,
+        kind: ChatChannelKind,
+        group: ChannelGroup,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatChannel, DomainError> {
+        let group = normalize_channel_group(group, kind)?;
         non_empty(
             workspace_id,
             "invalid-channel-name",
@@ -1778,6 +1851,7 @@ impl<'a> LinkedChatStore<'a> {
         let cid = channel_id;
         let slug_c = slug.clone();
         let name_c = name.clone();
+        let group_c = group.clone();
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if channel_by_slug(tx, &ws, &slug_c)?.is_some() {
                 return Err(DomainError::chat(
@@ -1788,21 +1862,14 @@ impl<'a> LinkedChatStore<'a> {
             // Persist the validated kind (`channel` or `dm`) — not hardcoded:
             // DM privacy depends on the stored kind (`list_personal_feed`
             // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, now_ms)?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
             journal_local_op_in_tx(
                 tx,
                 &ws,
                 "chat.channel.create",
-                &serde_json::json!({
-                    "channelId": cid,
-                    "name": name_c,
-                    "slug": slug_c,
-                    "kind": kind.as_str(),
-                    "createdAtMs": now_ms,
-                    "wireId": cid,
-                }),
+                &channel_create_payload(&cid, &name_c, &slug_c, kind, &group_c, now_ms, &cid),
                 now_ms,
             )?;
             Ok::<_, DomainError>(ChatChannel {
@@ -1811,6 +1878,7 @@ impl<'a> LinkedChatStore<'a> {
                 name: name_c.clone(),
                 slug: slug_c.clone(),
                 kind,
+                group: group_c.clone(),
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -1909,20 +1977,14 @@ impl<'a> LinkedChatStore<'a> {
                 }
                 return Ok::<_, DomainError>(existing);
             }
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
+            let group = ChannelGroup::default();
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group, now_ms)?;
             record_channel_wire_id(tx, &ws, &wire, &cid)?;
             journal_local_op_in_tx(
                 tx,
                 &ws,
                 "chat.channel.create",
-                &serde_json::json!({
-                    "channelId": cid,
-                    "name": name_c,
-                    "slug": slug_c,
-                    "kind": kind.as_str(),
-                    "createdAtMs": now_ms,
-                    "wireId": wire,
-                }),
+                &channel_create_payload(&cid, &name_c, &slug_c, kind, &group, now_ms, &wire),
                 now_ms,
             )?;
             Ok::<_, DomainError>(ChatChannel {
@@ -1931,6 +1993,7 @@ impl<'a> LinkedChatStore<'a> {
                 name: name_c.clone(),
                 slug: slug_c.clone(),
                 kind,
+                group,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -1970,6 +2033,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
                             ch.created_at_ms, ch.updated_at_ms, \
+                            ch.type, ch.purpose, ch.folder_path, \
                             COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
                      FROM chat_channels ch \
                      LEFT JOIN ( \
@@ -1995,8 +2059,8 @@ impl<'a> LinkedChatStore<'a> {
             let rows = stmt
                 .query_map(params![workspace_id, MAX_LIST_ROWS], |row| {
                     let channel = map_channel_row(row)?;
-                    let thread_count = row.get(7)?;
-                    let unread_count = row.get(8)?;
+                    let thread_count = row.get(10)?;
+                    let unread_count = row.get(11)?;
                     Ok(channel.map(|channel| ChatChannelSummary {
                         channel,
                         thread_count,
@@ -5290,16 +5354,108 @@ fn insert_channel(
     name: &str,
     slug: &str,
     kind: ChatChannelKind,
+    group: &ChannelGroup,
     now_ms: i64,
 ) -> Result<(), DomainError> {
     tx.execute(
         "INSERT INTO chat_channels \
-         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![workspace_id, channel_id, name, slug, kind.as_str(), now_ms],
+         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+          type, purpose, folder_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+        params![
+            workspace_id,
+            channel_id,
+            name,
+            slug,
+            kind.as_str(),
+            now_ms,
+            group.channel_type.as_str(),
+            group.purpose,
+            group.folder_path
+        ],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+/// The `chat.channel.create` wire payload. The group fields ride beside the
+/// kind so a receiving replica draws the group the way its creator did.
+fn channel_create_payload(
+    channel_id: &str,
+    name: &str,
+    slug: &str,
+    kind: ChatChannelKind,
+    group: &ChannelGroup,
+    created_at_ms: i64,
+    wire_id: &str,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "channelId": channel_id,
+        "name": name,
+        "slug": slug,
+        "kind": kind.as_str(),
+        "type": group.channel_type.as_str(),
+        "purpose": group.purpose,
+        "createdAtMs": created_at_ms,
+        "wireId": wire_id,
+    });
+    if let Some(folder) = &group.folder_path {
+        payload["folderPath"] = serde_json::json!(folder);
+    }
+    payload
+}
+
+/// Trim and bound the group fields. A `dm` or `agent` channel has no folder;
+/// a folder path is workspace-relative with no leading, trailing, or doubled
+/// separator and no `.` or `..` segment.
+pub fn normalize_channel_group(
+    group: ChannelGroup,
+    kind: ChatChannelKind,
+) -> Result<ChannelGroup, DomainError> {
+    let purpose = group.purpose.trim().to_owned();
+    if purpose.chars().count() > MAX_CHANNEL_PURPOSE_CHARS || purpose.contains(['\n', '\r']) {
+        return Err(DomainError::chat(
+            "invalid-channel-purpose",
+            "A group's purpose is one line of at most 200 characters.",
+        ));
+    }
+    let folder_path = match group.folder_path {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                if kind != ChatChannelKind::Channel {
+                    return Err(DomainError::chat(
+                        "invalid-channel-folder",
+                        "Only a group has a folder.",
+                    ));
+                }
+                if trimmed.chars().count() > MAX_CHANNEL_FOLDER_PATH_CHARS
+                    || trimmed.starts_with('/')
+                    || trimmed.ends_with('/')
+                    || trimmed.contains('\\')
+                    || trimmed.contains("//")
+                    || trimmed
+                        .split('/')
+                        .any(|segment| segment == "." || segment == "..")
+                    || trimmed.chars().any(|c| c.is_control())
+                {
+                    return Err(DomainError::chat(
+                        "invalid-channel-folder",
+                        "A group's folder is a workspace-relative path.",
+                    ));
+                }
+                Some(trimmed.to_owned())
+            }
+        }
+    };
+    Ok(ChannelGroup {
+        channel_type: group.channel_type,
+        purpose,
+        folder_path,
+    })
 }
 
 fn record_channel_wire_id(
@@ -5338,7 +5494,8 @@ fn channel_by_slug(
     slug: &str,
 ) -> Result<Option<ChatChannel>, DomainError> {
     conn.query_row(
-        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms \
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path \
          FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
         params![workspace_id, slug],
         map_channel_row,
@@ -5370,7 +5527,8 @@ fn require_channel(
     channel_id: &str,
 ) -> Result<ChatChannel, DomainError> {
     conn.query_row(
-        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms \
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path \
          FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
         params![workspace_id, channel_id],
         map_channel_row,
@@ -6324,14 +6482,25 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
     let kind_str: String = row.get(4)?;
     let created_at_ms: i64 = row.get(5)?;
     let updated_at_ms: i64 = row.get(6)?;
-    Ok(ChatChannelKind::from_db(&kind_str).map(|kind| ChatChannel {
-        workspace_id,
-        channel_id,
-        name,
-        slug,
-        kind,
-        created_at_ms,
-        updated_at_ms,
+    let type_str: String = row.get(7)?;
+    let purpose: String = row.get(8)?;
+    let folder_path: Option<String> = row.get(9)?;
+    Ok(ChatChannelKind::from_db(&kind_str).and_then(|kind| {
+        let channel_type = ChatChannelType::from_db(&type_str)?;
+        Ok(ChatChannel {
+            workspace_id,
+            channel_id,
+            name,
+            slug,
+            kind,
+            group: ChannelGroup {
+                channel_type,
+                purpose,
+                folder_path,
+            },
+            created_at_ms,
+            updated_at_ms,
+        })
     }))
 }
 

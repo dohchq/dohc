@@ -37,7 +37,7 @@ function fixture() {
     listMessages: vi.fn(async () => messages),
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => [{
       id: "channel", workspaceId: "workspace", name: "General",
-      slug: "general", kind: "channel",
+      slug: "general", kind: "channel", type: "posts", purpose: "",
       createdAtMs: 100, updatedAtMs: 100,
       threadCount: 1, unreadCount: 0,
     }]),

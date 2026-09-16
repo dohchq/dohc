@@ -1,3 +1,4 @@
+import { channelSlugForName } from "@dohc/security-contract";
 import {
   ListFileChatsPayload,
   CreateFileChatPayload,
@@ -172,6 +173,8 @@ export function registerChatsIpcHandlers<
     ): Promise<ChatBookmark>;
   };
   notifyRenderer(input: { workspaceId: string }): void;
+  // A group is a folder. Main creates it when the group is created.
+  ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor,
@@ -179,7 +182,7 @@ export function registerChatsIpcHandlers<
     localReactorFallbackId, currentCredentials, verifiedChatAuthorUserIdFor, revalidateChatWrite,
     chatRelayIdentityFor, syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
-    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer, ensureGroupFolder,
   } = dependencies;
   const { requireChatScope, syncChatWriteFor, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark, materializePendingChatBookmarks } = desktopChatBookmarks;
@@ -591,6 +594,9 @@ export function registerChatsIpcHandlers<
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      type: channel.type,
+      purpose: channel.purpose,
+      ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
       createdAtMs: channel.createdAtMs,
       updatedAtMs: channel.updatedAtMs,
       threadCount: channel.threadCount,
@@ -928,11 +934,21 @@ export function registerChatsIpcHandlers<
         requireEngineCapture(workspaceId, "Chats"),
       assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),
       run: async ({ workspace }, input) => {
+        // A group is a folder: the folder is the group's slug unless the
+        // creator named one. Main creates it so the group's files have a
+        // home before the first post.
+        const folderPath = input.folderPath ?? channelSlugForName(input.name);
         const channel = await linkedChatStoreFor(workspace).createChannel({
           workspaceId: workspace.workspaceId,
           name: input.name,
           kind: "channel",
+          ...(input.type ? { type: input.type } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          ...(folderPath ? { folderPath } : {}),
         });
+        if (channel.folderPath) {
+          await ensureGroupFolder(workspace, channel.folderPath);
+        }
         return CreateChatChannelResult.parse({
           // A locally created channel's wire identity is its own id.
           channel: {

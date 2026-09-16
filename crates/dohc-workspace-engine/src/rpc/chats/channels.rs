@@ -8,9 +8,11 @@ use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use dohc_engine_domain::ChannelGroup;
 use dohc_engine_domain::ChatChannel;
 use dohc_engine_domain::ChatChannelKind;
 use dohc_engine_domain::ChatChannelSummary;
+use dohc_engine_domain::ChatChannelType;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
@@ -25,6 +27,10 @@ struct ChatChannelCreateParams {
     channel_id: String,
     name: String,
     kind: String,
+    #[serde(rename = "type")]
+    channel_type: Option<String>,
+    purpose: Option<String>,
+    folder_path: Option<String>,
     now_ms: Option<i64>,
 }
 
@@ -60,7 +66,7 @@ fn parse_channel_kind(raw: &str) -> Result<ChatChannelKind, WireError> {
 }
 
 pub(super) fn channel_json(channel: &ChatChannel) -> Value {
-    json!({
+    let mut value = json!({
         "workspaceId": channel.workspace_id,
         "channelId": channel.channel_id,
         "name": channel.name,
@@ -70,9 +76,15 @@ pub(super) fn channel_json(channel: &ChatChannel) -> Value {
             ChatChannelKind::Dm => "dm",
             ChatChannelKind::Agent => "agent",
         },
+        "type": channel.group.channel_type.as_str(),
+        "purpose": channel.group.purpose,
         "createdAtMs": channel.created_at_ms,
         "updatedAtMs": channel.updated_at_ms,
-    })
+    });
+    if let Some(folder) = &channel.group.folder_path {
+        value["folderPath"] = json!(folder);
+    }
+    value
 }
 
 fn channel_summary_json(summary: &ChatChannelSummary) -> Value {
@@ -91,6 +103,17 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ChatChannelCreateParams = parse(params)?;
         let kind = parse_channel_kind(&params.kind)?;
+        let channel_type = match params.channel_type.as_deref() {
+            None => ChatChannelType::default(),
+            Some(raw) => ChatChannelType::parse(raw).ok_or_else(|| {
+                WireError::new(ErrorCode::InvalidParams, "unknown chat channel type")
+            })?,
+        };
+        let group = ChannelGroup {
+            channel_type,
+            purpose: params.purpose.unwrap_or_default(),
+            folder_path: params.folder_path,
+        };
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let channel = Self::read_under_ctx(
@@ -101,6 +124,7 @@ impl EngineService {
                 params.channel_id,
                 params.name,
                 kind,
+                group,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
             ),
