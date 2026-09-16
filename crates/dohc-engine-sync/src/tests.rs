@@ -879,6 +879,7 @@ mod chat;
 mod owner_publication;
 mod recover;
 mod relay_pull;
+mod relay_pull_bench;
 mod secret;
 mod share_proposal;
 mod share_view;

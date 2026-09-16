@@ -195,7 +195,7 @@ impl DeferredRelayTransport {
     fn resolve<T>(
         &self,
         request: RelayIoRequest,
-        project: impl Fn(&RelayIoResponse) -> Option<T>,
+        project: impl Fn(&mut RelayIoResponse) -> Option<T>,
     ) -> Result<T, RelayError> {
         let mut state = self
             .state
@@ -222,7 +222,7 @@ impl DeferredRelayTransport {
                 Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
             );
             let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
-            let projected = match &state.completed[index].1 {
+            let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
@@ -336,13 +336,20 @@ impl RelayTransport for DeferredRelayTransport {
         })
     }
 
-    relay_transport_method!(
-        download_blobs,
-        BlobDownloadBatchRequest,
-        DownloadBlobs,
-        BlobDownloadBatchResponse,
-        DownloadBlobs
-    );
+    fn download_blobs(
+        &self,
+        request: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
+        self.resolve(
+            RelayIoRequest::DownloadBlobs(request),
+            |response| match response {
+                RelayIoResponse::DownloadBlobs(response) => Some(BlobDownloadBatchResponse {
+                    results: std::mem::take(&mut response.results),
+                }),
+                _ => None,
+            },
+        )
+    }
     relay_transport_method!(
         upload_key_envelope,
         KeyEnvelopeRequest,
@@ -402,8 +409,98 @@ impl RelayTransport for DeferredRelayTransport {
 }
 
 #[cfg(test)]
+#[path = "relay_bench.rs"]
+mod relay_bench;
+
+#[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    #[test]
+    fn completed_blob_batch_transfers_body_allocations_without_copying() {
+        let transport = DeferredRelayTransport::default();
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                sha256: "a".repeat(64),
+                limit_bytes: 1024,
+            }],
+        };
+        let bytes = vec![7; 1024];
+        let pointer = bytes.as_ptr();
+        transport.complete(
+            RelayIoRequest::DownloadBlobs(request.clone()),
+            Ok(RelayIoResponse::DownloadBlobs(BlobDownloadBatchResponse {
+                results: vec![Ok(BlobDownloadResponse { bytes })],
+            })),
+        );
+        let response = transport
+            .download_blobs(request.clone())
+            .expect("consume batch");
+        assert_eq!(
+            response.results[0].as_ref().expect("body").bytes.as_ptr(),
+            pointer
+        );
+        assert!(transport.state.lock().expect("state").completed.is_empty());
+        assert_eq!(
+            transport.download_blobs(request),
+            Err(RelayError::Local(RELAY_IO_PENDING.to_owned()))
+        );
+    }
+
+    #[test]
+    fn failed_blob_batch_projection_retains_its_completed_response() {
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: Vec::new(),
+        };
+        for (result, expected) in [
+            (Err(RelayError::BlobMissing), RelayError::BlobMissing),
+            (Ok(RelayIoResponse::UploadBlob), RelayError::InvalidResponse),
+        ] {
+            let transport = DeferredRelayTransport::default();
+            transport.complete(RelayIoRequest::DownloadBlobs(request.clone()), result);
+            for _ in 0..2 {
+                assert_eq!(
+                    transport.download_blobs(request.clone()),
+                    Err(expected.clone())
+                );
+                assert_eq!(transport.state.lock().expect("state").completed.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn completed_pull_page_remains_available_for_replay() {
+        let transport = DeferredRelayTransport::default();
+        let request = PullRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor: 0,
+            limit: 10,
+        };
+        let response = PullResponse {
+            ops: Vec::new(),
+            next_cursor: 1,
+            has_more: false,
+        };
+        transport.complete(
+            RelayIoRequest::Pull(request.clone()),
+            Ok(RelayIoResponse::Pull(response.clone())),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                transport.pull(request.clone()).expect("replay page"),
+                response
+            );
+            assert_eq!(transport.state.lock().expect("state").completed.len(), 1);
+        }
+    }
 
     #[test]
     fn completed_push_batches_release_consumed_request_payloads() {
