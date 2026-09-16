@@ -1438,6 +1438,7 @@ export function createWorkspaceEngineCapture(
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
+  let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
   // editor session is still rejecting the user's edits.
   const deadYDocSessions = new Set<object>();
@@ -2943,6 +2944,14 @@ export function createWorkspaceEngineCapture(
 
   function pollDaemonCaptureHealth(): void {
     if (stopped || daemonCaptureHealthTimer !== null) return;
+    const timer = setTimeout(() => {
+      if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
+      pollDaemonCaptureHealth();
+    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
+    daemonCaptureHealthTimer = timer;
+    daemonCaptureHealthTimer.unref?.();
+    if (daemonCaptureHealthQueued) return;
+    daemonCaptureHealthQueued = true;
     enqueue("daemon capture health", () =>
       reportCaptureOutcome(async () => {
         const engine = await engineStore();
@@ -2953,14 +2962,10 @@ export function createWorkspaceEngineCapture(
         return status === undefined
           ? true
           : status.running && !status.degraded && !status.terminal;
+      }).finally(() => {
+        daemonCaptureHealthQueued = false;
       }),
     );
-    const timer = setTimeout(() => {
-      if (daemonCaptureHealthTimer === timer) daemonCaptureHealthTimer = null;
-      pollDaemonCaptureHealth();
-    }, DAEMON_CAPTURE_HEALTH_POLL_MS);
-    daemonCaptureHealthTimer = timer;
-    daemonCaptureHealthTimer.unref?.();
   }
 
   return {
