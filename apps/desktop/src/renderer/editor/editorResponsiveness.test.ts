@@ -174,6 +174,7 @@ describe("editor chrome reuse", () => {
     { name: "insert at start", from: 1, to: 1, text: "prefix " },
     { name: "insert at end", from: 6, to: 6, text: " suffix" },
     { name: "replace marked text", from: 2, to: 5, text: "🙂" },
+    { name: "replace without shifting blocks", from: 2, to: 5, text: "new" },
     { name: "clear paragraph", from: 1, to: 6, text: "" },
   ])("maps gutter positions for $name without rebuilding decorations", ({ from, to, text }) => {
     const insert = vi.fn();

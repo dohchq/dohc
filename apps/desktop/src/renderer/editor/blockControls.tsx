@@ -292,7 +292,9 @@ export function makeBlockControlsPlugin({
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
         activeBlockIndex = undefined;
         if (isSingleTextblockReplacement(tr)) {
-          return old.map(tr.mapping, tr.doc);
+          return tr.doc.content.size === tr.before.content.size
+            ? old
+            : old.map(tr.mapping, tr.doc);
         }
         return buildBlockControlDecorations(
           tr.doc,
