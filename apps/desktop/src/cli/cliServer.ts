@@ -2182,6 +2182,7 @@ async function dispatch(
         origin: "cli",
         body: request.args.body,
         needsDecision: request.args.needsDecision,
+        ...(request.args.options && request.args.options.length > 0 ? { options: request.args.options } : {}),
         attachments,
       });
       const linkWarning = await linkRunMessage(context, {
@@ -2244,6 +2245,7 @@ async function dispatch(
         origin: "cli",
         body: request.args.body,
         needsDecision: request.args.needsDecision,
+        ...(request.args.options && request.args.options.length > 0 ? { options: request.args.options } : {}),
         attachments,
       });
       const linkWarning = await linkRunMessage(context, {
@@ -2261,6 +2263,7 @@ async function dispatch(
             threadId: thread.thread.id,
             messageId: decisionMessage.id,
             resolvedByMessageId: message.id,
+            ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
           });
           resolvedByReply = resolution.resolvedByMessageId === message.id;
         } catch (error) {

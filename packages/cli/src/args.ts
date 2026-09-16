@@ -22,6 +22,7 @@ export type ParsedCliCommand = ParsedCliBase &
         title?: string;
         attachments: string[];
         needsDecision: boolean;
+        options?: string[];
         body: string;
       }
     | {
@@ -30,7 +31,9 @@ export type ParsedCliCommand = ParsedCliBase &
         to?: string;
         attachments: string[];
         needsDecision: boolean;
+        options?: string[];
         resolve?: string;
+        choose?: string;
         body: string;
       }
     | { verb: "react"; message: string; emoji: string }
@@ -84,6 +87,8 @@ function stripGlobalFlags(argv: readonly string[]): {
   const optionsWithValues = new Set([
     "--attach",
     "--channel",
+    "--choose",
+    "--option",
     "--from",
     "--limit",
     "--out",
@@ -152,6 +157,7 @@ function parsePost(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
   let title: string | undefined;
   const attachments: string[] = [];
   let needsDecision = false;
+  const options: string[] = [];
   const bodyParts: string[] = [];
   let optionsEnded = false;
   for (let index = 1; index < tokens.length; index += 1) {
@@ -166,6 +172,9 @@ function parsePost(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
       index += 1;
     } else if (!optionsEnded && token === "--needs-decision") {
       needsDecision = true;
+    } else if (!optionsEnded && token === "--option") {
+      options.push(takeValue(tokens, index, token));
+      index += 1;
     } else if (!optionsEnded && token.startsWith("--")) {
       fail(`unknown post option '${token}'`);
     } else {
@@ -178,7 +187,8 @@ function parsePost(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, { 
     channel,
     ...(title ? { title } : {}),
     attachments,
-    needsDecision,
+    needsDecision: needsDecision || options.length > 0,
+    ...(options.length > 0 ? { options } : {}),
     body,
   };
 }
@@ -189,7 +199,9 @@ function parseReply(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, {
   let to: string | undefined;
   const attachments: string[] = [];
   let needsDecision = false;
+  const options: string[] = [];
   let resolve: string | undefined;
+  let choose: string | undefined;
   const bodyParts: string[] = [];
   let optionsEnded = false;
   for (let index = 1; index < tokens.length; index += 1) {
@@ -204,8 +216,14 @@ function parseReply(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, {
       index += 1;
     } else if (!optionsEnded && token === "--needs-decision") {
       needsDecision = true;
+    } else if (!optionsEnded && token === "--option") {
+      options.push(takeValue(tokens, index, token));
+      index += 1;
     } else if (!optionsEnded && token === "--resolve") {
       resolve = takeValue(tokens, index, token);
+      index += 1;
+    } else if (!optionsEnded && token === "--choose") {
+      choose = takeValue(tokens, index, token);
       index += 1;
     } else if (!optionsEnded && token.startsWith("--")) {
       fail(`unknown reply option '${token}'`);
@@ -215,12 +233,15 @@ function parseReply(tokens: readonly string[]): Omit<Extract<ParsedCliCommand, {
   }
   const body = bodyParts.join(" ");
   if (!body) fail("reply requires a body or '-' for stdin");
+  if (choose && !resolve) fail("--choose needs --resolve <message>");
   return {
     thread,
     ...(to ? { to } : {}),
     attachments,
-    needsDecision,
+    needsDecision: needsDecision || options.length > 0,
+    ...(options.length > 0 ? { options } : {}),
     ...(resolve ? { resolve } : {}),
+    ...(choose ? { choose } : {}),
     body,
   };
 }

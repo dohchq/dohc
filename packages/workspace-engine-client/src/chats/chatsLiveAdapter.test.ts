@@ -186,6 +186,8 @@ const channel = {
   name: "General",
   slug: "general",
   kind: "channel",
+  type: "posts",
+  purpose: "",
   createdAtMs: 1,
   updatedAtMs: 2,
 };

@@ -20,17 +20,23 @@ interface RunnerThreadContextInput {
 
 function messageForMarkdown(
   message: ChatMessage,
-  decisionByMessage: ReadonlyMap<string, "open" | "resolved">,
+  decisionByMessage: ReadonlyMap<
+    string,
+    { state: "open" | "resolved"; options?: readonly string[]; chosenOption?: string }
+  >,
 ): CliResultByVerb["show"]["messages"][number] {
+  const decision = decisionByMessage.get(message.id);
   return {
     id: message.id,
     author: message.author,
     body: message.body,
     createdAtMs: message.createdAtMs,
     ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
-    ...(decisionByMessage.has(message.id)
-      ? { decisionState: decisionByMessage.get(message.id)! }
+    ...(decision ? { decisionState: decision.state } : {}),
+    ...(decision?.options && decision.options.length > 0
+      ? { decisionOptions: [...decision.options] }
       : {}),
+    ...(decision?.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
     attachments: message.attachments.map((attachment) => ({
       ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
@@ -61,7 +67,14 @@ export async function buildRunnerThreadContext(
     throw new Error(`Chat channel for thread ${JSON.stringify(input.threadId)} was not found.`);
   }
   const decisionByMessage = new Map(
-    decisions.map((decision) => [decision.messageId, decision.state]),
+    decisions.map((decision) => [
+      decision.messageId,
+      {
+        state: decision.state,
+        ...(decision.options ? { options: decision.options } : {}),
+        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
+      },
+    ]),
   );
   const markdownInput: CliResultByVerb["show"] = {
     thread: {

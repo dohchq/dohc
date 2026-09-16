@@ -48,6 +48,8 @@ struct ChatThreadStartParams {
     #[serde(default)]
     needs_decision: bool,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    options: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
 }
@@ -258,6 +260,7 @@ impl EngineService {
                     origin: params.origin,
                     body: params.body,
                     needs_decision: params.needs_decision,
+                    options: params.options.unwrap_or_default(),
                     attachments: params
                         .attachments
                         .unwrap_or_default()

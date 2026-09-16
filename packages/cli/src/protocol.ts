@@ -38,6 +38,7 @@ const postArgsSchema = z
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
+    options: z.array(z.string().min(1)).max(12).optional(),
     body: z.string().min(1),
   })
   .strict();
@@ -49,7 +50,9 @@ const replyArgsSchema = z
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
+    options: z.array(z.string().min(1)).max(12).optional(),
     resolve: z.string().min(1).optional(),
+    choose: z.string().min(1).optional(),
     body: z.string().min(1),
   })
   .strict();
@@ -366,6 +369,8 @@ const cliShowMessageSchema = z
     createdAtMs: z.number().int().nonnegative(),
     parentMessageId: z.string().min(1).optional(),
     decisionState: z.enum(["open", "resolved"]).optional(),
+    decisionOptions: z.array(z.string()).optional(),
+    decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
   })

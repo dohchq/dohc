@@ -49,6 +49,13 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
     if (message.decisionState) metadata.push(`needs-decision(${message.decisionState})`);
     if (message.runId) metadata.push(`run ${message.runId}`);
     lines.push("", metadata.join(" · "), message.body);
+    if (message.decisionOptions && message.decisionOptions.length > 0) {
+      lines.push(
+        ...message.decisionOptions.map((option) =>
+          option === message.decisionChosenOption ? `- [x] ${option}` : `- [ ] ${option}`,
+        ),
+      );
+    }
     if (message.attachments.length > 0) {
       lines.push(
         message.attachments

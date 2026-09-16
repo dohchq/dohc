@@ -145,6 +145,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
+  options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
@@ -173,6 +174,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
+  options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
@@ -195,6 +197,7 @@ type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   resolvedByMessageId: string;
+  chosenOption?: string;
   nowMs?: number;
 };
 type ChatReactionSetParams = ChatsJsonObject & {
@@ -497,6 +500,8 @@ const ChatDecisionSchema = mutableStruct({
   state: Schema.Literals(["open", "resolved"]),
   resolvedByMessageId: Schema.optionalKey(Schema.String),
   atMs: AnyInt,
+  options: Schema.optionalKey(Schema.Array(Schema.String)),
+  chosenOption: Schema.optionalKey(Schema.String),
 });
 const ChatReactionAuthorSchema = mutableStruct({
   authorId: Schema.String,
@@ -671,6 +676,9 @@ const ChatFeedChannelSchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
 });

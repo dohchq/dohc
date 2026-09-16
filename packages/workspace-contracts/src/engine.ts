@@ -655,6 +655,10 @@ interface ChatDecisionRecord {
   state: ChatDecisionState;
   resolvedByMessageId?: ChatMessageId;
   atMs: number;
+  // A poll's choices, in order. Absent for a bare question.
+  options?: readonly string[];
+  // The choice the answer named, when the poll had choices.
+  chosenOption?: string;
 }
 
 interface ChatAttachment {
@@ -889,6 +893,8 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    // A poll's choices. Implies needsDecision.
+    options?: string[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;
@@ -935,6 +941,8 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    // A poll's choices. Implies needsDecision.
+    options?: string[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;
@@ -956,6 +964,8 @@ export interface LinkedChatStore {
     threadId: ChatThreadId;
     messageId: ChatMessageId;
     resolvedByMessageId: ChatMessageId;
+    // The choice, when the poll has choices. Must be one of them.
+    chosenOption?: string;
   }): Promise<ChatDecisionRecord>;
   listThreadDecisions(
     workspaceId: WorkspaceId,

@@ -100,6 +100,7 @@ function buildCliRequest(
           ...(command.title ? { title: command.title } : {}),
           attachments: command.attachments,
           needsDecision: command.needsDecision,
+          ...(command.options ? { options: command.options } : {}),
           body: stdinBody ?? command.body,
         },
       };
@@ -115,7 +116,9 @@ function buildCliRequest(
           ...(command.to ? { to: command.to } : {}),
           attachments: command.attachments,
           needsDecision: command.needsDecision,
+          ...(command.options ? { options: command.options } : {}),
           ...(command.resolve ? { resolve: command.resolve } : {}),
+          ...(command.choose ? { choose: command.choose } : {}),
           body: stdinBody ?? command.body,
         },
       };

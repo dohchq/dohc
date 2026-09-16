@@ -7,11 +7,12 @@
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
-    ChatChannelKind, ChatChannelType, ChatReactionState, ChatThreadLane, FeedCursorValue,
-    FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput,
-    NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage,
-    SetFollow, SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
-    channel_slug_for_name, decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
+    ChatChannelKind, ChatChannelType, ChatDecisionState, ChatReactionState, ChatThreadLane,
+    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
+    LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -46,6 +47,7 @@ fn start_thread(
         origin: None,
         body: body.to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -70,6 +72,7 @@ fn send_msg(
         origin: None,
         body: body.to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -303,6 +306,124 @@ fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
         .expect("journaled thread");
     let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
     assert_eq!(payload["lane"], "chat");
+}
+
+#[test]
+fn a_poll_carries_its_choices_and_the_answer_names_one() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    let mut question = start_thread(
+        "chan-1",
+        "poll-1",
+        "poll-msg",
+        "Which fare?",
+        ChatActorKind::Agent,
+        20,
+    );
+    question.options = vec![" 7am direct ".to_owned(), "2pm with a stop".to_owned()];
+    chats
+        .start_channel_thread(&question, &NO_FAULTS)
+        .expect("poll");
+
+    let open = chats
+        .list_thread_decisions(WS, "poll-1", None, 10)
+        .expect("decisions");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].state, ChatDecisionState::Open);
+    assert_eq!(open[0].options, vec!["7am direct", "2pm with a stop"]);
+    assert_eq!(open[0].chosen_option, None);
+
+    // Twelve is the cap; a repeated or empty choice is refused.
+    for bad in [
+        vec!["a".to_owned(), "a".to_owned()],
+        vec!["".to_owned()],
+        (0..13).map(|n| n.to_string()).collect::<Vec<_>>(),
+    ] {
+        let mut attempt = start_thread(
+            "chan-1",
+            &format!("bad-{}", bad.len()),
+            &format!("bad-msg-{}", bad.len()),
+            "?",
+            ChatActorKind::Agent,
+            21,
+        );
+        attempt.options = bad;
+        let err = chats
+            .start_channel_thread(&attempt, &NO_FAULTS)
+            .expect_err("bad options");
+        assert_eq!(err.code(), "invalid-poll-options");
+    }
+
+    // The answer names a choice, and only one of the poll's.
+    let answer = send_msg(
+        "poll-1",
+        "answer-msg",
+        Some("poll-msg"),
+        "The early one.",
+        30,
+    );
+    chats.send_message(&answer, &NO_FAULTS).expect("answer");
+    let resolve = |chosen: Option<&str>, request: &str| ResolveDecision {
+        workspace_id: WS.to_owned(),
+        thread_id: "poll-1".to_owned(),
+        message_id: "poll-msg".to_owned(),
+        resolved_by_message_id: "answer-msg".to_owned(),
+        chosen_option: chosen.map(str::to_owned),
+        now_ms: 31,
+        request_id: request.to_owned(),
+    };
+    let err = chats
+        .resolve_decision(&resolve(None, "r-none"), &NO_FAULTS)
+        .expect_err("a poll needs a choice");
+    assert_eq!(err.code(), "invalid-poll-choice");
+    let err = chats
+        .resolve_decision(&resolve(Some("noon"), "r-noon"), &NO_FAULTS)
+        .expect_err("not a choice");
+    assert_eq!(err.code(), "invalid-poll-choice");
+    let resolved = chats
+        .resolve_decision(&resolve(Some("7am direct"), "r-ok"), &NO_FAULTS)
+        .expect("answered");
+    assert_eq!(resolved.state, ChatDecisionState::Resolved);
+    assert_eq!(resolved.chosen_option.as_deref(), Some("7am direct"));
+    assert_eq!(resolved.options, vec!["7am direct", "2pm with a stop"]);
+
+    // The choices and the answer ride the wire.
+    let payloads: Vec<String> = store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.decision.set' \
+                     ORDER BY origin_seq",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(0))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled decisions");
+    let last: serde_json::Value =
+        serde_json::from_str(payloads.last().expect("one")).expect("json");
+    assert_eq!(last["state"], "resolved");
+    assert_eq!(
+        last["options"],
+        serde_json::json!(["7am direct", "2pm with a stop"])
+    );
+    assert_eq!(last["chosenOption"], "7am direct");
 }
 
 #[test]
@@ -659,6 +780,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
                 thread_id: "thread-revision".to_owned(),
                 message_id: "message-opening".to_owned(),
                 resolved_by_message_id: "message-reply".to_owned(),
+                chosen_option: None,
                 now_ms: 50,
                 request_id: "decision-revision".to_owned(),
             },

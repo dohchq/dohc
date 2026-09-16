@@ -11,12 +11,13 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
     ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
     FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
-    attachment_id_for, channel_slug_for_name, has_projection_control_char, is_js_trim_ws,
-    is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body, normalize_channel_group,
-    normalize_channel_name, normalize_display_name, normalize_feed_identity,
-    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path,
+    attachment_id_for, channel_slug_for_name, encode_poll_options, has_projection_control_char,
+    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
+    normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path,
 };
 
 use crate::error::local_corruption;
@@ -682,6 +683,12 @@ struct DecisionSet {
     at_ms: i64,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     resolved_by_message_id: Option<String>,
+    /// A poll's choices. Absent for a bare question and for ops written
+    /// before the groups migration.
+    #[serde(default)]
+    options: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    chosen_option: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1556,6 +1563,20 @@ fn apply_decision(
             reason: "chat decision payload is invalid",
         });
     }
+    let options = normalize_poll_options(p.options.as_deref().unwrap_or(&[]))
+        .map_err(|error| map_chat_rule(error, "chat decision options are invalid"))?;
+    let chosen_option = match p.chosen_option.as_deref() {
+        None => None,
+        Some(chosen) => {
+            if p.state != "resolved" || !options.iter().any(|option| option == chosen) {
+                return Err(SyncError::InvalidInput {
+                    reason: "chat decision choice is invalid",
+                });
+            }
+            Some(chosen.to_owned())
+        }
+    };
+    let options_json = encode_poll_options(&options);
     let prior_thread_id = tx
         .query_row(
             "SELECT thread_id FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
@@ -1566,14 +1587,16 @@ fn apply_decision(
         .map_err(SyncError::corrupt)?;
     let updated = tx.execute(
         "INSERT INTO chat_decisions \
-         (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq, \
+          options_json, chosen_option) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(workspace_id, message_id) DO UPDATE SET \
            thread_id=excluded.thread_id, state=excluded.state, resolved_by_message_id=excluded.resolved_by_message_id, \
-           at_ms=excluded.at_ms, origin_id=excluded.origin_id, origin_seq=excluded.origin_seq \
+           at_ms=excluded.at_ms, origin_id=excluded.origin_id, origin_seq=excluded.origin_seq, \
+           options_json=excluded.options_json, chosen_option=excluded.chosen_option \
          WHERE (excluded.at_ms, excluded.state='resolved', excluded.origin_id, excluded.origin_seq) > \
                (at_ms, state='resolved', origin_id, origin_seq)",
-        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq],
+        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq, options_json, chosen_option],
     )
     .map_err(SyncError::persist)?;
     if updated > 0 {

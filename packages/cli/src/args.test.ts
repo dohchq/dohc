@@ -32,6 +32,43 @@ describe("parseCliArguments", () => {
     });
   });
 
+  it("parses a poll's choices and the answer that picks one", () => {
+    expect(
+      parseCliArguments(
+        ["chat", "post", "trip", "--option", "7am direct", "--option", "2pm with a stop", "Which fare?"],
+        {},
+      ),
+    ).toEqual({
+      actor: "human",
+      json: false,
+      verb: "post",
+      channel: "trip",
+      attachments: [],
+      needsDecision: true,
+      options: ["7am direct", "2pm with a stop"],
+      body: "Which fare?",
+    });
+    expect(
+      parseCliArguments(
+        ["chat", "reply", "thread-1", "--resolve", "message-1", "--choose", "7am direct", "The early one."],
+        {},
+      ),
+    ).toEqual({
+      actor: "human",
+      json: false,
+      verb: "reply",
+      thread: "thread-1",
+      attachments: [],
+      needsDecision: false,
+      resolve: "message-1",
+      choose: "7am direct",
+      body: "The early one.",
+    });
+    expect(() =>
+      parseCliArguments(["chat", "reply", "thread-1", "--choose", "7am direct", "x"], {}),
+    ).toThrow(/--choose needs --resolve/);
+  });
+
   it("parses post and reply write options", () => {
     expect(
       parseCliArguments(

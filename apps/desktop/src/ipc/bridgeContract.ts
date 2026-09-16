@@ -1626,6 +1626,9 @@ export const ChatDecisionRecord = z.object({
   state: z.enum(["open", "resolved"]),
   resolvedByMessageId: OPAQUE_ID.optional(),
   atMs: z.number(),
+  // A poll's choices, in order. Absent for a bare question.
+  options: z.array(z.string().min(1).max(200)).max(12).optional(),
+  chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
@@ -1649,6 +1652,7 @@ export const ResolveChatDecisionPayload = z.object({
   threadId: OPAQUE_ID,
   messageId: OPAQUE_ID,
   resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ResolveChatDecisionPayload = z.infer<
   typeof ResolveChatDecisionPayload

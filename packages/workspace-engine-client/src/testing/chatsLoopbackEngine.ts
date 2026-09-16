@@ -562,7 +562,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "attachments", "nowMs",
+        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -576,7 +576,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "attachments", "nowMs",
+        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -585,7 +585,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.readStateMarkThreadRead:
       return ["threadId", "upToSequence", "expectedRevision", "nowMs"];
     case CHATS_METHOD.decisionResolve:
-      return ["threadId", "messageId", "resolvedByMessageId", "nowMs"];
+      return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs"];
     case CHATS_METHOD.reactionSet:
       return [
         "threadId", "messageId", "emoji", "author", "replicationAuthorId",
@@ -1487,12 +1487,17 @@ export class ChatsLoopbackEngine implements EngineTransport {
         createdAtMs: atMs,
       });
     }
-    if (optionalBoolean(params, "needsDecision") === true) {
+    const options = params.options;
+    const pollOptions = Array.isArray(options)
+      ? options.map((option) => (typeof option === "string" ? option.trim() : "")).filter(Boolean)
+      : [];
+    if (optionalBoolean(params, "needsDecision") === true || pollOptions.length > 0) {
       state.decisions.set(messageId, {
         threadId,
         messageId,
         state: "open",
         atMs,
+        ...(pollOptions.length > 0 ? { options: pollOptions } : {}),
       });
       this.bumpThreadRevision(state, threadId);
     }
@@ -1656,6 +1661,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
       "invalid-message-body",
     );
     if (decision.state === "resolved") return jsonResult(decision);
+    const chosen = optionalString(params, "chosenOption")?.trim();
+    if (decision.options && decision.options.length > 0) {
+      if (!chosen || !decision.options.includes(chosen)) throw new Error("invalid-poll-choice");
+      decision.chosenOption = chosen;
+    } else if (chosen) {
+      throw new Error("invalid-poll-choice");
+    }
     decision.state = "resolved";
     decision.resolvedByMessageId = resolvedByMessageId;
     decision.atMs = Math.max(this.tick(optionalSafeInteger(params, "nowMs")), decision.atMs + 1);
@@ -2146,6 +2158,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
                   name: channel.name,
                   slug: channel.slug,
                   kind: channel.kind,
+                  type: channel.type,
+                  purpose: channel.purpose,
+                  ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
                   createdAtMs: channel.createdAtMs,
                   updatedAtMs: channel.updatedAtMs,
                 },

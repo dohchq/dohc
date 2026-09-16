@@ -554,6 +554,7 @@ export function registerChatsIpcHandlers<
       threadId: input.threadId,
       messageId: input.messageId,
       resolvedByMessageId: input.resolvedByMessageId,
+      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
     });
     syncChatWriteFor(scope, { threadId: input.threadId });
     return ResolveChatDecisionResult.parse({

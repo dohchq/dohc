@@ -210,6 +210,7 @@ export class ChatsLiveAdapter {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    options?: string[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<{ thread: ChatThread; message: ChatMessage }> {
     this.assertWorkspace(input.workspaceId);
@@ -233,6 +234,7 @@ export class ChatsLiveAdapter {
         ...(input.needsDecision !== undefined
           ? { needsDecision: input.needsDecision }
           : {}),
+        ...(input.options !== undefined ? { options: input.options } : {}),
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
@@ -329,6 +331,7 @@ export class ChatsLiveAdapter {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    options?: string[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<ChatMessage> {
     this.assertWorkspace(input.workspaceId);
@@ -351,6 +354,7 @@ export class ChatsLiveAdapter {
         ...(input.needsDecision !== undefined
           ? { needsDecision: input.needsDecision }
           : {}),
+        ...(input.options !== undefined ? { options: input.options } : {}),
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
@@ -383,6 +387,7 @@ export class ChatsLiveAdapter {
     threadId: string;
     messageId: string;
     resolvedByMessageId: string;
+    chosenOption?: string;
   }): Promise<ChatDecision & { workspaceId: string }> {
     this.assertWorkspace(input.workspaceId);
     const decision = await this.request(
@@ -391,6 +396,7 @@ export class ChatsLiveAdapter {
         threadId: input.threadId,
         messageId: input.messageId,
         resolvedByMessageId: input.resolvedByMessageId,
+        ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
       },
       {
         idempotencyKey: `${input.messageId}:${input.resolvedByMessageId}`,
