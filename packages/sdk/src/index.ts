@@ -270,13 +270,10 @@ export type DohcProvenanceRecord = {
 export const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
 
 export type DohcThemeMode = "light" | "dark";
-export type DohcThemeDensity = "comfortable" | "compact";
 
 export type DohcTheme = {
   /** Which palette is on screen. dohc's "system" mode is already resolved. */
   mode: DohcThemeMode;
-  density: DohcThemeDensity;
-  reduceMotion: boolean;
   /**
    * CSS custom properties, spelled exactly as dohc's own stylesheet spells
    * them ("--dohc-ink", "--font-sans"). Write `var(--dohc-ink)` in panel CSS
@@ -299,8 +296,6 @@ export function isDohcTheme(value: unknown): value is DohcTheme {
   if (!value || typeof value !== "object") return false;
   const theme = value as Partial<DohcTheme>;
   if (theme.mode !== "light" && theme.mode !== "dark") return false;
-  if (theme.density !== "comfortable" && theme.density !== "compact") return false;
-  if (typeof theme.reduceMotion !== "boolean") return false;
   if (!theme.tokens || typeof theme.tokens !== "object") return false;
   // A token whose name is not a custom property would be written straight
   // into a style attribute, so the shape is checked, not trusted.
@@ -318,9 +313,9 @@ export function isDohcThemeMessage(value: unknown): value is DohcThemeMessage {
 
 /**
  * Writes one theme onto an element, normally the guest document's <html>:
- * every token as a custom property, plus the three attributes dohc's own
- * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
- * the same way dohc does.
+ * every token as a custom property, plus the data-theme attribute dohc's
+ * own stylesheet switches on, so a panel can write `[data-theme='dark']`
+ * rules the same way dohc does.
  */
 export function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void {
   if (!isDohcTheme(theme)) {
@@ -333,8 +328,6 @@ export function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void {
     root.style.setProperty(name, value);
   }
   root.dataset.theme = theme.mode;
-  root.dataset.density = theme.density;
-  root.dataset.reduceMotion = String(theme.reduceMotion);
 }
 
 /** The documented collection query options; unknown keys never travel. */
@@ -1510,7 +1503,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       /**
        * The one line that makes a panel look native: it writes dohc's tokens
        * onto this document and keeps writing them when the user changes
-       * theme, density, or reduced motion. Panel CSS then uses the same
+       * theme. Panel CSS then uses the same
        * names dohc uses — `color: var(--dohc-ink)`.
        *
        * Returns a function that stops following. A panel that never calls

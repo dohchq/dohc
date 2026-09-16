@@ -817,6 +817,27 @@ describe("refreshShareMount", () => {
     ).toBe("keep me");
   });
 
+  it("refuses a file at shared-with-me before materialization", async () => {
+    const host = await tempHostRoot();
+    const container = join(host, SHARED_WITH_ME_FOLDER);
+    await writeFile(container, "keep this file");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/brief.md", "the brief");
+
+    await expect(
+      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
+    ).rejects.toThrow(/not a real directory/);
+    await expect(
+      refreshShareMount(harness, {
+        hostRoot: host,
+        mount: { shareId: SHARE_ID, label: "alex" },
+      }),
+    ).rejects.toThrow(/not a real directory/);
+    expect(await readFile(container, "utf8")).toBe("keep this file");
+    expect(harness.transport.requests).toEqual([]);
+  });
+
   it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -1177,7 +1198,7 @@ describe("share mount refresh failures", () => {
   it("abandons the refresh only when the session expired", () => {
     expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
       kind: "abort",
-      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+      message: "Your dohc Drive session expired. Sign in again, then refresh shares.",
     });
   });
 

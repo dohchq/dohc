@@ -196,7 +196,7 @@ Design point 2 calls the viewer anonymous, but the URL is still a bearer credent
 
 The owner UI must say exactly what a link exposes and that files added later under a shared folder also become visible. It must warn before rotation because rotation is irreversible for the old URL. It must not imply that revoke recalls downloaded data.
 
-The relay sees share plaintext today. Web links widen the audience and traffic path, but they do not add end-to-end secrecy. State that in the sharing UI and self-hosting docs. Do not imply that possession of the secret hides content from dohc Cloud.
+The relay sees share plaintext today. Web links widen the audience and traffic path, but they do not add end-to-end secrecy. State that in the sharing UI and self-hosting docs. Do not imply that possession of the secret hides content from dohc Drive.
 
 Decide what metadata anonymous viewers receive. Workspace IDs, private ancestor paths, owner email, account IDs, history outside the selector, deleted paths, presence, and other participants' identities should not flow by default. The existing recipient summary is not automatically appropriate for the public viewer.
 

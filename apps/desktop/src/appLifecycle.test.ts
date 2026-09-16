@@ -214,8 +214,7 @@ describe("desktop bootstrap", () => {
     });
     const askRenderer = vi.fn();
     const guard = createQuitGuard({
-      askRenderer,
-      confirmForceQuit: async () => false,
+      ask: askRenderer,
       quit: () => f.app.quit(),
       forceQuit: vi.fn(),
     });

@@ -45,7 +45,6 @@ export function createJoinedWorkspaceRunner(dependencies: {
         rootPath: input.rootPath,
         workspaceId: input.workspaceId,
         kind: "personal",
-        bootstrap: "join",
       });
       const registered = input.prepare
         ? await input.prepare(workspace)

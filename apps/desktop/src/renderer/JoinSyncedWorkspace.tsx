@@ -1,22 +1,31 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
-import { ArrowLeft, FolderOpen } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { IconButton, PrimaryButton } from "./ui/controls";
+import { FolderChip, Step } from "./ui/Step";
 
-// "Join a synced workspace" (0P-C): the second-machine half of multi-machine
-// sync. Paste the code copied from the machine that already has the
-// workspace, pick an empty folder, and the workspace arrives — files,
-// history, and chats. Joining needs a signed-in dohc Cloud session, so the
-// panel gates on that first and embeds the normal sign-in when absent.
+// "Join a synced workspace": the second-machine half of multi-machine sync.
+// Three real gates, shown as three steps so the whole cost is visible up
+// front: sign in, enter the code from the machine that has the workspace,
+// pick an empty folder. Joining needs a dohc Drive session, so step one
+// embeds the normal sign-in until one exists.
 
 type Gate =
   | { kind: "checking" }
   | { kind: "signed-out" }
   | { kind: "signed-in"; email: string };
+
+function isWindows(): boolean {
+  return bridge().platform === "win32";
+}
+
+function displayPath(path: string): string {
+  return isWindows() ? path.replaceAll("/", "\\") : path;
+}
 
 export function JoinSyncedWorkspace(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
@@ -32,10 +41,9 @@ export function JoinSyncedWorkspace(props: {
   const [warning, setWarning] = useState<string | null>(null);
   const joinedRef = useRef<Workspace | null>(null);
   const sessionRef = useRequestSequence();
-  // Guards the async join against unmount (0P-C gate fix): if the parent
-  // swaps this view away while cloudJoinWorkspace is in flight, the resolved
-  // promise must not navigate the app into the joined workspace the user
-  // just backed out of (nor call setState on an unmounted component).
+  // Guards the async join against unmount: if the parent swaps this view
+  // away while cloudJoinWorkspace is in flight, the resolved promise must not
+  // navigate the app into the joined workspace the user just backed out of.
   const actionRequests = useRequestSequence();
 
   function checkSession() {
@@ -80,13 +88,10 @@ export function JoinSyncedWorkspace(props: {
         rootPath: folder,
         ...(needsPassphrase ? { passphrase } : {}),
       });
-      // Unmounted mid-join: ignore the handler's result gracefully — the
-      // user backed out, so never navigate them into the workspace.
       if (!actionRequests.isCurrent(actionRequest)) return;
       if (result.warning) {
         // The workspace was added but its first sync didn't finish. Say so
-        // and let the user open it deliberately instead of vanishing the
-        // message under the workspace shell.
+        // and let the user open it deliberately.
         joinedRef.current = result.workspace;
         setWarning(result.warning);
         return;
@@ -94,7 +99,7 @@ export function JoinSyncedWorkspace(props: {
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
-      const message = (ipcErrorMessage(cause).trim() || "Couldn't join the workspace.");
+      const message = ipcErrorMessage(cause).trim() || "Couldn't join the workspace.";
       if (/passphrase required to unlock synced secrets/i.test(message)) {
         setNeedsPassphrase(true);
         setError(
@@ -108,25 +113,29 @@ export function JoinSyncedWorkspace(props: {
     }
   }
 
+  const signedIn = gate.kind === "signed-in";
+  const hasCode = code.trim().length > 0;
   const canJoin =
-    gate.kind === "signed-in" &&
+    signedIn &&
     !joining &&
-    code.trim().length > 0 &&
+    hasCode &&
     folder !== null &&
     (!needsPassphrase || passphrase.length > 0);
+
+  // Both fields stay visible and editable after sign-in.
+  const codeState = !signedIn ? "pending" : "current";
+  const folderState = !signedIn ? "pending" : "current";
 
   return (
     <div
       data-testid="join-synced-workspace"
-      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      className="dohc-elevated flex w-105 flex-col gap-5 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
         {warning === null ? (
           // Gated while a join is in flight (the request cannot be
           // cancelled) and gone once the workspace exists (warning state):
-          // the workspace was durably created, so "back as if nothing
-          // happened" would strand an invisible registration — the only
-          // honest affordance left is "Open workspace" below.
+          // the only honest affordance left then is "Open workspace".
           <IconButton
             aria-label="Back"
             disabled={joining}
@@ -139,30 +148,46 @@ export function JoinSyncedWorkspace(props: {
         <h2 className="m-0 text-sm font-semibold text-ink">Join a synced workspace</h2>
       </div>
 
-      {gate.kind === "checking" ? (
-        <p className="m-0 text-xs text-subtle">Checking your dohc Cloud connection…</p>
-      ) : null}
-
-      {gate.kind === "signed-out" ? (
+      {warning !== null ? (
         <>
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            The workspace you're joining belongs to your dohc Cloud account —
-            sign in first, then paste the code from your other machine.
+          <p data-testid="join-warning" className="m-0 text-xs leading-relaxed text-warning">
+            {warning} The workspace was already added on this machine, so the
+            only way forward is to open it.
           </p>
-          <CloudLogin onConnected={checkSession} embedded />
+          <PrimaryButton
+            data-testid="join-open-anyway"
+            onClick={() => {
+              if (joinedRef.current) props.onWorkspaceReady(joinedRef.current);
+            }}
+          >
+            Open workspace
+          </PrimaryButton>
         </>
-      ) : null}
+      ) : (
+        // Not a <form>: the embedded sign-in panel owns one, and nested forms
+        // collapse so Connect would submit the join instead. Enter in either
+        // join field submits through onKeyDown.
+        <div className="flex flex-col">
+          <Step
+            number={1}
+            title="Sign in to dohc Drive"
+            state={gate.kind === "signed-in" ? "done" : "current"}
+            summary={gate.kind === "signed-in" ? gate.email : undefined}
+          >
+            {gate.kind === "checking" ? (
+              <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
+            ) : (
+              <>
+                <p className="sr-only">Sign in first, then enter the code from your other machine.</p>
+                <CloudLogin onConnected={checkSession} embedded untitled />
+              </>
+            )}
+          </Step>
 
-      {gate.kind === "signed-in" && warning === null ? (
-        <>
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            On the machine that already has the workspace, open dohc Cloud and
-            copy the code under "Add this workspace on another machine".
-          </p>
-          <label className="block text-[11px] font-medium text-subtle">
-            Workspace code
+          <Step number={2} title="Enter the code from your other machine" state={codeState}>
             <input
               data-testid="join-sync-code"
+              aria-label="Workspace code"
               value={code}
               onChange={(event) => {
                 setCode(event.currentTarget.value);
@@ -172,81 +197,60 @@ export function JoinSyncedWorkspace(props: {
               }}
               placeholder="dohc-sync:…"
               spellCheck={false}
-              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void join();
+              }}
+              className="h-9 w-full rounded-md border border-line bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
-          </label>
-          <div className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium text-subtle">
-              Where it should live on this machine
-            </span>
-            <div className="flex items-start justify-between gap-2">
-              <code className="break-all font-mono text-[12px] leading-snug text-ink">
-                {folder ?? "Choose an empty folder"}
-              </code>
-              <button
-                type="button"
-                data-testid="join-choose-folder"
-                onClick={() => void chooseFolder()}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted transition-colors hover:text-ink"
-              >
-                <FolderOpen size={13} aria-hidden />
-                Choose folder
-              </button>
-            </div>
-          </div>
-          {needsPassphrase ? (
-            <label className="block text-[11px] font-medium text-subtle">
-              Protected-file passphrase
-              <input
-                data-testid="join-sync-passphrase"
-                value={passphrase}
-                type="password"
-                spellCheck={false}
-                onChange={(event) => setPassphrase(event.currentTarget.value)}
-                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
-              />
-            </label>
-          ) : null}
-          <PrimaryButton
-            type="button"
-            data-testid="join-workspace-start"
-            disabled={!canJoin}
-            onClick={() => void join()}
-          >
-            {joining ? "Bringing your workspace over…" : "Join workspace"}
-          </PrimaryButton>
-          {joining ? (
-            <p className="m-0 text-xs text-subtle" role="status">
-              Downloading files, history, and chats. This can take a moment for
-              larger workspaces.
-            </p>
-          ) : null}
-          {error ? (
-            <p data-testid="join-error" role="alert" className="m-0 text-xs text-danger">
-              {error}
-            </p>
-          ) : null}
-        </>
-      ) : null}
+            {needsPassphrase ? (
+              <label className="flex flex-col gap-1.5 text-[11px] font-medium text-subtle">
+                Protected-file passphrase
+                <input
+                  data-testid="join-sync-passphrase"
+                  value={passphrase}
+                  type="password"
+                  spellCheck={false}
+                  onChange={(event) => setPassphrase(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void join();
+                  }}
+                  className="h-9 w-full rounded-md border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                />
+              </label>
+            ) : null}
+          </Step>
 
-      {warning !== null ? (
-        <>
-          <p data-testid="join-warning" className="m-0 text-xs leading-relaxed text-warning">
-            {warning} The workspace was already added on this machine, so the
-            only way forward is to open it.
-          </p>
-          <button
-            type="button"
-            data-testid="join-open-anyway"
-            onClick={() => {
-              if (joinedRef.current) props.onWorkspaceReady(joinedRef.current);
-            }}
-            className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
-          >
-            Open workspace
-          </button>
-        </>
-      ) : null}
+          <Step number={3} title="Choose an empty folder on this machine" state={folderState} last>
+            <FolderChip
+              folder={folder ? displayPath(folder) : null}
+              placeholder="Choose an empty folder"
+              testId="join-choose-folder"
+              onClick={() => void chooseFolder()}
+            />
+
+            <PrimaryButton
+              type="button"
+              data-testid="join-workspace-start"
+              onClick={() => void join()}
+              disabled={!canJoin}
+              className="mt-2"
+            >
+              {joining ? "Bringing your workspace over…" : "Join workspace"}
+            </PrimaryButton>
+            {joining ? (
+              <p className="m-0 text-xs text-subtle" role="status">
+                Downloading files, history, and chats. This can take a moment for
+                larger workspaces.
+              </p>
+            ) : null}
+            {error ? (
+              <p data-testid="join-error" role="alert" className="m-0 text-xs text-danger">
+                {error}
+              </p>
+            ) : null}
+          </Step>
+        </div>
+      )}
     </div>
   );
 }

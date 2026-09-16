@@ -64,8 +64,6 @@ describe("desktop user settings model", () => {
       profile: {},
       appearance: {
         themeMode: "dark" as const,
-        density: "compact" as const,
-        reduceMotion: true,
       },
       editor: DEFAULT_USER_SETTINGS.editor,
       notifications: DEFAULT_USER_SETTINGS.notifications,
@@ -75,8 +73,6 @@ describe("desktop user settings model", () => {
     // The stored appearance choices survive; only the new field fills in.
     expect(DesktopUserSettings.parse(legacySettings).appearance).toEqual({
       themeMode: "dark",
-      density: "compact",
-      reduceMotion: true,
       zoomLevel: 0,
     });
 

@@ -72,7 +72,7 @@ describe("cloud device-flow login", () => {
     });
 
     await expect(login.start()).rejects.toThrow(
-      "No dohc Cloud server is configured",
+      "No dohc Drive server is configured",
     );
     expect(calls).toEqual([]);
   });

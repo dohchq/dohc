@@ -10,7 +10,6 @@ import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { CollectionRecordEditContext } from "../workspaces/collectionRecordEdits";
 import type { WorkspaceEngineMomentSummary, WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
-import { createWorkspaceChatLifecycle } from "../workspaces/workspaceChatLifecycle";
 
 function deferred() {
   let release!: () => void;
@@ -18,7 +17,7 @@ function deferred() {
   return { promise, release };
 }
 
-type State = { workspaceChatLifecycle: ReturnType<typeof createWorkspaceChatLifecycle> };
+type State = Record<string, never>;
 type Dependencies = Parameters<typeof createDesktopCliServer<State>>[0];
 
 function fixture(rootPath = resolve("cli-workspace")) {
@@ -27,14 +26,10 @@ function fixture(rootPath = resolve("cli-workspace")) {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "owner" },
   };
   const rows = new Map([[workspace.workspaceId, workspace]]);
-  const maintain = vi.fn<(root: string) => Promise<void>>(async () => undefined);
-  const maintenanceError = vi.fn();
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: (id) => rows.get(id) ?? null,
     canonicalizeRoot: resolve,
-    createState: (): State => ({ workspaceChatLifecycle: createWorkspaceChatLifecycle({
-      isReadOnly: () => false, maintain, onError: maintenanceError,
-    }) }),
+    createState: (): State => ({}),
   });
   const store = {
     findThreadChannelId: vi.fn(async () => "channel"),
@@ -71,12 +66,6 @@ function fixture(rootPath = resolve("cli-workspace")) {
     assertWritableWorkspace: vi.fn(),
     chatRelayIdentityFor: vi.fn(async () => ({ joinedChannel: null })),
     currentCredentials: () => credentials,
-    workspaceAuthorities: authorities,
-    canonicalWorkspaceFor: (lease) => {
-      lease.assertCurrent();
-      return { ...rows.get(lease.binding.workspaceId)!, rootPath: lease.binding.canonicalRootPath,
-        attachmentId: lease.binding.attachmentId };
-    },
     startCliServer: vi.fn(async (input) => { options = input; return handle; }),
     stateDir: () => "state",
     warmCredentialCache: vi.fn(async () => undefined),
@@ -88,7 +77,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     rememberPendingCliRunMessageLink: vi.fn(),
   };
   return {
-    workspace, rows, authorities, maintain, maintenanceError, capture, store, dispatchStore,
+    workspace, rows, authorities, capture, store, dispatchStore,
     requestWorkspace, handle, dependencies,
     create: () => createDesktopCliServer(dependencies),
     options: () => options,
@@ -196,7 +185,7 @@ describe("desktop CLI workspace context", () => {
     const result = context.assertMessageWritable({ channelId: "channel" }, "owner");
     const observed = result.catch((error: unknown) => error);
     try { f.setCredentials(null); } finally { held.release(); await observed; }
-    expect(await observed).toMatchObject({ message: expect.stringContaining("Sign in to dohc Cloud") });
+    expect(await observed).toMatchObject({ message: expect.stringContaining("Sign in to dohc Drive") });
     f.setCredentials(credentials);
     await expect(context.assertMessageWritable({ channelId: "channel" }, "owner")).resolves.toBeUndefined();
     await expect(context.assertMessageWritable({ channelId: "channel" }, "other")).rejects.toThrow("account that joined");
@@ -312,30 +301,13 @@ describe("desktop CLI workspace context", () => {
 });
 
 describe("desktop CLI server callbacks", () => {
-  it("waits for every workspace boot, tolerates maintenance failure, and returns the close handle", async () => {
+  it("starts the CLI server and returns its close handle", async () => {
     const f = fixture();
-    const held = deferred(); const entered = deferred();
-    f.rows.set("second", { ...f.workspace, workspaceId: "second", rootPath: resolve("second") });
-    f.maintain.mockImplementation(async (root) => {
-      if (root === f.workspace.rootPath) { entered.release(); await held.promise; }
-      else throw new Error("maintenance failed");
-    });
     const pending = f.create().startDesktopCliServer();
-    try { await entered.promise; expect(f.dependencies.startCliServer).not.toHaveBeenCalled(); }
-    finally { held.release(); await pending; }
     expect(await pending).toBe(f.handle);
-    expect(f.maintain).toHaveBeenCalledTimes(2);
-    expect(f.maintenanceError).toHaveBeenCalledWith(expect.objectContaining({ message: "maintenance failed" }));
     expect(f.options().stateDir).toBe("state");
     await (await pending).close();
     expect(f.handle.close).toHaveBeenCalledOnce();
-  });
-
-  it("continues server startup after an authority boot callback rejects", async () => {
-    const f = fixture();
-    f.dependencies.canonicalWorkspaceFor = () => { throw new Error("retired before boot"); };
-    expect(await f.create().startDesktopCliServer()).toBe(f.handle);
-    expect(f.maintain).not.toHaveBeenCalled();
   });
 
   it("lists current registry rows and shared views at callback time", async () => {

@@ -2023,7 +2023,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("publish_site stops at the explicit dohc Cloud review boundary", async () => {
+  it("publish_site stops at the explicit dohc Drive review boundary", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo", title: "Todo" });
       const result = await publishSite(ctx, { siteRoot: "todo" });
@@ -2031,7 +2031,7 @@ describe("mcp tools operate on allowed paths", () => {
         ok: false,
         status: "review-required",
         siteRoot: "todo",
-        reason: expect.stringMatching(/cloud boundary/i),
+        reason: expect.stringMatching(/drive boundary/i),
         review: {
           siteRoot: "todo",
           includesSharedWithMe: false,

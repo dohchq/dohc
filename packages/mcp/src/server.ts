@@ -321,7 +321,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_publish_site",
     {
       description:
-        "Prepare a site publish/share review. This refuses to publish until dohc Cloud publish is wired.",
+        "Prepare a site publish/share review. This refuses to publish until dohc Drive publish is wired.",
       inputSchema: {
         siteRoot: z.string().min(1).max(4096),
       },

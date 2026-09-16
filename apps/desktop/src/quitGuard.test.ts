@@ -1,35 +1,39 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createExitRounds,
   createQuitGuard,
-  createRecoveryChecker,
   createWorkspaceWindowRegistry,
+  type ExitKind,
+  type ExitRoundMessage,
 } from "./quitGuard";
 
-function makeGuard(overrides: {
-  confirmForceQuit?: () => Promise<boolean>;
+type Window = { id: number; destroyed: boolean };
+const window = (id: number): Window => ({ id, destroyed: false });
+
+function rounds(options: {
+  windows?: Window[];
+  confirmProceed?: (kind: ExitKind) => Promise<boolean>;
 } = {}) {
-  const askRenderer = vi.fn();
-  const quit = vi.fn();
-  const forceQuit = vi.fn();
-  const confirmForceQuit = vi.fn(
-    overrides.confirmForceQuit ?? (async () => false),
-  );
-  const guard = createQuitGuard({
-    askRenderer,
-    confirmForceQuit,
-    quit,
-    forceQuit,
+  const windows = options.windows ?? [window(1), window(2)];
+  const sent: Array<{ to: number; message: ExitRoundMessage }> = [];
+  const confirmProceed = vi.fn(options.confirmProceed ?? (async () => false));
+  const exits = createExitRounds<Window>({
+    participants: () => windows.filter((entry) => !entry.destroyed),
+    participantId: (entry) => entry.id,
+    send: (entry, message) => { sent.push({ to: entry.id, message }); },
+    confirmProceed,
     timeoutMs: 1_000,
   });
-  return { guard, askRenderer, quit, forceQuit, confirmForceQuit };
-}
-
-function quitEvent() {
-  const event = { prevented: false, preventDefault: () => undefined };
-  event.preventDefault = () => {
-    event.prevented = true;
+  const requests = (to: number) =>
+    sent.filter((entry) => entry.to === to && entry.message.kind === "request").map((entry) => entry.message.roundId);
+  const closings = (to: number) =>
+    sent.filter((entry) => entry.to === to && entry.message.kind !== "request").map((entry) => entry.message.kind);
+  const settled = (outcome: Promise<unknown>) => {
+    const state = { value: null as unknown };
+    void outcome.then((value) => { state.value = value; });
+    return state;
   };
-  return event;
+  return { exits, windows, sent, requests, closings, confirmProceed, settled };
 }
 
 afterEach(() => {
@@ -37,302 +41,451 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// A quit is the one irreversible exit for set-aside drafts, so main
-// asks the renderer before it proceeds. The interesting cases are what
-// happens when the renderer answers late or not at all.
+// The exit round asks every workspace window, and proceeds only when every
+// one is clear. The interesting cases are what happens when the windows
+// disagree, answer late, come and go, or never answer.
+describe("exit rounds", () => {
+  it("asks every window and proceeds only when the last one clears", async () => {
+    const r = rounds();
+    const round = r.exits.begin("quit");
+    expect(round.created).toBe(true);
+    expect(r.requests(1)).toEqual([round.roundId]);
+    expect(r.requests(2)).toEqual([round.roundId]);
+    const state = r.settled(round.outcome);
+    expect(r.exits.answer(1, round.roundId, "clear")).toBe(true);
+    await Promise.resolve();
+    expect(state.value, "a clear first responder must not carry the second window").toBeNull();
+    r.exits.answer(2, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+    expect(r.closings(1)).toEqual(["proceed"]);
+    expect(r.closings(2)).toEqual(["proceed"]);
+  });
+
+  it("keeps a clear first responder from bypassing a held second, until it clears too", async () => {
+    vi.useFakeTimers();
+    const r = rounds();
+    const round = r.exits.begin("update");
+    r.exits.answer(1, round.roundId, "clear");
+    r.exits.answer(2, round.roundId, "hold");
+    await vi.advanceTimersByTimeAsync(60_000);
+    // Every window answered: the held one owns the decision, no dialog.
+    expect(r.confirmProceed).not.toHaveBeenCalled();
+    r.exits.answer(2, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+  });
+
+  it("ignores a wrong sender and a stale round id", async () => {
+    vi.useFakeTimers();
+    const r = rounds({ windows: [window(1), window(2)] });
+    const round = r.exits.begin("quit");
+    expect(r.exits.answer(99, round.roundId, "clear")).toBe(false);
+    expect(r.exits.answer(1, round.roundId + 1, "clear")).toBe(false);
+    expect(r.exits.answer(2, round.roundId - 1, "cancel")).toBe(false);
+    const state = r.settled(round.outcome);
+    r.exits.answer(1, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value).toBeNull();
+    r.exits.answer(2, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+  });
+
+  it("cancels the whole round when any window goes back, and tells the others", async () => {
+    const r = rounds();
+    const round = r.exits.begin("update");
+    r.exits.answer(1, round.roundId, "clear");
+    r.exits.answer(2, round.roundId, "cancel");
+    await expect(round.outcome).resolves.toBe("cancelled");
+    expect(r.closings(1)).toEqual(["cancelled"]);
+    expect(r.closings(2)).toEqual(["cancelled"]);
+    expect(r.exits.current()).toBeNull();
+    // A late clear for the cancelled round counts for nothing.
+    expect(r.exits.answer(1, round.roundId, "clear")).toBe(false);
+  });
+
+  it("joins a second request for the same exit and supersedes a different one", async () => {
+    const r = rounds();
+    const first = r.exits.begin("update");
+    const again = r.exits.begin("update");
+    expect(again.created).toBe(false);
+    expect(again.roundId).toBe(first.roundId);
+    expect(r.requests(1)).toEqual([first.roundId, first.roundId]);
+    const quit = r.exits.begin("quit");
+    expect(quit.created).toBe(true);
+    await expect(first.outcome).resolves.toBe("cancelled");
+    await expect(again.outcome).resolves.toBe("cancelled");
+    expect(r.exits.current()).toEqual({ roundId: quit.roundId, kind: "quit" });
+  });
+
+  it("removes a closed participant and enrolls a window that opens mid-round", async () => {
+    const r = rounds();
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    const third = window(3);
+    r.exits.enroll(third);
+    expect(r.requests(3)).toEqual([round.roundId]);
+    r.windows[1]!.destroyed = true;
+    r.exits.remove(2);
+    const state = r.settled(round.outcome);
+    await Promise.resolve();
+    expect(state.value, "the new window has not answered").toBeNull();
+    r.exits.answer(3, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+    expect(r.closings(2)).toEqual([]);
+  });
+
+  it("proceeds when the last participant closes and when there is nothing to ask", async () => {
+    const r = rounds({ windows: [window(1)] });
+    const round = r.exits.begin("quit");
+    r.exits.remove(1);
+    await expect(round.outcome).resolves.toBe("proceed");
+    const empty = rounds({ windows: [] });
+    await expect(empty.exits.begin("update").outcome).resolves.toBe("proceed");
+    expect(empty.confirmProceed).not.toHaveBeenCalled();
+  });
+
+  // A silent window may be busy, not dead. The ACK window never proceeds by
+  // itself: it asks the USER, and "Wait" keeps everything as it was.
+  it("asks the user about a silent window and waiting keeps a quit vetoed", async () => {
+    vi.useFakeTimers();
+    const r = rounds();
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledExactlyOnceWith("quit");
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value, "a silent renderer must never count as safe").toBeNull();
+    expect(r.exits.current()?.roundId).toBe(round.roundId);
+    // The slow window still answers, and its answer counts once the user
+    // asks to quit again; Wait itself authorizes nothing.
+    r.exits.answer(2, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value).toBeNull();
+    r.exits.begin("quit");
+    await expect(round.outcome).resolves.toBe("proceed");
+  });
+
+  it("refuses an install outright when the user waits on a silent window", async () => {
+    vi.useFakeTimers();
+    const r = rounds();
+    const round = r.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledExactlyOnceWith("update");
+    await expect(round.outcome).resolves.toBe("cancelled");
+  });
+
+  it("forces a quit or installs only on an explicit decision over the covered windows", async () => {
+    vi.useFakeTimers();
+    const quit = rounds({ confirmProceed: async () => true });
+    const quitRound = quit.exits.begin("quit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(quitRound.outcome).resolves.toBe("forced");
+    expect(quit.closings(1)).toEqual([]);
+
+    const update = rounds({ confirmProceed: async () => true });
+    const updateRound = update.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(updateRound.outcome).resolves.toBe("proceed");
+  });
+
+  it("does not let a stale timeout decision cover a window enrolled while the dialog was up", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("quit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    const third = window(3);
+    r.exits.enroll(third);
+    decide(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value, "the dialog never named the new window's work").toBeNull();
+    // The new window answers clear for itself; the two the dialog covered
+    // are decided by that dialog, and only they are forced.
+    r.exits.answer(3, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("forced");
+    expect(r.exits.takeForcedParticipants().map((entry) => entry.id)).toEqual([1, 2]);
+    expect(r.closings(3)).toEqual(["proceed"]);
+    expect(r.closings(1)).toEqual([]);
+  });
+
+  it("lets the escalation dialog own an install against a late renderer answer", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Both wake mid-dialog and say clear.
+    r.exits.answer(1, round.roundId, "clear");
+    r.exits.answer(2, round.roundId, "clear");
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value).toBeNull();
+    decide(false);
+    await expect(round.outcome).resolves.toBe("cancelled");
+  });
+
+  it("keeps a newcomer's reply while the install dialog is up, and lets it cancel", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const third = window(3);
+    r.exits.enroll(third);
+    // Its hold is kept: after the dialog proceeds, the round waits on it.
+    expect(r.exits.answer(3, round.roundId, "hold")).toBe(true);
+    decide(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value, "a held newcomer must not be overridden by a dialog that never named it").toBeNull();
+    r.exits.answer(3, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+
+    // And its Go back cancels even while the dialog is still open.
+    const again = rounds({ confirmProceed: () => new Promise<boolean>(() => undefined) });
+    const second = again.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    again.exits.enroll(window(3));
+    expect(again.exits.answer(3, second.roundId, "cancel")).toBe(true);
+    await expect(second.outcome).resolves.toBe("cancelled");
+  });
+
+  it("does not stage an install behind an open dialog when the last member leaves", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ windows: [window(1)], confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("update");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    r.exits.remove(1);
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.value, "the user is still deciding the warning").toBeNull();
+    decide(false);
+    await expect(round.outcome).resolves.toBe("cancelled");
+
+    const two = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const twoRound = two.exits.begin("update");
+    two.exits.answer(1, twoRound.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The silent member closes: the clear one alone would settle, but not
+    // behind the dialog.
+    two.exits.remove(2);
+    const twoState = two.settled(twoRound.outcome);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(twoState.value).toBeNull();
+    decide(true);
+    await expect(twoRound.outcome).resolves.toBe("proceed");
+  });
+
+  it("forces only the silent windows the quit dialog was about, never one that answered for itself", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    // A window opened after the round began answers clear before the
+    // dialog. It can still capture a draft after that, so it is never
+    // destroyed under a decision about someone else's silence.
+    const third = window(3);
+    r.exits.enroll(third);
+    r.exits.answer(3, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    // One more window opens while the dialog is up: not covered either.
+    const fourth = window(4);
+    r.exits.enroll(fourth);
+    r.exits.answer(4, round.roundId, "clear");
+    decide(true);
+    await expect(round.outcome).resolves.toBe("forced");
+    expect(r.exits.takeForcedParticipants().map((entry) => entry.id)).toEqual([2]);
+    expect(r.exits.takeForcedParticipants()).toEqual([]);
+    for (const id of [1, 3, 4]) expect(r.closings(id)).toEqual(["proceed"]);
+    expect(r.closings(2)).toEqual([]);
+  });
+
+  it("re-asks a window enrolled before it loaded, and retracts a proceeded round to every member", async () => {
+    const r = rounds({ windows: [window(1)] });
+    const round = r.exits.begin("update");
+    const late = window(2);
+    r.exits.enroll(late);
+    r.exits.enroll(late);
+    expect(r.requests(2)).toEqual([round.roundId, round.roundId]);
+    r.exits.answer(1, round.roundId, "clear");
+    r.exits.answer(2, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+    // A stale id retracts nothing; the proceeded round reaches both.
+    r.exits.retract(round.roundId + 1);
+    expect(r.closings(2)).toEqual(["proceed"]);
+    r.exits.retract(round.roundId);
+    expect(r.closings(2)).toEqual(["proceed", "cancelled"]);
+    expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
+    r.exits.retract(round.roundId);
+    expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
+  });
+
+  // Wait is not authorization. It keeps the quit vetoed, asks nothing more,
+  // and the next explicit quit decides afresh.
+  it("does not re-prompt after Wait on a silent window, and a new quit asks again", async () => {
+    vi.useFakeTimers();
+    const r = rounds({ confirmProceed: async () => false });
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(r.confirmProceed, "Wait must not repeat the prompt unasked").toHaveBeenCalledOnce();
+    expect(r.exits.current()?.roundId).toBe(round.roundId);
+    // The user asks to quit again: the silent window is asked once more,
+    // and its silence goes back to the user.
+    const again = r.exits.begin("quit");
+    expect(again.roundId).toBe(round.roundId);
+    expect(r.requests(2)).toEqual([round.roundId, round.roundId]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not prompt for a window that opens or reloads during Wait until the next explicit quit", async () => {
+    vi.useFakeTimers();
+    const r = rounds({ confirmProceed: async () => false });
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    // A new window is tracked and then loads, and a member that already
+    // answered reloads. Each is asked, and none re-prompts the user.
+    const third = window(3);
+    r.exits.enroll(third);
+    r.exits.enroll(third);
+    r.exits.enroll(r.windows[1]!);
+    expect(r.requests(3)).toEqual([round.roundId, round.roundId]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(r.confirmProceed, "Wait must not be undone by a window opening").toHaveBeenCalledOnce();
+    expect(r.exits.current()?.roundId).toBe(round.roundId);
+    // Explicit quit re-arms: the silent windows go back to the user.
+    r.exits.begin("quit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(r.confirmProceed).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a late clear during Wait settle only on the next explicit quit", async () => {
+    vi.useFakeTimers();
+    let decide!: (proceed: boolean) => void;
+    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const round = r.exits.begin("quit");
+    r.exits.answer(1, round.roundId, "clear");
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The slow window answers clear while the dialog is up; the user waits.
+    r.exits.answer(2, round.roundId, "clear");
+    decide(false);
+    await vi.advanceTimersByTimeAsync(0);
+    const state = r.settled(round.outcome);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(state.value, "Wait is not authorization to quit").toBeNull();
+    expect(r.confirmProceed).toHaveBeenCalledOnce();
+    // Cmd+Q again: everyone is clear, so the quit proceeds without a stuck
+    // round asking nobody.
+    const again = r.exits.begin("quit");
+    expect(again.created).toBe(false);
+    await expect(round.outcome).resolves.toBe("proceed");
+    expect(r.exits.current()).toBeNull();
+  });
+});
+
 describe("quit guard", () => {
-  it("intercepts the first quit and asks the renderer", () => {
-    const { guard, askRenderer, quit } = makeGuard();
+  function makeGuard() {
+    const ask = vi.fn();
+    const quit = vi.fn();
+    const forceQuit = vi.fn();
+    return { guard: createQuitGuard({ ask, quit, forceQuit }), ask, quit, forceQuit };
+  }
+  function quitEvent() {
+    const event = { prevented: false, preventDefault: () => undefined };
+    event.preventDefault = () => { event.prevented = true; };
+    return event;
+  }
+
+  it("intercepts the first quit and starts the round", () => {
+    const { guard, ask, quit } = makeGuard();
     const event = quitEvent();
     expect(guard.beforeQuit(event)).toBe("asked");
     expect(event.prevented).toBe(true);
-    expect(askRenderer).toHaveBeenCalledTimes(1);
+    expect(ask).toHaveBeenCalledOnce();
     expect(quit).not.toHaveBeenCalled();
   });
 
-  it("resumes into a real quit when the renderer says nothing is at stake", () => {
+  it("resumes into a real quit and does not ask again for it", () => {
     const { guard, quit } = makeGuard();
     guard.beforeQuit(quitEvent());
     guard.resume();
-    expect(quit).toHaveBeenCalledTimes(1);
-    // The approved quit is not intercepted again.
+    expect(quit).toHaveBeenCalledOnce();
     const second = quitEvent();
     expect(guard.beforeQuit(second)).toBe("proceed");
     expect(second.prevented).toBe(false);
   });
 
-  it("holds indefinitely while the renderer's dialog owns the decision", async () => {
-    vi.useFakeTimers();
-    const { guard, quit, confirmForceQuit } = makeGuard();
+  it("forces only through the force path, and a held quit revokes any approval", () => {
+    const { guard, quit, forceQuit, ask } = makeGuard();
     guard.beforeQuit(quitEvent());
-    guard.hold();
-    await vi.advanceTimersByTimeAsync(60_000);
-    // No timer fires after a hold: the user is deciding.
-    expect(confirmForceQuit).not.toHaveBeenCalled();
+    guard.force();
+    expect(forceQuit).toHaveBeenCalledOnce();
     expect(quit).not.toHaveBeenCalled();
-  });
-
-  // A renderer that has not answered may be busy, not dead.
-  // The ACK window must never force-quit by itself — it asks the user, with
-  // the loss named, and "Wait" leaves the drafts alone.
-  it("asks the user instead of force-quitting a silent renderer, and waiting keeps the app up", async () => {
-    vi.useFakeTimers();
-    const { guard, quit, confirmForceQuit } = makeGuard({
-      confirmForceQuit: async () => false,
-    });
-    guard.beforeQuit(quitEvent());
-
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(confirmForceQuit, "busy-renderer force quit: make the timeout approve and call quit() directly (the r10 shape). A busy renderer's drafts die with no dialog and no decision.").toHaveBeenCalledTimes(1);
-    expect(quit).not.toHaveBeenCalled();
-
-    // The quit stays vetoed afterwards, so a slow renderer can still answer.
-    const later = quitEvent();
-    expect(guard.beforeQuit(later)).toBe("asked");
-    expect(later.prevented).toBe(true);
-  });
-
-  // An ordinary app.quit() does not deliver this answer. A
-  // renderer that wakes before its window closes runs beforeunload knowing
-  // nothing of the MAIN-side dialog — no bypass, no approved ids — so it
-  // vetoes the exit and opens a second warning while the guard stays
-  // approved. The explicit decision has to take the force path.
-  it("force-quits only on an explicit decision, and through the force path", async () => {
-    vi.useFakeTimers();
-    const { guard, quit, forceQuit } = makeGuard({
-      confirmForceQuit: async () => true,
-    });
-    guard.beforeQuit(quitEvent());
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(forceQuit, "carry the decision: call options.quit() here instead. The waking renderer vetoes the unload the user already chose.").toHaveBeenCalledTimes(1);
-    expect(quit).not.toHaveBeenCalled();
-    const next = quitEvent();
-    expect(guard.beforeQuit(next)).toBe("proceed");
-  });
-
-  it("drops a stale force-quit answer when the renderer already resumed", async () => {
-    vi.useFakeTimers();
-    let decide!: (quitAnyway: boolean) => void;
-    const { guard, quit, forceQuit } = makeGuard({
-      confirmForceQuit: () =>
-        new Promise<boolean>((resolve) => {
-          decide = resolve;
-        }),
-    });
-    guard.beforeQuit(quitEvent());
-    await vi.advanceTimersByTimeAsync(1_000);
-    // The renderer answers while the main-side dialog is still up.
-    guard.resume();
-    expect(quit).toHaveBeenCalledTimes(1);
-    decide(true);
-    await vi.advanceTimersByTimeAsync(0);
-    // No second quit from the stale dialog answer, by either path.
-    expect(quit).toHaveBeenCalledTimes(1);
-    expect(forceQuit).not.toHaveBeenCalled();
-  });
-
-  // An update install pre-approves the quit before the
-  // renderer can veto its unload. If the user then goes back, the approval
-  // must not outlive the quit it was granted for — otherwise the next Cmd+Q
-  // proceeds without asking, reaches beforeunload with no pending intent, and
-  // the warning is labelled a close.
-  it("drops a pre-approval when the quit it was granted for is held", () => {
-    const { guard, askRenderer } = makeGuard();
-    guard.approve();
+    expect(guard.beforeQuit(quitEvent())).toBe("proceed");
     guard.hold();
     const next = quitEvent();
-    expect(guard.beforeQuit(next), "hold revokes: leave `approved` set in hold(). The next quit proceeds unasked and the renderer never gets to name the action.").toBe("asked");
-    expect(next.prevented).toBe(true);
-    expect(askRenderer).toHaveBeenCalledTimes(1);
+    expect(guard.beforeQuit(next)).toBe("asked");
+    expect(ask).toHaveBeenCalledTimes(2);
   });
 
   it("pre-approves an update's own quit, and a refused install revokes it", () => {
-    const { guard, askRenderer } = makeGuard();
+    const { guard, ask } = makeGuard();
     guard.approve();
-    const duringInstall = quitEvent();
-    expect(guard.beforeQuit(duringInstall)).toBe("proceed");
-    expect(askRenderer).not.toHaveBeenCalled();
-
+    expect(guard.beforeQuit(quitEvent())).toBe("proceed");
+    expect(ask).not.toHaveBeenCalled();
     guard.revoke();
-    const afterRefusal = quitEvent();
-    expect(guard.beforeQuit(afterRefusal)).toBe("asked");
-    expect(afterRefusal.prevented).toBe(true);
+    expect(guard.beforeQuit(quitEvent())).toBe("asked");
   });
 });
 
-// Which renderer answers for the quit. Not every window runs
-// the workspace — the PDF export creates a hidden, preload-less one — and
-// asking IT would answer nothing while the user sees the unresponsive dialog
-// over drafts that were fully available.
+// Which renderers answer for the quit. Not every window runs the workspace:
+// the PDF export creates a hidden, preload-less one, and asking IT would
+// answer nothing while the user sees the unresponsive dialog over drafts that
+// were fully available.
 describe("workspace window registry", () => {
   type FakeWindow = { id: string; destroyed: boolean };
 
   it("lists every live workspace window for the force-quit path", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>(
-      (window) => window.destroyed,
-    );
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
     const first: FakeWindow = { id: "first", destroyed: false };
     const gone: FakeWindow = { id: "gone", destroyed: true };
     const second: FakeWindow = { id: "second", destroyed: false };
     registry.track(first);
     registry.track(gone);
     registry.track(second);
-    expect(registry.allLive().map((window) => window.id), "allLive: return every tracked window. The force path then calls destroy() on one that is already destroyed.").toEqual([
-      "first",
-      "second",
-    ]);
+    expect(registry.allLive().map((entry) => entry.id)).toEqual(["first", "second"]);
   });
 
-
   it("answers with a tracked workspace window, never another live window", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>(
-      (window) => window.destroyed,
-    );
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
     const workspace: FakeWindow = { id: "workspace", destroyed: false };
-    // The PDF export's hidden window is never tracked.
     const pdfExport: FakeWindow = { id: "pdf-export", destroyed: false };
     registry.track(workspace);
-
-    expect(registry.live(), "window targeting: pick the first live window from a list that includes untracked ones. The quit check reaches a renderer that cannot answer.").toBe(workspace);
+    expect(registry.live()).toBe(workspace);
     expect(registry.live()).not.toBe(pdfExport);
   });
 
   it("skips destroyed windows and forgets closed ones", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>(
-      (window) => window.destroyed,
-    );
+    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed);
     const closed: FakeWindow = { id: "old", destroyed: true };
     const open: FakeWindow = { id: "new", destroyed: false };
     registry.track(closed);
     registry.track(open);
     expect(registry.live()).toBe(open);
-
     registry.forget(open);
     expect(registry.live()).toBeUndefined();
-  });
-});
-
-// The renderer checks its drafts before it asks for an
-// install, and a reopen can set an edit aside in the gap before main's
-// handler runs. Main asks again at the moment it would approve the quit.
-describe("recovery boundary check", () => {
-  it("blocks when the renderer reports set-aside drafts at answer time", async () => {
-    let asked: number | null = null;
-    const checker = createRecoveryChecker({
-      send: (requestId) => {
-        asked = requestId;
-        return true;
-      },
-      confirmProceed: async () => false,
-      timeoutMs: 1_000,
-    });
-    const pending = checker.ask();
-    expect(asked).not.toBeNull();
-    checker.answer(asked!, true);
-    await expect(pending).resolves.toBe(true);
-  });
-
-  it("clears the quit when the renderer reports nothing set aside", async () => {
-    let asked: number | null = null;
-    const checker = createRecoveryChecker({
-      send: (requestId) => {
-        asked = requestId;
-        return true;
-      },
-      confirmProceed: async () => false,
-      timeoutMs: 1_000,
-    });
-    const pending = checker.ask();
-    checker.answer(asked!, false);
-    await expect(pending).resolves.toBe(false);
-  });
-
-  // The ACK window does not answer for the renderer. A busy
-  // renderer and a dead one look identical from main at any deadline, so
-  // silence asks the user instead of refusing the install they asked for.
-  it("asks the user when the renderer never answers, and waiting blocks", async () => {
-    vi.useFakeTimers();
-    const confirmProceed = vi.fn(async () => false);
-    const checker = createRecoveryChecker({
-      send: () => true,
-      confirmProceed,
-      timeoutMs: 1_000,
-    });
-    const pending = checker.ask();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(confirmProceed).toHaveBeenCalledTimes(1);
-    await expect(pending).resolves.toBe(true);
-  });
-
-  it("installs over an unresponsive renderer only on an explicit decision", async () => {
-    vi.useFakeTimers();
-    const checker = createRecoveryChecker({
-      send: () => true,
-      confirmProceed: async () => true,
-      timeoutMs: 1_000,
-    });
-    const pending = checker.ask();
-    await vi.advanceTimersByTimeAsync(1_000);
-    await expect(pending).resolves.toBe(false);
-  });
-
-  // Once the dialog is on screen it owns the answer. A late
-  // renderer reply settling behind it either strands the user's click on a
-  // request that no longer exists, or lets the install begin while the dialog
-  // is still asking whether to proceed.
-  it("lets the escalation dialog own the request against a late renderer answer", async () => {
-    vi.useFakeTimers();
-    let decide!: (proceed: boolean) => void;
-    let asked: number | null = null;
-    const checker = createRecoveryChecker({
-      send: (requestId) => {
-        asked = requestId;
-        return true;
-      },
-      confirmProceed: () =>
-        new Promise<boolean>((resolve) => {
-          decide = resolve;
-        }),
-      timeoutMs: 1_000,
-    });
-    const pending = checker.ask();
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    // The renderer wakes mid-dialog and says "clear".
-    checker.answer(asked!, false);
-    await vi.advanceTimersByTimeAsync(0);
-
-    // The user is still deciding, and their answer is the one that counts.
-    decide(false);
-    await vi.advanceTimersByTimeAsync(0);
-    await expect(pending).resolves.toBe(true);
-  });
-
-  it("does not block when there is no renderer to ask", async () => {
-    const checker = createRecoveryChecker({
-      send: () => false,
-      confirmProceed: async () => false,
-    });
-    // Nothing rendered means no renderer-held drafts to lose.
-    await expect(checker.ask()).resolves.toBe(false);
-  });
-
-  it("keeps answers keyed to their own request", async () => {
-    const ids: number[] = [];
-    const checker = createRecoveryChecker({
-      send: (requestId) => {
-        ids.push(requestId);
-        return true;
-      },
-      confirmProceed: async () => false,
-      timeoutMs: 1_000,
-    });
-    const first = checker.ask();
-    const second = checker.ask();
-    expect(ids).toHaveLength(2);
-    checker.answer(ids[1]!, false);
-    checker.answer(ids[0]!, true);
-    await expect(first).resolves.toBe(true);
-    await expect(second).resolves.toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -37,6 +38,8 @@ import {
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
   EngineYDocSaveStateEvent,
+  ExitRoundAnswerPayload,
+  ExitRoundMessage,
   ExplorerMenuCommand,
   ListPluginsResult,
   ListOfferedPluginsResult,
@@ -111,16 +114,31 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
+  devTools: devToolsGranted(process.argv),
+  windowRole:
+    new URLSearchParams(window.location.search).get("view") === "manager"
+      ? "manager"
+      : "workspace",
   reloadRenderer: () =>
     ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
+  devForgetWorkspaces: () => ipcRenderer.invoke(CHANNELS.devForgetWorkspaces),
+  devRevealPath: (payload) => ipcRenderer.invoke(CHANNELS.devRevealPath, payload),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>
     ipcRenderer.invoke(CHANNELS.getDefaultWorkspaceRoot),
+  getDefaultShareRoot: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getDefaultShareRoot, payload),
   createLocalWorkspace: (payload: CreateLocalWorkspacePayload) =>
     ipcRenderer.invoke(CHANNELS.createLocalWorkspace, payload),
   attachWorkspaceFolder: (payload) =>
     ipcRenderer.invoke(CHANNELS.attachWorkspaceFolder, payload),
+  forgetWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.forgetWorkspace, payload),
+  openWorkspaceWindow: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspaceWindow, payload),
+  openWorkspaceManager: () => ipcRenderer.invoke(CHANNELS.openWorkspaceManager),
+  closeThisWindow: () => ipcRenderer.invoke(CHANNELS.closeThisWindow),
+  revealWorkspaceFolder: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revealWorkspaceFolder, payload),
   listWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   listCollections: (payload) =>
@@ -632,28 +650,9 @@ const bridge: DohcDesktopBridge = {
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
   installUpdate: () => invokeParsed(CHANNELS.installUpdate, UpdateActionResult),
-  onQuitRequested: (listener: () => void) => {
-    const handler = () => listener();
-    ipcRenderer.on(CHANNELS.quitRequested, handler);
-    return () => ipcRenderer.removeListener(CHANNELS.quitRequested, handler);
-  },
-  onRecoveryCheckRequested: (listener: (requestId: number) => void) => {
-    const handler = (_event: unknown, requestId: unknown) => {
-      // Only a number ever crosses this boundary; anything else is dropped.
-      if (typeof requestId === "number") listener(requestId);
-    };
-    ipcRenderer.on(CHANNELS.recoveryCheckRequested, handler);
-    return () =>
-      ipcRenderer.removeListener(CHANNELS.recoveryCheckRequested, handler);
-  },
-  answerRecoveryCheck: async (payload: {
-    requestId: number;
-    blocked: boolean;
-  }) => {
-    await ipcRenderer.invoke(CHANNELS.recoveryCheckAnswer, {
-      requestId: payload.requestId,
-      blocked: payload.blocked,
-    });
+  onExitRound: (listener) => onEvent(CHANNELS.exitRound, ExitRoundMessage, listener),
+  answerExitRound: async (payload) => {
+    await ipcRenderer.invoke(CHANNELS.exitRoundAnswer, ExitRoundAnswerPayload.parse(payload));
   },
   holdQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.holdQuit);

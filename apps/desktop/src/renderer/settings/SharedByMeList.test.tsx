@@ -275,11 +275,11 @@ describe("SharedByMeList", () => {
 
     bridgeMock.listRelayShares.mockRejectedValue(
       new Error(
-        "Error invoking remote method 'desktop:list-relay-shares': Error: Sign in to dohc Cloud first.",
+        "Error invoking remote method 'desktop:list-relay-shares': Error: Sign in to dohc Drive first.",
       ),
     );
     render(<SharedByMeList workspaceId="ws-1" />);
     const error = await screen.findByTestId("shared-by-me-error");
-    expect(error.textContent).toBe("Sign in to dohc Cloud first.");
+    expect(error.textContent).toBe("Sign in to dohc Drive first.");
   });
 });

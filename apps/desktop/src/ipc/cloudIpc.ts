@@ -217,7 +217,7 @@ export function registerCloudIpcHandlers<
         assertWritableWorkspace(workspace);
         const credentials = await loadAndCacheCurrentCredentials();
         operation.assertCurrent();
-        if (!credentials) throw new Error("Sign in to dohc Cloud first");
+        if (!credentials) throw new Error("Sign in to dohc Drive first");
         if (!credentials.relayUrl) {
           throw new Error("Cloud sync requires a relay URL");
         }
@@ -300,7 +300,7 @@ export function registerCloudIpcHandlers<
       // inside a pasted code.
       throw new Error(
         "This workspace syncs through a different server than the one you're signed in to. " +
-          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then join again.`,
+          `Reconnect dohc Drive with the sync relay URL ${parsed.relayUrl}, then join again.`,
       );
     }
     if (findWorkspace(parsed.workspaceId)) {
@@ -338,7 +338,7 @@ export function registerCloudIpcHandlers<
       }
       if (error instanceof RelayUnauthorizedError) {
         throw new Error(
-          "Your dohc Cloud session expired. Sign in again, then retry.",
+          "Your dohc Drive session expired. Sign in again, then retry.",
         );
       }
       throw error;

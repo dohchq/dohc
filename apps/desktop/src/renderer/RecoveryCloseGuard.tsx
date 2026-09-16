@@ -47,6 +47,8 @@ type PendingUnload = {
   // and an unload should follow, false when it failed without unloading —
   // the guard re-arms itself on false.
   resume: () => Promise<boolean>;
+  // The drain this intent waited on could not land its writes.
+  failed?: () => void;
 };
 let pendingUnload: PendingUnload | null = null;
 let exitRequest = 0;
@@ -54,8 +56,50 @@ let exitRequest = 0;
 // The mounted guard registers its dialog opener here so the decide-first
 // paths (update install) can warn without triggering the destructive call.
 let openRecoveryWarning:
-  | ((warning: { kind: UnloadKind; resume: () => Promise<boolean> }) => void)
+  | ((warning: {
+      kind: UnloadKind;
+      resume: () => Promise<boolean>;
+      round?: number;
+    }) => void)
   | null = null;
+
+// The exit round this window is currently answering, so a late reply, a
+// dialog confirm, or a Go back speaks for the right round and no other.
+let activeRound: { id: number; kind: "quit" | "update" } | null = null;
+// The round whose exit this window is waiting to see through: the one that
+// proceeded last. A retraction for it drops the claimed intent.
+let proceededRound: number | null = null;
+// The exit request the last round's arrival became. An install started
+// here at `request - 1` is still current when the only thing that happened
+// since is its own round asking, whether or not that round has proceeded.
+let roundRequest: { request: number; kind: "quit" | "update" } | null = null;
+
+function isOwnRoundRequest(request: number): boolean {
+  return (
+    roundRequest !== null &&
+    roundRequest.kind === "update" &&
+    roundRequest.request === request + 1 &&
+    exitRequest === roundRequest.request
+  );
+}
+
+function answerRound(roundId: number, decision: "clear" | "hold" | "cancel"): void {
+  void bridge().answerExitRound({ roundId, decision }).catch(() => undefined);
+}
+
+// The round ended without the exit happening: refused or failed staging,
+// or a cancellation. Every window drops the intent it claimed for that
+// round, and only that; a reload or a newer action keeps its label.
+function forgetRoundIntent(roundId: number): boolean {
+  const owned = activeRound?.id === roundId || proceededRound === roundId;
+  if (!owned) return false;
+  if (activeRound?.id === roundId) activeRound = null;
+  if (proceededRound === roundId) proceededRound = null;
+  if (pendingUnload?.kind === "update" || pendingUnload?.kind === "quit") {
+    pendingUnload = null;
+  }
+  return true;
+}
 
 export function requestGuardedReload(): void {
   exitRequest += 1;
@@ -92,8 +136,15 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
   if (request !== exitRequest) return null;
   if (atRiskOrphanedDraftIds().length === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
-    if (request !== exitRequest) return null;
+    // The install's own round asks this window too, and that ask is part
+    // of this request, not a newer action. Only an action from outside the
+    // round makes the result stale.
+    if (request !== exitRequest && !isOwnRoundRequest(request)) return null;
     if (!result.accepted && hasUnsettledCollectionWrites()) return null;
+    // Another window's recovery dialog went back, or this one's did: a
+    // decision the user already made, not an install failure. The callers'
+    // own flow ends here with nothing to report.
+    if (result.cancelled) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
     // aside after this renderer's own check. That refusal
     // is a recovery decision, not an install failure, and the direct branch
@@ -131,6 +182,26 @@ function resumeExit(kind: "update" | "quit"): Promise<boolean> {
     );
 }
 
+// Resumes an intent a round claimed. While that round is still being
+// decided, "resume" means answering it again: this window is clear, and
+// main proceeds only once every window is. Resuming the quit directly would
+// skip a window still holding its warning, and for an update it would quit
+// before the install was ever staged. Only after the round proceeded is the
+// exit main's to finish, through the approved quit.
+function resumeRoundIntent(
+  round: { id: number; kind: "update" | "quit" },
+  reclaim: () => void,
+): Promise<boolean> {
+  if (activeRound?.id === round.id) {
+    reclaim();
+    answerRound(round.id, "clear");
+    return Promise.resolve(true);
+  }
+  if (proceededRound === round.id) return resumeExit(round.kind);
+  // The round ended without the exit: nothing to resume.
+  return Promise.resolve(false);
+}
+
 function hasUnsettledCollectionWrites(): boolean {
   return hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
 }
@@ -164,7 +235,11 @@ function holdUnloadForCollectionWrites(pending: PendingUnload | null): void {
     const settled = await settleCollectionWritesForExit();
     if (pendingWritesDrain !== drain) return;
     pendingWritesDrain = null;
-    if (!settled || drain.request !== exitRequest) return;
+    if (drain.request !== exitRequest) return;
+    if (!settled) {
+      drain.pending?.failed?.();
+      return;
+    }
     const claimed = drain.pending;
     if (claimed) pendingUnload = claimed;
     const resume =
@@ -190,6 +265,9 @@ export function resetGuardedExits(): void {
   exitRequest += 1;
   pendingUnload = null;
   pendingWritesDrain = null;
+  activeRound = null;
+  proceededRound = null;
+  roundRequest = null;
 }
 
 // The install's own exit runs through beforeunload like any other unload, and
@@ -263,6 +341,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // What the user asked for — the confirm button resumes exactly it.
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
+    // The exit round this dialog answers for, when main is waiting on it.
+    round?: number;
   } | null>(null);
   // Live, not a snapshot: the dialog embeds Copy/Dismiss,
   // so the count must follow every dismissal, and an emptied dialog has
@@ -281,6 +361,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const showCloseWarning = (warning: {
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
+    round?: number;
   }) => {
     const active = document.activeElement;
     if (
@@ -292,7 +373,18 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     setCloseWarning(warning);
   };
   useEffect(() => {
-    if (warningOpen && liveCount === 0) setCloseWarning(null);
+    if (!warningOpen || liveCount !== 0) return;
+    // The last at-risk draft was resolved from the dialog: nothing left to
+    // warn about. A dialog that was answering a round still owes main an
+    // answer, or the install it holds never settles. Clear it now that the
+    // drafts are gone, unless a collection write is still landing.
+    const round = closeWarning?.round;
+    setCloseWarning(null);
+    if (round !== undefined && activeRound?.id === round) {
+      answerRound(round, hasUnsettledCollectionWrites() ? "cancel" : "clear");
+    }
+    // closeWarning is read once, at the moment the count reaches zero.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [warningOpen, liveCount]);
   useEffect(() => {
     if (!warningVisible) return;
@@ -360,52 +452,102 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         resume: pending?.resume ?? null,
       });
     };
-    // Required contract, called directly. The bridge and
-    // the preload gained both listeners in this same change, so an optional
-    // call would define a second supported preload — one where the renderer
-    // silently drops native-quit handling instead of showing the mismatched
-    // build. There are no users and no old preloads to carry.
+    // Required contract, called directly. The bridge and the preload carry
+    // this listener together, so an optional call would define a second
+    // supported preload — one where the renderer silently drops exit
+    // handling instead of showing the mismatched build.
     //
-    // Main re-asks at the quit boundary — the answer is
-    // read at answer time, so an edit set aside after this renderer's own
-    // check still blocks the install. The answer is the live store measured
-    // against what the user approved, never a blanket
-    // "the user already confirmed": a draft captured after the confirm was in
-    // no warning, and quitAndInstall is the last chance to stop. A refusal
-    // here is what brings the dialog back with that draft listed.
-    const unsubscribeRecoveryCheck = bridge().onRecoveryCheckRequested(
-      (requestId) => {
-        void bridge().answerRecoveryCheck({
-          requestId,
-          blocked: hasUnapprovedDrafts() || hasUnsettledCollectionWrites(),
-        });
-      },
-    );
-    // A native quit (Cmd+Q, tray Quit) is main-initiated: answer promptly —
-    // resume when nothing is at stake, hold when the dialog takes over — so
-    // main's hung-renderer fail-safe never fires for a live renderer.
-    const unsubscribeQuit = bridge().onQuitRequested(() => {
+    // Main asks every workspace window before a quit or an update install.
+    // The answer is read at answer time: an edit set aside after this
+    // renderer's own check still blocks. It is the live store measured
+    // against what the user approved, never a blanket "the user already
+    // confirmed": a draft captured after the confirm was in no warning, and
+    // quitAndInstall is the last chance to stop.
+    //
+    // Answer promptly — clear when nothing is at stake, hold when the dialog
+    // takes over — so main's hung-renderer fail-safe never fires for a live
+    // renderer. A window that is not the one that asked for the restart
+    // still gets its own dialog, whose confirm clears its part of the round
+    // and whose Go back cancels the whole round.
+    const unsubscribeExitRound = bridge().onExitRound((message) => {
+      if (message.kind === "proceed") {
+        // The exit is on its way: the claimed intent stays for its unload,
+        // and a retraction for this round can still take it back.
+        if (activeRound?.id === message.roundId) {
+          activeRound = null;
+          proceededRound = message.roundId;
+        }
+        return;
+      }
+      if (message.kind !== "request") {
+        // The round ended without the exit: cancelled by a window, refused
+        // or failed at the updater. A dialog still open for it has nothing
+        // left to decide, the approval it granted is off, and the intent
+        // claimed for it must not label a later, unrelated close.
+        if (!forgetRoundIntent(message.roundId)) return;
+        rearmGuard();
+        setCloseWarning((current) =>
+          current?.round === message.roundId ? null : current,
+        );
+        return;
+      }
       exitRequest += 1;
+      roundRequest = { request: exitRequest, kind: message.exit };
+      const round = { id: message.roundId, kind: message.exit };
+      activeRound = round;
+      proceededRound = null;
+      // Claim the intent up front: a queued reopen can still capture a
+      // draft between a clear answer and the exit's own beforeunload, and
+      // the warning that blocks it there must resume the QUIT or RESTART.
+      // Falling back to window.close() would leave the process running on
+      // macOS, and with agent dispatch still alive. The intent keeps its
+      // round: resuming it re-answers the round until main proceeds.
+      const intent: PendingUnload = {
+        kind: round.kind,
+        resume: () => resumeRoundIntent(round, () => { pendingUnload = intent; }),
+      };
+      const resume = intent.resume;
+      pendingUnload = intent;
       if (hasUnsettledCollectionWrites()) {
+        answerRound(round.id, "hold");
         void bridge().holdQuit();
         holdUnloadForCollectionWrites({
-          kind: "quit",
-          resume: () => resumeExit("quit"),
+          kind: round.kind,
+          // The drain lands, then answers this round — if it is still the
+          // one main is waiting on. A cancelled or superseded round is not
+          // answered; a newer one asks again on its own.
+          resume: () => {
+            if (activeRound?.id !== round.id) return Promise.resolve(false);
+            pendingUnload = intent;
+            if (hasUnapprovedDrafts()) {
+              showCloseWarning({ kind: round.kind, resume, round: round.id });
+              return Promise.resolve(false);
+            }
+            answerRound(round.id, "clear");
+            return Promise.resolve(true);
+          },
+          // The write could not land: there is no exit to hold for, and no
+          // dialog to say so. The round is cancelled so the install settles
+          // and the failure notice keeps the person's input. The approval
+          // an earlier local warning granted is off too: the person is
+          // staying, and main's broadcast will not reach a window that
+          // already forgot the round.
+          failed: () => {
+            if (activeRound?.id !== round.id) return;
+            answerRound(round.id, "cancel");
+            forgetRoundIntent(round.id);
+            rearmGuard();
+          },
         });
         return;
       }
       if (!hasUnapprovedDrafts()) {
-        // Claim the intent before resuming. Answering
-        // clear does not end the story: a queued reopen can still capture a
-        // draft between this answer and the quit's own beforeunload, and the
-        // warning that blocks it there must resume the QUIT. Falling back to
-        // window.close() would leave the process running on macOS, and with
-        // agent dispatch still alive.
-        void resumeExit("quit");
+        answerRound(round.id, "clear");
         return;
       }
+      answerRound(round.id, "hold");
       void bridge().holdQuit();
-      showCloseWarning({ kind: "quit", resume: () => resumeExit("quit") });
+      showCloseWarning({ kind: round.kind, resume, round: round.id });
     });
     // Registered last, so a preload that fails the contract above leaves no
     // listener and no opener behind — a half-installed guard is worse than
@@ -415,8 +557,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     return () => {
       openRecoveryWarning = null;
       window.removeEventListener("beforeunload", onBeforeUnload);
-      unsubscribeQuit();
-      unsubscribeRecoveryCheck();
+      unsubscribeExitRound();
       if (bypassRearmTimer.current) clearTimeout(bypassRearmTimer.current);
     };
     // rearmGuard and hasUnapprovedDrafts read refs and the module store, never
@@ -460,7 +601,21 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 type="button"
                 data-testid="recovery-close-goback"
                 autoFocus
-                onClick={() => setCloseWarning(null)}
+                onClick={() => {
+                  // Going back on a round cancels it for every window: the
+                  // originating install settles, and no other window's
+                  // dialog keeps asking about an exit that is off. The
+                  // approval an earlier local warning granted is off too:
+                  // the person is staying, so the next close asks over the
+                  // full list.
+                  const round = closeWarning.round;
+                  setCloseWarning(null);
+                  if (round !== undefined && activeRound?.id === round) {
+                    rearmGuard();
+                    forgetRoundIntent(round);
+                    answerRound(round, "cancel");
+                  }
+                }}
                 className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
               >
                 Go back
@@ -472,6 +627,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // Resume exactly what the user asked for: a requested
                   // reload, restart, or quit must not become a plain exit.
                   const kind = closeWarning.kind;
+                  const round = closeWarning.round;
                   const resume =
                     closeWarning.resume ??
                     (() => {
@@ -500,6 +656,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     rearmGuard,
                     BYPASS_REARM_MS,
                   );
+                  // A dialog answering a pending round clears this window's
+                  // part of it. Main proceeds only when every window is
+                  // clear; the exit itself then comes back through the
+                  // approved quit, or the original install, so nothing is
+                  // resumed here.
+                  if (round !== undefined && activeRound?.id === round) {
+                    pendingUnload = { kind: activeRound.kind, resume };
+                    answerRound(round, "clear");
+                    return;
+                  }
                   const request = exitRequest;
                   void resume().then((unloading) => {
                     if (unloading || request !== exitRequest) return;

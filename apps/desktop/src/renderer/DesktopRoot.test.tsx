@@ -7,13 +7,24 @@ import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 
-vi.mock("./DesktopFirstRun", () => ({
-  DesktopFirstRun: (props: {
+vi.mock("./WorkspaceManager", () => ({
+  WorkspaceManager: (props: {
+    workspaces: Workspace[];
     handoffStatus: ShareHandoffStatus;
+    onOpenWorkspace: (workspace: Workspace) => void;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;
   }) => (
     <div data-testid="first-run">
+      {props.workspaces.map((workspace) => (
+        <button
+          key={workspace.workspaceId}
+          type="button"
+          onClick={() => props.onOpenWorkspace(workspace)}
+        >
+          {`Open ${workspace.workspaceId}`}
+        </button>
+      ))}
       {props.handoffStatus.status !== "idle" ? (
         <span data-testid="handoff-active">{props.handoffStatus.status}</span>
       ) : null}
@@ -79,6 +90,7 @@ describe("DesktopRoot", () => {
     const calls: string[] = [];
     let handoffEvent: ((status: ShareHandoffStatus) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -116,6 +128,7 @@ describe("DesktopRoot", () => {
 
   it("keeps an idle handoff out of the ordinary first-run product", async () => {
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -138,6 +151,7 @@ describe("DesktopRoot", () => {
   it("dismisses a handoff by its visible identity and returns to the ordinary surface", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -169,6 +183,7 @@ describe("DesktopRoot", () => {
   it("acknowledges a completed handoff once by its visible identity", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -202,6 +217,7 @@ describe("DesktopRoot", () => {
     const dismissShareHandoff = vi.fn(() => dismissal.promise);
     let handoffEvent: ((status: ShareHandoffStatus) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -241,6 +257,7 @@ describe("DesktopRoot", () => {
     const registry = deferred<{ workspaces: Workspace[] }>();
     let activate: ((workspace: Workspace) => void) | null = null;
     vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
       getWorkspaceRegistry: vi.fn(() => registry.promise),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
@@ -318,5 +335,152 @@ describe("DesktopRoot", () => {
     });
     await waitFor(() => expect(getUserSettings).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(getWorkspaceRegistry).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("startup selection", () => {
+  it("lets an activity refresh that beats the mount read open the first workspace", async () => {
+    const startupRead = deferred<{ workspaces: Workspace[] }>();
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    const getWorkspaceRegistry = vi
+      .fn(async () => ({ workspaces: [workspace("a")] }))
+      .mockReturnValueOnce(startupRead.promise);
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      getWorkspaceRegistry,
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+    expect(getWorkspaceRegistry).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      emitActivity?.({});
+    });
+    expect((await screen.findByTestId("active-workspace")).textContent).toBe("a");
+
+    // The mount read lands late and stale: it must not reselect.
+    await act(async () => {
+      startupRead.resolve({ workspaces: [workspace("b"), workspace("a")] });
+    });
+    expect(screen.getByTestId("active-workspace").textContent).toBe("a");
+  });
+});
+
+describe("registry grows under an idle first-run window", () => {
+  it("lists a workspace registered mid-join without leaving the first-run screen", async () => {
+    let registry: { workspaces: Workspace[] } = { workspaces: [] };
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      getWorkspaceRegistry: vi.fn(async () => registry),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+    expect(await screen.findByTestId("first-run")).toBeTruthy();
+
+    // Main registers the joined workspace and broadcasts before populate
+    // finishes. The join screen must survive that broadcast.
+    registry = { workspaces: [workspace("joined")] };
+    await act(async () => {
+      emitActivity?.({});
+    });
+    expect(await screen.findByRole("button", { name: "Open joined" })).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+
+    // Only an explicit selection activates it.
+    fireEvent.click(screen.getByRole("button", { name: "Open joined" }));
+    expect((await screen.findByTestId("active-workspace")).textContent).toBe("joined");
+  });
+});
+
+describe("registry emptied under an open workspace", () => {
+  it("drops to first run instead of keeping a shell with nothing to open", async () => {
+    const workspace = {
+      workspaceId: "ws-1",
+      rootPath: "/home/ice/dohc/personal",
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    let registry: { workspaces: typeof workspace[] } = { workspaces: [workspace] };
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      getWorkspaceRegistry: vi.fn(async () => registry),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+    expect(await screen.findByTestId("workspace-shell")).toBeTruthy();
+
+    registry = { workspaces: [] };
+    await act(async () => {
+      emitActivity?.({});
+    });
+    expect(await screen.findByTestId("first-run")).toBeTruthy();
+  });
+
+  it("falls back to a remaining workspace when the open one is forgotten", async () => {
+    let registry = { workspaces: [workspace("a"), workspace("b")] };
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      getWorkspaceRegistry: vi.fn(async () => registry),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+    });
+    render(<DesktopRoot />);
+    expect((await screen.findByTestId("active-workspace")).textContent).toBe("a");
+
+    registry = { workspaces: [workspace("b")] };
+    await act(async () => {
+      emitActivity?.({});
+    });
+    expect((await screen.findByTestId("active-workspace")).textContent).toBe("b");
   });
 });

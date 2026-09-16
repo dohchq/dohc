@@ -907,7 +907,7 @@ describe("workspace share handoff placement", () => {
 
     expect(
       await screen.findByText(
-        "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.",
+        "dohc couldn't reach dohc Drive. Check your connection, then choose Try again.",
       ),
     ).toBeTruthy();
     await userEvent.setup().click(
@@ -926,6 +926,39 @@ describe("workspace share handoff placement", () => {
     expect(onDismissShareHandoff).toHaveBeenCalledOnce();
     expect(bridge.mountShare).not.toHaveBeenCalled();
     expect(bridge.openSharedView).not.toHaveBeenCalled();
+  });
+});
+
+describe("workspace manager route", () => {
+  it("shows a failed manager open in the shell error with a retry", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onManageWorkspaces = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(
+        new Error("Error invoking remote method 'desktop:open-workspace-manager': Error: No display."),
+      )
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+        onManageWorkspaces={onManageWorkspaces}
+      />,
+    );
+    await user.click(await screen.findByTestId("workspace-switcher"));
+    await user.click(screen.getByTestId("workspace-switcher-manage"));
+
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain("Couldn't open the workspace manager.");
+    expect(banner.textContent).toContain("No display.");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(onManageWorkspaces).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
 });
 

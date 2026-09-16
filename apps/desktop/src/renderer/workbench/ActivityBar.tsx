@@ -177,7 +177,7 @@ export function ActivityBar(props: {
             accessible names and must keep matching exactly one element. */}
         <RailButton
           testId="activity-cloud"
-          label="dohc Cloud"
+          label="dohc Drive"
           badge={props.hasConflict ? "danger" : undefined}
           onClick={props.onOpenCloud}
           icon={<RailGlyph Icon={Cloud} />}

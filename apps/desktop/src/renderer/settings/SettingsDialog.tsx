@@ -507,68 +507,6 @@ export function SettingsDialog(props: {
               />
             </SettingRow>
             <SettingRow
-              title="Density"
-              description="Compact density tightens repeated desktop chrome without changing document content."
-              modified={isModified(
-                userSettings.appearance.density,
-                DEFAULT_USER_SETTINGS.appearance.density,
-              )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  appearance: {
-                    ...userSettings.appearance,
-                    density: DEFAULT_USER_SETTINGS.appearance.density,
-                  },
-                })
-              }
-              testId="settings-row-density"
-            >
-              <SegmentedControl
-                label="Density"
-                value={userSettings.appearance.density}
-                options={[
-                  { value: "comfortable", label: "Comfort" },
-                  { value: "compact", label: "Compact" },
-                ]}
-                onChange={(density) =>
-                  void saveUserSettings({
-                    ...userSettings,
-                    appearance: { ...userSettings.appearance, density },
-                  })
-                }
-              />
-            </SettingRow>
-            <SettingRow
-              title="Reduce motion"
-              description="Minimize non-essential motion throughout the desktop app."
-              modified={isModified(
-                userSettings.appearance.reduceMotion,
-                DEFAULT_USER_SETTINGS.appearance.reduceMotion,
-              )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  appearance: {
-                    ...userSettings.appearance,
-                    reduceMotion: DEFAULT_USER_SETTINGS.appearance.reduceMotion,
-                  },
-                })
-              }
-              testId="settings-row-reduce-motion"
-            >
-              <SwitchControl
-                label="Reduce motion"
-                checked={userSettings.appearance.reduceMotion}
-                onChange={(reduceMotion) =>
-                  void saveUserSettings({
-                    ...userSettings,
-                    appearance: { ...userSettings.appearance, reduceMotion },
-                  })
-                }
-              />
-            </SettingRow>
-            <SettingRow
               title="Zoom"
               description="Scales the whole window. Ctrl/Cmd+= zooms in, Ctrl/Cmd+- zooms out, Ctrl/Cmd+0 resets."
               modified={isModified(
@@ -634,16 +572,19 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-cloud">
             <SettingRow
-              title="dohc Cloud"
+              title="dohc Drive"
               description="Connect, sync, and manage cloud collaboration for this workspace."
             >
               <button
                 type="button"
+                // Pinned accessible name; the visible label follows the
+                // product name.
+                aria-label="Open Cloud"
                 onClick={props.onOpenCloud}
                 className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
                 disabled={!props.onOpenCloud}
               >
-                Open Cloud
+                Open Drive
               </button>
             </SettingRow>
             <SettingRow

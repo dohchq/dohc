@@ -24,10 +24,6 @@ export function isDohcTheme(value) {
     const theme = value;
     if (theme.mode !== "light" && theme.mode !== "dark")
         return false;
-    if (theme.density !== "comfortable" && theme.density !== "compact")
-        return false;
-    if (typeof theme.reduceMotion !== "boolean")
-        return false;
     if (!theme.tokens || typeof theme.tokens !== "object")
         return false;
     // A token whose name is not a custom property would be written straight
@@ -42,9 +38,9 @@ export function isDohcThemeMessage(value) {
 }
 /**
  * Writes one theme onto an element, normally the guest document's <html>:
- * every token as a custom property, plus the three attributes dohc's own
- * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
- * the same way dohc does.
+ * every token as a custom property, plus the data-theme attribute dohc's
+ * own stylesheet switches on, so a panel can write `[data-theme='dark']`
+ * rules the same way dohc does.
  */
 export function applyDohcTheme(theme, root) {
     if (!isDohcTheme(theme)) {
@@ -54,8 +50,6 @@ export function applyDohcTheme(theme, root) {
         root.style.setProperty(name, value);
     }
     root.dataset.theme = theme.mode;
-    root.dataset.density = theme.density;
-    root.dataset.reduceMotion = String(theme.reduceMotion);
 }
 export class DohcSdkError extends Error {
     code;
@@ -883,7 +877,7 @@ export function createDohcClient(options = {}) {
             /**
              * The one line that makes a panel look native: it writes dohc's tokens
              * onto this document and keeps writing them when the user changes
-             * theme, density, or reduced motion. Panel CSS then uses the same
+             * theme. Panel CSS then uses the same
              * names dohc uses — `color: var(--dohc-ink)`.
              *
              * Returns a function that stops following. A panel that never calls

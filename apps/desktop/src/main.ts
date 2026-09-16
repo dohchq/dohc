@@ -8,6 +8,11 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
+import {
+  devToolsEnabled,
+  devToolsPreloadArguments,
+  registerDevToolsIpcHandlers,
+} from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
@@ -107,8 +112,9 @@ import {
 } from "./updates/electronUpdater";
 import { initialUpdateState } from "./updates/updateMachine";
 import {
+  createExitRounds,
   createQuitGuard,
-  createRecoveryChecker,
+  type ExitKind,
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
@@ -137,6 +143,7 @@ import {
   effectiveHome,
   findWorkspace,
   listWorkspaces,
+  markWorkspaceOpened,
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
@@ -349,8 +356,6 @@ import {
   startCliServer,
   type CliRunMessageLink,
 } from "./cli/cliServer";
-import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
-import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
   createShareHandoffIntentSlot,
@@ -685,13 +690,20 @@ function workspaceSummaries(): WorkspaceSummary[] {
   return workspaceSummariesFrom(listWorkspaces());
 }
 
+// Main's single dev-tools decision: gates the dev channels and is handed to
+// every renderer's preload, so a packaged app with the env var set shows
+// nothing.
+const devToolsGranted = devToolsEnabled(process.env, app);
+
 const desktopWindows = createDesktopWindows({
   app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, writeUserSettingsFile, createMainWindow,
+  preloadArguments: devToolsPreloadArguments(devToolsGranted),
   get pluginSurfaces(): { applyWebAppZoom(level: number): void } { return pluginSurfaces; },
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
+  get exitRounds() { return exitRounds; },
 });
 const {
   workspaceWindows,
@@ -796,7 +808,7 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
     cloudLogin().credentials(),
   );
   if (!loaded.current) {
-    throw new Error("Your dohc Cloud session changed. Try again.");
+    throw new Error("Your dohc Drive session changed. Try again.");
   }
   return loaded.credentials;
 }
@@ -837,7 +849,7 @@ function relayShareErrorCopy(
     case "secret_path":
       return "Secret files can't be shared.";
     case "recipient_not_found":
-      return "No dohc account matches that email. Ask them to sign in to dohc Cloud once, then share again.";
+      return "No dohc account matches that email. Ask them to sign in to dohc Drive once, then share again.";
     case "empty_selector":
       return "Pick a file, folder, or version to share.";
     case "invalid_path":
@@ -898,7 +910,7 @@ async function relayShareJsonWithCredentials<T>(
   | RelayShareRetainedNotFoundResult<T>
 > {
   if (!credentials.relayUrl) {
-    throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+    throw new Error("Reconnect dohc Drive with a sync relay URL, then try again.");
   }
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -921,7 +933,7 @@ async function relayShareJsonWithCredentials<T>(
         cloudLogin().invalidateSessionIf(expected),
     });
     throw new RelaySessionError(
-      "Your dohc Cloud session expired. Sign in again, then retry.",
+      "Your dohc Drive session expired. Sign in again, then retry.",
       { sessionWasCurrent },
     );
   }
@@ -991,7 +1003,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   pluginSurfaces: PluginSurfaces<WebContentsView>;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
   tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
-  workspaceChatLifecycle: ReturnType<typeof createWorkspaceChatLifecycle>;
   shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
   shareViewFiles: ShareViewFilesState;
   operationLanes: Map<string, Promise<void>>;
@@ -1052,7 +1063,6 @@ function createDesktopWorkspaceAuthorityState(
       allowOrigin: allowLoopbackFrameOrigin,
     }),
     tryInVersionSessions: createTryInVersionSessionsFor(binding),
-    workspaceChatLifecycle: createWorkspaceChatLifecycleFor(binding),
     shareMountCommands: createShareMountCommandsFor(binding),
     shareViewFiles: new ShareViewFilesState(),
     operationLanes: new Map(),
@@ -1133,7 +1143,6 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       ),
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
-      state.workspaceChatLifecycle.settled(),
       ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
@@ -1418,24 +1427,38 @@ function physicalWorkspaceRegistration(workspace: RegistryEntry) {
   };
 }
 
+// Register, then tell every window: a workspace created or attached from the
+// manager window must show up in the other windows' switchers at once.
 function registerPhysicalWorkspace(
   workspace: RegistryEntry,
 ): DesktopWorkspaceAuthorityBinding {
-  return workspaceAuthorities.registerBinding(
+  const binding = workspaceAuthorities.registerBinding(
     workspace,
     physicalWorkspaceRegistration(workspace),
   );
+  notifyRenderer();
+  return binding;
 }
 
 function registerReservedPhysicalWorkspace(
   reservation: WorkspaceAuthorityReservation,
   workspace: RegistryEntry,
 ): DesktopWorkspaceAuthorityBinding {
-  return workspaceAuthorities.registerReservedBinding(
+  const binding = workspaceAuthorities.registerReservedBinding(
     reservation,
     workspace,
     physicalWorkspaceRegistration(workspace),
   );
+  notifyRenderer();
+  return binding;
+}
+
+// Forget: close every handle the app holds on the workspace and drop its
+// registry row. The folder is untouched; opening it again re-adopts the
+// manifest and its identity.
+async function forgetWorkspace(workspaceId: string): Promise<void> {
+  await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
+  notifyRenderer();
 }
 
 function removePhysicalWorkspace(
@@ -2322,7 +2345,7 @@ async function revalidateChatWrite(
     store,
   );
   if (currentAuthorUserId !== authorUserId) {
-    throw new Error("Your dohc Cloud session changed. Try again.");
+    throw new Error("Your dohc Drive session changed. Try again.");
   }
 }
 
@@ -2621,10 +2644,7 @@ async function acquireDispatchRunActivity(
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
     const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
-    await lease.state.workspaceChatLifecycle.open(
-      current,
-      () => ensureWorkspaceActivityOpen(current),
-    );
+    await ensureWorkspaceActivityOpen(current);
     let released = false;
     return async () => {
       if (released) return;
@@ -2873,32 +2893,6 @@ function assertChatRunnerIdle(workspaceId: string): void {
   }
 }
 
-function createWorkspaceChatLifecycleFor(
-  binding: WorkspaceAuthorityBinding<RegistryEntry>,
-) {
-  return createWorkspaceChatLifecycle({
-    isReadOnly: (workspaceId) =>
-      withWorkspaceAttachment(
-        { workspaceId, attachmentId: binding.attachmentId },
-        () => Boolean(sharedViewOf(workspaceId)),
-      ) ?? true,
-    isReadyForMaintenance: (workspaceId) =>
-      withWorkspaceAttachment(
-        { workspaceId, attachmentId: binding.attachmentId },
-        () => findWorkspace(workspaceId)?.joinBootstrapPending !== true,
-      ) ?? false,
-    maintain: async (rootPath) => {
-      if (rootPath !== binding.canonicalRootPath) {
-        throw new Error("Chat maintenance received a stale workspace root.");
-      }
-      await ensureAgentsChatBlock(rootPath);
-    },
-    onError: (error) => {
-      console.error("[desktop] AGENTS.md chat description:", error);
-    },
-  });
-}
-
 async function openWorkspaceActivityForOperation(
   operation: DesktopWorkspaceOperation,
   options: WorkspaceActivityOpenOptions,
@@ -2914,11 +2908,8 @@ async function openWorkspaceActivityForOperation(
   operation.assertCurrent();
   const canonicalWorkspace = operation.workspace;
   operation.state.retainedActivity = true;
-  const result = await operation.state.workspaceChatLifecycle.open(
-    canonicalWorkspace,
-    () => ensureOpen(canonicalWorkspace, options),
-    options.afterActivityOpen,
-  );
+  const result = await ensureOpen(canonicalWorkspace, options);
+  await options.afterActivityOpen?.();
   operation.assertCurrent();
   void chatDispatchService.scanWorkspace(
     canonicalWorkspace.workspaceId,
@@ -3070,8 +3061,6 @@ const { startDesktopCliServer } = createDesktopCliServer({
   assertWritableWorkspace,
   chatRelayIdentityFor,
   currentCredentials: () => cachedCredentials,
-  workspaceAuthorities,
-  canonicalWorkspaceFor,
   startCliServer,
   stateDir,
   warmCredentialCache,
@@ -3321,7 +3310,7 @@ function createShareViewFilesForOperation(
       const credentials = cachedCredentials;
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
-          throw new Error("Sign in to dohc Cloud first.");
+          throw new Error("Sign in to dohc Drive first.");
         }
         return null;
       }
@@ -3615,7 +3604,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   windows: {
     create: () => trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
+      createMainWindow({
+        beforeRendererReload: prepareAfterRendererCrash,
+        preloadArguments: devToolsPreloadArguments(devToolsGranted),
+      }),
     ),
     whenLoaded: (window) => new Promise<void>((resolve) => {
       window.webContents.once("did-finish-load", resolve);
@@ -3624,7 +3616,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
     hasAny: () => BrowserWindow.getAllWindows().length !== 0,
     showOrCreate: showOrCreateMainWindow,
-    activate: sendWorkspaceActivated,
+    activate: (window, workspace) => {
+      void sendWorkspaceActivated(window, workspace).catch((error: unknown) =>
+        desktopWindows.reportActivationFailure(workspace, error),
+      );
+    },
   },
   workspaces: {
     openPath: openWorkspacePath,
@@ -3781,7 +3777,7 @@ async function openWorkspacePath(
   const rootPath = workspaceRootForOpenPath(path);
   if (!rootPath) return null;
   const workspace = await ensureWorkspaceRegistered(rootPath);
-  sendWorkspaceActivated(window, workspace);
+  await sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
 }
@@ -3832,73 +3828,57 @@ const senderWorkspaceAuthority = {
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
-// Quit-ask guard: shared by the before-quit interceptor and the IPC
-// handlers the renderer answers through. The state machine lives in
+// Exit rounds: every WORKSPACE window answers before a quit or an update
+// install, never the manager or the PDF export's hidden preload-less window,
+// which would answer nothing while the user sees the unresponsive dialog
+// over drafts that were fully available. The state machine lives in
 // quitGuard.ts so the busy-renderer promise is a tested fact: a silent ACK
-// window opens a MAIN-side dialog that names the loss — it never quits by
+// window opens a MAIN-side dialog that names the loss — it never proceeds by
 // itself.
-const quitGuard = createQuitGuard({
-  askRenderer: () => {
-    // The WORKSPACE window, never an arbitrary live one: the PDF export's
-    // hidden preload-less window would answer nothing and the user would get
-    // the unresponsive dialog over drafts that were fully available (#579
-    // review, r12).
-    liveWorkspaceWindow()?.webContents.send(CHANNELS.quitRequested);
+const exitRounds = createExitRounds<BrowserWindow>({
+  participants: () => workspaceWindows.allLive(),
+  participantId: (window) => window.webContents.id,
+  send: (window, message) => {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.exitRound, message);
   },
-  confirmForceQuit: async () => {
+  confirmProceed: async (kind: ExitKind) => {
+    const verb = kind === "quit" ? "Quitting" : "Installing";
     const { response } = await dialog.showMessageBox({
       type: "warning",
       message: "dohc isn't responding.",
-      detail:
-        "Quitting now can lose unsaved recovery text. Wait, or quit anyway.",
-      buttons: ["Wait", "Quit anyway"],
+      detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
+      buttons: ["Wait", kind === "quit" ? "Quit anyway" : "Install anyway"],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
     });
     return response === 1;
-  },
-  quit: () => app.quit(),
-  // The user chose "quit anyway" over a renderer that never answered. Destroy
-  // the workspace windows first: a destroyed window runs no beforeunload, so
-  // a renderer that wakes cannot veto the decision and open a second warning.
-  // App.quit() still follows, so the will-quit teardown —
-  // engine sessions, stores, WAL locks — runs exactly as for any other quit.
-  forceQuit: () => {
-    for (const window of workspaceWindows.allLive()) window.destroy();
-    app.quit();
   },
 });
 
-// Recovery re-check at the quit boundary. The renderer's
-// own check happens before it asks for the install, and a reopen can set an
-// edit aside in the gap between the two — separate processes, and a queued
-// render lands inside it. So main asks again here, and only then approves the
-// quit that quitAndInstall starts.
-//
-// A renderer that misses the ACK window may be busy, not dead, and no
-// deadline tells those apart. Silence therefore asks the
-// USER rather than refusing the install the user just asked for — the same
-// escalation the quit ask uses, with the loss named.
-const recoveryChecker = createRecoveryChecker({
-  send: (requestId) => {
-    const window = liveWorkspaceWindow();
-    if (!window) return false;
-    window.webContents.send(CHANNELS.recoveryCheckRequested, requestId);
-    return true;
-  },
-  confirmProceed: async () => {
-    const { response } = await dialog.showMessageBox({
-      type: "warning",
-      message: "dohc isn't responding.",
-      detail:
-        "Installing now can lose unsaved recovery text. Wait, or install anyway.",
-      buttons: ["Wait", "Install anyway"],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
+const quitGuard = createQuitGuard({
+  ask: () => {
+    const round = exitRounds.begin("quit");
+    if (!round.created) return;
+    void round.outcome.then((outcome) => {
+      if (outcome === "proceed") quitGuard.resume();
+      else if (outcome === "forced") quitGuard.force();
     });
-    return response === 1;
+  },
+  quit: () => app.quit(),
+  // The user chose "quit anyway" over a renderer that never answered. Destroy
+  // the windows that dialog named first: a destroyed window runs no
+  // beforeunload, so a renderer that wakes cannot veto the decision and open
+  // a second warning. A window the dialog did not cover answered clear for
+  // itself and unloads through its own guard, which can still stop the quit
+  // over a draft it captured since. App.quit() then follows, so the
+  // will-quit teardown — engine sessions, stores, WAL locks — runs exactly
+  // as for any other quit.
+  forceQuit: () => {
+    for (const window of exitRounds.takeForcedParticipants()) {
+      if (!window.isDestroyed()) window.destroy();
+    }
+    app.quit();
   },
 });
 
@@ -3907,7 +3887,7 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
     assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
-    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, recoveryChecker,
+    rememberChromeTheme, titleBarOverlayOptions, stepWindowZoom, exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
   });
   windowIpc.registerReload();
@@ -3923,9 +3903,28 @@ function registerIpcHandlers(): void {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    forgetWorkspace,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
+    openWorkspaceWindow: (workspace) =>
+      desktopWindows.openWorkspaceInWindow(workspace, (window) => {
+        const session = rendererWorkspaceSessions.current(window.webContents);
+        return session?.workspaceId === workspace.workspaceId;
+      }),
+    openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
+    closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
+  });
+
+  registerDevToolsIpcHandlers<IpcMainInvokeEvent>({
+    enabled: devToolsGranted,
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    listWorkspaces,
+    forgetWorkspace,
+    stateDir,
+    showItemInFolder: (path) => shell.showItemInFolder(path),
   });
 
   const workspaceFilesIpc = createWorkspaceFilesIpc<
@@ -4274,6 +4273,7 @@ function registerIpcHandlers(): void {
     setPreferredWorkspaceId: (workspaceId) => {
       desktopWindows.setPreferredWorkspaceId(workspaceId);
     },
+    markWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: (operation) =>
       openWorkspaceActivityForOperation(operation, {}, ensureWorkspaceActivityOpen),
@@ -4400,7 +4400,7 @@ function registerIpcHandlers(): void {
 
   registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, currentUpdateState, recoveryChecker, quitGuard,
+    assertTrustedSender, currentUpdateState, exitRounds, quitGuard,
     get autoUpdateController() { return autoUpdateController; },
   });
 

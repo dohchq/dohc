@@ -63,15 +63,13 @@ function applyTheme(theme) {
     document.documentElement.style.setProperty(name, value);
   }
   document.documentElement.dataset.theme = theme.mode;
-  document.documentElement.dataset.density = theme.density;
-  document.documentElement.dataset.reduceMotion = String(theme.reduceMotion);
   modeOutput.textContent = theme.mode;
   inkOutput.textContent = theme.tokens["--dohc-ink"];
 }
 
 // Listening starts before the first read, so a theme change during startup is
 // applied rather than lost. dohc pushes one of these whenever the user
-// changes theme, density, or reduced motion.
+// changes theme.
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent || event.origin !== responseOrigin) return;
   const message = event.data;

@@ -153,7 +153,7 @@ describe("ActivityBar optional utility actions", () => {
 
     expect(screen.getByTestId("activity-cloud").tagName).toBe("SPAN");
     expect(screen.getByTestId("activity-settings").tagName).toBe("SPAN");
-    expect(screen.queryByRole("button", { name: "dohc Cloud" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "dohc Drive" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
   });
 
@@ -173,7 +173,7 @@ describe("ActivityBar optional utility actions", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "dohc Cloud" }));
+    fireEvent.click(screen.getByRole("button", { name: "dohc Drive" }));
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(onOpenCloud).toHaveBeenCalledOnce();
     expect(onOpenSettings).toHaveBeenCalledOnce();

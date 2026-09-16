@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { configure } from "@testing-library/dom";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
@@ -20,6 +20,7 @@ const bridgeMock = {
   openSharedView: vi.fn(),
   mountShare: vi.fn(),
   pickWorkspaceRoot: vi.fn(),
+  getDefaultShareRoot: vi.fn(),
   createLocalWorkspace: vi.fn(),
   createWorkspaceFile: vi.fn(),
   createWorkspaceFolder: vi.fn(),
@@ -50,6 +51,9 @@ beforeEach(() => {
     email: "recipient@dohc.test",
   });
   bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/shared");
+  bridgeMock.getDefaultShareRoot.mockImplementation(async ({ shareId }: { shareId: string }) =>
+    `/home/ice/dohc/shared/${shareId}`,
+  );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
   bridgeMock.mountShare.mockResolvedValue({
     workspace: { ...SHARED_VIEW, shareView: undefined },
@@ -173,7 +177,7 @@ describe("OpenSharedView", () => {
     expect(onMounted).not.toHaveBeenCalled();
   });
 
-  it("opens a pre-resolved received share only after the first-run destination is confirmed", async () => {
+  it("opens a pre-resolved received share into its suggested first-run folder", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
     const onOpened = vi.fn();
@@ -189,9 +193,7 @@ describe("OpenSharedView", () => {
       />,
     );
 
-    expect(
-      (await screen.findByTestId("open-share-start") as HTMLButtonElement).disabled,
-    ).toBe(true);
+    await screen.findByTestId("open-share-start");
     expect(screen.queryByTestId("open-share-code")).toBeNull();
     expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
     expect(bridgeMock.pickWorkspaceRoot).not.toHaveBeenCalled();
@@ -203,8 +205,8 @@ describe("OpenSharedView", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridgeMock.writeWorkspaceAsset).not.toHaveBeenCalled();
 
-    await user.click(screen.getByTestId("open-share-choose-folder"));
-    await screen.findByText("/home/ice/dohc/shared");
+    await screen.findByText("/home/ice/dohc/shared/share-1");
+    expect(bridgeMock.pickWorkspaceRoot).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("open-share-start"));
@@ -212,7 +214,7 @@ describe("OpenSharedView", () => {
     await waitFor(() =>
       expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
         shareCode: "ordinary-received-share-code",
-        rootPath: "/home/ice/dohc/shared",
+        rootPath: "/home/ice/dohc/shared/share-1",
       }),
     );
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
@@ -370,16 +372,99 @@ describe("OpenSharedView", () => {
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
-  it("stays disabled until both a code and a folder exist", async () => {
+  it("suggests a folder for the share so the person need not pick one", async () => {
     const user = userEvent.setup();
     render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
     const button = (await screen.findByTestId("open-share-start")) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    await user.type(screen.getByTestId("open-share-code"), "dohc-share:x:http://r.test");
-    expect(button.disabled).toBe(true);
+    await user.type(screen.getByTestId("open-share-code"), "dohc-share:trip:http://r.test");
+    await screen.findByText("/home/ice/dohc/shared/trip");
+    await waitFor(() => expect(button.disabled).toBe(false));
+    expect(bridgeMock.pickWorkspaceRoot).not.toHaveBeenCalled();
+    // A chosen folder wins over the suggestion.
     await user.click(screen.getByTestId("open-share-choose-folder"));
     await screen.findByText("/home/ice/dohc/shared");
-    expect(button.disabled).toBe(false);
+    await user.click(button);
+    await waitFor(() =>
+      expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
+        shareCode: "dohc-share:trip:http://r.test",
+        rootPath: "/home/ice/dohc/shared",
+      }),
+    );
+  });
+
+  it("never opens share B into the folder suggested for share A", async () => {
+    const rootA = deferred<string>();
+    const rootB = deferred<string>();
+    bridgeMock.getDefaultShareRoot.mockImplementation(({ shareId }: { shareId: string }) =>
+      shareId === "share-a" ? rootA.promise : rootB.promise,
+    );
+    const user = userEvent.setup();
+    render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
+    const input = await screen.findByTestId("open-share-code");
+    const button = screen.getByTestId("open-share-start") as HTMLButtonElement;
+
+    fireEvent.change(input, { target: { value: "dohc-share:share-a:http://r.test" } });
+    await waitFor(() =>
+      expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({ shareId: "share-a" }),
+    );
+    fireEvent.change(input, { target: { value: "dohc-share:share-b:http://r.test" } });
+    await waitFor(() =>
+      expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({ shareId: "share-b" }),
+    );
+
+    // A's answer lands while B is pending: nothing to open into yet.
+    await act(async () => rootA.resolve("/home/ice/dohc/shared/share-a"));
+    expect(screen.queryByText("/home/ice/dohc/shared/share-a")).toBeNull();
+    expect(button.disabled).toBe(true);
+
+    await act(async () => rootB.resolve("/home/ice/dohc/shared/share-b"));
+    await screen.findByText("/home/ice/dohc/shared/share-b");
+    await user.click(button);
+    await waitFor(() =>
+      expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
+        shareCode: "dohc-share:share-b:http://r.test",
+        rootPath: "/home/ice/dohc/shared/share-b",
+      }),
+    );
+  });
+
+  it("drops a pending suggestion when the code turns invalid or the mode changes", async () => {
+    const rootA = deferred<string>();
+    bridgeMock.getDefaultShareRoot.mockReturnValue(rootA.promise);
+    const user = userEvent.setup();
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+    await user.click(await screen.findByTestId("open-share-mode-separate"));
+    const input = screen.getByTestId("open-share-code");
+    const button = screen.getByTestId("open-share-start") as HTMLButtonElement;
+
+    fireEvent.change(input, { target: { value: "dohc-share:share-a:http://r.test" } });
+    await waitFor(() => expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledTimes(1));
+    fireEvent.change(input, { target: { value: "dohc-share:share-a" } });
+    await act(async () => rootA.resolve("/home/ice/dohc/shared/share-a"));
+    expect(screen.queryByText("/home/ice/dohc/shared/share-a")).toBeNull();
+    expect(button.disabled).toBe(true);
+
+    // A second in-flight answer must not survive a switch to mount mode.
+    const rootAgain = deferred<string>();
+    bridgeMock.getDefaultShareRoot.mockReturnValue(rootAgain.promise);
+    fireEvent.change(input, { target: { value: "dohc-share:share-a:http://r.test" } });
+    await waitFor(() => expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("open-share-mode-mount"));
+    await act(async () => rootAgain.resolve("/home/ice/dohc/shared/share-a"));
+    // Back to separate: a fresh request, still pending, so the answer that
+    // landed during mount mode must not show.
+    bridgeMock.getDefaultShareRoot.mockReturnValue(deferred<string>().promise);
+    await user.click(screen.getByTestId("open-share-mode-separate"));
+    await waitFor(() => expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("/home/ice/dohc/shared/share-a")).toBeNull();
+    expect(button.disabled).toBe(true);
   });
 
   it("surfaces the handler's honest error copy, stripped of IPC noise", async () => {
@@ -404,12 +489,19 @@ describe("OpenSharedView", () => {
     );
   });
 
-  it("gates on a signed-in dohc Cloud session first", async () => {
+  it("asks for sign-in only when Open is pressed without a session", async () => {
+    const user = userEvent.setup();
     bridgeMock.cloudStatus.mockResolvedValue({ connected: false });
     render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
-    await screen.findByText(
-      "Shares are addressed to your dohc Cloud account — sign in first, then paste the code you received.",
+    await user.type(
+      await screen.findByTestId("open-share-code"),
+      "dohc-share:share-1:http://localhost:1788",
     );
-    expect(screen.queryByTestId("open-share-code")).toBeNull();
+    await screen.findByText("/home/ice/dohc/shared/share-1");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    await user.click(screen.getByTestId("open-share-start"));
+    const panel = await screen.findByTestId("cloud-sync-panel");
+    expect(panel.parentElement).toBe(document.activeElement);
+    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 });

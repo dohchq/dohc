@@ -8,7 +8,8 @@ import {
   type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { DesktopFirstRun } from "./DesktopFirstRun";
+import { WorkspaceManager } from "./WorkspaceManager";
+import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
 export function DesktopRoot() {
@@ -16,6 +17,7 @@ export function DesktopRoot() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const isManagerWindow = bridge().windowRole === "manager";
   const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
     null,
   );
@@ -32,15 +34,25 @@ export function DesktopRoot() {
       await bridge().getWorkspaceRegistry(),
     );
     if (request < committedRegistryRequest.current) return registry.workspaces;
+    // Whichever response commits first is startup: it may pick the opening
+    // workspace, since the mount read below loses if this one wins.
+    const startup = committedRegistryRequest.current === 0;
     committedRegistryRequest.current = request;
     setWorkspaces(registry.workspaces);
-    setWorkspace((current) =>
-      current
-        ? (registry.workspaces.find(
-            (candidate) => candidate.workspaceId === current.workspaceId,
-          ) ?? current)
-        : (registry.workspaces[0] ?? null),
-    );
+    // An open workspace that left the registry (forgotten, or its binding
+    // retired) must not keep the shell alive with nothing to open: drop to
+    // first run, or to whichever workspace remains. Once first run is
+    // visible, a newly registered workspace is only listed; a join or share
+    // still populating it activates it when it finishes.
+    setWorkspace((current) => {
+      if (startup) return current ?? registry.workspaces[0] ?? null;
+      if (!current || registry.workspaces.length === 0) return null;
+      return (
+        registry.workspaces.find((candidate) => candidate.workspaceId === current.workspaceId) ??
+        registry.workspaces[0] ??
+        null
+      );
+    });
     setLoadError(null);
     setLoaded(true);
     return registry.workspaces;
@@ -186,20 +198,50 @@ export function DesktopRoot() {
       </div>
     );
   }
-  if (!workspace) {
+  if (isManagerWindow) {
+    // The manager window: pick a workspace and it opens in its own window,
+    // then this one closes. Nothing else ever renders here.
     return (
-      <DesktopFirstRun
+      <WorkspaceManager
+        workspaces={workspaces}
+        current={null}
         handoffStatus={shareHandoffStatus}
         onDismissShareHandoff={dismissShareHandoff}
         onShareHandoffOpened={dismissShareHandoff}
-        onWorkspaceReady={(created) => {
-          setWorkspaces([created]);
-          setWorkspace(created);
-        }}
+        onForgot={refreshWorkspaceRegistry}
+        onOpenWorkspace={(next) =>
+          bridge()
+            .openWorkspaceWindow({ workspaceId: next.workspaceId })
+            .then(() => bridge().closeThisWindow())
+        }
       />
     );
   }
+  if (!workspace) {
+    return (
+      <>
+        <WorkspaceManager
+          workspaces={workspaces}
+          current={null}
+          handoffStatus={shareHandoffStatus}
+          onDismissShareHandoff={dismissShareHandoff}
+          onShareHandoffOpened={dismissShareHandoff}
+          onForgot={refreshWorkspaceRegistry}
+          onOpenWorkspace={(next) => {
+            setWorkspaces((known) =>
+              known.some((entry) => entry.workspaceId === next.workspaceId)
+                ? known
+                : [...known, next],
+            );
+            setWorkspace(next);
+          }}
+        />
+        <DevPanel />
+      </>
+    );
+  }
   return (
+    <>
     <DesktopWorkspaceShell
       // Remount on switch: file list and selection are workspace-local and
       // must never leak from workspace A into workspace B.
@@ -211,6 +253,7 @@ export function DesktopRoot() {
       onDismissShareHandoff={dismissShareHandoff}
       onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
+      onManageWorkspaces={() => bridge().openWorkspaceManager()}
       onSwitchWorkspace={(next) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list
         // didn't know yet — keep the switcher list complete.
@@ -222,5 +265,7 @@ export function DesktopRoot() {
         setWorkspace(next);
       }}
     />
+    <DevPanel workspaceId={workspace.workspaceId} />
+    </>
   );
 }
