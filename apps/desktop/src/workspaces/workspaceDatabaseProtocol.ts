@@ -5,8 +5,16 @@ import type {
   DatabasePageView,
   DatabaseSnapshotView,
 } from "./workspaceDatabaseTypes.ts";
+import type { ImportDataInput } from "@dohc/sqlite-worker";
+
+export interface DatabaseImportResult {
+  bytes: Uint8Array;
+  rowCount: number;
+  tableName: string;
+}
 
 export type WorkspaceDatabaseWorkerRequest =
+  | { id: number; kind: "import-data"; input: ImportDataInput }
   | {
       id: number;
       kind: "read-path";
@@ -48,6 +56,7 @@ export type WorkspaceDatabaseWorkerRequest =
     };
 
 export type WorkspaceDatabaseWorkerResult =
+  | DatabaseImportResult
   | DatabaseSnapshotView
   | DatabasePageView
   | DatabaseEditResult;

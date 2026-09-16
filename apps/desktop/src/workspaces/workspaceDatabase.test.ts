@@ -8,6 +8,7 @@ import {
   importToDatabase,
   readDatabaseSnapshot,
   readPreparedDatabaseSnapshot,
+  createWorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
 
@@ -29,6 +30,20 @@ beforeEach(async () => {
 });
 
 describe("importToDatabase", () => {
+  it("does not publish imported bytes after the operation is cancelled", async () => {
+    const abort = new AbortController();
+    const worker = createWorkspaceDatabaseWorkerOwner({
+      onRequestStarted: (request) => {
+        if (request.kind === "import-data") abort.abort();
+      },
+    });
+    try {
+      await expect(importToDatabase(root, WALLET_SOURCE, "cancelled.sqlite", "transactions", {
+        worker, signal: abort.signal,
+      })).rejects.toThrow("Database import was cancelled.");
+      await expect(readFile(join(root, "cancelled.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await worker.dispose(); }
+  });
   it("refuses to replace an existing database (edits are never silently dropped)", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await applyDatabaseEdit(

@@ -57,6 +57,11 @@ const UPDATE: DatabaseEdit = {
   payload: { value: "changed" },
 };
 
+const IMPORT_SOURCE = {
+  name: "data.csv", mediaType: "text/csv", tableName: "imported data",
+  body: 'id,title,amount\nr1,"one,two",4.5\nr2,"line one\nline two",7',
+};
+
 function owner(
   options: Parameters<typeof createWorkspaceDatabaseWorkerOwner>[0] = {},
 ): WorkspaceDatabaseWorkerOwner {
@@ -64,6 +69,47 @@ function owner(
   owners.add(created);
   return created;
 }
+
+describe("database import worker", () => {
+  it("materializes complete rows and normalized schema without returning a duplicate snapshot", async () => {
+    const worker = owner();
+    const result = await worker.importData(IMPORT_SOURCE);
+    expect(Object.keys(result).sort()).toEqual(["bytes", "rowCount", "tableName"]);
+    expect(result).toMatchObject({ rowCount: 2, tableName: "imported_data" });
+    const snapshot = await worker.readBytes({ bytes: result.bytes, path: "import.sqlite" });
+    expect(snapshot.tables[0]?.rows).toEqual([
+      expect.objectContaining({ id: "r1", title: "one,two", amount: 4.5 }),
+      expect.objectContaining({ id: "r2", title: "line one\nline two", amount: 7 }),
+    ]);
+  });
+
+  it("preserves import errors and can handle another request after rejection", async () => {
+    const worker = owner();
+    await expect(worker.importData({ ...IMPORT_SOURCE, body: "id,title" }))
+      .rejects.toThrow("Import failed (empty-import-source): Import source did not contain any rows.");
+    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
+  });
+
+  it("cancels an import queued behind another request before it starts", async () => {
+    const started: string[] = [];
+    const worker = owner({ onRequestStarted: (request) => started.push(request.kind) });
+    const first = worker.importData(IMPORT_SOURCE);
+    const abort = new AbortController();
+    const cancelled = worker.importData(IMPORT_SOURCE, abort.signal);
+    abort.abort();
+    await expect(cancelled).rejects.toThrow("Database import was cancelled.");
+    await first;
+    expect(started).toEqual(["import-data"]);
+  });
+
+  it("drains a started import on cancellation and remains usable", async () => {
+    const abort = new AbortController();
+    const worker = owner({ onRequestStarted: () => abort.abort() });
+    await expect(worker.importData(IMPORT_SOURCE, abort.signal))
+      .rejects.toThrow("Database import was cancelled.");
+    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
+  });
+});
 
 afterEach(async () => {
   await Promise.all([...owners].map((created) => created.dispose()));
