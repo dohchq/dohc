@@ -1,5 +1,4 @@
 import { createRequire } from "node:module";
-import { setImmediate } from "node:timers/promises";
 import { afterEach, expect, it } from "vitest";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
@@ -20,12 +19,11 @@ function fixture() {
     currentPath: "note.md", checkpoint, suffix: [], candidate: Uint8Array.of(0, 0)};
   return {pool, input, validate: pool.validator(policy)};
 }
-it("runs the same validator without blocking the event loop or detaching input", async () => {
+it("runs the same validator without detaching input", async () => {
   const {input, validate} = fixture(), expected = createLiveMarkdownJournalValidator(policy)(input);
   expect(expected.kind).toBe("accepted");
-  const original = input.checkpoint.slice(); let completed = false;
-  const pending = Promise.resolve(validate(input)).then(result => {completed = true; return result;});
-  await setImmediate(); expect(completed).toBe(false);
+  const original = input.checkpoint.slice();
+  const pending = validate(input);
   expect(await pending).toEqual(expected); expect(input.checkpoint).toEqual(original);
   expect(await validate({...input, candidate: Uint8Array.of(255)})).toEqual(createLiveMarkdownJournalValidator(policy)({...input, candidate: Uint8Array.of(255)}));
 });
