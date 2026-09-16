@@ -4,6 +4,7 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
+import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -110,7 +111,7 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     name: string;
     kind?: "channel" | "dm" | "agent";
-    type?: "posts" | "chat" | "both";
+    type?: ChatChannelType;
     purpose?: string;
     folderPath?: string;
   }): Promise<ChatChannel> {
@@ -204,7 +205,7 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     channelId: string;
     title?: string;
-    lane?: "posts" | "chat";
+    lane?: ChatThreadLane;
     author: ChatActor;
     authorUserId?: string;
     origin?: "cli";
@@ -246,7 +247,7 @@ export class ChatsLiveAdapter {
   async listChannelThreads(input: {
     workspaceId: string;
     channelId: string;
-    lane?: "posts" | "chat";
+    lane?: ChatThreadLane;
   }): Promise<ChatChannelThreadSummary[]> {
     this.assertWorkspace(input.workspaceId);
     const rows: ChatChannelThreadSummary[] = [];

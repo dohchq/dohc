@@ -3,6 +3,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
+import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -122,7 +123,7 @@ type ChatChannelCreateParams = ChatsJsonObject & {
   channelId: string;
   name: string;
   kind: "channel" | "dm" | "agent";
-  type?: "posts" | "chat" | "both";
+  type?: ChatChannelType;
   purpose?: string;
   folderPath?: string;
   nowMs?: number;
@@ -138,7 +139,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   title?: string;
-  lane?: "posts" | "chat";
+  lane?: ChatThreadLane;
   authorKind: "human" | "agent";
   authorDisplayName: string;
   authorUserId?: string;
@@ -158,7 +159,7 @@ type ChatThreadCreateParams = ChatsJsonObject & {
 type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
 type ChatThreadsListForChannelParams = ChatPageParams & {
   channelId: string;
-  lane?: "posts" | "chat";
+  lane?: ChatThreadLane;
 };
 type ChatThreadParams = ChatsJsonObject & { threadId: string };
 type ChatThreadProjectionParams = ChatThreadParams & {
