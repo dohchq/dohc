@@ -4,6 +4,7 @@ import { backtickFence, serializeRichdocBody } from '@dohc/ydoc-projection'
 import { CodeBlock } from '@tiptap/extension-code-block'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
+import { Marked, type marked } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { TaskList } from '@tiptap/extension-list'
@@ -54,6 +55,7 @@ const extensions: AnyExtension[] = [
   TableKit,
 ]
 const markdownManager = new MarkdownManager({
+  marked: new Marked() as unknown as typeof marked,
   extensions,
   indentation: { style: 'space', size: 2 },
 })

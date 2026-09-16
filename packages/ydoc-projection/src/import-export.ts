@@ -5,6 +5,7 @@ import type {
 } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
+import { Marked, type marked } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
   renderTableToMarkdown,
@@ -226,6 +227,7 @@ const extensions: AnyExtension[] = [
   TableRow,
 ]
 const markdownManager = new MarkdownManager({
+  marked: new Marked() as unknown as typeof marked,
   extensions,
   indentation: { style: 'space', size: 2 },
 })
