@@ -8,6 +8,7 @@ import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
   filterOpForShare,
+  filterProposedChangeForShare,
   isLiveEditShareSelector,
   parseChatThreadTopic,
   parseStoredShareSelectorJson,
@@ -795,6 +796,12 @@ describe("chat-channel share op filter", () => {
     // group whose channel the log has not named yet is the same.
     expect(presenceTopicAllowedForShare(dmGroup, "wire-dm", dmResolver)).toBe(false);
     expect(presenceTopicAllowedForShare(dmGroup, "team/a.md", dmResolver)).toBe(false);
+    expect(
+      filterProposedChangeForShare(dmGroup, {
+        basedOnPath: null, basedOnBlobSha256: null, operation: "write", afterPath: "team/new.md",
+        afterBlobSha256: "b".repeat(64), afterContentKind: "text", afterByteLength: 3, recordedAtMs: 5,
+      }, dmResolver).allowed,
+    ).toBe(false);
     const unknownGroup = { ...dmGroup, channelWireId: "wire-unknown" };
     expect(presenceTopicAllowedForShare(unknownGroup, "team/a.md", dmResolver)).toBe(false);
     expect(

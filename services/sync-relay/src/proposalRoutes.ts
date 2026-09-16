@@ -74,6 +74,7 @@ export function createProposalRoutes(
     | "appendLogBatch"
     | "workspaceIsOwnedBy"
     | "settleShareProposalInTransaction"
+    | "findChannelCreateKind"
   >,
   nowMs: () => number,
   newId: () => string,
@@ -209,7 +210,9 @@ export function createProposalRoutes(
       const touchedPaths = new Set<string>();
       const referencedShas = new Set<string>();
       for (const [index, raw] of (input.ops as unknown[]).entries()) {
-        const decision = filterProposedChangeForShare(share.selector, raw);
+        const decision = filterProposedChangeForShare(share.selector, raw, {
+          channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
+        });
         if (!decision.allowed) throw relayError("share_op_rejected");
         const change = decision.change;
         const paths = new Set(

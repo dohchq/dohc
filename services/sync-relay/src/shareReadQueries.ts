@@ -104,6 +104,7 @@ export function createShareReadQueries(
     chatResolver: ChatShareThreadResolver,
   ): unknown | null => {
     if (row.opKind !== "moment.append") return null;
+    if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolver)) return null;
     const fileSelector = fileSideOf(selector);
     if (!fileSelector) return null;
     selector = fileSelector;

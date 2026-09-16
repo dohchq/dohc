@@ -1252,11 +1252,13 @@ export type ProposedChangeDecision =
 export function filterProposedChangeForShare(
   selector: AnyShareSelector,
   raw: unknown,
+  chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): ProposedChangeDecision {
   // A chat-channel grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
   if (isGroupSelector(selector)) {
-    return filterProposedChangeForShare(fileHalfOfGroup(selector), raw);
+    if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
+    return filterProposedChangeForShare(fileHalfOfGroup(selector), raw, chat);
   }
   // Changes follow PATHS. A version share names none, so it proposes nothing.
   if (selector.paths.length === 0) return { allowed: false };

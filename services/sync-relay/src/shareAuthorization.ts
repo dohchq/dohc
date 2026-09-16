@@ -100,6 +100,11 @@ export function selectorTargetsBlockedChannel(
 ): boolean {
   if (!("kind" in selector)) return false;
   const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
+  // A group is a grant on an ordinary channel and its folder. Whatever the
+  // channel later resolves as, anything else authorizes nothing: a direct
+  // message has no folder, and a grant minted before the log named the
+  // channel must not follow it into one.
+  if (selector.kind === "group") return channelKind !== "channel";
   return channelKind === "agent" || channelKind === null;
 }
 
