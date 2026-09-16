@@ -1,5 +1,5 @@
 use dohc_engine_domain::{
-    ChannelGroup, ChatActorKind, ChatChannelKind, CreateFileThread, SendMessage,
+    ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, SendMessage,
     StartChannelThread,
 };
 use dohc_engine_runtime::{CancellationToken, RuntimeError, WorkspaceSupervisor};
@@ -31,6 +31,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         thread_id: "existing-thread".to_owned(),
         message_id: "opening-message".to_owned(),
         title: Some("Project discussion".to_owned()),
+        lane: ChatThreadLane::Posts,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_user_id: Some("user-ada".to_owned()),

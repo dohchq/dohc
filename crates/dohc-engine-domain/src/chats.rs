@@ -258,6 +258,37 @@ pub struct ChatChannelSummary {
     pub unread_count: i64,
 }
 
+/// Which lane a channel thread sits in. The posts lane is the feed; the
+/// chat lane is the group's one running conversation, kept out of the
+/// feed and the post list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatThreadLane {
+    #[default]
+    Posts,
+    Chat,
+}
+
+impl ChatThreadLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatThreadLane::Posts => "posts",
+            ChatThreadLane::Chat => "chat",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "posts" => Some(ChatThreadLane::Posts),
+            "chat" => Some(ChatThreadLane::Chat),
+            _ => None,
+        }
+    }
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        Self::parse(raw).ok_or(DomainError::StateCorrupt {
+            reason: "chat thread has an unknown lane",
+        })
+    }
+}
+
 /// A durable chat thread row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatThread {
@@ -266,6 +297,7 @@ pub struct ChatThread {
     pub title: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub lane: ChatThreadLane,
     pub channel_id: Option<String>,
     pub linked_object_id: Option<String>,
     pub linked_path_hint: Option<String>,
@@ -742,6 +774,7 @@ pub struct StartChannelThread {
     pub thread_id: String,
     pub message_id: String,
     pub title: Option<String>,
+    pub lane: ChatThreadLane,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
     pub author_user_id: Option<String>,
@@ -2220,6 +2253,7 @@ impl<'a> LinkedChatStore<'a> {
                 title: title_c.clone(),
                 created_at_ms: input.now_ms,
                 updated_at_ms: input.now_ms,
+                lane: ChatThreadLane::Posts,
                 channel_id: None,
                 linked_object_id: Some(object_id_c.clone()),
                 linked_path_hint: path_hint_c.clone(),
@@ -2322,9 +2356,16 @@ impl<'a> LinkedChatStore<'a> {
             tx.execute(
                 "INSERT INTO chat_threads \
                  (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
-                  linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, NULL, NULL, ?5)",
-                params![input.workspace_id, input.thread_id, title_c, now, channel.channel_id],
+                  linked_object_id, linked_path_hint, linked_at_ms, channel_id, lane) \
+                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, NULL, NULL, ?5, ?6)",
+                params![
+                    input.workspace_id,
+                    input.thread_id,
+                    title_c,
+                    now,
+                    channel.channel_id,
+                    input.lane.as_str()
+                ],
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
@@ -2441,6 +2482,7 @@ impl<'a> LinkedChatStore<'a> {
                 title: display_title,
                 created_at_ms: now,
                 updated_at_ms: now,
+                lane: input.lane,
                 channel_id: Some(channel.channel_id.clone()),
                 linked_object_id: None,
                 linked_path_hint: None,
@@ -2864,7 +2906,7 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-                     t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
+                     t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, t.lane, \
                      (SELECT m.body FROM chat_messages m \
                       WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
                       ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
@@ -2889,6 +2931,25 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
+        self.list_channel_threads_in_lane(
+            workspace_id,
+            channel_id,
+            ChatThreadLane::Posts,
+            after,
+            limit,
+        )
+    }
+
+    /// [`Self::list_channel_threads`] for one lane. The posts lane is the
+    /// group's feed; the chat lane holds its running conversation.
+    pub fn list_channel_threads_in_lane(
+        &self,
+        workspace_id: &str,
+        channel_id: &str,
+        lane: ChatThreadLane,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
         validate_chat_page_limit(limit)?;
         let (has_after, after_updated_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
@@ -2901,7 +2962,7 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                                 t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                                t.linked_path_hint, t.linked_at_ms, \
+                                t.linked_path_hint, t.linked_at_ms, t.lane, \
                                 (SELECT m.body FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id \
                                    AND m.thread_id = t.thread_id \
@@ -2926,7 +2987,7 @@ impl<'a> LinkedChatStore<'a> {
                                    AND m.thread_id = t.thread_id \
                                  ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
                          FROM chat_threads t \
-                         WHERE t.workspace_id = ?1 AND t.channel_id = ?2 \
+                         WHERE t.workspace_id = ?1 AND t.channel_id = ?2 AND t.lane = ?7 \
                            AND (?3 = 0 OR t.updated_at_ms < ?4 \
                              OR (t.updated_at_ms = ?4 AND t.thread_id < ?5)) \
                          ORDER BY t.updated_at_ms DESC, t.thread_id DESC LIMIT ?6",
@@ -2940,14 +3001,15 @@ impl<'a> LinkedChatStore<'a> {
                             has_after,
                             after_updated_at_ms,
                             after_thread_id,
-                            limit
+                            limit,
+                            lane.as_str()
                         ],
                         |row| {
                             let thread = map_thread_row(row)?;
-                            let message_count: i64 = row.get(11)?;
-                            let stored_read_sequence: Option<i64> = row.get(12)?;
-                            let open_decision_count: i64 = row.get(13)?;
-                            let opening_message_id: Option<String> = row.get(14)?;
+                            let message_count: i64 = row.get(12)?;
+                            let stored_read_sequence: Option<i64> = row.get(13)?;
+                            let open_decision_count: i64 = row.get(14)?;
+                            let opening_message_id: Option<String> = row.get(15)?;
                             Ok(thread.map(|thread| {
                                 (
                                     thread,
@@ -3072,7 +3134,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                             t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                            t.linked_path_hint, t.linked_at_ms, \
+                            t.linked_path_hint, t.linked_at_ms, t.lane, \
                             (SELECT m.body FROM chat_messages m \
                              WHERE m.workspace_id = t.workspace_id \
                                AND m.thread_id = t.thread_id \
@@ -3417,7 +3479,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                             t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                            t.linked_path_hint, t.linked_at_ms, \
+                            t.linked_path_hint, t.linked_at_ms, t.lane, \
                             (SELECT m.body FROM chat_messages m \
                              WHERE m.workspace_id = t.workspace_id \
                                AND m.thread_id = t.thread_id \
@@ -3460,8 +3522,8 @@ impl<'a> LinkedChatStore<'a> {
                     ],
                     |row| {
                         let thread = map_thread_row(row)?;
-                        let latest_created_at_ms = row.get(11)?;
-                        let latest_message_id = row.get(12)?;
+                        let latest_created_at_ms = row.get(12)?;
+                        let latest_message_id = row.get(13)?;
                         Ok(thread.map(|thread| AgentUnreadThreadRow {
                             thread,
                             latest_created_at_ms,
@@ -4809,6 +4871,7 @@ FROM chat_messages m
 JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
 LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
 WHERE m.workspace_id = ?1
+  AND t.lane = 'posts'
   AND (t.channel_id IS NULL OR c.kind <> 'dm')
   AND (t.channel_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM chat_channel_placeholders placeholder
@@ -4845,6 +4908,7 @@ FROM chat_messages m
 JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
 LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
 WHERE m.workspace_id = ?1 AND m.message_id = ?3 AND m.created_at_ms = ?4
+  AND t.lane = 'posts'
   AND (t.channel_id IS NULL OR c.kind <> 'dm')
   AND (t.channel_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM chat_channel_placeholders placeholder
@@ -5546,7 +5610,7 @@ fn require_thread(
 ) -> Result<ChatThread, DomainError> {
     conn.query_row(
         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-         t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
+         t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, t.lane, \
          (SELECT m.body FROM chat_messages m \
           WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
           ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
@@ -5982,17 +6046,18 @@ fn ensure_thread_structure_exported(
         return Ok(());
     }
 
-    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms): (
+    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane): (
         String,
         i64,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<i64>,
+        String,
     ) = tx
         .query_row(
             "SELECT title, created_at_ms, channel_id, linked_object_id, \
-                    linked_path_hint, linked_at_ms \
+                    linked_path_hint, linked_at_ms, lane \
              FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
             params![workspace_id, thread_id],
             |row| {
@@ -6003,6 +6068,7 @@ fn ensure_thread_structure_exported(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -6012,6 +6078,7 @@ fn ensure_thread_structure_exported(
         "threadId": thread_id,
         "title": title,
         "createdAtMs": created_at_ms,
+        "lane": lane,
     });
     let payload_object = payload
         .as_object_mut()
@@ -6504,14 +6571,22 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
     }))
 }
 
+/// Column layout every thread select shares: 0..=8 the row, 9 `lane`,
+/// 10 the opening body, 11 whether the owning channel exists. Callers
+/// that add aggregates start at 12.
 fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread, DomainError>> {
     let stored_title: String = row.get(2)?;
-    let first_body: Option<String> = row.get(9)?;
+    let lane_str: String = row.get(9)?;
+    let first_body: Option<String> = row.get(10)?;
     let mut channel_id: Option<String> = row.get(5)?;
     let mut linked_object_id: Option<String> = row.get(6)?;
     let mut linked_path_hint: Option<String> = row.get(7)?;
     let mut linked_at_ms: Option<i64> = row.get(8)?;
-    let channel_owner_exists: i64 = row.get(10)?;
+    let channel_owner_exists: i64 = row.get(11)?;
+    let lane = match ChatThreadLane::from_db(&lane_str) {
+        Ok(lane) => lane,
+        Err(error) => return Ok(Err(error)),
+    };
     let created_at_ms: i64 = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
     let has_linked_owner = linked_object_id
@@ -6544,6 +6619,7 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread
         title: chat_thread_display_title(&stored_title, first_body.as_deref()),
         created_at_ms,
         updated_at_ms,
+        lane,
         channel_id,
         linked_object_id,
         linked_path_hint,

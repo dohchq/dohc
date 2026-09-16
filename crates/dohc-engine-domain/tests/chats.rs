@@ -7,10 +7,10 @@
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
-    ChatChannelKind, ChatChannelType, ChatReactionState, FeedCursorValue, FollowState,
-    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput, NoFaults,
-    PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
+    ChatChannelKind, ChatChannelType, ChatReactionState, ChatThreadLane, FeedCursorValue,
+    FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput,
+    NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage,
+    SetFollow, SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
     channel_slug_for_name, decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
@@ -39,6 +39,7 @@ fn start_thread(
         thread_id: thread_id.to_owned(),
         message_id: message_id.to_owned(),
         title: None,
+        lane: ChatThreadLane::Posts,
         author_kind: kind,
         author_display_name: "Ada".to_owned(),
         author_user_id: Some("user-ada".to_owned()),
@@ -210,6 +211,98 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
     assert_eq!(payload["type"], "both");
     assert_eq!(payload["purpose"], "Dates, flights, the flat.");
     assert_eq!(payload["folderPath"], "trips/lisbon");
+}
+
+#[test]
+fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    chats
+        .ensure_default_channel_follows(WS, "user-ada", &NO_FAULTS)
+        .expect("follows");
+
+    let post = start_thread(
+        "chan-1",
+        "post-1",
+        "post-msg",
+        "A post",
+        ChatActorKind::Human,
+        20,
+    );
+    chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    let mut lane = start_thread(
+        "chan-1",
+        "lane-1",
+        "lane-msg",
+        "hey",
+        ChatActorKind::Human,
+        30,
+    );
+    lane.lane = ChatThreadLane::Chat;
+    let (started, _) = chats
+        .start_channel_thread(&lane, &NO_FAULTS)
+        .expect("chat lane");
+    assert_eq!(started.lane, ChatThreadLane::Chat);
+
+    // The posts lane lists the post only; the chat lane lists the conversation only.
+    let posts = chats
+        .list_channel_threads(WS, "chan-1", None, 10)
+        .expect("posts");
+    assert_eq!(
+        posts
+            .iter()
+            .map(|row| row.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["post-1"]
+    );
+    let chat = chats
+        .list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10)
+        .expect("chat lane");
+    assert_eq!(
+        chat.iter()
+            .map(|row| row.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lane-1"]
+    );
+    assert_eq!(chat[0].thread.lane, ChatThreadLane::Chat);
+
+    // Home never shows a chat line, even from a followed channel.
+    let feed = chats
+        .list_personal_feed(WS, "user-ada", Some(10), None)
+        .expect("feed");
+    assert_eq!(
+        feed.items
+            .iter()
+            .map(|item| item.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["post-1"]
+    );
+
+    // The lane rides the wire so a replica keeps the line out of its feed too.
+    let payload: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_json FROM replication_log                  WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create'                  ORDER BY origin_seq DESC LIMIT 1",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled thread");
+    let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+    assert_eq!(payload["lane"], "chat");
 }
 
 #[test]
@@ -1426,6 +1519,7 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "threadId": "thread-1",
             "title": "Launch",
             "createdAtMs": 20,
+            "lane": "posts",
             "channelSlug": "general",
             "channelWireId": GENERAL_CHANNEL_WIRE_ID,
         })
@@ -1630,6 +1724,7 @@ fn authored_reply_exports_structure_without_exporting_local_parent() {
             "threadId": "local-thread",
             "title": "Local thread",
             "createdAtMs": 20,
+            "lane": "posts",
             "channelSlug": "general",
             "channelWireId": GENERAL_CHANNEL_WIRE_ID,
         })

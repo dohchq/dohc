@@ -7,8 +7,8 @@ use dohc_engine_domain::chats::{
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatChannelKind, ChatReactionState, CreateFileThread, DeleteTextFile, FollowState,
-    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
+    ChatChannelKind, ChatReactionState, ChatThreadLane, CreateFileThread, DeleteTextFile,
+    FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
     MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
     SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
     WriteBinary, attachment_id_for, channel_slug_for_name,

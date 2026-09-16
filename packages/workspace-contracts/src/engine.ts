@@ -602,6 +602,11 @@ interface ChatThreadReadState {
   updatedAtMs: number;
 }
 
+/// Which lane a channel thread sits in. The posts lane is the feed; the
+/// chat lane is the group's one running conversation, kept out of the feed
+/// and the post list.
+export type ChatThreadLane = "posts" | "chat";
+
 export interface ChatThread {
   id: ChatThreadId;
   workspaceId: WorkspaceId;
@@ -610,6 +615,8 @@ export interface ChatThread {
   title: string;
   createdAtMs: number;
   updatedAtMs: number;
+  // Absent on older fixtures; a thread without a lane is a post.
+  lane?: ChatThreadLane;
   // Exactly-one-owner (P0E rule, tightened at the WS-E gate): a thread is
   // file-linked OR belongs to a channel — never both, never neither. The
   // store enforces this at creation (createThread requires a linked file;
@@ -873,6 +880,7 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
     title?: string;
+    lane?: ChatThreadLane;
     author: ChatActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -890,9 +898,11 @@ export interface LinkedChatStore {
     }>;
   }): Promise<{ thread: ChatThread; message: ChatMessage }>;
   // Most-recent-activity first, with derived unread counts.
+  // The posts lane unless a lane is named.
   listChannelThreads(input: {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
+    lane?: ChatThreadLane;
   }): Promise<ChannelThreadSummary[]>;
   // Monotonic cursor advance: a lower-or-equal sequence is a no-op returning
   // the current state (revision unchanged); upToSequence clamps to the

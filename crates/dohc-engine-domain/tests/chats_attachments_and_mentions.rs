@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, CreateFileThread, LinkedChatStore, LocalAttachmentInput,
-    MentionCursor, NoFaults, SendMessage, StartChannelThread, attachment_id_for,
-    parse_mention_handles,
+    ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore,
+    LocalAttachmentInput, MentionCursor, NoFaults, SendMessage, StartChannelThread,
+    attachment_id_for, parse_mention_handles,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -64,6 +64,7 @@ fn start_with(
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),
                 title: Some("Thread".to_owned()),
+                lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: Some("ada".to_owned()),
@@ -99,6 +100,7 @@ fn start_message(
                 thread_id: thread_id.to_owned(),
                 message_id: message_id.to_owned(),
                 title: None,
+                lane: ChatThreadLane::Posts,
                 author_kind: kind,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: author_user_id.map(str::to_owned),
@@ -222,6 +224,7 @@ fn attachment_insert_and_replication_op_commit_together() {
             thread_id: "thread".to_owned(),
             message_id: "message".to_owned(),
             title: None,
+            lane: ChatThreadLane::Posts,
             author_kind: ChatActorKind::Human,
             author_display_name: "Ada".to_owned(),
             author_user_id: None,
@@ -525,6 +528,7 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
         thread_id: "thread".to_owned(),
         message_id: "message".to_owned(),
         title: None,
+        lane: ChatThreadLane::Posts,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_user_id: None,

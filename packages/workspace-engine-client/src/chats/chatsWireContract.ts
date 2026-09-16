@@ -138,6 +138,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   title?: string;
+  lane?: "posts" | "chat";
   authorKind: "human" | "agent";
   authorDisplayName: string;
   authorUserId?: string;
@@ -154,7 +155,10 @@ type ChatThreadCreateParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
-type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
+type ChatThreadsListForChannelParams = ChatPageParams & {
+  channelId: string;
+  lane?: "posts" | "chat";
+};
 type ChatThreadParams = ChatsJsonObject & { threadId: string };
 type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
@@ -452,12 +456,14 @@ const ChatLinkedFileSchema = mutableStruct({
   pathHint: Schema.optionalKey(Schema.String),
   linkedAtMs: AnyInt,
 });
+const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatThreadSchema = mutableStruct({
   id: Schema.String,
   workspaceId: Schema.String,
   title: Schema.String,
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
+  lane: Schema.optionalKey(ThreadLaneSchema),
   linkedFile: Schema.optionalKey(ChatLinkedFileSchema),
   channelId: Schema.optionalKey(Schema.String),
 });

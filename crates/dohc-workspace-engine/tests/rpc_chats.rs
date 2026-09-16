@@ -707,6 +707,7 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
             "title": "File thread",
             "createdAtMs": 20,
             "updatedAtMs": 20,
+            "lane": "posts",
             "linkedFile": {
                 "objectId": "object-1",
                 "pathHint": "notes/file.md",

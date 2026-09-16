@@ -5,10 +5,10 @@ use dohc_engine_domain::{
     ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
     ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
-    LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
-    UnreadFileThread,
+    ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
+    DispatchRecovery, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
+    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    ThreadDispatchPause, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -185,12 +185,13 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         channel_id: String,
+        lane: ChatThreadLane,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, RuntimeError> {
         self.run(move |store, _| {
             LinkedChatStore::new(store)
-                .list_channel_threads(&workspace_id, &channel_id, after, limit)
+                .list_channel_threads_in_lane(&workspace_id, &channel_id, lane, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

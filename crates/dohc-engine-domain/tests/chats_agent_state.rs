@@ -1,6 +1,6 @@
 use dohc_engine_domain::{
-    BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, LinkedChatStore, NoFaults,
-    SaveBookmark, SendMessage, StartChannelThread,
+    BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
+    LinkedChatStore, NoFaults, SaveBookmark, SendMessage, StartChannelThread,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -32,6 +32,7 @@ fn start(
                 thread_id: thread.to_owned(),
                 message_id: message.to_owned(),
                 title: None,
+                lane: ChatThreadLane::Posts,
                 author_kind: kind,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: Some("ada".to_owned()),

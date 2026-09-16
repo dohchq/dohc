@@ -9,14 +9,14 @@ use dohc_engine_domain::chats::{
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
-    ChatChannelKind, ChatChannelType, DomainError, FeedCoordinateResolution, FollowTargetKind,
-    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
-    channel_slug_for_name, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
-    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
-    normalize_display_name, normalize_feed_identity, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_addressable_plaintext_path,
+    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
+    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
+    attachment_id_for, channel_slug_for_name, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body, normalize_channel_group,
+    normalize_channel_name, normalize_display_name, normalize_feed_identity,
+    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
+    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
+    resolve_thread_message, validate_addressable_plaintext_path,
 };
 
 use crate::error::local_corruption;
@@ -651,6 +651,9 @@ struct ThreadCreate {
     linked_at_ms: Option<i64>,
     channel_slug: Option<String>,
     channel_wire_id: Option<String>,
+    /// Absent from ops written before the groups migration: a post.
+    #[serde(default)]
+    lane: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1193,11 +1196,23 @@ fn apply_thread(
         None
     };
     let (linked_object_id, linked_path_hint) = linked_object_for_apply(tx, op, &payload)?;
+    let lane = match payload.lane.as_deref() {
+        None => ChatThreadLane::default(),
+        Some(raw) => ChatThreadLane::parse(raw).ok_or(SyncError::InvalidInput {
+            reason: "chat thread lane is invalid",
+        })?,
+    };
+    // A file-linked thread has no lane of its own; it is always a post.
+    if lane == ChatThreadLane::Chat && channel_id.is_none() {
+        return Err(SyncError::InvalidInput {
+            reason: "only a channel thread has a chat lane",
+        });
+    }
     tx.execute(
         "INSERT OR IGNORE INTO chat_threads \
-         (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
-          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
-        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, linked_object_id, linked_path_hint, payload.linked_at_ms, channel_id],
+         (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id, lane) \
+          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, linked_object_id, linked_path_hint, payload.linked_at_ms, channel_id, lane.as_str()],
     )
     .map_err(SyncError::persist)?;
     upsert_chat_search_index_row(

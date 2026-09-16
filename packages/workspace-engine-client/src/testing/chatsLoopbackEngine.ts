@@ -561,12 +561,12 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
-        "channelId", "threadId", "messageId", "title", "authorKind", "authorDisplayName",
+        "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName",
         "authorUserId", "origin", "body", "needsDecision", "attachments", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
-    case CHATS_METHOD.threadsListForChannel: return ["channelId", "pageLimit", "cursor"];
+    case CHATS_METHOD.threadsListForChannel: return ["channelId", "lane", "pageLimit", "cursor"];
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
@@ -1235,12 +1235,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const title = optionalString(params, "title")?.trim() || body.split("\n")[0]?.slice(0, 80) || "New chat";
+    const lane = optionalString(params, "lane") ?? "posts";
+    if (lane !== "posts" && lane !== "chat") throw new Error("invalid-thread-lane");
     const thread: ChatThread = {
       id: threadId,
       workspaceId: workspace,
       title,
       createdAtMs: atMs,
       updatedAtMs: atMs,
+      lane,
       channelId,
     };
     state.threads.set(threadId, thread);
@@ -1551,8 +1554,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const channelId = requiredString(params, "channelId");
     if (!state.channels.has(channelId)) throw new Error("channel-not-found");
+    const lane = optionalString(params, "lane") ?? "posts";
     const rows = [...state.threads.values()]
-      .filter((thread) => thread.channelId === channelId)
+      .filter((thread) => thread.channelId === channelId && (thread.lane ?? "posts") === lane)
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs || compareText(right.id, left.id))
       .map((thread) => {
         const messages = threadMessages(state, thread.id);

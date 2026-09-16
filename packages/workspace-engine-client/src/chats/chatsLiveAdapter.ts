@@ -204,6 +204,7 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     channelId: string;
     title?: string;
+    lane?: "posts" | "chat";
     author: ChatActor;
     authorUserId?: string;
     origin?: "cli";
@@ -221,6 +222,7 @@ export class ChatsLiveAdapter {
         threadId,
         messageId,
         ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.lane !== undefined ? { lane: input.lane } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
         ...(input.authorUserId !== undefined
@@ -242,6 +244,7 @@ export class ChatsLiveAdapter {
   async listChannelThreads(input: {
     workspaceId: string;
     channelId: string;
+    lane?: "posts" | "chat";
   }): Promise<ChatChannelThreadSummary[]> {
     this.assertWorkspace(input.workspaceId);
     const rows: ChatChannelThreadSummary[] = [];
@@ -249,6 +252,7 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.threadsListForChannel, {
         channelId: input.channelId,
+        ...(input.lane !== undefined ? { lane: input.lane } : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
