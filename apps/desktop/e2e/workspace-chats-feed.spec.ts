@@ -253,7 +253,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
 
-    const persistedChannel = page
+    const persistedChannel = view
       .getByTestId("chats-channel")
       .filter({ hasText: channelName });
     await expect(persistedChannel).toBeVisible();
