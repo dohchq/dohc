@@ -156,6 +156,9 @@ export function registerSharedChannelsIpcHandlers<
           capturedGeneration: credentialGeneration,
           currentGeneration: () => currentCredentialGeneration(),
         });
+        // Credentials can rotate between the lookup resolving and this
+        // handler resuming; nothing runs on a session that is already gone.
+        assertCurrentShareSession();
         if (channel.folderPath && credentials.relayUrl) {
           await relayClientForWorkspace({
             workspaceId: workspace.workspaceId,

@@ -69,6 +69,7 @@ async function harness() {
   const acknowledge = vi.fn();
   const unmount = vi.fn<() => Promise<{ folderLeft?: true }>>(async () => ({}));
   const push = vi.fn(async () => undefined);
+  const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
@@ -85,7 +86,13 @@ async function harness() {
     requireEngineCapture: async (captured) => ({ workspace: captured }),
     assertWritableWorkspace: () => undefined,
     linkedChatStoreFor: () => store,
-    remoteForWorkspace: async () => ({ credentials, credentialGeneration: generation }),
+    remoteForWorkspace: async () => {
+      // A rotation that lands after the lookup resolves and before the
+      // handler resumes: the captured generation is already stale.
+      const captured = generation;
+      if (rotateAfterLookup.value) generation += 1;
+      return { credentials, credentialGeneration: captured };
+    },
     currentCredentialGeneration: () => generation, currentCredentials: () => credentials,
     warmCredentialCache: warm,
     relayShareJsonWithCredentials: async <Result>(_credentials: CloudCredentials, path: string, init?: RequestInit) => {
@@ -103,7 +110,7 @@ async function harness() {
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, unmount, push, store, relayCalls,
+    mount, unmount, push, rotateAfterLookup, store, relayCalls,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -226,6 +233,17 @@ describe("registered shared-channel handlers", () => {
     // The group's channel must already be on the relay, so the share pushes
     // first; a chat-only share leaves that to the next sync pass.
     expect(h.push).toHaveBeenCalledOnce();
+  });
+
+  it("a session change before the share runs stops a plain channel share too", async () => {
+    const h = await harness();
+    h.store.listChannels.mockResolvedValue([channel({ id: "bare", name: "Bare", slug: "bare" })]);
+    h.store.getChannelWireId.mockResolvedValue("wire-bare");
+    h.rotateAfterLookup.value = true;
+    await expect(h.invoke(CHANNELS.shareChatChannel, {
+      workspaceId: "workspace", channelId: "bare", recipientEmail: "ana@example.test",
+    })).rejects.toThrow("session changed");
+    expect(h.relayCalls).toHaveLength(0);
   });
 
   it("a session change during the pre-share push stops the share before the relay hears of it", async () => {
