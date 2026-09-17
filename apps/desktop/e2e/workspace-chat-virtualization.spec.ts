@@ -101,8 +101,9 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await expect(lane.getByText("First message in the empty chat", { exact: true })).toHaveCount(0);
 
     const historyTop = await wheelFromEnd(list, 60);
-    const historyMessage = await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming while reading history");
-    await expect(lane.locator(`[data-message-id="${historyMessage}"]`)).toBeAttached();
+    const historyAnchor = lane.getByTestId("chats-lane-message").filter({ hasText: `Lane message ${messageCount - 2}` });
+    await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming while reading history");
+    await expect(historyAnchor).toHaveAttribute("aria-setsize", String(messageCount + 1));
     await expect.poll(() => distanceFromEnd(list)).toBeGreaterThan(60);
     expect(await list.evaluate((node) => node.scrollTop)).toBeCloseTo(historyTop, 0);
 
@@ -149,7 +150,7 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
   }
 });
 
-test("a file chat search result reveals an unmounted historical message", async () => {
+test("a file linked mention reveals an unmounted historical message", async () => {
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   const workspaceId = "chat-window-linked";
@@ -161,7 +162,7 @@ test("a file chat search result reveals an unmounted historical message", async 
       await files.ensureMainVersion({ workspaceId });
       const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const thread = await chats.createThread({ workspaceId, title: "Long file conversation", linkedFile: { objectId: file.object.id, pathHint: "topic.md" } });
-      const first = await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: "heliotrope historical target" });
+      const first = await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: "heliotrope historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
         await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `File message ${index}` });
       }
@@ -178,9 +179,7 @@ test("a file chat search result reveals an unmounted historical message", async 
     await expectWindowed(rail, "linked-chat", `File message ${messageCount - 1}`);
     await expect(rail.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
-    await page.getByTestId("activity-search").click();
-    await page.getByTestId("search-input").fill("heliotrope");
-    await page.getByTestId("search-result-group").filter({ hasText: "Long file conversation" }).getByTestId("search-result-row").click();
+    await page.getByTestId("chat-file-mention").filter({ hasText: "Long file conversation" }).click();
     await expect(rail.locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();
     await expect(rail.getByTestId("linked-chat-message-body").filter({ hasText: "heliotrope historical target" })).toBeInViewport();
   } finally {
@@ -188,7 +187,7 @@ test("a file chat search result reveals an unmounted historical message", async 
   }
 });
 
-test("a DM search result reveals an unmounted historical message", async () => {
+test("a file linked mention opens the exact unmounted DM message", async () => {
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   const workspaceId = "chat-window-dm";
@@ -202,9 +201,12 @@ test("a DM search result reveals an unmounted historical message", async () => {
     await seedWorkspaceManifest(temp, workspaceId);
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: userId } }]);
     await seedCloudCredentials(temp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: "owner@dohc.test", userId, token });
-    const firstMessageId = await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats }) => {
+    await writeWorkspaceFiles(temp, [{ path: "topic.md", contents: "# Topic\n" }]);
+    const firstMessageId = await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats, files }) => {
+      await files.ensureMainVersion({ workspaceId });
+      const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const channel = await chats.createChannel({ workspaceId, name: "reader@dohc.test", kind: "dm" });
-      const { thread, message } = await chats.startChannelThread({ workspaceId, channelId: channel.id, author, body: "azimuth historical target" });
+      const { thread, message } = await chats.startChannelThread({ workspaceId, channelId: channel.id, author, body: "azimuth historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
         await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `Direct message ${index}` });
       }
@@ -219,9 +221,9 @@ test("a DM search result reveals an unmounted historical message", async () => {
     await expectWindowed(dm, "chats-dm", `Direct message ${messageCount - 1}`);
     await expect(dm.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
-    await page.getByTestId("activity-search").click();
-    await page.getByTestId("search-input").fill("azimuth");
-    await page.getByTestId("search-result-group").filter({ hasText: "azimuth historical target" }).getByTestId("search-result-row").click();
+    await waitForWorkspaceFile(page, workspaceId, "topic.md");
+    await explorerRow(page, "topic.md").click();
+    await page.getByTestId("chat-file-mention").filter({ hasText: "reader@dohc.test" }).click();
     await expect(page.getByTestId("chats-dm-view").locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();
   } finally {
     await relay?.stop();
