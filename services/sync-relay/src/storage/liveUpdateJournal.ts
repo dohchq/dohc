@@ -80,12 +80,19 @@ interface DecodedJournalRow {
   history: {namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number};
 }
 export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
+  return journalMetadataWithBinding(db, raw, journalBindingFromRow(raw), provenance);
+}
+function journalBindingFromRow(raw: Record<string, unknown>): LiveObjectBinding {
   const binding = parseLiveObjectBinding({ workspaceId: raw.workspace_id, mainVersionId: raw.main_version_id,
     objectId: raw.object_id, lineageClaimId: raw.lineage_claim_id, currentPath: raw.current_path,
     selectorPaths: typeof raw.selector_paths_json === "string" ? JSON.parse(raw.selector_paths_json) : null,
     restoreFenceGeneration: raw.restore_fence_generation });
   journalIntegrity(binding.mainVersionId === "main" && binding.currentPath === raw.current_path &&
     JSON.stringify(binding.selectorPaths) === raw.selector_paths_json);
+  return binding;
+}
+function journalMetadataWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
+  provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
   const cursor = authorityInteger(raw.journal_cursor, 1);
   const rows = provenance ?? db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`).all(cursor);
   const firstSeen = rows.map(row => {
@@ -104,7 +111,11 @@ export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>
   return { accepted: { receipt, binding, authority, receivedAtMs }, firstSeen: parseLiveUpdateStructRanges(firstSeen) };
 }
 export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
-  const metadata=decodeJournalMetadata(db,raw,provenance);
+  return journalRowWithBinding(db, raw, journalBindingFromRow(raw), provenance);
+}
+function journalRowWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
+  provenance?: Record<string, unknown>[]): DecodedJournalRow {
+  const metadata=journalMetadataWithBinding(db,raw,binding,provenance);
   journalIntegrity((raw.validation_checkpoint_sha256 === null) === (raw.validation_checkpoint_bytes === null));
   const checkpoint = raw.validation_checkpoint_sha256 === null ? null : {
     digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256), bytes: journalBytes(raw.validation_checkpoint_bytes),
@@ -466,8 +477,17 @@ export function liveJournalCut(storage: StorageContext, document: LiveDocumentKe
       rows.push(row); provenance.set(cursor, rows);
     }
     let last = checkpoint.cursor ?? 0, suffixBytes = 0;
+    let previousBinding: { raw: Record<string, unknown>; binding: LiveObjectBinding } | undefined;
     const suffix = rawSuffix.map(raw => {
-      const row = decodeJournalRow(storage.db, raw, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? []), receipt = row.admitted.metadata.accepted.receipt;
+      // Reuse validation only for identical SQLite values within this read.
+      const prior = previousBinding;
+      const binding = prior && raw.workspace_id === prior.raw.workspace_id && raw.main_version_id === prior.raw.main_version_id &&
+        raw.object_id === prior.raw.object_id && raw.lineage_claim_id === prior.raw.lineage_claim_id &&
+        raw.current_path === prior.raw.current_path && raw.selector_paths_json === prior.raw.selector_paths_json &&
+        raw.restore_fence_generation === prior.raw.restore_fence_generation
+        ? { ...prior.binding, selectorPaths: [...prior.binding.selectorPaths] } : journalBindingFromRow(raw);
+      previousBinding = { raw, binding };
+      const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? []), receipt = row.admitted.metadata.accepted.receipt;
       journalIntegrity(receipt.journalCursor > last && receipt.journalCursor <= (highWater ?? 0) && row.checkpoint === null);
       last = receipt.journalCursor; suffixBytes += row.admitted.updateBytes.byteLength;
       return { cursor: receipt.journalCursor, digest: receipt.updateDigest, bytes: row.admitted.updateBytes, metadata: row.admitted.metadata };
