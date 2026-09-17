@@ -1,5 +1,5 @@
 diff --git a/handler.js b/handler.js
-index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f394446f4f573 100644
+index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..ab2038f1e8a2c46a9fa3703f00a15c16479973c0 100644
 --- a/handler.js
 +++ b/handler.js
 @@ -1,4 +1,5 @@
@@ -8,7 +8,7 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
  import { realpath as fsrealpath, lstat, open, stat } from 'node:fs/promises';
  import { type as osType } from 'node:os';
  import * as sp from 'node:path';
-@@ -103,6 +104,70 @@ const delFromSet = (main, prop, item) => {
+@@ -103,6 +104,124 @@ const delFromSet = (main, prop, item) => {
  };
  const isEmptySet = (val) => (val instanceof Set ? val.size === 0 : !val);
  const FsWatchInstances = new Map();
@@ -23,6 +23,36 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
 +        const directories = new Set();
 +        const files = new Map();
 +        const entries = new Set();
++        const recheckFiles = (event, uncertain) => {
++            const pending = [];
++            for (const group of files.values())
++                for (const entry of group)
++                    pending.push(entry.listener(event, entry.basename, uncertain));
++            return Promise.all(pending);
++        };
++        let uncertaintyRunning = false;
++        let uncertaintyPending = false;
++        let uncertaintyEvent;
++        const queueRecheck = (event) => {
++            uncertaintyPending = true;
++            uncertaintyEvent = event;
++            if (uncertaintyRunning)
++                return;
++            uncertaintyRunning = true;
++            // Keep one sweep in flight. A notification received during its
++            // stats requires a trailing sweep, never a dropped throttle event.
++            void (async () => {
++                try {
++                    while (uncertaintyPending && entries.size > 0) {
++                        uncertaintyPending = false;
++                        await recheckFiles(uncertaintyEvent, true);
++                    }
++                }
++                finally {
++                    uncertaintyRunning = false;
++                }
++            })();
++        };
 +        const watcher = fs_watch(directory, { persistent: options.persistent }, (event, filename) => {
 +            for (const entry of directories)
 +                entry.listener(event, filename);
@@ -33,14 +63,37 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
 +                for (const entry of matching)
 +                    entry.listener(event, entry.basename);
 +            }
++            else if (filename && /~\d/.test(filename) && event === 'change') {
++                // A content notification remains authoritative even if stat
++                // metadata is unchanged. Resolve its short name before routing.
++                void Promise.all([fsrealpath(sp.join(directory, filename)), fsrealpath(directory)])
++                    .then(([path, parent]) => {
++                    if (sp.dirname(path).toLowerCase() !== parent.toLowerCase()) {
++                        recheckFiles(event, false);
++                        return;
++                    }
++                    const group = files.get(sp.basename(path).toLowerCase());
++                    if (group)
++                        for (const entry of group)
++                            entry.listener(event, entry.basename);
++                }, (error) => {
++                    if (error.code === 'ENOENT' || error.code === 'ENOTDIR')
++                        queueRecheck(event);
++                    else
++                        recheckFiles(event, false);
++                });
++            }
 +            else if (!filename || /~\d/.test(filename)) {
-+                for (const group of files.values())
-+                    for (const entry of group)
-+                        entry.listener(event, entry.basename, !!filename && event === 'rename');
++                if (filename)
++                    queueRecheck(event);
++                else
++                    recheckFiles(event, false);
 +            }
 +        });
 +        shared = { watcher, directories, files, entries };
 +        watcher.on(EV.ERROR, (error) => {
++            if (WindowsDirectoryInstances.get(key) === shared)
++                WindowsDirectoryInstances.delete(key);
 +            for (const entry of entries)
 +                entry.proxy.emit(EV.ERROR, error);
 +        });
@@ -71,7 +124,8 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
 +            shared.files.delete(basename.toLowerCase());
 +        if (shared.entries.size === 0) {
 +            shared.watcher.close();
-+            WindowsDirectoryInstances.delete(key);
++            if (WindowsDirectoryInstances.get(key) === shared)
++                WindowsDirectoryInstances.delete(key);
 +        }
 +    };
 +    return proxy;
@@ -79,19 +133,21 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
  /**
   * Instantiates the fs_watch interface
   * @param path to be watched
-@@ -113,8 +178,8 @@ const FsWatchInstances = new Map();
+@@ -113,16 +232,19 @@ const FsWatchInstances = new Map();
   * @returns {NativeFsWatcher}
   */
  function createFsWatchInstance(path, options, listener, errHandler, emitRaw) {
 -    const handleEvent = (rawEvent, evPath) => {
 -        listener(path);
 +    const handleEvent = (rawEvent, evPath, uncertain = false) => {
-+        listener(path, undefined, uncertain);
++        const pending = listener(path, undefined, uncertain);
          emitRaw(rawEvent, evPath, { watchedPath: path });
          // emit based on events occurring for files from a directory's watcher in
          // case the file's watcher misses it (and rely on throttling to de-dupe)
-@@ -123,6 +188,8 @@ function createFsWatchInstance(path, options, listener, errHandler, emitRaw) {
+         if (evPath && path !== evPath) {
+             fsWatchBroadcast(sp.resolve(path, evPath), KEY_LISTENERS, sp.join(path, evPath));
          }
++        return pending;
      };
      try {
 +        if (isWindows && options.persistent)
@@ -99,7 +155,20 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
          return fs_watch(path, {
              persistent: options.persistent,
          }, handleEvent);
-@@ -302,7 +369,7 @@ export class NodeFsHandler {
+@@ -140,6 +262,12 @@ const fsWatchBroadcast = (fullPath, listenerType, val1, val2, val3) => {
+     const cont = FsWatchInstances.get(fullPath);
+     if (!cont)
+         return;
++    if (val3 === true) {
++        const listeners = cont[listenerType];
++        return listeners instanceof Set
++            ? Promise.all([...listeners].map((listener) => listener(val1, val2, val3)))
++            : listeners?.(val1, val2, val3);
++    }
+     foreach(cont[listenerType], (listener) => {
+         listener(val1, val2, val3);
+     });
+@@ -302,7 +430,7 @@ export class NodeFsHandler {
       * @param listener on fs change
       * @returns closer for the watcher instance
       */
@@ -108,7 +177,7 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
          const opts = this.fsw.options;
          const directory = sp.dirname(path);
          const basename = sp.basename(path);
-@@ -311,6 +378,7 @@ export class NodeFsHandler {
+@@ -311,6 +439,7 @@ export class NodeFsHandler {
          const absolutePath = sp.resolve(path);
          const options = {
              persistent: opts.persistent,
@@ -116,7 +185,7 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
          };
          if (!listener)
              listener = EMPTY_FN;
-@@ -348,8 +416,8 @@ export class NodeFsHandler {
+@@ -348,8 +477,8 @@ export class NodeFsHandler {
          // if the file is already being watched, do nothing
          if (parent.has(basename))
              return;
@@ -127,7 +196,7 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
                  return;
              if (!newStats || newStats.mtimeMs === 0) {
                  try {
-@@ -359,7 +427,11 @@ export class NodeFsHandler {
+@@ -359,7 +488,11 @@ export class NodeFsHandler {
                      // Check that change event was not fired because of changed only accessTime.
                      const at = newStats.atimeMs;
                      const mt = newStats.mtimeMs;
@@ -140,7 +209,7 @@ index 6b12880bfcdae186dd738a9397b53ebb5849f0ac..d57a5e1fce4b4b385baf1aa88b2f3944
                          this.fsw._emit(EV.CHANGE, file, newStats);
                      }
                      if ((isMacos || isLinux || isFreeBSD) && prevStats.ino !== newStats.ino) {
-@@ -551,7 +623,7 @@ export class NodeFsHandler {
+@@ -551,7 +684,7 @@ export class NodeFsHandler {
                  if (stats && stats.mtimeMs === 0)
                      return;
                  this._handleRead(dirPath, false, wh, target, dir, depth, throttler);

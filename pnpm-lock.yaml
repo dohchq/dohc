@@ -40,7 +40,7 @@ overrides:
   prosemirror-view: 1.42.2
 
 patchedDependencies:
-  chokidar@5.0.0: 973450c2525d50b4c605ef5e20072eefb2bf2407bb7bbbdcc87daf79418c0dec
+  chokidar@5.0.0: 692638d364e0aa2e401826301baf15bbf83e8798bafcb69badefbad31928ee6e
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
 
 importers:
@@ -704,7 +704,7 @@ importers:
         version: link:../workspace-core
       chokidar:
         specifier: ^5.0.0
-        version: 5.0.0(patch_hash=973450c2525d50b4c605ef5e20072eefb2bf2407bb7bbbdcc87daf79418c0dec)
+        version: 5.0.0(patch_hash=692638d364e0aa2e401826301baf15bbf83e8798bafcb69badefbad31928ee6e)
     devDependencies:
       '@types/node':
         specifier: ^24.13.3
@@ -8634,7 +8634,7 @@ snapshots:
       '@tanstack/router-generator': 1.167.8
       '@tanstack/router-utils': 1.162.1
       '@tanstack/virtual-file-routes': 1.162.0
-      chokidar: 5.0.0(patch_hash=973450c2525d50b4c605ef5e20072eefb2bf2407bb7bbbdcc87daf79418c0dec)
+      chokidar: 5.0.0(patch_hash=692638d364e0aa2e401826301baf15bbf83e8798bafcb69badefbad31928ee6e)
       unplugin: 3.0.0
       zod: 4.4.3
     optionalDependencies:
@@ -9763,7 +9763,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
-  chokidar@5.0.0(patch_hash=973450c2525d50b4c605ef5e20072eefb2bf2407bb7bbbdcc87daf79418c0dec):
+  chokidar@5.0.0(patch_hash=692638d364e0aa2e401826301baf15bbf83e8798bafcb69badefbad31928ee6e):
     dependencies:
       readdirp: 5.1.1
 

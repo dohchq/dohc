@@ -36,10 +36,10 @@ describe("workspace watcher filesystem changes", () => {
     await writeFile(join(root, "replacement.tmp"), "replacement");
     await rename(join(root, "replacement.tmp"), join(root, "existing.md"));
     await vi.waitFor(() => expect(seen()).toContain("existing.md"));
+    expect(seen()).not.toContain("replacement.tmp");
     batches.length = 0;
     await rm(join(root, "existing.md"));
     await vi.waitFor(() => expect(seen()).toContain("existing.md"));
-    expect(seen()).not.toContain("replacement.tmp");
   });
 
   it("reports descendants of created, moved, and removed directories", async () => {

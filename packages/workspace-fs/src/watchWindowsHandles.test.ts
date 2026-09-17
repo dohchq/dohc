@@ -5,6 +5,173 @@ import { describe, it } from "vitest";
 // A separate Node process can count the native calls without replacing the
 // filesystem backend for other tests in this worker.
 describe.skipIf(process.platform !== "win32")("Windows native watch handles", () => {
+  it("coalesces uncertain bursts and reruns when a later deletion arrives during the first sweep", async () => {
+    await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import fsp from 'node:fs/promises';
+      import { EventEmitter } from 'node:events';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { join, resolve } from 'node:path';
+      import { tmpdir } from 'node:os';
+      const root = await fsp.mkdtemp(join(tmpdir(), 'dohc-watch-burst-'));
+      const target = join(root, 'later-delete.md');
+      const sibling = join(root, 'unchanged.md');
+      await fsp.writeFile(target, 'before');
+      await fsp.writeFile(sibling, 'before');
+      const realStat = fsp.stat;
+      const snapshots = new Map([[target, await realStat(target)], [sibling, await realStat(sibling)]]);
+      const pending = [];
+      const native = new Map();
+      let controlled = false;
+      fs.watch = (path, options, listener) => {
+        const emitter = new EventEmitter();
+        emitter.close = () => native.delete(resolve(path));
+        native.set(resolve(path), listener);
+        return emitter;
+      };
+      fsp.stat = async (path, ...args) => controlled && snapshots.has(resolve(path))
+        ? new Promise((resolveStat, reject) => pending.push({ path: resolve(path), resolve: resolveStat, reject }))
+        : realStat(path, ...args);
+      syncBuiltinESMExports();
+      const { watch } = await import(process.argv[1]);
+      const watcher = watch(root, { ignoreInitial: true });
+      const waitFor = async predicate => {
+        const deadline = Date.now() + 5000;
+        while (!predicate()) {
+          assert.ok(Date.now() < deadline, 'sweep did not settle');
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      };
+      try {
+        await new Promise((resolve, reject) => watcher.once('ready', resolve).once('error', reject));
+        controlled = true;
+        const emit = native.get(root);
+        for (let i = 0; i < 20; i++) emit('rename', 'UNREL~1.MD');
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(pending.length, 2, 'a burst starts one stat per file, not one per event');
+        const deleted = new Promise(resolve => watcher.once('unlink', resolve));
+        // The first stat snapshots preceded this notification. A trailing
+        // sweep must observe the deletion even though the first results do not.
+        await fsp.rm(target);
+        emit('rename', 'LATER~1.MD');
+        for (const request of pending.slice(0, 2)) request.resolve(snapshots.get(request.path));
+        await waitFor(() => pending.length >= 4);
+        assert.equal(pending.length, 4, 'one trailing sweep covers notifications received in flight');
+        for (const request of pending.slice(2)) {
+          if (request.path === target) request.reject(Object.assign(new Error('gone'), { code: 'ENOENT' }));
+          else request.resolve(snapshots.get(request.path));
+        }
+        assert.equal(await deleted, target);
+      } finally {
+        controlled = false;
+        for (const request of pending) request.resolve(snapshots.get(request.path));
+        await watcher.close();
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
+  }, 20_000);
+
+  it("resolves short-name content changes without relying on changed file metadata", async () => {
+    await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import fsp from 'node:fs/promises';
+      import { EventEmitter } from 'node:events';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { join, resolve } from 'node:path';
+      import { tmpdir } from 'node:os';
+      const root = await fsp.mkdtemp(join(tmpdir(), 'dohc-watch-short-change-'));
+      const target = join(root, 'changed-file.md');
+      const sibling = join(root, 'unchanged-file.md');
+      await fsp.writeFile(target, 'before');
+      await fsp.writeFile(sibling, 'before');
+      const originalStat = fsp.stat;
+      const originalRealpath = fsp.realpath;
+      const snapshots = new Map([[target, await originalStat(target)], [sibling, await originalStat(sibling)]]);
+      const native = new Map();
+      fs.watch = (path, options, listener) => {
+        const emitter = new EventEmitter();
+        emitter.close = () => native.delete(resolve(path));
+        native.set(resolve(path), listener);
+        return emitter;
+      };
+      // Model an actual content notification on a filesystem whose stat
+      // snapshot did not change. The notification must remain authoritative.
+      fsp.stat = async (path, ...args) => snapshots.get(resolve(path)) ?? originalStat(path, ...args);
+      fsp.realpath = async (path, ...args) => resolve(path) === join(root, 'CHANGE~1.MD')
+        ? target : originalRealpath(path, ...args);
+      syncBuiltinESMExports();
+      const { watch } = await import(process.argv[1]);
+      const watcher = watch(root, { ignoreInitial: true });
+      try {
+        await new Promise((resolve, reject) => watcher.once('ready', resolve).once('error', reject));
+        await fsp.writeFile(target, 'after!');
+        const changes = [];
+        let observed;
+        const done = new Promise(resolve => { observed = resolve; });
+        watcher.on('change', path => { changes.push(path); observed(); });
+        native.get(root)('change', 'CHANGE~1.MD');
+        await done;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(changes, [target], 'the target emits despite identical stats; its sibling does not');
+      } finally {
+        await watcher.close();
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
+  }, 20_000);
+
+  it("creates a fresh shared handle after a native error and preserves it when stale owners close", async () => {
+    await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+      import { EventEmitter } from 'node:events';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { join } from 'node:path';
+      import { tmpdir } from 'node:os';
+      const root = await mkdtemp(join(tmpdir(), 'dohc-watch-recovery-'));
+      for (const name of ['old.md', 'new.md', 'third.md']) await writeFile(join(root, name), 'value');
+      const native = [];
+      fs.watch = (path, options, listener) => {
+        const emitter = new EventEmitter();
+        const entry = { emitter, listener, closed: false };
+        emitter.close = () => { entry.closed = true; };
+        native.push(entry);
+        return emitter;
+      };
+      syncBuiltinESMExports();
+      const { watch } = await import(process.argv[1]);
+      const watchers = [];
+      const start = async name => {
+        const watcher = watch(join(root, name), { ignoreInitial: true });
+        watchers.push(watcher);
+        await new Promise((resolve, reject) => watcher.once('ready', resolve).once('error', reject));
+        return watcher;
+      };
+      try {
+        const first = await start('old.md');
+        first.on('error', () => {});
+        // Node closes its native handle before delivering this error.
+        native[0].emitter.close();
+        native[0].emitter.emit('error', new Error('native watch failed'));
+        await start('new.md');
+        assert.equal(native.length, 2, 'new registrations cannot join a failed handle');
+        await first.close();
+        const third = await start('third.md');
+        assert.equal(native.length, 2, 'stale close cannot evict the replacement handle');
+        const observed = new Promise(resolve => third.once('change', resolve));
+        native[1].listener('change', 'third.md');
+        assert.equal(await observed, join(root, 'third.md'));
+      } finally {
+        for (const watcher of watchers) await watcher.close();
+        assert.ok(native.every(entry => entry.closed));
+        await rm(root, { recursive: true, force: true });
+      }
+    `, import.meta.resolve("chokidar")], { timeout: 15_000 });
+  }, 20_000);
+
   it("does not let an unrelated short-name hint suppress a real edit", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
       import assert from 'node:assert/strict';
@@ -57,7 +224,7 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         await fsp.rm(root, { recursive: true, force: true });
       }
     `, import.meta.resolve("chokidar")], { timeout: 15_000 });
-  });
+  }, 20_000);
 
   it("shares directory handles, routes ambiguous names, and closes each owner", async () => {
     await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
@@ -124,11 +291,6 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         const before = raw;
         native.get(root).listener('change', null);
         assert.ok(raw > before, 'missing filename reaches the file owner');
-        const errors = [];
-        second.on('error', error => errors.push(error));
-        const failure = new Error('synthetic native failure');
-        native.get(root).watcher.emit('error', failure);
-        assert.ok(errors.includes(failure), 'native errors reach the remaining owner');
         const unlinks = [];
         second.on('unlink', path => unlinks.push(path));
         suppressNative = true;
@@ -151,6 +313,13 @@ describe.skipIf(process.platform !== "win32")("Windows native watch handles", ()
         native.get(root).listener('rename', 'LONG-F~1.MD');
         await waitFor(() => deleted.includes(join(root, 'long-filename.md')));
         assert.deepEqual(falseChanges, [], 'unchanged siblings are not file changes');
+        const errors = [];
+        third.on('error', error => errors.push(error));
+        const failure = new Error('synthetic native failure');
+        const failedNative = native.get(root).watcher;
+        failedNative.close();
+        failedNative.emit('error', failure);
+        assert.ok(errors.includes(failure), 'native errors reach the remaining owner');
         await third.close();
         assert.equal(native.size, 0);
       } finally {
