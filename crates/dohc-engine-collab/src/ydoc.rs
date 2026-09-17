@@ -3116,9 +3116,13 @@ fn render_code_block(
 ) -> ProjectionResult<String> {
     let language = attr_js_string(attrs, "language");
     let content = markdown_text_content(children)?;
-    let fence = backtick_fence(&content, 3)?;
+    let delimiter = if language.contains('`') { '~' } else { '`' };
+    let fence = delimiter_fence(&content, 3, delimiter)?;
     let mut output = ProjectionBuffer::new();
     output.push_str(&fence)?;
+    if language.starts_with(delimiter) {
+        output.push(' ')?;
+    }
     output.push_str(&language)?;
     if children.is_empty() {
         output.push_str("\n\n")?;
@@ -3155,10 +3159,14 @@ fn markdown_text_content(nodes: &[MarkdownNode]) -> ProjectionResult<String> {
 }
 
 fn backtick_fence(value: &str, minimum: usize) -> ProjectionResult<String> {
+    delimiter_fence(value, minimum, '`')
+}
+
+fn delimiter_fence(value: &str, minimum: usize, delimiter: char) -> ProjectionResult<String> {
     let mut longest = 0usize;
     let mut current = 0usize;
     for character in value.chars() {
-        if character == '`' {
+        if character == delimiter {
             current = current.saturating_add(1);
             longest = longest.max(current);
         } else {
@@ -3167,7 +3175,7 @@ fn backtick_fence(value: &str, minimum: usize) -> ProjectionResult<String> {
     }
     let length = minimum.max(longest.saturating_add(1));
     let mut fence = ProjectionBuffer::with_capacity(length)?;
-    fence.push_repeat('`', length)?;
+    fence.push_repeat(delimiter, length)?;
     Ok(fence.into_string())
 }
 
@@ -4793,6 +4801,31 @@ mod projection_tests {
             markdown_document(&nodes).expect("small projection"),
             "````js\nbefore\n```\nafter\n````"
         );
+    }
+
+    #[test]
+    fn code_block_language_with_backticks_uses_collision_free_tilde_fence() {
+        for language in ["lang`tick", "`leading", "```leading", "~lang`tick"] {
+            for content in ["", "code", "before\n~~~\n```\nafter"] {
+                let children = if content.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![text_run(content, Vec::new())]
+                };
+                let attrs =
+                    BTreeMap::from([("language".to_string(), Value::String(language.into()))]);
+                let fence = if content.contains("~~~") {
+                    "~~~~"
+                } else {
+                    "~~~"
+                };
+                let padding = if language.starts_with('~') { " " } else { "" };
+                assert_eq!(
+                    render_code_block(&attrs, &children).expect("small projection"),
+                    format!("{fence}{padding}{language}\n{content}\n{fence}")
+                );
+            }
+        }
     }
 
     #[test]

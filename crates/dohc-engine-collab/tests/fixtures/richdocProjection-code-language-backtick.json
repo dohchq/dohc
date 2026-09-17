@@ -1,0 +1,22 @@
+{
+ "seed": -125,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-code-language-backtick",
+ "updates": [
+  "AQS7m4y7CgAHAQRib2R5Awljb2RlQmxvY2sHALubjLsKAAYEALubjLsKAQRjb2RlKAC7m4y7CgAIbGFuZ3VhZ2UBdwlsYW5nYHRpY2sA",
+  "AQG7m4y7CgcoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWY29kZS1sYW5ndWFnZS1iYWNrdGljawA="
+ ],
+ "mergedUpdateB64": "AQW7m4y7CgAHAQRib2R5Awljb2RlQmxvY2sHALubjLsKAAYEALubjLsKAQRjb2RlKAC7m4y7CgAIbGFuZ3VhZ2UBdwlsYW5nYHRpY2soAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWY29kZS1sYW5ndWFnZS1iYWNrdGljawA=",
+ "stateVectorB64": "AbubjLsKCA==",
+ "coverage": {
+  "nodes": [
+   "codeBlock",
+   "doc",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "~~~lang`tick\ncode\n~~~"
+ }
+}

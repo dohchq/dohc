@@ -747,6 +747,23 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    name: "code-language-leading-tilde",
+    makeDoc: () => directRichdoc([
+      xmlElement("codeBlock", { language: "~lang`tick" }, [xmlText("before\n~~~\n```\nafter")]),
+      paragraph("After code"),
+    ]),
+  },
+  {
+    name: "empty-code-block-containers",
+    makeDoc: () => directRichdoc([
+      xmlElement("bulletList", {}, ["js", "lang`tick"].map(language =>
+        xmlElement("listItem", {}, [paragraph("intro"), xmlElement("codeBlock", { language }, [])]),
+      )),
+      xmlElement("blockquote", {}, [xmlElement("codeBlock", { language: "lang`tick" }, [])]),
+      paragraph("After code"),
+    ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
@@ -889,35 +906,21 @@ function emit(fx) {
 const SEEDS = 24;
 for (let s = 1; s <= SEEDS; s++) emit(makePlaintext(s));
 for (let s = 1; s <= SEEDS; s++) emit(makeRichdoc(1000 + s));
-const allowedOracleFailures = new Set(
-  (process.env.DOHC_FIXTURE_ALLOW_ORACLE_FAILURES ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean),
-);
 const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) => {
   try {
     return makeRichdocProjection(index, fixture);
   } catch (error) {
-    // The drift checker sets this to the cases the live oracle can no longer
-    // produce, so one broken construct cannot blind the check for every other
-    // fixture. Regenerating normally still fails loudly on the same case.
-    if (allowedOracleFailures.has(fixture.name)) {
-      console.error(`ORACLE_FAILURE ${fixture.name}: ${error?.cause?.message ?? error?.message}`);
-      return null;
-    }
     throw new Error(
       `failed to generate richdocProjection-${fixture.name}.json`,
       { cause: error },
     );
   }
 });
-const emittedProjectionFixtures = projectionFixtures.filter(Boolean);
 const coveredNodes = new Set(
-  emittedProjectionFixtures.flatMap((fixture) => fixture.coverage.nodes),
+  projectionFixtures.flatMap((fixture) => fixture.coverage.nodes),
 );
 const coveredMarks = new Set(
-  emittedProjectionFixtures.flatMap((fixture) => fixture.coverage.marks),
+  projectionFixtures.flatMap((fixture) => fixture.coverage.marks),
 );
 const schema = getDohcProseMirrorSchema();
 const missingNodes = Object.keys(schema.nodes).filter(
@@ -931,7 +934,7 @@ if (missingNodes.length > 0 || missingMarks.length > 0) {
     `richdoc projection fixtures do not cover the TS schema:\nmissing nodes: ${missingNodes.join(", ") || "(none)"}\nmissing marks: ${missingMarks.join(", ") || "(none)"}`,
   );
 }
-emittedProjectionFixtures.forEach(emit);
+projectionFixtures.forEach(emit);
 emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
@@ -941,5 +944,5 @@ writeFileSync(
   JSON.stringify({ fixtures: manifest }, null, 1),
 );
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${emittedProjectionFixtures.length} richdoc projection + 3 probes)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes)`,
 );

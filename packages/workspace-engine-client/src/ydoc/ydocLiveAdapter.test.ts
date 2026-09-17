@@ -4583,7 +4583,7 @@ describe("no-edit settle skip", () => {
   it.each([false, true])(
     "a rejected source projection preserves seed behavior and cleanup (record fails: %s)",
     async (failRecord) => {
-      const source = "~~~lang`tick\ncode\n~~~\n";
+      const source = "```js\ncode\n```\n";
       const seedDocs: Y.Doc[] = [];
       const importMarkdown = ydocProjection.markdownToYDoc;
       const importer = vi
@@ -4612,6 +4612,11 @@ describe("no-edit settle skip", () => {
           return sendRequest(request);
         });
       const adapter = new YdocLiveAdapter(engine);
+      const projector = vi
+        .spyOn(ydocProjection, "yDocToMarkdown")
+        .mockImplementationOnce(() => {
+          throw new Error("source projection failed");
+        });
       try {
         const opening = adapter.openSession({
           workspace: WORKSPACE,
@@ -4625,10 +4630,8 @@ describe("no-edit settle skip", () => {
           const session = await opening;
           try {
             const code = session.doc.getXmlFragment("body").get(0) as Y.XmlElement;
-            expect(code.getAttribute("language")).toBe("lang`tick");
-            expect(() => ydocProjection.yDocToMarkdown(session.doc)).toThrow(
-              "could not restore a fenced code block serialization sentinel",
-            );
+            expect(code.getAttribute("language")).toBe("js");
+            expect(ydocProjection.yDocToMarkdown(session.doc)).toBe(source.trimEnd());
             expect(session.doc.getMap("meta").has("dohcMarkdownSource")).toBe(false);
             expect(engine.recordedUpdates).toHaveLength(1);
           } finally {
@@ -4636,19 +4639,30 @@ describe("no-edit settle skip", () => {
           }
         }
         expect(seedDocs).toHaveLength(1);
+        expect(projector).toHaveBeenNthCalledWith(1, seedDocs[0]);
         expect(seedDocs[0]!.isDestroyed).toBe(true);
       } finally {
         adapter.dispose();
         importer.mockRestore();
+        projector.mockRestore();
         transport.mockRestore();
         for (const doc of seedDocs) doc.destroy();
       }
     },
   );
 
-  it("the first richdoc seed carries its exact captured Markdown across the wire", async () => {
-    const source = "# Shared\n\nStarting together.\n";
-    const canonical = "# Shared\n\nStarting together.";
+  it.each([
+    {
+      name: "heading",
+      source: "# Shared\n\nStarting together.\n",
+      canonical: "# Shared\n\nStarting together.",
+    },
+    {
+      name: "backtick-bearing code language",
+      source: "~~~lang`tick\ncode\n~~~\n\nStarting together.\n",
+      canonical: "~~~lang`tick\ncode\n~~~\n\nStarting together.",
+    },
+  ])("the first richdoc seed carries its exact captured Markdown across the wire ($name)", async ({ source, canonical }) => {
     const engine = new YdocLoopbackEngine();
     engine.seedFile({
       workspace: WORKSPACE,

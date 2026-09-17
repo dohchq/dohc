@@ -2151,6 +2151,35 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  it.each(['lang`tick', '`leading', '```leading', '~lang`tick'])('round-trips code blocks whose language is %s', language => {
+    for (const content of ['', 'code', 'before\n~~~\n```\nafter']) {
+      for (const quoted of [false, true]) {
+        const block = {
+          type: 'codeBlock',
+          attrs: { language },
+          ...(content ? { content: [{ type: 'text', text: content }] } : {}),
+        }
+        const doc = yDocFromBody([
+          quoted ? { type: 'blockquote', content: [block] } : block,
+          { type: 'paragraph', content: [{ type: 'text', text: 'After code' }] },
+        ])
+        const markdown = yDocToMarkdown(doc)
+        const fence = content.includes('~~~') ? '~~~~' : '~~~'
+        expect(markdown).toContain(`${fence}${language.startsWith('~') ? ' ' : ''}${language}`)
+        expect(markdown).not.toContain('DOHC_CODE_BLOCK')
+        const restored = markdownToYDoc(markdown)
+        expect(yDocBodyJSON(restored)).toEqual(yDocBodyJSON(doc))
+        expect(yDocToMarkdown(restored)).toBe(markdown)
+      }
+    }
+  })
+
+  it.each(['js', 'lang`tick'])('keeps an empty %s code block indented inside a list', language => {
+    const fence = language.includes('`') ? '~~~' : '```'
+    const markdown = `- intro\n  ${fence}${language}\n  \n  ${fence}\n\nAfter`
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+  })
+
   it('uses collision-free block and inline code delimiters', () => {
     const doc = yDocFromBody([
       {
