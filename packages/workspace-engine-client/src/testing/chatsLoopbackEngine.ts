@@ -1427,6 +1427,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     threadId: string,
     atMs: number,
   ): ChatMessage {
+    const options = params.options;
+    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid-poll-options");
+    const pollOptions: string[] = [];
+    if (Array.isArray(options)) {
+      if (options.length > 12) throw new Error("invalid-poll-options");
+      for (const raw of options) {
+        if (typeof raw !== "string") throw new Error("invalid-poll-options");
+        const option = raw.trim();
+        if (!option || option.length > 200 || /[\r\n]/u.test(option) || pollOptions.includes(option)) {
+          throw new Error("invalid-poll-options");
+        }
+        pollOptions.push(option);
+      }
+    }
     const messageId = requiredString(params, "messageId", "invalid-message-body");
     if (state.messages.has(messageId)) throw new Error("target-exists");
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
@@ -1488,10 +1502,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
         createdAtMs: atMs,
       });
     }
-    const options = params.options;
-    const pollOptions = Array.isArray(options)
-      ? options.map((option) => (typeof option === "string" ? option.trim() : "")).filter(Boolean)
-      : [];
     if (optionalBoolean(params, "needsDecision") === true || pollOptions.length > 0) {
       state.decisions.set(messageId, {
         threadId,
