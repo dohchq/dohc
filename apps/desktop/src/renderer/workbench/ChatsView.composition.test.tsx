@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
@@ -14,6 +14,22 @@ import {
 } from "./ChatsView.testHarness";
 
 describe("ChatsView My agent", () => {
+  it("attributes a runner failure to dohc without an agent badge", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({
+      id: "failure", authorKind: "agent", authorDisplayName: "You",
+      body: "⚠ Agent run failed (exit 3). Open the run chip for details.",
+    })] });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-thread"));
+    const notes = await screen.findAllByTestId("chats-message");
+    const note = within(notes.find((element) => element.dataset.messageId === "failure")!);
+    expect(note.getByTestId("chats-message-author").textContent).toBe("dohc");
+    expect(note.getByTestId("chats-message-author").dataset.authorKind).toBe("system");
+    expect(note.queryByTestId("chats-comment-agent-badge")).toBeNull();
+  });
+
   it("stays absent when the workspace has no agent channel", async () => {
     renderView();
     await screen.findByTestId("chats-channel");

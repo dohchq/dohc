@@ -547,14 +547,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <div className="flex flex-wrap items-baseline gap-1.5">
             <span
               data-testid="chats-message-author"
-              data-author-kind={comment.authorKind}
+              data-author-kind={isSystem ? "system" : comment.authorKind}
               className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
+                isAgent && !isSystem ? "text-agent" : "text-ink"
               }`}
             >
-              {chatAuthorLabel(comment)}
+              {isSystem ? "dohc" : chatAuthorLabel(comment)}
             </span>
-            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" /> : null}
             <time
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
