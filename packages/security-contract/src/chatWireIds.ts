@@ -6,10 +6,10 @@ export const AGENT_CHANNEL_WIRE_ID = "channel_wire_agent_v1";
 // `[a-z0-9-]` drop; runs of `-` collapse; ends trim. A group's default
 // folder is its slug, so both sides must spell it the same way.
 export function channelSlugForName(name: string): string {
-  const lowered = name.normalize("NFC").toLowerCase();
+  const lowered = name.normalize("NFC").toLowerCase().replace(/\p{White_Space}+/gu, "-");
   let out = "";
   for (const ch of lowered) {
-    if (/\s|_/u.test(ch)) out += "-";
+    if (ch === "_") out += "-";
     else if (/[a-z0-9-]/u.test(ch)) out += ch;
   }
   return out.replace(/-+/gu, "-").replace(/^-|-$/gu, "");
