@@ -3207,10 +3207,19 @@ export function ChatsView(props: {
                 const bookmarkId = isComment ? item.message.id : item.thread.id;
                 const bookmark = bookmarkFor(bookmarkTarget.kind, bookmarkId);
                 const bookmarkKey = `${bookmarkTarget.kind}:${bookmarkId}`;
-                const joined = item.channel?.wireId
-                  ? joinedByWire.get(item.channel.wireId)
-                  : undefined;
-                const locked = joined?.access === "read-only" || joined?.ended === true;
+                // Same authority as the channel view: an unresolved or
+                // unanswered share listing fails closed, so Home never offers
+                // a write the channel would refuse.
+                const locked = item.channel
+                  ? channelIsLocked({
+                      ...item.channel,
+                      wireId: item.channel.wireId,
+                      createdAtMs: 0,
+                      updatedAtMs: 0,
+                      threadCount: 0,
+                      unreadCount: 0,
+                    })
+                  : false;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
                 const isAgent = item.message.authorKind === "agent";
                 const time = formatChatTime(item.message.createdAtMs);
