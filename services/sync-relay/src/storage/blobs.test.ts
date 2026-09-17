@@ -27,6 +27,12 @@ function append(db: Pick<InspectionDatabase, "prepare">, payload: string, origin
     VALUES (?, 'origin', ?, 'opaque.future.kind', ?, 1)`).run(workspaceId, originSeq, payload);
 }
 
+function addRetainedInventory(f: Awaited<ReturnType<typeof fixture>>) {
+  const roots = Array.from({ length: 17 }, (_, index) => `9${index.toString(16).padStart(63, "0")}`);
+  for (const sha of roots) f.put(sha);
+  append(f.db, JSON.stringify(roots), 100_000);
+}
+
 const cases: [string, string, string[]][] = [
   ["lowercase", JSON.stringify({ value: hash }), [hash]],
   ["ASCII uppercase", JSON.stringify({ value: hash.toUpperCase() }), [hash]],
@@ -47,6 +53,7 @@ const cases: [string, string, string[]][] = [
 
 it.each(cases)("matches existing SQL retention for %s", async (_name, payload, hashes) => {
   const f = await fixture();
+  addRetainedInventory(f);
   for (const sha of [...hashes, orphan]) f.put(sha);
   append(f.db, payload);
   const expected = f.db.prepare(`SELECT b.sha256 FROM sync_relay_blobs b
@@ -58,9 +65,9 @@ it.each(cases)("matches existing SQL retention for %s", async (_name, payload, h
     .toEqual({ removed: expected.length, removedSha256s: expected });
 });
 
-it.each([2, 4])("does not join log rows or cross workspace boundaries with %i candidates", async count => {
+it.each([2, 17])("does not join log rows or cross workspace boundaries with %i candidates", async count => {
   const f = await fixture();
-  const hashes = [hash, orphan, "a".repeat(64), "b".repeat(64)].slice(0, count).sort();
+  const hashes = [hash, orphan, ...Array.from({ length: 15 }, (_, index) => index.toString(16).padStart(64, "0"))].slice(0, count).sort();
   for (const sha of hashes) f.put(sha);
   f.put(hash, 1, "other");
   append(f.db, JSON.stringify(hash.slice(0, 32)), 0);
@@ -90,6 +97,7 @@ it("preserves the grace boundary and returns sorted actual deletions across chun
 
 it("rechecks external log writes and fresh replacement after discovery yields", async () => {
   const f = await fixture();
+  addRetainedInventory(f);
   const replacement = "e".repeat(64);
   const existingRoot = "d".repeat(64);
   for (const sha of [hash, replacement, orphan, existingRoot]) f.put(sha);
@@ -119,6 +127,7 @@ it("rechecks external log writes and fresh replacement after discovery yields", 
 
 it("keeps every locked retention predicate after initial discovery", async () => {
   const f = await fixture();
+  addRetainedInventory(f);
   const proposalHash = "a".repeat(64);
   const publicationHash = "b".repeat(64);
   for (const sha of [hash, proposalHash, publicationHash, orphan]) f.put(sha);
@@ -189,6 +198,7 @@ it("retains a late-page root and a reference committed between deletion chunks",
 
 it("finishes discovery while a writer appends a full page at each yield", async () => {
   const f = await fixture();
+  addRetainedInventory(f);
   const existingRoots = ["a".repeat(64), "b".repeat(64)];
   for (const sha of [hash, orphan, ...existingRoots]) f.put(sha);
   for (let index = 0; index < 32; index++) append(f.db, index === 0 ? JSON.stringify(existingRoots) : "{}", index);
@@ -217,6 +227,7 @@ it("finishes discovery while a writer appends a full page at each yield", async 
 
 it("retains a late root across payload pieces using the locked bulk scan", async () => {
   const f = await fixture();
+  addRetainedInventory(f);
   const secondOrphan = "e".repeat(64);
   const thirdOrphan = "d".repeat(64);
   for (const sha of [hash, secondOrphan, orphan, thirdOrphan]) f.put(sha);
@@ -234,6 +245,7 @@ it("retains a late root across payload pieces using the locked bulk scan", async
 
 it("does not delete after a partial locked log scan fails", async () => {
   const f = await fixture();
+  addRetainedInventory(f);
   const hashes = [hash, orphan, "a".repeat(64), "b".repeat(64)];
   for (const sha of hashes) f.put(sha);
   for (let index = 0; index < 96; index++) append(f.db, "{}", index);

@@ -3,7 +3,7 @@ import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
 import { BLOB_LOG_TEXT_CHUNK, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
 
-const DIRECT_SQL_INVENTORY_LIMIT = 3;
+const DIRECT_SQL_INVENTORY_LIMIT = 16;
 
 async function excludeLogReferencedBlobs(
   storage: StorageContext,
