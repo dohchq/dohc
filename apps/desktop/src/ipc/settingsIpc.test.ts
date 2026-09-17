@@ -87,6 +87,7 @@ async function harness() {
     effects.push({ kind: "name", value, persisted: persisted() });
   });
   const applyZoomLevelToWindows = vi.fn((value: number) => { effects.push({ kind: "zoom", value, persisted: persisted() }); });
+  const broadcastUserSettings = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
   const openDispatchWorkspaces = vi.fn(() => [...entries.values()]);
   const scanWorkspace = vi.fn<(workspaceId: string) => Promise<unknown>>(async () => undefined);
@@ -100,7 +101,7 @@ async function harness() {
     stateDir: () => stateDirectory, enqueueUserSettingsWrite, setCachedPreferredName,
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
-    broadcastUserSettings: () => undefined,
+    broadcastUserSettings,
   });
   const zoom = createZoomMutation({
     enqueue: enqueueUserSettingsWrite,
@@ -118,7 +119,7 @@ async function harness() {
   return {
     handlers, firstGroup, effects, entries, authorities, sessions, first, second, open, zoom,
     enqueueUserSettingsWrite, setCachedPreferredName, applyZoomLevelToWindows,
-    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace,
+    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
@@ -183,6 +184,7 @@ describe("registered settings IPC", () => {
     expect(h.preferredName()).toBe("Ice");
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual({ settings, source: "stored" });
     await expect(h.invoke(CHANNELS.resetUserSettings)).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+    expect(h.broadcastUserSettings).toHaveBeenLastCalledWith({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     expect(h.preferredName()).toBeUndefined();
     expect(h.effects.map(({ kind, value }) => ({ kind, value }))).toEqual([
       { kind: "name", value: "Ice" }, { kind: "zoom", value: 2 },

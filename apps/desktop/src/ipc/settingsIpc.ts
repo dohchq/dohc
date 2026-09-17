@@ -84,6 +84,7 @@ export function createSettingsIpc<
           source: "stored",
         });
       });
+      broadcastUserSettings(result);
       await refreshDispatchTray();
       return result;
     });
