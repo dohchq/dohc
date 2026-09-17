@@ -717,14 +717,26 @@ describe("shared channels (MU-C4)", () => {
       ops: [{ ...decision("msg-a-1", { options: ["\uFEFFFriday", "Monday"], chosenOption: "Monday" }), originSeq: 3 }],
     })));
     expect(bom.status).toBe(200);
+    // The pick is compared as written: a padded pick is not one of the choices.
+    const padded = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday"], chosenOption: " Friday " }), originSeq: 4 }],
+    })));
+    expect(padded.status).toBe(403);
+    // A null is an absent field, as the engine reads it.
+    const bare = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: null, chosenOption: null }), originSeq: 4 }],
+    })));
+    expect(bare.status).toBe(200);
     const noChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
       originId: "origin-member-a",
-      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 4 }],
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 5 }],
     })));
     expect(noChoice.status).toBe(403);
     const goodChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
       originId: "origin-member-a",
-      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 4 }],
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 5 }],
     })));
     expect(goodChoice.status).toBe(200);
   });

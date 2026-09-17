@@ -1224,8 +1224,9 @@ function trimLikeEngine(value: string): string {
 function decisionPollFieldsValid(payload: unknown): boolean {
   const record = asRecord(payload);
   if (!record) return false;
-  const options = record.options;
-  const chosen = record.chosenOption;
+  // The engine reads a null as an absent field.
+  const options = record.options ?? undefined;
+  const chosen = record.chosenOption ?? undefined;
   const normalized: string[] = [];
   if (options !== undefined) {
     if (!Array.isArray(options) || options.length > MAX_POLL_OPTIONS) return false;
@@ -1240,8 +1241,9 @@ function decisionPollFieldsValid(payload: unknown): boolean {
     }
   }
   if (chosen !== undefined) {
+    // The engine compares the pick as written against the trimmed choices.
     if (typeof chosen !== "string" || record.state !== "resolved" || normalized.length === 0) return false;
-    if (!normalized.includes(trimLikeEngine(chosen))) return false;
+    if (!normalized.includes(chosen)) return false;
   } else if (record.state === "resolved" && normalized.length > 0) {
     return false;
   }
