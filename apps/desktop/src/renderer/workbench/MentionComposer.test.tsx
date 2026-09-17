@@ -217,7 +217,9 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     await userEvent.click(screen.getByTestId("chats-open"));
     await userEvent.click(await screen.findByRole("button", { name: "Attach a file" }));
-    expect(await screen.findByTestId("chats-file-mention-option")).toBeTruthy();
+    const fileOption = await screen.findByTestId("chats-file-mention-option");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(fileOption.id);
+    expect(fileOption.getAttribute("aria-selected")).toBe("true");
     await userEvent.click(screen.getByTestId("chats-file-mention-option"));
     await userEvent.click(await screen.findByTestId("chats-file-mention-whole"));
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
