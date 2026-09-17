@@ -176,7 +176,7 @@ describe("a group share is one grant for the channel and its folder", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
-    for (const paths of [["private"], ["team", "private"], ["team/child"]]) {
+    for (const paths of [["private"], ["team", "private"], ["team/child"], ["team", "team"]]) {
       const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({
         recipientUserId: MEMBER_A, channelWireId: SHARED_WIRE, paths,
       })));

@@ -248,8 +248,8 @@ export function validateGroupShareSelector(
       message: "a group share names its folder",
     };
   }
-  if (chat && (files.selector.paths.length !== 1 ||
-    files.selector.paths[0] !== chat.channelFolderPath?.(channel.selector.channelWireId))) {
+  if (chat && (!Array.isArray(input.paths) || input.paths.length !== 1 ||
+    input.paths[0] !== chat.channelFolderPath?.(channel.selector.channelWireId))) {
     return {
       ok: false,
       code: RELAY_ERRORS.invalid_path.code,
