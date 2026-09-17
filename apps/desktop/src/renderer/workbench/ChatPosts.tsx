@@ -113,7 +113,7 @@ function AgentBadge(props: { testIdPrefix: string }) {
 
 // A poll's choices, stacked. Picking one is the answer. An answered poll
 // keeps its choices and marks the one taken.
-function PollOptions(props: {
+export function PollOptions(props: {
   decision: ChatDecisionRecord;
   onChoose?: (option: string) => void;
   testIdPrefix: string;
@@ -160,7 +160,7 @@ function PollOptions(props: {
   );
 }
 
-function DecisionStatus(props: {
+export function DecisionStatus(props: {
   decision: ChatDecisionRecord;
   onResolve?: (option?: string) => void;
   testIdPrefix: string;
