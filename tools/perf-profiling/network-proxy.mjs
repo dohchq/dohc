@@ -2,6 +2,17 @@ import { createServer, request } from "node:http";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 
+function forwardedHeaders(headers) {
+  const forwarded = { ...headers };
+  const hopHeaders = [
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+    ...String(headers.connection ?? "").split(","),
+  ];
+  for (const name of hopHeaders) delete forwarded[name.trim().toLowerCase()];
+  return forwarded;
+}
+
 // Response shaping only: latency is one extra delay per response, bandwidth
 // is one shared downstream budget. This does not emulate packet loss or RTT.
 export async function openNetworkProxy(targetUrl) {
@@ -34,12 +45,12 @@ export async function openNetworkProxy(targetUrl) {
     const upstream = request({
       hostname: target.hostname, port: target.port,
       path: incoming.url, method: incoming.method,
-      headers: { ...incoming.headers, host: target.host },
+      headers: { ...forwardedHeaders(incoming.headers), host: target.host },
     }, (response) => {
       const forwarding = (async () => {
         try {
           if (settings.latencyMs) await delay(settings.latencyMs, undefined, { signal });
-          outgoing.writeHead(response.statusCode ?? 502, response.headers);
+          outgoing.writeHead(response.statusCode ?? 502, forwardedHeaders(response.headers));
           for await (const chunk of response) {
             if (settings.bytesPerSecond) {
               availableAt = Math.max(availableAt, performance.now()) + chunk.length * 1000 / settings.bytesPerSecond;

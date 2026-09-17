@@ -204,4 +204,15 @@ try {
   ]) await runCase(settings);
   report.status = "pass";
 } catch (error) { report.status = "fail"; report.error = String(error); process.exitCode = 1; }
-finally { await cleanupSuiteTestScratch(); report.finishedAt = new Date().toISOString(); await save(); }
+finally {
+  try { await cleanupSuiteTestScratch(); }
+  catch (error) {
+    report.cleanupError = String(error);
+    report.error ??= String(error);
+    report.status = "fail";
+    process.exitCode = 1;
+  } finally {
+    report.finishedAt = new Date().toISOString();
+    await save();
+  }
+}

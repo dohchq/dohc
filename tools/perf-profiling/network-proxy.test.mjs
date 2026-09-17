@@ -33,6 +33,53 @@ test("shaping preserves status, authorization, query and response bytes", async 
   assert.equal(proxy.snapshot().bytes, body.length);
 });
 
+test("filters hop-by-hop headers in both directions while preserving the HTTP payload", async (t) => {
+  let forwarded;
+  const proxy = await fixture(t, (request, response) => {
+    forwarded = request.headers;
+    response.writeHead(201, {
+      Connection: "X-Response-Hop, Keep-Alive",
+      "X-Response-Hop": "private response hop",
+      "Keep-Alive": "timeout=1234",
+      "Proxy-Authenticate": "private proxy challenge",
+      "Content-Type": "application/octet-stream",
+      "X-End-To-End": "retained response",
+    });
+    response.end(Buffer.from([0, 127, 255]));
+  });
+  const response = await new Promise((resolve, reject) => {
+    get(proxy.baseUrl, { headers: {
+      Connection: "X-Request-Hop, Keep-Alive",
+      "X-Request-Hop": "private request hop",
+      "Keep-Alive": "timeout=1234",
+      "Proxy-Authorization": "private proxy credential",
+      "Proxy-Connection": "keep-alive",
+      TE: "trailers",
+      Authorization: "Bearer fixture",
+      "X-End-To-End": "retained request",
+    } }, async (response) => {
+      try {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) });
+      } catch (error) { reject(error); }
+    }).once("error", reject);
+  });
+  assert.equal(forwarded["x-request-hop"], undefined);
+  assert.equal(forwarded["proxy-authorization"], undefined);
+  assert.equal(forwarded["proxy-connection"], undefined);
+  assert.equal(forwarded.te, undefined);
+  assert.notEqual(forwarded["keep-alive"], "timeout=1234");
+  assert.equal(forwarded.authorization, "Bearer fixture");
+  assert.equal(forwarded["x-end-to-end"], "retained request");
+  assert.equal(response.headers["x-response-hop"], undefined);
+  assert.equal(response.headers["proxy-authenticate"], undefined);
+  assert.notEqual(response.headers["keep-alive"], "timeout=1234");
+  assert.equal(response.headers["x-end-to-end"], "retained response");
+  assert.equal(response.status, 201);
+  assert.deepEqual(response.body, Buffer.from([0, 127, 255]));
+});
+
 test("fails one counted blob with a query string and then resumes", async (t) => {
   const proxy = await fixture(t, (_, response) => response.end("blob"));
   proxy.configure({ failBlobAt: 2 });
