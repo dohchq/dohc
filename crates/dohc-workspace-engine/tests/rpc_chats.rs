@@ -4606,3 +4606,208 @@ async fn unread_file_thread_arm_fails_closed_on_non_safe_read_state() {
     assert_eq!(error.code, ErrorCode::Internal);
     assert_eq!(error.message, "state-corrupt");
 }
+
+// A poll's choices and its answer cross the RPC boundary with the decision,
+// and a channel's lanes page apart: the posts lane is the default, the chat
+// lane is named, an unknown lane is refused, and one lane's cursor does not
+// open the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn polls_and_lanes_cross_the_rpc_boundary() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-polls-lanes").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "Launch",
+            "kind": "channel",
+            "type": "both",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "poll-thread",
+            "messageId": "poll",
+            "authorKind": "agent",
+            "authorDisplayName": "Ada's agent",
+            "body": "Which day do we ship?",
+            "needsDecision": true,
+            "options": ["Friday", "Monday"],
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "poll-thread" }),
+    )
+    .await;
+    assert_eq!(
+        listed["decisions"][0]["options"],
+        json!(["Friday", "Monday"]),
+        "dropping options from the decision DTO -> a poll lists as a bare question."
+    );
+    assert!(listed["decisions"][0].get("chosenOption").is_none());
+
+    let wrong = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve-wrong",
+        json!({
+            "threadId": "poll-thread",
+            "messageId": "poll",
+            "resolvedByMessageId": "poll",
+            "chosenOption": "Sunday",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    assert_eq!(wrong.message, "invalid-poll-choice");
+
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve-good",
+        json!({
+            "threadId": "poll-thread",
+            "messageId": "poll",
+            "resolvedByMessageId": "poll",
+            "chosenOption": "Monday",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    let resolved = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "poll-thread" }),
+    )
+    .await;
+    assert_eq!(resolved["decisions"][0]["state"], json!("resolved"));
+    assert_eq!(
+        resolved["decisions"][0]["chosenOption"],
+        json!("Monday"),
+        "dropping chosenOption from the decision DTO -> the answer never reaches a reader."
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "lane-thread",
+            "messageId": "lane-opening",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "quick word",
+            "lane": "chat",
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    let posts = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel" }),
+    )
+    .await;
+    let posts_ids: Vec<&Value> = posts["threads"]
+        .as_array()
+        .expect("threads")
+        .iter()
+        .map(|summary| &summary["thread"]["id"])
+        .collect();
+    assert_eq!(
+        posts_ids,
+        vec![&json!("poll-thread")],
+        "listing without a lane must read the posts lane only."
+    );
+    let chat = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "lane": "chat" }),
+    )
+    .await;
+    assert_eq!(chat["threads"][0]["thread"]["id"], json!("lane-thread"));
+    assert_eq!(chat["threads"][0]["thread"]["lane"], json!("chat"));
+    assert_eq!(chat["threads"].as_array().expect("threads").len(), 1);
+
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "lane": "feed" }),
+    )
+    .await;
+    assert_eq!(unknown.message, "unknown chat thread lane");
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "second-post",
+            "messageId": "second-opening",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Second post",
+            "nowMs": 50,
+        }),
+    )
+    .await;
+    let first_page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "pageLimit": 1 }),
+    )
+    .await;
+    let posts_cursor = first_page["nextCursor"]
+        .as_str()
+        .expect("posts cursor")
+        .to_owned();
+    let crossed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "lane": "chat", "cursor": posts_cursor }),
+    )
+    .await;
+    assert!(
+        crossed.message.contains("cursor"),
+        "a posts-lane cursor opened the chat lane: {}",
+        crossed.message
+    );
+}

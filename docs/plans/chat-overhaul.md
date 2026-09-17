@@ -43,7 +43,7 @@ Recorded so no phase re-litigates them.
 
 ## Phase 1: renderer, posts and groups
 
-**Status: implemented on `feat/chat-overhaul`; in review.**
+**Status: merged in #1124.**
 
 Redraw chat on the existing engine contract. No engine change. No IPC change except where a field is already on the wire and unused.
 
@@ -79,7 +79,7 @@ Gate: `pnpm verify:pr --base main` green. `pnpm test:desktop:e2e` green on the c
 
 ## Phase 2: engine, group as folder
 
-**Status: implemented on `feat/chat-engine`, stacked on phase 1; in review. Item 2, members as an engine op, is not built: members remain relay grants, and `chat-overhaul-phase2.md` records why.**
+**Status: merged in #1136. Item 2 is superseded: a member is a relay grant, and `chat-overhaul-phase2.md` decision 2 says why the engine holds no second copy.**
 
 The changes the prototype needs that the engine does not have. Each is small on its own. Together they replace two share systems with one.
 
@@ -103,7 +103,7 @@ Gate: `pnpm verify:pr --base main` with both `--job js` and `--job rust` green. 
 
 ## Phase 3: agents
 
-**Status: implemented on `feat/chat-engine` with phase 2; in review.**
+**Status: merged in #1136.**
 
 1. Add agent under Agents in the nav: name, runner, check. Writes the existing `runner` settings. Replaces the "Set up your agent" card in the channel view.
 2. The agent's screen: runner, what it reaches, recent work.

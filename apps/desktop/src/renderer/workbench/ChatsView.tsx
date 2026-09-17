@@ -323,6 +323,26 @@ function NavRow(props: {
   );
 }
 
+// The strip names the program a runner command starts, not its whole
+// command line: a quoted path to a script is a path, and the strip is a
+// sentence. The full command sits in the title.
+// An agent seen in a joined group's chat lane: who, under whom, and the
+// group to open.
+type LaneAgent = { key: string; label: string; owner: string; channel: ChatChannelRecord; atMs: number };
+
+export function runnerProgram(command: string): string {
+  const tokens: string[] = [];
+  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/gu;
+  for (const match of command.trim().matchAll(pattern)) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+    if (tokens.length === 2) break;
+  }
+  const basename = (token: string): string => token.split(/[\\/]/u).pop() ?? token;
+  const program = tokens[0] ? basename(tokens[0]) : "";
+  const script = tokens[1] ? basename(tokens[1]) : "";
+  return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
+}
+
 export function ChatsView(props: {
   workspaceId: string;
   workspaces: readonly DmWorkspaceOption[];
@@ -2518,8 +2538,85 @@ export function ChatsView(props: {
   // the Home items already read, so it costs nothing and lists exactly the
   // agents whose work the user has seen arrive. Read-only: nothing here runs
   // or configures them.
+  // Agents that speak only in a group's chat lane never enter Home, so the
+  // Agents list also reads each joined group's chat lane. One page of the
+  // lane per group, on the nav and after activity; a handful of calls.
+  const [laneAgents, setLaneAgents] = useState<LaneAgent[]>([]);
+  const laneAgentSeq = useRef(0);
+  // What a lane said, by group, keyed on the lane's updated time. Message
+  // facts only; the channel and the share are attached when the list is
+  // assembled, so a renamed group or a re-issued share shows as it is now.
+  const laneAgentCache = useRef(
+    new Map<string, { updatedAtMs: number; spoke: Array<{ id: string; label: string; atMs: number }> }>(),
+  );
+  // The joined chat groups, as one string, so the read runs when that set
+  // changes and not on every overview or share refresh.
+  const joinedChatGroups = useMemo(() => {
+    if (overview.status !== "ready") return [];
+    return overview.channels.filter(
+      (channel) =>
+        typeof channel.wireId === "string" &&
+        (channel.type === "chat" || channel.type === "both") &&
+        joinedByWire.get(channel.wireId),
+    );
+  }, [joinedByWire, overview]);
+  const joinedChatGroupsKey = joinedChatGroups.map((channel) => channel.id).join("\u0000");
+  useEffect(() => {
+    if (nav.level !== "channels") return;
+    const token = liveToken.current;
+    const seq = ++laneAgentSeq.current;
+    const isCurrent = () => token === liveToken.current && seq === laneAgentSeq.current;
+    if (joinedChatGroups.length === 0) {
+      setLaneAgents([]);
+      return;
+    }
+    void Promise.all(
+      joinedChatGroups.map(async (channel): Promise<LaneAgent[]> => {
+        const listed = await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane: "chat" });
+        // The lane the group shows is its oldest chat thread, as ChatLane reads it.
+        const lane = [...listed.threads].sort(
+          (left, right) => left.createdAtMs - right.createdAtMs || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+        )[0];
+        if (!lane) return [];
+        const cached = laneAgentCache.current.get(channel.id);
+        let spoke = cached && cached.updatedAtMs === lane.updatedAtMs ? cached.spoke : undefined;
+        if (!spoke) {
+          const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
+          spoke = page.messages
+            .filter((message) => message.authorKind === "agent")
+            .map((message) => ({
+              id: message.authorUserId ?? message.authorDisplayName,
+              label: chatAuthorLabel(message),
+              atMs: message.createdAtMs,
+            }));
+          // An obsolete read must not seed the cache for a later hit.
+          if (isCurrent()) laneAgentCache.current.set(channel.id, { updatedAtMs: lane.updatedAtMs, spoke });
+        }
+        const joined = joinedByWire.get(channel.wireId ?? "");
+        const owner = joined?.granterEmail ?? "someone else";
+        return spoke.map((who) => ({
+          key: `${joined?.shareId ?? channel.id}\u0000${who.id}`,
+          label: who.label,
+          owner,
+          channel,
+          atMs: who.atMs,
+        }));
+      }),
+    )
+      .then((found) => {
+        if (!isCurrent()) return;
+        setLaneAgents(found.flat());
+      })
+      .catch(() => {
+        // The lane read is a convenience for the list; Home's items still
+        // name every agent that posts. A failed read leaves the list as is.
+      });
+    // The group list itself is read through its key, so a new overview
+    // object with the same groups does not start another read.
+  }, [joinedChatGroupsKey, joinedByWire, nav.level, props.threadRevision, workspaceId]);
+
   const otherAgents = useMemo(() => {
-    const seen = new Map<string, { key: string; label: string; owner: string; latest: ChatFeedItemRecord }>();
+    const seen = new Map<string, { key: string; label: string; owner: string; atMs: number; fromFeed: boolean; open: () => void }>();
     for (const item of personalFeed) {
       if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
       const joined = joinedByWire.get(item.channel.wireId);
@@ -2527,12 +2624,38 @@ export function ChatsView(props: {
       const owner = joined.granterEmail ?? "someone else";
       const key = `${joined.shareId}\u0000${item.authorFollowTarget?.targetId ?? item.message.authorDisplayName}`;
       const known = seen.get(key);
-      if (!known || known.latest.message.createdAtMs < item.message.createdAtMs) {
-        seen.set(key, { key, label: chatAuthorLabel(item.message), owner, latest: item });
+      if (!known || known.atMs < item.message.createdAtMs) {
+        const channel = item.channel;
+        seen.set(key, {
+          key,
+          label: chatAuthorLabel(item.message),
+          owner,
+          atMs: item.message.createdAtMs,
+          fromFeed: true,
+          open: () =>
+            openConversation({
+              level: "thread",
+              channel: { ...channel, wireId: channel.wireId, createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0 },
+              thread: { ...item.thread, channelId: channel.id, messageCount: 0, lastReadSequence: 0, unreadCount: 0 },
+              focusMessageId: item.message.id,
+            }),
+        });
       }
     }
+    for (const agent of laneAgents) {
+      const known = seen.get(agent.key);
+      if (known && (known.fromFeed || known.atMs >= agent.atMs)) continue;
+      seen.set(agent.key, {
+        key: agent.key,
+        label: agent.label,
+        owner: agent.owner,
+        atMs: agent.atMs,
+        fromFeed: false,
+        open: () => openConversation({ level: "channel", channel: agent.channel }),
+      });
+    }
     return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
-  }, [joinedByWire, personalFeed]);
+  }, [joinedByWire, laneAgents, openConversation, personalFeed]);
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
   // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
@@ -3952,10 +4075,14 @@ export function ChatsView(props: {
             className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
             <Bot size={12} aria-hidden className="shrink-0 text-agent" />
-            <span data-testid="chats-agent-screen-runner" className="min-w-0 flex-1 truncate">
+            <span
+              data-testid="chats-agent-screen-runner"
+              className="min-w-0 flex-1 truncate"
+              title={agentReady ? props.userSettings?.runner.command.trim() : undefined}
+            >
               {agentReady
                 ? props.userSettings?.runner.command.trim()
-                  ? `Runs ${props.userSettings.runner.command.trim()}`
+                  ? `Runs ${runnerProgram(props.userSettings.runner.command)}`
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
@@ -4498,29 +4625,7 @@ export function ChatsView(props: {
                         testId="chats-other-agent"
                         data={{ "data-owner": agent.owner }}
                         active={false}
-                        onClick={() => {
-                          const item = agent.latest;
-                          if (!item.channel) return;
-                          openConversation({
-                            level: "thread",
-                            channel: {
-                              ...item.channel,
-                              wireId: item.channel.wireId,
-                              createdAtMs: 0,
-                              updatedAtMs: 0,
-                              threadCount: 0,
-                              unreadCount: 0,
-                            },
-                            thread: {
-                              ...item.thread,
-                              channelId: item.channel.id,
-                              messageCount: 0,
-                              lastReadSequence: 0,
-                              unreadCount: 0,
-                            },
-                            focusMessageId: item.message.id,
-                          });
-                        }}
+                        onClick={agent.open}
                         icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
                         label={agent.label}
                         labelTestId="chats-other-agent-name"
