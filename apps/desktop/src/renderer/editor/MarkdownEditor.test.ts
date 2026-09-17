@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension, getSchema, type JSONContent } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+import { marked } from "marked";
 // Bare TaskItem is imported here only as the contrast case for the schema-
 // fidelity pin below — every registered test-local editor schema in
 // this file uses DohcTaskItem.
@@ -126,6 +127,30 @@ afterEach(() => {
 // already tripped the latch, `console.warn` assertions below would pass
 // vacuously (the warning simply never fires again) whether or not the fix
 // still works. Keep this describe first in the file.
+it("keeps editor tokenizers out of the process-wide Markdown registry", async () => {
+  const registrations = () => {
+    const extensions = marked.defaults.extensions;
+    return {
+      inline: extensions?.inline?.length ?? 0,
+      block: extensions?.block?.length ?? 0,
+      startInline: extensions?.startInline?.length ?? 0,
+      startBlock: extensions?.startBlock?.length ?? 0,
+    };
+  };
+  const before = registrations();
+  for (let index = 0; index < 3; index++) {
+    const view = render(createElement(MarkdownEditor, {
+      value: "A ==highlight== and [[note]]\n\n> [!NOTE]\n> callout\n",
+      onDirty: vi.fn(), workspaceId: "workspace-1", path: `note-${index}.md`, knownFiles: [],
+    }));
+    const editor = await screen.findByTestId("markdown-editor");
+    expect(editor.querySelector("mark")?.textContent).toBe("highlight");
+    expect(editor.textContent).toContain("callout");
+    view.unmount();
+    expect(registrations()).toEqual(before);
+  }
+});
+
 describe("MarkdownEditor collaboration selection", () => {
   it("binds a leading task list without constructing an invalid text selection", async () => {
     const selectionWarning =

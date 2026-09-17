@@ -21,7 +21,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
 interface Descriptor { publicationId: string; authorityRevision: number; files: Omit<AppDocumentFile, "bytes">[] }
-interface Launch { origin: string; publicationId: string; capability: string; profileSecret: string; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string; staged?: ReturnType<typeof createAppDocument>; stagedExpires?: number }
+interface Launch { origin: string; publicationId: string; material: Extract<LinkBrowserMaterial, {ok: true}>; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string; staged?: ReturnType<typeof createAppDocument>; stagedExpires?: number }
 
 async function boundedBytes(response: Request | Response, max: number, signal: AbortSignal): Promise<Uint8Array> {
   const reader = response.body?.getReader(); if (!reader) return new Uint8Array();
@@ -44,12 +44,29 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   const collectionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES); let pending = 0, statusPending = 0, collectionPending = 0;
   const hostPattern = new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`);
   const appHost = (host: string) => hostPattern.test(host);
-  async function relay(launch: Pick<Launch, "publicationId" | "capability" | "profileSecret">, suffix: string, signal: AbortSignal) {
-    try {return await options.fetchRelay(new Request(new URL(`/sync/link/app-publications/${launch.publicationId}${suffix}`, options.relayUrl),
-      { headers: { authorization: `LinkCapability ${launch.capability}`, "x-dohc-link-profile-secret": launch.profileSecret }, signal, redirect: "manual" }));}
-    catch {throw new RelayUnavailable();}
+  async function fetchForLaunch(launch: Pick<Launch, "material">, request: Request) {
+    const capability = await launch.material.currentCapability();
+    if (!capability) return refusal();
+    const send = (token: string) => {
+      const headers = new Headers(request.headers);
+      headers.set("authorization", `LinkCapability ${token}`);
+      headers.set("x-dohc-link-profile-secret", launch.material.profileSecret);
+      return options.fetchRelay(new Request(request.clone(), {headers}));
+    };
+    try {
+      const response = await send(capability);
+      if (![401, 403, 404].includes(response.status)) return response;
+      const current = await launch.material.currentCapability();
+      if (!current || current === capability) return response;
+      await response.body?.cancel().catch(() => {});
+      return await send(current);
+    } catch { throw new RelayUnavailable(); }
   }
-  async function descriptor(launch: Pick<Launch, "publicationId" | "capability" | "profileSecret"> & { revision?: number }, signal: AbortSignal): Promise<Descriptor> {
+  async function relay(launch: Pick<Launch, "publicationId" | "material">, suffix: string, signal: AbortSignal) {
+    return fetchForLaunch(launch, new Request(new URL(`/sync/link/app-publications/${launch.publicationId}${suffix}`, options.relayUrl),
+      {signal, redirect: "manual"}));
+  }
+  async function descriptor(launch: Pick<Launch, "publicationId" | "material"> & { revision?: number }, signal: AbortSignal): Promise<Descriptor> {
     const response = await relay(launch, "", signal);
     try {
       if (response.status === 429 || response.status >= 500) throw new RelayUnavailable();
@@ -101,9 +118,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           const body = await readBoundedJson(request, 1024, signal);
           if (!exact(body, "discriminator,publicationId") || typeof body.discriminator !== "string" || !isSessionDiscriminator(body.discriminator) || typeof body.publicationId !== "string" || !PUBLICATION.test(body.publicationId)) return refusal();
           const material = await options.resolveMaterial(body.discriminator, request.headers.get("cookie"), signal); if (!material.ok) return refusal();
-          const current = await descriptor({ publicationId: body.publicationId, capability: material.capabilityToken, profileSecret: material.profileSecret }, signal);
+          const current = await descriptor({ publicationId: body.publicationId, material }, signal);
           signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
-          launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, capability: material.capabilityToken, profileSecret: material.profileSecret,
+          launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, material,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
           return Response.json({ action: `https://${launchHost}/bootstrap`, handoff }, { headers: { ...headers, ...(material.setCookie ? { "set-cookie": material.setCookie } : {}) } });
         }
@@ -139,7 +156,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!launch.cookieHash || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash || !TOKEN.test(proof) || hash(proof) !== launch.proofHash || request.headers.get("origin") !== launch.origin) return refusal();
         if (!(collectionRequest ? collectionRate : sessionRate).allow(host, now())) return unavailable();
         if (url.pathname === "/collection") return await forwardAppCollection({request,relayUrl:options.relayUrl,publicationId:launch.publicationId,
-          authorityRevision:launch.revision,capability:launch.capability,profileSecret:launch.profileSecret,signal,fetchRelay:options.fetchRelay});
+          authorityRevision:launch.revision,capability:launch.material.capabilityToken,profileSecret:launch.material.profileSecret,signal,fetchRelay:request => fetchForLaunch(launch, request)});
         if (url.pathname === "/status") { await descriptor(launch, signal); return new Response(null, { status: 204, headers }); }
         if (url.pathname !== "/document") return refusal();
         await descriptor(launch, signal); signal.throwIfAborted();

@@ -143,7 +143,7 @@ export class OwnerCommittedDelivery {
         }});
       await applyPending();
       if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
-        ? {kind: "pending",reason: applicationPending ? "Owner application did not commit." : "Owner delivery pass reached its work budget.", continueDrain: outbox.admittedEntries > 0 || appliedCount > 0}
+        ? {kind: "pending",reason: applicationPending ? "Owner application did not commit." : "Owner delivery pass reached its work budget.", continueDrain: outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0}
         : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");

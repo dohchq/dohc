@@ -13,6 +13,10 @@ describe("main window web preferences", () => {
     expect(prefs.nodeIntegration).toBe(false);
     expect(prefs.contextIsolation).toBe(true);
     expect(prefs.sandbox).toBe(true);
+    expect(prefs.additionalArguments).toEqual([]);
+    expect(
+      createMainWindowWebPreferences("/abs/path/preload.js", ["--dohc-dev-tools"]).additionalArguments,
+    ).toEqual(["--dohc-dev-tools"]);
   });
 
   it("requires an absolute preload path", () => {

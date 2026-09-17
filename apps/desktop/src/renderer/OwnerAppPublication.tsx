@@ -175,7 +175,7 @@ function PublicationDialog(props: {
   };
 
   const reviewReactivation = async (publication: Publication) => {
-    if (busy || responsesBusy || publication.manifestUnavailable || publication.active) return;
+    if (busy || responsesBusy || publication.manifestUnavailable || publication.active || !publication.linkCurrent) return;
     const mine = ++request.current;
     setBusy("prepare"); setBusyPublicationId(publication.publicationId); setError(null); setNotice(null);
     try {
@@ -265,6 +265,7 @@ function PublicationDialog(props: {
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
       </header>
       <p className="m-0 break-all font-mono text-[12px] text-muted">{props.appRoot}</p>
+      <p className="m-0 text-[12px] text-muted">Publishing apps currently requires Windows x64.</p>
       {responsesBusy ? <p role="status" className="m-0 text-[13px] text-muted">Updating responses. Wait before closing.</p> : null}
       {notice ? <p role="status" className="m-0 text-[13px] text-ink">{notice}</p> : null}
       {error ? <p role="alert" className="m-0 text-[13px] text-danger">{error}</p> : null}
@@ -303,7 +304,8 @@ function PublicationDialog(props: {
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
               <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
                   {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {publication.active ? "Published" : "Unpublished"}</p>
+                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {!publication.linkCurrent ? "Link changed" : publication.active ? "Published" : "Unpublished"}</p>
+                    {!publication.linkCurrent ? <p className="m-0 text-warning">This publication is unavailable. Choose a current link below and review the app again.</p> : null}
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
                       <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}
@@ -317,7 +319,7 @@ function PublicationDialog(props: {
                   <div className="flex shrink-0 flex-col items-end gap-2">
                     {publication.collectionCapability ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Revoke collection access ${publication.publicationId}`} onClick={() => setPendingRevoke(publication)}>{busy === "revokeCollection" && busyPublicationId === publication.publicationId ? "Revoking…" : "Revoke collection access"}</SecondaryButton> : null}
                     {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
-                      publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
+                      !publication.linkCurrent ? null : publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
                   </div>
                 </li>)}
               </ul>}
@@ -350,7 +352,7 @@ function PublicationDialog(props: {
       </ConfirmDialog> : null}
       {pendingWithdraw ? <ConfirmDialog testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
         <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">{pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
+        <p className="mt-2 mb-0 text-[13px] text-muted">{!pendingWithdraw.linkCurrent ? "This publication belongs to a changed link. Choose a current link to publish the app again." : pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
         <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
       </ConfirmDialog> : null}
   </>;

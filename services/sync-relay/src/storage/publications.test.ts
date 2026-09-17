@@ -385,7 +385,7 @@ it("recovers owner publications in bounded pages without leaking another owner o
   ids.sort();
   const first = await (await f.http("w/app-publications?appRoot=app")).json();
   expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
-  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", collectionCapability: null, manifestUnavailable: false,
+  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", collectionCapability: null, linkCurrent: true, manifestUnavailable: false,
     sourceRevision: expect.stringMatching(/^[0-9a-f]{64}$/), active: true});
   const last = await (await f.http(`w/app-publications?appRoot=app&cursor=${first.nextCursor}`)).json();
   expect(last.publications.map((p: {publicationId: string}) => p.publicationId)).toEqual(ids.slice(25));expect(last.nextCursor).toBeNull();
@@ -408,8 +408,8 @@ it("retains damaged owner rows for withdrawal and refuses their manifests generi
   const page = f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits, appRoot: "app"});
   expect(page.publications).toHaveLength(2);
   const damaged = page.publications.find(row => row.publicationId === f.published.publicationId)!;
-  expect(damaged).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, manifestUnavailable: true});
-  expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({collectionCapability: null, manifestUnavailable: false, appRoot: "app"});
+  expect(damaged).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, linkCurrent: true, manifestUnavailable: true});
+  expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({collectionCapability: null, linkCurrent: true, manifestUnavailable: false, appRoot: "app"});
   const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found", code: "not_found"});
   expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: damaged.publicationId, ownerUserId: "owner", expectedAuthorityRevision: damaged.authorityRevision}).active).toBe(false);
 });
@@ -499,4 +499,16 @@ it("does not reread manifests while streaming an authorized discovery page",asyn
   expect((await response.json()).publications).toHaveLength(1);
   expect(reads).toHaveBeenCalledTimes(1);
   reads.mockRestore();
+});
+
+it("reports changed link generations, retains withdrawal, and permits fresh publication", () => {
+  const f = fixture(), original = f.storage.publishAppPublication(request());
+  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run();
+  const list = () => f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits}).publications;
+  expect(list()).toMatchObject([{publicationId: original.publicationId, active: true, linkCurrent: false}]);
+  expect(() => f.storage.reactivateAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: original.publicationId, expectedAuthorityRevision: 1, limits})).toThrow();
+  expect(f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: original.publicationId, expectedAuthorityRevision: 1}).active).toBe(false);
+  const current = f.storage.publishAppPublication({...request(), generation: 2});
+  expect(current.publicationId).not.toBe(original.publicationId);
+  expect(list().find(row => row.publicationId === current.publicationId)).toMatchObject({active: true, linkCurrent: true});
 });

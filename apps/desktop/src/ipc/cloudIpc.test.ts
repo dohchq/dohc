@@ -114,7 +114,7 @@ async function harness() {
     currentCredentials: () => cache.snapshot().credentials,
     loadAndCacheCurrentCredentials: async () => {
       const loaded = await cache.adoptCurrent(login.credentials);
-      if (!loaded.current) throw new Error("Your dohc Cloud session changed. Try again.");
+      if (!loaded.current) throw new Error("Your dohc Drive session changed. Try again.");
       return loaded.credentials;
     },
     closeAllRelayTransportWorkspaces: closeRelay,

@@ -1735,15 +1735,11 @@ function createFakeRoot(): FakeRoot {
 
 const LIGHT: DohcTheme = {
   mode: "light",
-  density: "comfortable",
-  reduceMotion: false,
   tokens: { "--dohc-ink": "#1c1b18", "--font-sans": "InterVariable" },
 };
 
 const DARK: DohcTheme = {
   mode: "dark",
-  density: "compact",
-  reduceMotion: true,
   tokens: { "--dohc-ink": "#f6f4ee", "--font-sans": "InterVariable" },
 };
 
@@ -1753,8 +1749,6 @@ describe("dohc theme", () => {
     applyDohcTheme(DARK, root.element);
     expect(root.properties["--dohc-ink"]).toBe("#f6f4ee");
     expect(root.dataset.theme).toBe("dark");
-    expect(root.dataset.density).toBe("compact");
-    expect(root.dataset.reduceMotion).toBe("true");
   });
 
   // Token names are written into a style declaration, so a name that is not

@@ -1,5 +1,5 @@
+import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
-import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // `:shortcode:` emoji autocomplete trigger.
 //
 // A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
@@ -10,7 +10,7 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // same as if the user had typed or pasted it directly.
 //
 // Detection mirrors wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
-// `detectMentionAutocomplete`: walk to the text node under the cursor, look
+// `detectMentionAutocomplete`: resolve the text node under the cursor, look
 // at the text before it, apply the same code-block / inline-code-mark
 // exclusions, require the trigger character to sit at a word boundary
 // (start-of-node or after whitespace) so `12:30` and URLs don't fire.
@@ -27,7 +27,7 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // inside `view.update`) so the replacement is folded into the same
 // transaction cycle instead of racing a second dispatch.
 
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey, type Transaction } from '@tiptap/pm/state'
 import { ReplaceStep } from '@tiptap/pm/transform'
 import { type AutocompleteState } from './wikilinkPlugin'
@@ -60,26 +60,18 @@ const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/
 export function detectEmojiAutocomplete(
   doc: ProseMirrorNode,
   cursorPos: number,
+  position?: ResolvedPos,
 ): AutocompleteState {
-  let found: AutocompleteState = { active: false }
-  doc.descendants((node, pos, parent) => {
-    if (!node.isText || !node.text) return
-    if (isCodeBlock(parent)) return
-    if (node.marks.some(isCodeMark)) return
-    const nodeStart = pos
-    const nodeEnd = pos + node.text.length
-    if (cursorPos < nodeStart || cursorPos > nodeEnd) return
-    const before = node.text.slice(0, cursorPos - nodeStart)
-    const m = EMOJI_TRIGGER_RE.exec(before)
-    if (!m) return
-    found = {
-      active: true,
-      from: nodeStart + before.length - m[0].length,
-      query: m[1] ?? '',
-    }
-    return false // stop descending
-  })
-  return found
+  const run = cursorText(doc, cursorPos, position)
+  if (!run) return { active: false }
+  const before = run.text
+  const m = EMOJI_TRIGGER_RE.exec(before)
+  if (!m) return { active: false }
+  return {
+    active: true,
+    from: run.from + before.length - m[0].length,
+    query: m[1] ?? '',
+  }
 }
 
 type CompleteEmojiShortcode = {
@@ -95,26 +87,18 @@ type CompleteEmojiShortcode = {
 export function detectCompleteEmojiShortcode(
   doc: ProseMirrorNode,
   cursorPos: number,
+  position?: ResolvedPos,
 ): CompleteEmojiShortcode | null {
-  let found: CompleteEmojiShortcode | null = null
-  doc.descendants((node, pos, parent) => {
-    if (!node.isText || !node.text) return
-    if (isCodeBlock(parent)) return
-    if (node.marks.some(isCodeMark)) return
-    const nodeStart = pos
-    const nodeEnd = pos + node.text.length
-    if (cursorPos < nodeStart || cursorPos > nodeEnd) return
-    const before = node.text.slice(0, cursorPos - nodeStart)
-    const m = EMOJI_COMPLETE_RE.exec(before)
-    if (!m) return
-    found = {
-      from: nodeStart + before.length - m[0].length,
-      to: cursorPos,
-      shortcode: m[1] ?? '',
-    }
-    return false // stop descending
-  })
-  return found
+  const run = cursorText(doc, cursorPos, position)
+  if (!run) return null
+  const before = run.text
+  const m = EMOJI_COMPLETE_RE.exec(before)
+  if (!m) return null
+  return {
+    from: run.from + before.length - m[0].length,
+    to: cursorPos,
+    shortcode: m[1] ?? '',
+  }
 }
 
 /** Pure: did this batch of transactions insert text ending in a colon exactly
@@ -178,7 +162,7 @@ export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => 
       // the cursor — not on remote collab edits or other doc changes that
       // happen to leave the cursor after a literal `:shortcode:`.
       if (!insertedClosingColonAtCursor(transactions, sel.from)) return null
-      const found = detectCompleteEmojiShortcode(newState.doc, sel.from)
+      const found = detectCompleteEmojiShortcode(newState.doc, sel.from, sel.$from)
       if (!found) return null
       const entry = lookupEmoji(found.shortcode)
       if (!entry) return null

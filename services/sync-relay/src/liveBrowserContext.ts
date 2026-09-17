@@ -21,5 +21,5 @@ export function liveBrowserActor(scope: LiveBrowserContext): CurrentLiveBindingR
   return scope.kind === "named"
     ? { kind: "named", userId: scope.userId, grantId: scope.grantId }
     : { kind: "link", workspaceId: scope.workspaceId, grantId: scope.grantId, sessionId: scope.sessionId,
-      capabilityHash: scope.capabilityHash, profileTokenHash: scope.profileTokenHash };
+      profileTokenHash: scope.profileTokenHash };
 }

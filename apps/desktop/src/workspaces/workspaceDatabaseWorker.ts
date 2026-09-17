@@ -4,7 +4,9 @@ import {
   type WorkspaceDatabaseWorkerRequest,
   type WorkspaceDatabaseWorkerResponse,
   type WorkspaceDatabaseWorkerResult,
+  type DatabaseImportResult,
 } from "./workspaceDatabaseProtocol.ts";
+import type { ImportDataInput } from "@dohc/sqlite-worker";
 import type {
   DatabaseEdit,
   DatabaseEditResult,
@@ -23,6 +25,7 @@ interface WorkerAdapter {
 }
 
 export interface WorkspaceDatabaseWorkerOwner {
+  importData(input: ImportDataInput, signal?: AbortSignal): Promise<DatabaseImportResult>;
   readPath(input: {
     absolutePath: string;
     path: string;
@@ -89,6 +92,7 @@ interface QueuedRequest<Result extends WorkspaceDatabaseWorkerResult> {
 }
 
 function cancellationMessage(kind: RequestWithoutId["kind"]): string {
+  if (kind === "import-data") return "Database import was cancelled.";
   return kind === "edit-path"
     ? "Database edit was cancelled."
     : "Database read was cancelled.";
@@ -284,6 +288,9 @@ export function createWorkspaceDatabaseWorkerOwner(
   }
 
   return {
+    importData(input, signal) {
+      return enqueue<DatabaseImportResult>({ kind: "import-data", input }, signal);
+    },
     readPath(input) {
       return enqueue<DatabaseSnapshotView>(
         {

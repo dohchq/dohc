@@ -11,7 +11,7 @@ test("real HTTPS top-level handoff keeps app authority outside its opaque child"
   const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`);
   const file = {path:"bundle.js",sha256:createHash("sha256").update(bytes).digest("hex"),byteLength:bytes.length,contentType:"text/javascript; charset=utf-8"};
   const app = createAppLaunchHandler({config:{viewerOrigin:viewer,appDomain:"example.net"},relayUrl:"https://relay.example.org",
-    resolveMaterial:async (_d,cookie)=>cookie?.includes("viewer=session")?{ok:true,capabilityToken:"private-server-capability",profileSecret:"private-profile",setCookie:null}:{ok:false,status:404},
+    resolveMaterial:async (_d,cookie)=>cookie?.includes("viewer=session")?{ok:true,capabilityToken:"private-server-capability",profileSecret:"private-profile",setCookie:null,currentCapability:async()=>"private-server-capability"}:{ok:false,status:404},
     fetchRelay:async request=>{
       if(!active)return new Response(null,{status:404});
       return new URL(request.url).pathname.includes("/blobs/")?new Response(bytes,{headers:{"content-type":file.contentType}}):Response.json({publicationId,authorityRevision:1,files:[file]});

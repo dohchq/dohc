@@ -25,7 +25,7 @@ it("discovers real relay apps through the viewer's server session without exposi
 
 it("rejects private fields and stale viewer material after the relay response",async()=>{
   let count=0,extra=false;
-  const material={ok:true as const,capabilityToken:"server-token",profileSecret:"server-profile",setCookie:null};
+  const material={ok:true as const,capabilityToken:"server-token",profileSecret:"server-profile",setCookie:null,currentCapability:async()=>"server-token"};
   const handler=createAppDiscovery({viewerOrigin:"https://viewer.example.com",relayUrl:"https://relay.example.org",
     resolveMaterial:async()=>{count++;return count===2?{...material,capabilityToken:"new-token"}:material;},
     fetchRelay:async request=>{expect(request.headers.has("cookie")).toBe(false);return Response.json({publications:[],nextCursor:null,...(extra?{owner:"private"}:{})});}});

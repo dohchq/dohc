@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createSqliteEngine } from './sqliteEngine'
 
 function sha256(value: string) {
@@ -25,6 +25,65 @@ async function readTable(bytesBase64: string, table: string) {
 }
 
 describe('sqlite worker data imports', () => {
+  it('keeps raw materialization usable when the encoded response fails', async () => {
+    const engine = await createSqliteEngine()
+    const input = {
+      name: 'data.csv',
+      mediaType: 'text/csv',
+      body: 'id,value\na,1',
+      tableName: 'rows',
+    }
+    const originalToString = Buffer.prototype.toString
+    const spy = vi.spyOn(Buffer.prototype, 'toString').mockImplementation(function (this: Buffer, ...args: unknown[]) {
+      if (args[0] === 'base64') throw new RangeError('synthetic base64 conversion failure')
+      return originalToString.apply(this, args as [BufferEncoding?, number?, number?])
+    } as typeof Buffer.prototype.toString)
+    try {
+      await expect(engine.importData(input)).resolves.toMatchObject({
+        ok: false,
+        code: 'sqlite-materialize-failed',
+        message: 'synthetic base64 conversion failure',
+      })
+      await expect(engine.materializeImport(input)).resolves.toMatchObject({
+        ok: true, tableName: 'rows', rowCount: 1,
+      })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it.each([
+    { name: 'quoted.csv', mediaType: 'text/csv', body: 'id,note,amount\na,"one,two",4.5\nb,"line one\nline two",8' },
+    { name: 'data.json', mediaType: 'application/json', body: '[{"id":"a","value":true},{"id":"b","value":false}]' },
+    { name: 'data.jsonl', mediaType: 'application/x-ndjson', body: '{"id":"a","value":2}\n{"id":"b","value":3}' },
+    { name: 'data.md', mediaType: 'text/markdown', body: '| id | value |\n| --- | --- |\n| a | 2 |\n| b | 3 |' },
+  ])('materializes the same complete SQLite bytes for $name without an encoded snapshot result', async source => {
+    const engine = await createSqliteEngine()
+    const input = { ...source, tableName: 'imported data' }
+    const imported = await engine.importData(input)
+    const materialized = await engine.materializeImport(input)
+    if (!imported.ok || !materialized.ok) throw new Error('Import failed')
+    expect(Object.keys(materialized).sort()).toEqual(['bytes', 'ok', 'rowCount', 'tableName'])
+    expect(materialized.tableName).toBe(imported.tableName)
+    expect(materialized.rowCount).toBe(imported.rowCount)
+    expect(materialized.bytes).toEqual(Buffer.from(imported.bytesBase64, 'base64'))
+    expect(createHash('sha256').update(materialized.bytes).digest('hex')).toBe(imported.sha256)
+    expect(await readTable(materialized.bytes.toString('base64'), materialized.tableName)).toHaveLength(imported.rowCount)
+  })
+
+  it.each([
+    { name: 'empty.csv', mediaType: 'text/csv', body: 'id,value' },
+    { name: 'unsupported.bin', mediaType: 'application/octet-stream', body: 'data' },
+    { name: 'duplicate.csv', mediaType: 'text/csv', body: 'id,value\na,1\na,2' },
+  ])('keeps the same error for $name in both import paths', async source => {
+    const engine = await createSqliteEngine()
+    const input = { ...source, tableName: 'rows' }
+    const imported = await engine.importData(input)
+    const materialized = await engine.materializeImport(input)
+    expect(imported.ok).toBe(false)
+    expect(materialized).toEqual(imported)
+  })
+
   it('imports CSV into a SQLite table and returns provenance + materialized bytes', async () => {
     const engine = await createSqliteEngine()
     const body = [

@@ -391,7 +391,7 @@ async function revalidateCliWrite(
     (compareReactionAuthor &&
       currentIdentity.reactionAuthorId !== identity.reactionAuthorId)
   ) {
-    throw new CliCommandError("Your dohc Cloud session changed. Try again.");
+    throw new CliCommandError("Your dohc Drive session changed. Try again.");
   }
 }
 

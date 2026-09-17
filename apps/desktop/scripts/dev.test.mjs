@@ -19,8 +19,12 @@ test("desktop dev launches Electron outside Node mode", () => {
 
   const environment = desktopDevEnvironment(source);
 
-  assert.deepEqual(environment, { KEEP_ME: "yes" });
+  assert.deepEqual(environment, { KEEP_ME: "yes", DOHC_DEV_TOOLS: "1" });
   assert.equal(source.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("desktop dev leaves an explicit dev-tools choice alone", () => {
+  assert.equal(desktopDevEnvironment({ DOHC_DEV_TOOLS: "0" }).DOHC_DEV_TOOLS, "0");
 });
 
 test("desktop dev does not report an interrupted foreground process as a launch failure", () => {
@@ -38,7 +42,7 @@ test("desktop dev starts electron-vite from the desktop package", () => {
   const options = electronViteSpawnOptions({ KEEP_ME: "yes" });
 
   assert.equal(options.cwd, resolve(import.meta.dirname, ".."));
-  assert.deepEqual(options.env, { KEEP_ME: "yes" });
+  assert.deepEqual(options.env, { KEEP_ME: "yes", DOHC_DEV_TOOLS: "1" });
   assert.equal(options.stdio, "inherit");
 });
 

@@ -1053,7 +1053,7 @@ describe("RelayShareDialog", () => {
     await user.click(within(row).getByRole("button", { name: "Reset link" }));
     let confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Reset this link? The current link stops working right away, and dohc shows the new link once. People who joined through it keep access: avery.long.address@example.test, server-user-id-0000000002. To remove them, end the link instead.",
+      "Reset this link? The current link stops working right away, and dohc shows the new link once. Published apps stop working until you review and publish them again. People who joined through it keep access: avery.long.address@example.test, server-user-id-0000000002. To remove them, end the link instead.",
     );
     expect(
       within(confirmation).getByText("server-user-id-0000000002").tagName,
@@ -2217,7 +2217,7 @@ describe("RelayShareDialog", () => {
     );
     let confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Turn on comments for this link? The current link stops working right away, and dohc shows the new link once. People who joined through it keep access and stay at their current level: view@example.test, comment@example.test.",
+      "Turn on comments for this link? The current link stops working right away, and dohc shows the new link once. Published apps stop working until you review and publish them again. People who joined through it keep access and stay at their current level: view@example.test, comment@example.test.",
     );
     expect(
       within(confirmation).getByRole("button", { name: "Turn on comments" }),

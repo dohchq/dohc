@@ -1,3 +1,4 @@
+import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
 import { isCodeBlock, isCodeMark } from "./pmHelpers";
 // D4.8 (extended in D4.8b) — Wikilink rendering + autocomplete.
@@ -26,11 +27,11 @@ import { isCodeBlock, isCodeMark } from "./pmHelpers";
 //      to the editor to replace the `[[query` with the chosen
 //      path + close brackets.
 
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 
-export const wikilinkPluginKey = new PluginKey('dohc-wikilink')
+export const wikilinkPluginKey = new PluginKey<WikilinkState>('dohc-wikilink')
 
 export type WikilinkFile = {
   /** The vault path (e.g. `playground/a.md`). */
@@ -50,6 +51,18 @@ type WikilinkRange = {
   /** The path text written between `[[` and `]]`, with `.md`
    *  stripped (matches the rename cascade's convention). */
   target: string
+}
+
+type WikilinkPreview = WikilinkRange & {
+  display: string
+  resolved: boolean
+  source: boolean
+}
+
+type WikilinkState = {
+  ranges: WikilinkRange[]
+  previews: WikilinkPreview[]
+  decorations: DecorationSet
 }
 
 /** State surfaced to React for the autocomplete popover. `active:
@@ -103,33 +116,21 @@ export function computeWikilinkRanges(doc: ProseMirrorNode): WikilinkRange[] {
 export function detectAutocomplete(
   doc: ProseMirrorNode,
   cursorPos: number,
+  position?: ResolvedPos,
 ): AutocompleteState {
-  let found: AutocompleteState = { active: false }
-  doc.descendants((node, pos, parent) => {
-    if (!node.isText || !node.text) return
-    if (isCodeBlock(parent)) return
-    if (node.marks.some(isCodeMark)) return
-    const nodeStart = pos
-    const nodeEnd = pos + node.text.length
-    if (cursorPos < nodeStart || cursorPos > nodeEnd) return
-    // Slice from node start up to cursor. Find the last `[[` (or
-    // `\[\[`) in this slice without a closing `]]` between it and
-    // the cursor.
-    const before = node.text.slice(0, cursorPos - nodeStart)
-    // Reject if the slice contains `]]` After the opener — that
-    // means the `[[` already closed (it's a complete wikilink).
-    const re = /\\?\[\\?\[([^\]\n[]*)$/
-    const m = re.exec(before)
-    if (!m) return
-    const opener = m[0].slice(0, m[0].length - m[1]!.length)
-    found = {
-      active: true,
-      from: nodeStart + before.length - m[0].length,
-      query: m[1] ?? '',
-    }
-    return false // stop descending
-  })
-  return found
+  const run = cursorText(doc, cursorPos, position)
+  if (!run) return { active: false }
+  const before = run.text
+  // Reject if the slice contains `]]` After the opener — that
+  // means the `[[` already closed (it's a complete wikilink).
+  const re = /\\?\[\\?\[([^\]\n[]*)$/
+  const m = re.exec(before)
+  if (!m) return { active: false }
+  return {
+    active: true,
+    from: run.from + before.length - m[0].length,
+    query: m[1] ?? '',
+  }
 }
 
 /** Build the pill widget DOM for a wikilink range. */
@@ -184,20 +185,17 @@ function displayFor(
 
 function buildWikilinkDecorations(
   doc: ProseMirrorNode,
-  knownFiles: ReadonlyMap<string, WikilinkFile>,
-  cursorPos: number,
+  previews: readonly WikilinkPreview[],
 ): DecorationSet {
-  const ranges = computeWikilinkRanges(doc)
   const decorations: Decoration[] = []
-  for (const r of ranges) {
+  for (const [index, r] of previews.entries()) {
     // D4.8c — Obsidian-style live preview toggle. When the cursor
     // is inside the wikilink range, render it as SOURCE (the raw
     // [[path]] text styled lightly) so the user can see + edit
     // the link in place. When the cursor is outside, render the
     // pill (preview mode). Without this toggle, the cursor was
     // invisible whenever it landed inside the hidden-text region.
-    const cursorInside = cursorPos >= r.from && cursorPos <= r.to
-    if (cursorInside) {
+    if (r.source) {
       decorations.push(
         Decoration.inline(r.from, r.to, {
           class: 'dohc-wikilink-source',
@@ -207,14 +205,13 @@ function buildWikilinkDecorations(
       continue
     }
     // Preview mode — widget + hide.
-    const { display, resolved } = displayFor(r.target, knownFiles)
     decorations.push(
       Decoration.widget(
         r.from,
-        () => makePillElement(r.target, display, resolved),
+        () => makePillElement(r.target, r.display, r.resolved),
         // side:-1 places the widget before the underlying text so
         // clicks land on the widget, not on the hidden text behind.
-        { side: -1, ignoreSelection: true },
+        { side: -1, ignoreSelection: true, key: JSON.stringify([index, r.target, r.display, r.resolved]) },
       ),
     )
     decorations.push(
@@ -225,6 +222,27 @@ function buildWikilinkDecorations(
     )
   }
   return DecorationSet.create(doc, decorations)
+}
+
+function wikilinkState(
+  doc: ProseMirrorNode,
+  ranges: WikilinkRange[],
+  knownFiles: ReadonlyMap<string, WikilinkFile>,
+  cursorPos: number,
+  previous?: WikilinkState,
+): WikilinkState {
+  // Callers may mutate a map or its file entries in place. Compare the rendered
+  // values, not map identity, so a transaction can still refresh link titles.
+  const previews = ranges.map((range) => ({
+    ...range,
+    ...displayFor(range.target, knownFiles),
+    source: cursorPos >= range.from && cursorPos <= range.to,
+  }))
+  if (previous && ranges === previous.ranges && previews.every((preview, index) => {
+    const old = previous.previews[index]
+    return old.source === preview.source && old.display === preview.display && old.resolved === preview.resolved
+  })) return previous
+  return { ranges, previews, decorations: buildWikilinkDecorations(doc, previews) }
 }
 
 /** Build the plugin.
@@ -240,29 +258,27 @@ export function makeWikilinkPlugin(
     key: wikilinkPluginKey,
     state: {
       init(_, instance) {
-        return buildWikilinkDecorations(
+        return wikilinkState(
           instance.doc,
+          computeWikilinkRanges(instance.doc),
           getKnownFiles(),
           instance.selection.from,
         )
       },
       apply(tr, old, _oldState, newState) {
-        // D4.8c — rebuild on either doc changes (new wikilinks
-        // appeared) OR selection changes (cursor moved into/out
-        // of an existing wikilink range — toggle source/preview).
         if (!tr.docChanged && !tr.selectionSet) return old
-        return buildWikilinkDecorations(
+        return wikilinkState(
           newState.doc,
+          tr.docChanged ? computeWikilinkRanges(newState.doc) : old.ranges,
           getKnownFiles(),
           newState.selection.from,
+          tr.docChanged ? undefined : old,
         )
       },
     },
     props: {
       decorations(state) {
-        return wikilinkPluginKey.getState(state) as
-          | DecorationSet
-          | undefined
+        return wikilinkPluginKey.getState(state)?.decorations
       },
     },
     // We watch state in `view.update` rather than `apply` so we

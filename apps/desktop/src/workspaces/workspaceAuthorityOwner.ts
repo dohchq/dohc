@@ -551,6 +551,12 @@ export function createWorkspaceAuthorityOwner<
       return leaseRecord(currentRecord(workspaceId));
     },
 
+    // A lookup only. Retirement drains held leases first, so a caller that
+    // retires by id must not hold one of its own.
+    currentBinding(workspaceId: string): WorkspaceAuthorityBinding<Workspace> {
+      return currentRecord(workspaceId).binding;
+    },
+
     acquireBinding(
       binding: WorkspaceAuthorityBinding<Workspace>,
     ): WorkspaceAuthorityLease<Workspace, State> {

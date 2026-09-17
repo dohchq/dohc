@@ -19,8 +19,6 @@ describe("readDohcTheme", () => {
   it("reports the light palette by default", () => {
     const theme = readDohcTheme(root());
     expect(theme.mode).toBe("light");
-    expect(theme.density).toBe("comfortable");
-    expect(theme.reduceMotion).toBe(false);
     expect(theme.tokens["--dohc-ink"]).toBe(palette.light.ink);
   });
 
@@ -29,14 +27,6 @@ describe("readDohcTheme", () => {
     expect(theme.mode).toBe("dark");
     expect(theme.tokens["--dohc-ink"]).toBe(palette.dark.ink);
     expect(theme.tokens["--dohc-bg"]).toBe(palette.dark.bg);
-  });
-
-  it("carries density and reduced motion", () => {
-    const theme = readDohcTheme(
-      root({ "data-density": "compact", "data-reduce-motion": "true" }),
-    );
-    expect(theme.density).toBe("compact");
-    expect(theme.reduceMotion).toBe(true);
   });
 
   // The payload must BE the app's token set, not a list that can fall behind

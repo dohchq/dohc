@@ -345,7 +345,7 @@ export function NoticeCenter(props: {
         id: "cloud-disconnected",
         tone: "warning",
         title: "Cloud disconnected",
-        body: "Local work is safe. Reconnect dohc Cloud when you want sync again.",
+        body: "Local work is safe. Reconnect dohc Drive when you want sync again.",
         Icon: CloudOff,
       });
     }

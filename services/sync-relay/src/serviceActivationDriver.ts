@@ -8,6 +8,7 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
+import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
 import {ServiceActivationStaleCut} from "./storage/serviceActivation";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
@@ -34,7 +35,7 @@ export function parseServiceActivationConfig(value:unknown){
   for(const value of Object.values(policy))positive(value);
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
   return Object.freeze({targets:Object.freeze(targets),validateBaseline:createLiveMarkdownRegistrationValidator(validation),
-    validateJournal:createLiveMarkdownJournalValidator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
+    validateJournal:createLiveMarkdownJournalValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs)});
 }
@@ -69,7 +70,7 @@ export class ServiceActivationDriver {
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:o.client,workspace:workspace.handle,host:o.host,
       deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
-        maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateJournal}});
+        maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
     this.#restoreConsumers.set(key,consumer);return consumer;
   }
   workspaceReady(workspaceId:string){
@@ -144,7 +145,7 @@ export class ServiceActivationDriver {
       const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
         host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
         ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
-          maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateJournal}});
+          maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
       owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed};
       this.#owners.set(JSON.stringify(document),owner);
     }

@@ -368,7 +368,7 @@ function replaceSession(
   const current = storage.findLinkSessionByCapabilityHash(currentCapabilityHash);
   expect(current).not.toBeNull();
   const replacement: SyncRelayLinkSessionRow = {
-    sessionId: `replacement-${suffix}`,
+    sessionId: current!.sessionId,
     capabilityHash: capabilityHash(`replacement-${suffix}`),
     grantId: current!.grantId,
     generation: current!.generation,

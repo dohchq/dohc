@@ -20,7 +20,6 @@ const PreferredNameForIpc = z
 const THEME_MODES = ["system", "light", "dark"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
 
-const DENSITY_MODES = ["comfortable", "compact"] as const;
 
 // Window zoom, stored as a Chromium zoom level like VS Code's
 // window.zoomLevel: each step scales the window by 20% (factor 1.2^level).
@@ -69,8 +68,6 @@ export const DesktopUserSettings = z.object({
   }).strict().default({}),
   appearance: z.object({
     themeMode: z.enum(THEME_MODES),
-    density: z.enum(DENSITY_MODES),
-    reduceMotion: z.boolean(),
     // Added after appearance shipped. The default migrates stored files in
     // place instead of failing the strict parse and resetting preferences.
     zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL)
@@ -94,8 +91,6 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   profile: {},
   appearance: {
     themeMode: "system",
-    density: "comfortable",
-    reduceMotion: false,
     zoomLevel: DEFAULT_ZOOM_LEVEL,
   },
   editor: {

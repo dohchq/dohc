@@ -23,6 +23,9 @@ export interface WindowState {
 }
 
 export const WINDOW_STATE_FILE = "dohc-window-state.json";
+export const MANAGER_WINDOW_STATE_FILE = "dohc-manager-window-state.json";
+// The manager is a picker, not a workbench: small, and never below this.
+export const MANAGER_WINDOW_SIZE = { width: 880, height: 600 } as const;
 export const DEFAULT_WINDOW_SIZE = { width: 1280, height: 800 } as const;
 export const MIN_WINDOW_SIZE = { width: 840, height: 620 } as const;
 
@@ -36,7 +39,10 @@ function isFiniteInt(value: unknown): value is number {
 
 // Tolerant: a missing, corrupt, or foreign-shaped file is "no saved state",
 // never a launch failure.
-export function parseWindowState(raw: string | null | undefined): WindowState | null {
+export function parseWindowState(
+  raw: string | null | undefined,
+  minSize: { readonly width: number; readonly height: number } = MIN_WINDOW_SIZE,
+): WindowState | null {
   if (!raw) return null;
   try {
     const data = JSON.parse(raw) as {
@@ -50,8 +56,8 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
       !isFiniteInt(b.y) ||
       !isFiniteInt(b.width) ||
       !isFiniteInt(b.height) ||
-      b.width < MIN_WINDOW_SIZE.width ||
-      b.height < MIN_WINDOW_SIZE.height
+      b.width < minSize.width ||
+      b.height < minSize.height
     ) {
       return null;
     }

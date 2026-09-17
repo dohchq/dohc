@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { CHANNELS } from "./channels";
+import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { type SyncStatusResult, type WorkspaceSummary } from "./bridgeContract";
 import {
   createWorkspaceRootApproval,
@@ -14,7 +15,7 @@ import { deferred } from "../testing/deferred";
 
 type Event = { trusted: boolean };
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 async function registryHarness() {
   const home = await createTestScratch("registry-ipc-");
@@ -29,6 +30,8 @@ async function registryHarness() {
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
   const refresh = vi.fn(() => { steps.push("refresh"); });
   const pick = vi.fn(async () => ({ canceled: false, filePaths: [join(home, "picked")] }));
+  const forget = vi.fn(async (_workspaceId: string) => { steps.push("forget"); });
+  const reveal = vi.fn((_path: string) => { steps.push("reveal"); });
   registerWorkspaceRegistryIpcHandlers<Event>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
@@ -36,6 +39,8 @@ async function registryHarness() {
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    forgetWorkspace: forget, showItemInFolder: reveal,
+    openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });
@@ -44,7 +49,7 @@ async function registryHarness() {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ trusted }, payload);
   };
-  return { home, roots, handlers, createFolder, register, refresh, pick, steps, summaries, invoke };
+  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke };
 }
 
 describe("registered workspace registry handlers", () => {
@@ -52,11 +57,24 @@ describe("registered workspace registry handlers", () => {
     const h = await registryHarness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.pickWorkspaceRoot, CHANNELS.getWorkspaceRegistry, CHANNELS.getDefaultWorkspaceRoot,
+      CHANNELS.getDefaultShareRoot,
       CHANNELS.createLocalWorkspace, CHANNELS.attachWorkspaceFolder,
+      CHANNELS.forgetWorkspace, CHANNELS.openWorkspaceWindow, CHANNELS.openWorkspaceManager,
+      CHANNELS.closeThisWindow, CHANNELS.revealWorkspaceFolder,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     expect(h.pick).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
+  });
+
+  it("approves a default share root under the default workspace root", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const shareRoot = await h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "trip-2026" }) as string;
+    expect(shareRoot).toBe(`${root}/shared/trip-2026`);
+    expect(h.roots.usableRoot(shareRoot)).toBe(normalizeAbsolutePath(shareRoot));
+    await expect(h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "../escape" })).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.getDefaultShareRoot, { shareId: "Upper" })).rejects.toThrow();
   });
 
   it("shares exact root approval with later consumers and refuses sibling spellings", async () => {
@@ -142,20 +160,21 @@ function openHarness() {
   const activity = vi.fn(async () => status);
   const projection = vi.fn(async (_workspace: typeof workspace, value: SyncStatusResult) => value);
   const preferred = vi.fn();
+  const opened = vi.fn();
   const shared = vi.fn<() => unknown>(() => null);
   const handlers = new Map<string, (event: OpenEvent, payload: unknown) => unknown>();
   registerOpenWorkspaceIpcHandler<typeof sender, OpenEvent, typeof workspace, typeof operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
-    setPreferredWorkspaceId: preferred, openWorkspaceActivity: activity,
+    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, openWorkspaceActivity: activity,
     syncStatusWithOwnedProjection: projection, sharedViewOf: shared,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {
     workspaceId: workspace.workspaceId, rendererDocumentId: documentId,
   });
   return {
-    sender, workspace, sessions, activity, projection, preferred, shared, warmup, handlers, invoke,
+    sender, workspace, sessions, activity, projection, preferred, opened, shared, warmup, handlers, invoke,
     retirePhysical: () => { physicalCurrent = false; },
     replaceWarmupAttachment: () => { warmupWorkspace = { ...workspace, attachmentId: Symbol("replacement") }; },
   };
@@ -169,6 +188,7 @@ describe("registered workspace open", () => {
     expect(h.activity).not.toHaveBeenCalled();
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.preferred).toHaveBeenCalledWith("workspace");
+    expect(h.opened).toHaveBeenCalledWith("workspace");
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
     expect(h.warmup).toHaveBeenCalledWith(h.workspace);
   });
@@ -180,11 +200,26 @@ describe("registered workspace open", () => {
     h.activity.mockImplementation(() => { started.resolve(); return held.promise; });
     const result = h.invoke();
     await started.promise;
+    expect(h.opened).not.toHaveBeenCalled();
     if (kind === "physical") h.retirePhysical();
     else await h.sessions.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, documentId);
     held.resolve(status);
     await expect(result).rejects.toThrow();
     expect(h.warmup).not.toHaveBeenCalled();
+    expect(h.opened).not.toHaveBeenCalled();
+  });
+
+  it("stamps the last open only after the open succeeds, and a stamp failure does not fail it", async () => {
+    const h = openHarness();
+    h.activity.mockRejectedValueOnce(new Error("activity refused"));
+    await expect(h.invoke()).rejects.toThrow("activity refused");
+    expect(h.opened).not.toHaveBeenCalled();
+
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    h.opened.mockImplementationOnce(() => { throw new Error("registry is read-only"); });
+    await expect(h.invoke()).resolves.toEqual(status);
+    expect(h.opened).toHaveBeenCalledWith("workspace");
+    expect(h.warmup).toHaveBeenCalledOnce();
   });
 
   it("skips plugin warmup for shared views and successor attachments", async () => {
@@ -205,5 +240,22 @@ describe("registered workspace open", () => {
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.warmup).toHaveBeenCalledOnce();
     held.resolve();
+  });
+});
+
+describe("forget and reveal", () => {
+  it("forgets by id and refreshes native surfaces", async () => {
+    const h = await registryHarness();
+    await h.invoke(CHANNELS.forgetWorkspace, { workspaceId: "ws-1" });
+    expect(h.forget).toHaveBeenCalledWith("ws-1");
+    expect(h.steps).toEqual(["forget", "refresh"]);
+  });
+
+  it("reveals a registered root and refuses an unknown id", async () => {
+    const h = await registryHarness();
+    h.summaries.push({ workspaceId: "ws-1", rootPath: "/w/one", kind: "personal", mode: "local-first" });
+    await h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1" });
+    expect(h.reveal).toHaveBeenCalledWith("/w/one");
+    await expect(h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-9" })).rejects.toThrow("not in the registry");
   });
 });

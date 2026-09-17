@@ -458,6 +458,12 @@ impl ReconcileController {
         {
             return Err(FilesError::StaleReconcilePlan);
         }
+        if plan.ops.is_empty() && result.not_owned_paths.is_empty() {
+            self.generation = plan.to_generation;
+            self.outstanding = false;
+            self.update_degraded_retry_state(plan, &result.failed_applies);
+            return Ok(());
+        }
         let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
         let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
         let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
@@ -689,6 +695,89 @@ mod ack_receipt_tests {
         }
         fn retire(&mut self, _path: &str) -> Result<(), crate::capture::CaptureError> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_ack_preserves_manifest_storage_and_advances_generation() {
+        let mut controller = ReconcileController::new();
+        controller.manifest.insert(
+            "note.md".to_owned(),
+            ManifestEntry {
+                size: 3,
+                sha256: "abc".to_owned(),
+                mtime_ms: 42,
+            },
+        );
+        controller.outstanding = true;
+        let plan = empty_plan(&controller);
+        let receipt = empty_receipt();
+        let hash_storage = controller.manifest.get("note.md").unwrap().sha256.as_ptr();
+
+        controller.acknowledge_capture(&plan, &receipt).unwrap();
+
+        let entry = controller.manifest.get("note.md").unwrap();
+        assert_eq!(
+            entry.sha256.as_ptr(),
+            hash_storage,
+            "an empty acknowledgement must not clone the manifest"
+        );
+        assert_eq!(entry.mtime_ms, 42);
+        assert_eq!(controller.generation, plan.to_generation);
+        assert!(!controller.outstanding);
+        assert!(!controller.dirty);
+        assert!(matches!(
+            controller.acknowledge_capture(&plan, &receipt),
+            Err(FilesError::StaleReconcilePlan)
+        ));
+    }
+
+    #[test]
+    fn empty_ack_preserves_newer_dirty_signals_and_degraded_retry() {
+        let mut controller = ReconcileController::new();
+        controller.outstanding = true;
+        let plan = empty_plan(&controller);
+        controller.mark_dirty();
+        controller
+            .acknowledge_capture(&plan, &empty_receipt())
+            .unwrap();
+        assert!(controller.dirty);
+
+        for _ in 0..DEGRADED_RESCAN_BACKOFF {
+            controller.outstanding = true;
+            let mut plan = empty_plan(&controller);
+            plan.degraded = true;
+            plan.degraded_paths.push("unreadable.md".to_owned());
+            controller
+                .acknowledge_capture(&plan, &empty_receipt())
+                .unwrap();
+        }
+        assert!(!controller.dirty);
+        assert_eq!(controller.quarantined_paths, vec!["unreadable.md"]);
+    }
+
+    fn empty_plan(controller: &ReconcileController) -> ReconcilePlan {
+        ReconcilePlan {
+            from_generation: controller.generation,
+            to_generation: controller.generation.next(),
+            ops: Vec::new(),
+            retained_over_cap: Vec::new(),
+            unconfirmed_removed: Vec::new(),
+            degraded: false,
+            degraded_paths: Vec::new(),
+            prepared_from_dirty: true,
+            dirty_epoch: controller.dirty_epoch,
+        }
+    }
+
+    fn empty_receipt() -> CaptureApplyResult {
+        CaptureApplyResult {
+            applied_paths: Vec::new(),
+            captured: Vec::new(),
+            not_owned_paths: Vec::new(),
+            failed_applies: Vec::new(),
+            crashed_after_durable_boundary: None,
+            degraded: false,
         }
     }
 

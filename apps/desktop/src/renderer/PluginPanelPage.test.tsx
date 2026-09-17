@@ -744,18 +744,6 @@ describe("PluginPanelPage", () => {
       expect(message.theme.tokens["--dohc-bg"]).toBe(palette.dark.bg);
     });
 
-    it("pushes a reduced-motion change too", async () => {
-      const { postMessage } = await mountWithFrame();
-
-      await act(async () => {
-        document.documentElement.setAttribute("data-reduce-motion", "true");
-      });
-
-      await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
-      const [message] = postMessage.mock.calls.at(-1)!;
-      expect(message.theme.reduceMotion).toBe(true);
-    });
-
     // The liveness refs already refuse a stale push, so they would hide a
     // leaked observer. This watches the observer itself: one panel open must
     // not leave something watching <html> for the rest of the session.

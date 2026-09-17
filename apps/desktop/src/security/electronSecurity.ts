@@ -5,10 +5,13 @@ export interface MainWindowWebPreferences {
   nodeIntegration: false;
   contextIsolation: true;
   sandbox: true;
+  additionalArguments: string[];
 }
 
 export function createMainWindowWebPreferences(
   preloadPath: string,
+  // Main-derived facts the preload may read from process.argv.
+  additionalArguments: readonly string[] = [],
 ): MainWindowWebPreferences {
   if (!isAbsolute(preloadPath)) {
     throw new Error(`Preload path must be absolute, got: ${preloadPath}`);
@@ -18,6 +21,7 @@ export function createMainWindowWebPreferences(
     nodeIntegration: false,
     contextIsolation: true,
     sandbox: true,
+    additionalArguments: [...additionalArguments],
   };
 }
 

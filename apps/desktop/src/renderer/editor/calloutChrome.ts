@@ -402,7 +402,9 @@ export function makeCalloutChromePlugin() {
     },
     view() {
       return {
-        update: (view) => reconcileTitleInputs(view),
+        update: (view, previous) => {
+          if (view.state.doc !== previous.doc) reconcileTitleInputs(view);
+        },
       };
     },
     props: {

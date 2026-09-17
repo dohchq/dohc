@@ -461,7 +461,7 @@ it("keeps a damaged active approval revocable",async()=>{
   const f=ownerHttpFixture({appCollectionPolicy:undefined});
   f.raw.prepare("UPDATE sync_relay_app_collection_approvals SET capability_json='broken' WHERE publication_id=?").run(f.input.publicationId);
   const list=()=>f.storage.listAppPublications({workspaceId:"w",ownerUserId:"owner",limits}).publications[0];
-  expect(list()).toMatchObject({publicationId:f.input.publicationId,authorityRevision:2,collectionCapability:"unavailable",manifestUnavailable:false});
+  expect(list()).toMatchObject({publicationId:f.input.publicationId,authorityRevision:2,collectionCapability:"unavailable",linkCurrent: true, manifestUnavailable: false});
   expect((await f.approve({expectedAuthorityRevision:2,capability:null})).status).toBe(200);
   expect(list()).toMatchObject({authorityRevision:3,collectionCapability:null});
 });

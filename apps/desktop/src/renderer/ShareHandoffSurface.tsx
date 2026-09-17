@@ -11,9 +11,9 @@ import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
-  "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.";
+  "dohc couldn't reach dohc Drive. Check your connection, then choose Try again.";
 const BUSY_COPY =
-  "dohc Cloud is busy right now. Wait a moment, then choose Try again.";
+  "dohc Drive is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 

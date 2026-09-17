@@ -642,7 +642,7 @@ export function registerRelaySharesIpcHandlers<
             }
             operation.assertCurrent();
             if (currentCredentialGeneration() !== credentialGeneration) {
-              throw new Error("Your dohc Cloud session changed. Try again.");
+              throw new Error("Your dohc Drive session changed. Try again.");
             }
             if (poll.signal.aborted) throw new Error("aborted");
             return PollRelayShareDiscussionActivityResult.parse({

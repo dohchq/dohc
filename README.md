@@ -36,7 +36,7 @@ The desktop app currently includes:
 - Source-visible plugins and local web project previews.
 - Optional self-hosted sync, sharing, presence, and live co-editing.
 
-dohc Cloud has not shipped yet.
+dohc Drive has not shipped yet.
 
 ## Run it from source
 

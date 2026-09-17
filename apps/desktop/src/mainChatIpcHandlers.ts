@@ -273,7 +273,7 @@ export async function awaitCredentialGeneration<Result>(input: {
 }): Promise<Result> {
   const result = await input.run();
   if (input.currentGeneration() !== input.capturedGeneration) {
-    throw new Error("Your dohc Cloud session changed. Try again.");
+    throw new Error("Your dohc Drive session changed. Try again.");
   }
   return result;
 }

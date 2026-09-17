@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWindowIpc } from "./windowIpc";
 import { CHANNELS } from "./channels";
 import { decideNavigation } from "../security/electronSecurity";
-import { createQuitGuard, createRecoveryChecker } from "../quitGuard";
+import { createExitRounds, createQuitGuard } from "../quitGuard";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
 import { createUserSettingsWriteQueue, createZoomMutation } from "../window/windowZoom";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../settings/userSettings";
@@ -32,11 +32,16 @@ async function harness(isPackaged = false) {
   await sessions.open(first, { workspaceId: "a", attachmentId: Symbol("a") }, DOCUMENT);
   await sessions.open(second, { workspaceId: "b", attachmentId: Symbol("b") }, DOCUMENT);
   const prepareForRendererReload = vi.fn((value: Sender, document: string) => sessions.retireForReload(value, document));
-  const quit = vi.fn(), forceQuit = vi.fn(), askRenderer = vi.fn();
-  const quitGuard = createQuitGuard({ askRenderer, quit, forceQuit, confirmForceQuit: async () => false });
+  const quit = vi.fn(), forceQuit = vi.fn(), ask = vi.fn();
+  const quitGuard = createQuitGuard({ ask, quit, forceQuit });
   const requestIds: number[] = [];
   const confirmProceed = vi.fn(async () => false);
-  const recoveryChecker = createRecoveryChecker({ send: id => { requestIds.push(id); return true; }, confirmProceed });
+  const exitRounds = createExitRounds<Sender>({
+    participants: () => [first, second],
+    participantId: (value) => value.id,
+    send: (_value, message) => { if (message.kind === "request") requestIds.push(message.roundId); },
+    confirmProceed,
+  });
   const enqueue = createUserSettingsWriteQueue();
   let stored: DesktopUserSettings = structuredClone(DEFAULT_USER_SETTINGS);
   const apply = vi.fn();
@@ -66,13 +71,13 @@ async function harness(isPackaged = false) {
     registerEvent: (channel, handler) => { events.set(channel, handler); order.push(channel); },
     assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
     prepareForRendererReload, shell, clipboard, BrowserWindow, rememberChromeTheme,
-    titleBarOverlayOptions, stepWindowZoom, recoveryChecker, quitGuard, isTrustedFrame,
+    titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
     launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged },
   });
   return {
     ...capability, first, second, handlers, events, order, sessions, retiring,
     prepareForRendererReload, setRetirement: (next: Promise<void>) => { retirement = next; },
-    quit, forceQuit, askRenderer, quitGuard, recoveryChecker, requestIds, confirmProceed,
+    quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
     enqueue, write, apply, stored: () => stored, clipboard, shell, overlay, windows,
     BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
     logLaunchMarksOnce,
@@ -99,7 +104,7 @@ describe("registered window IPC", () => {
     expect(h.order).toEqual([
       CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
       CHANNELS.writeClipboardText, CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
-      "ui-state", "updates", CHANNELS.recoveryCheckAnswer, CHANNELS.holdQuit,
+      "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.holdQuit,
       CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
     ]);
   });
@@ -256,62 +261,40 @@ describe("registered window IPC", () => {
     await expect(h.invoke(CHANNELS.stepWindowZoom, { step: "in" })).resolves.toMatchObject({ settings: { appearance: { zoomLevel: initial + 1 } } });
   });
 
-  it("holds a real quit ask until the registered resume answer", async () => {
-    vi.useFakeTimers();
+  it("holds an approved quit until the registered resume answer", async () => {
     const h = await harness(); h.registerQuitAndMarks();
     const event = { preventDefault: vi.fn() };
     h.quitGuard.beforeQuit(event);
-    try {
-      expect(event.preventDefault).toHaveBeenCalledOnce();
-      expect(h.askRenderer).toHaveBeenCalledOnce();
-      await h.invoke(CHANNELS.holdQuit);
-      await vi.advanceTimersByTimeAsync(3_000);
-      expect(h.quit).not.toHaveBeenCalled();
-      expect(h.forceQuit).not.toHaveBeenCalled();
-      await h.invoke(CHANNELS.resumeQuit);
-      expect(h.quit).toHaveBeenCalledOnce();
-      expect(h.quitGuard.beforeQuit(event)).toBe("proceed");
-    } finally { h.quitGuard.hold(); }
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(h.ask).toHaveBeenCalledOnce();
+    await h.invoke(CHANNELS.holdQuit);
+    expect(h.quit).not.toHaveBeenCalled();
+    expect(h.forceQuit).not.toHaveBeenCalled();
+    await h.invoke(CHANNELS.resumeQuit);
+    expect(h.quit).toHaveBeenCalledOnce();
+    expect(h.quitGuard.beforeQuit(event)).toBe("proceed");
+    h.quitGuard.hold();
   });
 
-  it("routes valid recovery answers by request ID and ignores malformed answers", async () => {
-    const h = await harness(); h.registerQuitAndMarks();
-    const first = h.recoveryChecker.ask(), second = h.recoveryChecker.ask();
-    const firstSettled = vi.fn();
-    void first.then(firstSettled);
-    const [firstId, secondId] = h.requestIds;
-    try {
-      for (const payload of [null, undefined, {}, { requestId: firstId, blocked: "yes" }, { requestId: "1", blocked: true }]) {
-        await h.invoke(CHANNELS.recoveryCheckAnswer, payload);
-      }
-      await h.invoke(CHANNELS.recoveryCheckAnswer, { requestId: 99_999, blocked: true });
-      await h.invoke(CHANNELS.recoveryCheckAnswer, { requestId: secondId, blocked: false });
-      await expect(second).resolves.toBe(false);
-      expect(firstSettled).not.toHaveBeenCalled();
-      await h.invoke(CHANNELS.recoveryCheckAnswer, { requestId: firstId, blocked: true });
-      await expect(first).resolves.toBe(true);
-    } finally {
-      h.recoveryChecker.answer(firstId!, false); h.recoveryChecker.answer(secondId!, false);
-      await Promise.all([first, second]);
-    }
-    expect(h.confirmProceed).not.toHaveBeenCalled();
-  });
-
-  it("keeps an escalated recovery decision with its real confirmation owner", async () => {
+  it("keys round answers to the sender and round, and ignores malformed answers", async () => {
     vi.useFakeTimers();
     const h = await harness(); h.registerQuitAndMarks();
-    const confirmation = deferred<boolean>();
-    h.confirmProceed.mockImplementationOnce(() => confirmation.promise);
-    const result = h.recoveryChecker.ask();
-    try {
-      await vi.advanceTimersByTimeAsync(3_000);
-      expect(h.confirmProceed).toHaveBeenCalledOnce();
-      await h.invoke(CHANNELS.recoveryCheckAnswer, { requestId: h.requestIds[0], blocked: false });
-    } finally {
-      confirmation.resolve(false);
-      await Promise.allSettled([result]);
+    const round = h.exitRounds.begin("update");
+    const settled = vi.fn();
+    void round.outcome.then(settled);
+    const roundId = round.roundId;
+    for (const payload of [null, undefined, {}, { roundId, decision: "yes" }, { roundId: "1", decision: "clear" }]) {
+      await h.invoke(CHANNELS.exitRoundAnswer, payload);
     }
-    await expect(result).resolves.toBe(true);
+    // A stale round, and a sender that is not in the round.
+    await h.invoke(CHANNELS.exitRoundAnswer, { roundId: roundId + 7, decision: "clear" });
+    await h.invoke(CHANNELS.exitRoundAnswer, { roundId, decision: "clear" }, sender(99));
+    await h.invoke(CHANNELS.exitRoundAnswer, { roundId, decision: "clear" }, h.first);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled, "one clear window must not carry the other").not.toHaveBeenCalled();
+    await h.invoke(CHANNELS.exitRoundAnswer, { roundId, decision: "clear" }, h.second);
+    await expect(round.outcome).resolves.toBe("proceed");
+    expect(h.confirmProceed).not.toHaveBeenCalled();
   });
 
   it.each([["0", false], ["1", true], ["0", true], ["1", false]] as const)("gates mark snapshots for test=%s packaged=%s", async (flag, packaged) => {

@@ -10,10 +10,13 @@ import type {
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
+  DefaultShareRootPayload,
+  DefaultShareRootResult,
   DefaultWorkspaceRootResult,
   OpenWorkspaceRequestPayload,
   PickWorkspaceRootResult,
   SyncStatusResult,
+  WorkspaceIdPayload,
   WorkspaceRegistryResult,
   WorkspaceSummary,
 } from "./bridgeContract";
@@ -78,6 +81,13 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[]): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolder;
+  // Retires every open binding for the workspace, then removes its registry
+  // row. The folder on disk is left alone.
+  forgetWorkspace(workspaceId: string): Promise<void>;
+  showItemInFolder(path: string): void;
+  openWorkspaceWindow(workspace: WorkspaceSummary): Promise<unknown>;
+  openWorkspaceManager(): unknown;
+  closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
   refreshNativeWorkspaceSurfaces(): void;
   desktopMarks: {
@@ -95,6 +105,11 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
+    forgetWorkspace,
+    showItemInFolder,
+    openWorkspaceWindow,
+    openWorkspaceManager,
+    closeWindowOf,
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -127,6 +142,21 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const root = defaultWorkspaceRoot(effectiveHome());
     approveRoot(root);
     return DefaultWorkspaceRootResult.parse(root);
+  });
+
+  // A share opened as its own view defaults to <default root>/shared/<id>.
+  // The id is already restricted to [a-z0-9-] by the share code parser, so
+  // it is a safe single segment. Approving the path here is what lets the
+  // renderer open the share without a folder dialog.
+  registerHandler(CHANNELS.getDefaultShareRoot, (event, payload) => {
+    assertTrustedSender(event);
+    const input = DefaultShareRootPayload.parse(payload);
+    if (!/^[a-z0-9][a-z0-9-]*$/u.test(input.shareId)) {
+      throw new Error("Invalid share id.");
+    }
+    const root = `${defaultWorkspaceRoot(effectiveHome())}/shared/${input.shareId}`;
+    approveRoot(root);
+    return DefaultShareRootResult.parse(root);
   });
 
   registerHandler(CHANNELS.createLocalWorkspace, async (event, payload) => {
@@ -164,6 +194,43 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
+
+  registerHandler(CHANNELS.forgetWorkspace, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    await forgetWorkspace(input.workspaceId);
+    refreshNativeWorkspaceSurfaces();
+  });
+
+  registerHandler(CHANNELS.openWorkspaceWindow, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    const workspace = workspaceSummaries().find(
+      (entry) => entry.workspaceId === input.workspaceId,
+    );
+    if (!workspace) throw new Error("That workspace is not in the registry.");
+    await openWorkspaceWindow(workspace);
+  });
+
+  registerHandler(CHANNELS.openWorkspaceManager, (event) => {
+    assertTrustedSender(event);
+    openWorkspaceManager();
+  });
+
+  registerHandler(CHANNELS.closeThisWindow, (event) => {
+    assertTrustedSender(event);
+    closeWindowOf(event);
+  });
+
+  registerHandler(CHANNELS.revealWorkspaceFolder, (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceIdPayload.parse(payload);
+    const workspace = workspaceSummaries().find(
+      (entry) => entry.workspaceId === input.workspaceId,
+    );
+    if (!workspace) throw new Error("That workspace is not in the registry.");
+    showItemInFolder(workspace.rootPath);
+  });
 }
 
 export function registerOpenWorkspaceIpcHandler<
@@ -193,6 +260,7 @@ export function registerOpenWorkspaceIpcHandler<
     ): Promise<{ isCurrent(): boolean }>;
   };
   setPreferredWorkspaceId(workspaceId: string): void;
+  markWorkspaceOpened(workspaceId: string): void;
   syncStatusWithOwnedProjection(
     workspace: Workspace,
     status: SyncStatusResult,
@@ -206,6 +274,7 @@ export function registerOpenWorkspaceIpcHandler<
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
     setPreferredWorkspaceId,
+    markWorkspaceOpened,
     syncStatusWithOwnedProjection,
     openWorkspaceActivity,
     sharedViewOf,
@@ -231,6 +300,16 @@ export function registerOpenWorkspaceIpcHandler<
       if (!rendererSession.isCurrent()) {
         throw new Error(
           "Workspace open stopped because this window changed workspaces.",
+        );
+      }
+      // The recency stamp is a manager convenience: only a finished open
+      // earns it, and a registry write refusal must not fail the open.
+      try {
+        markWorkspaceOpened(workspace.workspaceId);
+      } catch (error) {
+        console.error(
+          `[desktop] could not stamp the last open of ${workspace.workspaceId}:`,
+          error,
         );
       }
       if (!sharedViewOf(workspace.workspaceId)) {

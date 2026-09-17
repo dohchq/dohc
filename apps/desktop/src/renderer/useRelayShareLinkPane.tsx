@@ -2267,7 +2267,7 @@ export function useRelayShareLinkPane(props: {
                   confirmationWidens ? (
                     <>
                       {confirmation.access === "edit" ? "Turn on editing for this link?" : "Turn on comments for this link?"} The current link stops working
-                      right away, and dohc shows the new link once.
+                      right away, and dohc shows the new link once. Published apps stop working until you review and publish them again.
                       {confirmationRow.dependents.length > 0 ? (
                         <>
                           {" "}People who joined through it keep access and stay at
@@ -2296,7 +2296,7 @@ export function useRelayShareLinkPane(props: {
                 ) : confirmation.kind === "reset" ? (
                   <>
                     Reset this link? The current link stops working right away, and dohc
-                    shows the new link once.
+                    shows the new link once. Published apps stop working until you review and publish them again.
                     {confirmationRow.dependents.length > 0 ? (
                       <>
                         {" "}People who joined through it keep access:{" "}

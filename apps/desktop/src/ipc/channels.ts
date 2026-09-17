@@ -147,8 +147,14 @@ export const CHANNELS = {
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
   getDefaultWorkspaceRoot: "desktop:get-default-workspace-root",
+  getDefaultShareRoot: "desktop:get-default-share-root",
   createLocalWorkspace: "desktop:create-local-workspace",
   attachWorkspaceFolder: "desktop:attach-workspace-folder",
+  forgetWorkspace: "desktop:forget-workspace",
+  openWorkspaceWindow: "desktop:open-workspace-window",
+  openWorkspaceManager: "desktop:open-workspace-manager",
+  closeThisWindow: "desktop:close-this-window",
+  revealWorkspaceFolder: "desktop:reveal-workspace-folder",
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
   createWorkspaceFolder: "desktop:create-workspace-folder",
@@ -367,21 +373,20 @@ export const CHANNELS = {
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
-  // Quit interception: main asks the renderer before a quit proceeds,
-  // so set-aside drafts warn before any destructive teardown. The renderer
-  // answers with hold (its dialog owns the decision) or resume (quit).
-  quitRequested: "desktop:quit-requested",
-  // Recovery re-check: main asks at the quit boundary,
-  // because a reopen can set an edit aside after the renderer's own check and
-  // before the install IPC runs. Request carries an id; the answer invokes
-  // back with it.
-  recoveryCheckRequested: "desktop:recovery-check-requested",
-  recoveryCheckAnswer: "desktop:recovery-check-answer",
+  // Exit rounds: before a quit or an update install, main asks every
+  // workspace renderer whether set-aside drafts would be lost. The request
+  // carries a round id; each renderer answers clear, hold, or cancel with it.
+  exitRound: "desktop:exit-round",
+  exitRoundAnswer: "desktop:exit-round-answer",
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",
+  // Dev tools (DOHC_DEV_TOOLS=1, unpackaged only): the debug panel's
+  // actions. Each handler is double-gated in main.
+  devForgetWorkspaces: "desktop:dev:forget-workspaces",
+  devRevealPath: "desktop:dev:reveal-path",
   getLaunchMarks: "desktop:test:get-launch-marks",
   getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;

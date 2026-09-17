@@ -57,6 +57,9 @@ export function CloudLogin(props: {
   // Nested inside another elevated card (join/open-shared signed-out gates):
   // drop this panel's own frame so cards never stack elevation.
   embedded?: boolean;
+  // The host already names dohc Drive (a step title, a section header):
+  // drop this panel's own heading so the name is not said twice.
+  untitled?: boolean;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
@@ -240,10 +243,10 @@ export function CloudLogin(props: {
         setConnectionError({
           message:
             missingServer && missingRelay
-              ? "Enter the cloud server URL and sync relay URL."
+              ? "Enter the server and sync relay."
               : missingServer
-                ? "Enter the cloud server URL."
-                : "Enter the sync relay URL.",
+                ? "Enter the server."
+                : "Enter the sync relay.",
           invalid:
             missingServer && missingRelay
               ? "both"
@@ -256,7 +259,7 @@ export function CloudLogin(props: {
       }
       if (!normalizedServerUrl) {
         setConnectionError({
-          message: "Enter the cloud server URL as an HTTP or HTTPS origin.",
+          message: "Enter the server as an HTTP or HTTPS origin.",
           invalid: "server",
         });
         serverUrlInput.current?.focus();
@@ -264,7 +267,7 @@ export function CloudLogin(props: {
       }
       if (!normalizedRelayUrl) {
         setConnectionError({
-          message: "Enter the sync relay URL as an HTTP or HTTPS origin.",
+          message: "Enter the sync relay as an HTTP or HTTPS origin.",
           invalid: "relay",
         });
         relayUrlInput.current?.focus();
@@ -291,7 +294,7 @@ export function CloudLogin(props: {
           kind: "failed",
           reason:
             connectionMode === "managed"
-              ? "dohc could not reach dohc Cloud. Check your connection, then try again."
+              ? "dohc could not reach dohc Drive. Check your connection, then try again."
               : "dohc could not reach this self-hosted server. Check both URLs, then try again.",
         });
       }
@@ -342,7 +345,7 @@ export function CloudLogin(props: {
       if (sessionRef.isCurrent(session)) setPhase({ kind: "disconnected" });
     } catch {
       if (sessionRef.isCurrent(session)) {
-        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Cloud." });
+        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Drive." });
       }
     }
   }
@@ -356,10 +359,12 @@ export function CloudLogin(props: {
           : "dohc-elevated w-105 max-w-[80vw] rounded-xl border border-line bg-panel p-5"
       }
     >
-      <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <Cloud size={14} aria-hidden className="text-subtle" />
-        dohc Cloud
-      </h2>
+      {props.untitled ? null : (
+        <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
+          <Cloud size={14} aria-hidden className="text-subtle" />
+          dohc Drive
+        </h2>
+      )}
 
       {phase.kind === "loading" ? (
         <p className="mb-0 mt-2 text-xs text-subtle">Checking connection…</p>
@@ -395,7 +400,7 @@ export function CloudLogin(props: {
           {managedCloudStatus === "ready" && connectionMode === "managed" ? (
             <>
               <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-                Connect to dohc Cloud for sync and sharing. Your workspace keeps
+                Connect to dohc Drive for sync and sharing. Your workspace keeps
                 working locally without a connection.
               </p>
               <PrimaryButton
@@ -403,7 +408,7 @@ export function CloudLogin(props: {
                 onClick={() => void connect()}
                 className="mt-3"
               >
-                Connect to dohc Cloud
+                Connect to dohc Drive
               </PrimaryButton>
               <SecondaryButton
                 type="button"
@@ -424,8 +429,7 @@ export function CloudLogin(props: {
                   data-testid="cloud-managed-unconfigured"
                   className="mb-0 mt-2 text-xs leading-relaxed text-muted"
                 >
-                  dohc Cloud isn't configured in this build. You can still connect
-                  to a self-hosted server.
+                  dohc Drive isn't configured in this version. Enter your own server.
                 </p>
               ) : null}
               {managedCloudStatus === "invalid" ? (
@@ -434,7 +438,7 @@ export function CloudLogin(props: {
                     data-testid="cloud-managed-invalid"
                     className="mb-0 mt-2 text-xs leading-relaxed text-danger"
                   >
-                    dohc Cloud is unavailable because this build has incomplete
+                    dohc Drive is unavailable because this build has incomplete
                     server settings.
                   </p>
                   <p className="mb-0 mt-1 text-xs leading-relaxed text-muted">
@@ -452,7 +456,7 @@ export function CloudLogin(props: {
                   }}
                   className="mt-3"
                 >
-                  Use dohc Cloud
+                  Use dohc Drive
                 </SecondaryButton>
               ) : null}
               <form
@@ -462,15 +466,8 @@ export function CloudLogin(props: {
                   void connect();
                 }}
               >
-                <p className="mb-0 mt-3 text-[11px] font-semibold text-ink">
-                  Self-hosted server
-                </p>
-                <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
-                  Enter the server and sync relay origins from your administrator.
-                  Origins cannot include paths, queries, fragments, or sign-in details.
-                </p>
                 <label className="mt-3 block text-[11px] font-medium text-subtle">
-                  Cloud server URL
+                  Server
                   <input
                     ref={serverUrlInput}
                     spellCheck={false}
@@ -495,7 +492,7 @@ export function CloudLogin(props: {
                   />
                 </label>
                 <label className="mt-2 block text-[11px] font-medium text-subtle">
-                  Sync relay URL
+                  Sync relay
                   <input
                     ref={relayUrlInput}
                     spellCheck={false}

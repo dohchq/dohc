@@ -289,9 +289,9 @@ describe("owner app publication", () => {
     h.relay.mockResolvedValueOnce({ publications: [], nextCursor: cursor });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [], nextCursor: cursor });
     expect(h.requests).toEqual([]);
-    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true, collectionCapability: null, manifestUnavailable: false }], nextCursor: null });
+    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true, collectionCapability: null, linkCurrent: true, manifestUnavailable: false }], nextCursor: null });
     await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app", cursor })).rejects.toThrow("another app");
-    const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, manifestUnavailable: true };
+    const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, linkCurrent: true, manifestUnavailable: true };
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
     expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
   });

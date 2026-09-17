@@ -410,7 +410,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
     client:{captureOwnerActivation,sendRequest} as never,
     workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
-    config:{targets:[target],validateBaseline,validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
+    config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument:(_document,_signal,operation)=>operation(),

@@ -174,7 +174,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         credentials: null,
         resolvedAuthorUserId: undefined,
       }),
-    ).toThrowError("Sign in to dohc Cloud to send a message in this shared channel.");
+    ).toThrowError("Sign in to dohc Drive to send a message in this shared channel.");
   });
 
   it("requires credentials from the joined channel relay", () => {
@@ -224,7 +224,7 @@ describe("assertSharedChannelMessageIdentity", () => {
         authorUserId: "user-1",
         resolvedAuthorUserId: "user-2",
       }),
-    ).toThrowError("Your dohc Cloud session changed. Try again.");
+    ).toThrowError("Your dohc Drive session changed. Try again.");
   });
 });
 

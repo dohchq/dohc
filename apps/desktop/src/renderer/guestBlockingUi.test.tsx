@@ -36,9 +36,8 @@ const bridgeMock = {
   ),
   // The close guard calls these directly: a stub that omits them is a
   // mismatched build (RecoveryCloseGuard.test.tsx).
-  onQuitRequested: vi.fn(() => () => undefined),
-  onRecoveryCheckRequested: vi.fn(() => () => undefined),
-  answerRecoveryCheck: vi.fn(async () => undefined),
+  onExitRound: vi.fn(() => () => undefined),
+  answerExitRound: vi.fn(async () => undefined),
   holdQuit: vi.fn(async () => undefined),
   resumeQuit: vi.fn(async () => undefined),
 };

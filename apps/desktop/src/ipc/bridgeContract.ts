@@ -265,6 +265,8 @@ export const WorkspaceSummary = z.object({
   rootPath: PATH_STRING,
   kind: KIND_ENUM,
   mode: MODE_ENUM,
+  // Epoch ms of the last open in any window; absent when never stamped.
+  lastOpenedAt: z.number().int().nonnegative().optional(),
   // Present only on a shared VIEW received through a relay share grant:
   // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.
@@ -329,6 +331,16 @@ export const WorkspaceRegistryResult = z.object({
 export type WorkspaceRegistryResult = z.infer<typeof WorkspaceRegistryResult>;
 
 export const DefaultWorkspaceRootResult = PATH_STRING;
+
+// Where a share opened as its own view goes when the person does not pick a
+// folder: a sibling of the default workspace root, named after the share.
+// The main process approves the path so the open can use it without a
+// dialog; the renderer never invents roots.
+export const DefaultShareRootPayload = z.object({
+  shareId: z.string().min(1).max(128),
+});
+export type DefaultShareRootPayload = z.infer<typeof DefaultShareRootPayload>;
+export const DefaultShareRootResult = PATH_STRING;
 
 export const CreateLocalWorkspacePayload = z.object({
   rootPath: PATH_STRING,
@@ -3668,7 +3680,7 @@ export type InvokePluginPanelSdkResult = z.infer<
   typeof InvokePluginPanelSdkResult
 >;
 
-// dohc Cloud login (device-authorization flow): the desktop shows a short
+// dohc Drive login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
 // session token never reaches the renderer — main stores it via safeStorage
 // and the renderer only ever sees connection status + email.
@@ -5410,9 +5422,31 @@ export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
 export const UpdateActionResult = z.object({
   accepted: z.boolean(),
+  // True when the exit round was cancelled: a window's recovery dialog
+  // went back. A decision, not an install failure.
+  cancelled: z.boolean().optional(),
   state: UpdateStateEvent,
 });
 export type UpdateActionResult = z.infer<typeof UpdateActionResult>;
+
+// One exit round message from main. `request` asks this window whether a
+// quit or update may lose its set-aside drafts; `proceed` and `cancelled`
+// close the round.
+export const ExitRoundMessage = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("request"),
+    roundId: z.number().int().positive(),
+    exit: z.enum(["quit", "update"]),
+  }),
+  z.object({ kind: z.literal("proceed"), roundId: z.number().int().positive() }),
+  z.object({ kind: z.literal("cancelled"), roundId: z.number().int().positive() }),
+]);
+export type ExitRoundMessage = z.infer<typeof ExitRoundMessage>;
+export const ExitRoundAnswerPayload = z.object({
+  roundId: z.number().int().positive(),
+  decision: z.enum(["clear", "hold", "cancel"]),
+});
+export type ExitRoundAnswerPayload = z.infer<typeof ExitRoundAnswerPayload>;
 
 export const UpdateCheckResult = z.object({
   checked: z.boolean(),
@@ -5897,6 +5931,14 @@ export const DesktopMarksResult = z.object({
 });
 export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 
+export const DevRevealPathPayload = z.object({
+  target: z.enum(["workspace", "state-dir"]),
+  workspaceId: WORKSPACE_ID.optional(),
+});
+export type DevRevealPathPayload = z.infer<typeof DevRevealPathPayload>;
+export const DevForgetWorkspacesResult = z.object({ forgot: z.number().int().nonnegative() });
+export type DevForgetWorkspacesResult = z.infer<typeof DevForgetWorkspacesResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   // The daemon handshake and the renderer's first paint race each other, so a
@@ -5915,16 +5957,36 @@ export interface DohcDesktopBridge {
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.
   platform: NodeJS.Platform;
+  // Constant: which surface this window renders. "manager" is the workspace
+  // manager window; "workspace" is an ordinary window. Read from the load
+  // URL by the preload, never from the renderer.
+  windowRole: "workspace" | "manager";
+  // Constant: main's own dev-tools decision (DOHC_DEV_TOOLS=1 in an
+  // unpackaged build), handed to the preload at window creation. The
+  // renderer shows the debug panel on it; every dev channel is separately
+  // gated in main, so this is a hint, not authority.
+  devTools: boolean;
   reloadRenderer(): Promise<void>;
+  devForgetWorkspaces(): Promise<DevForgetWorkspacesResult>;
+  devRevealPath(payload: DevRevealPathPayload): Promise<void>;
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;
+  getDefaultShareRoot(payload: DefaultShareRootPayload): Promise<string>;
   createLocalWorkspace(
     payload: CreateLocalWorkspacePayload,
   ): Promise<WorkspaceSummary>;
   attachWorkspaceFolder(
     payload: AttachWorkspaceFolderPayload,
   ): Promise<WorkspaceSummary>;
+  forgetWorkspace(payload: WorkspaceIdPayload): Promise<void>;
+  revealWorkspaceFolder(payload: WorkspaceIdPayload): Promise<void>;
+  // Opens (or focuses) a window for the workspace and leaves this window as
+  // it is. The manager window closes itself after.
+  openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
+  // Opens (or focuses) the workspace manager in its own window.
+  openWorkspaceManager(): Promise<void>;
+  closeThisWindow(): Promise<void>;
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
@@ -6389,18 +6451,16 @@ export interface DohcDesktopBridge {
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
   installUpdate(): Promise<UpdateActionResult>;
-  // Quit interception: main asks before a quit proceeds so set-aside
-  // drafts can warn first — electron-updater's quitAndInstall is one-shot,
-  // so the decision must come before any destructive call. The renderer
-  // either holds the quit (its dialog owns the decision) or resumes it.
-  onQuitRequested(listener: () => void): () => void;
-  // Main re-checks recovery drafts at the quit boundary:
-  // the renderer answers whether any unresolved set-aside edit would be lost.
-  onRecoveryCheckRequested(listener: (requestId: number) => void): () => void;
-  answerRecoveryCheck(payload: {
-    requestId: number;
-    blocked: boolean;
-  }): Promise<void>;
+  // Exit rounds: before a quit proceeds or an update installs, main asks
+  // every workspace window whether set-aside drafts would be lost.
+  // electron-updater's quitAndInstall is one-shot, so the decision comes
+  // before any destructive call. Each window answers clear, hold (its
+  // dialog owns the decision), or cancel (the user went back) with the
+  // round id it was asked under.
+  onExitRound(listener: (message: ExitRoundMessage) => void): () => void;
+  answerExitRound(payload: ExitRoundAnswerPayload): Promise<void>;
+  // A late draft vetoes an approved exit's unload; the renderer tells main
+  // the approval is off, and resumes the quit once the user confirms.
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
   // Workspace content search. Answers accepted after the rg child

@@ -37,6 +37,14 @@ async function run(
   request: WorkspaceDatabaseWorkerRequest,
 ): Promise<WorkspaceDatabaseWorkerResult> {
   switch (request.kind) {
+    case "import-data": {
+      const { createSqliteEngine } = await import("@dohc/sqlite-worker");
+      const engine = await createSqliteEngine();
+      const result = await engine.materializeImport(request.input);
+      if (!result.ok) throw new Error(`Import failed (${result.code}): ${result.message}`);
+      const bytes = Uint8Array.from(result.bytes);
+      return { bytes, rowCount: result.rowCount, tableName: result.tableName };
+    }
     case "read-path":
       return readDatabaseSnapshotAtPath(
         request.absolutePath,
@@ -81,7 +89,10 @@ port.on("message", (request: WorkspaceDatabaseWorkerRequest) => {
     port.postMessage({ id: request.id, kind: "started" });
     try {
       const result = await run(request);
-      port.postMessage({ id: request.id, kind: "result", result });
+      port.postMessage(
+        { id: request.id, kind: "result", result },
+        "bytes" in result ? [result.bytes.buffer as ArrayBuffer] : [],
+      );
     } catch (error) {
       port.postMessage({
         id: request.id,

@@ -36,6 +36,168 @@ const NO_FAULTS: NoFaults = NoFaults;
 /// The daemon's granular chat response budget.
 const GRANULAR_BYTE_BUDGET: usize = 256 * 1024;
 
+#[test]
+#[ignore = "manual actor search pagination benchmark; run without competing workloads"]
+fn profiles_search_actor_first_and_late_pages() {
+    use std::time::Instant;
+
+    const PAGE_SIZE: usize = 25;
+    for (surface, name, lines, spacing, unicode) in [
+        (SearchSurface::File, "dense", 10_000, 1, false),
+        (SearchSurface::File, "sparse", 100_000, 100, false),
+        (
+            SearchSurface::File,
+            "unicode-mixed-newlines",
+            10_000,
+            10,
+            true,
+        ),
+        (SearchSurface::Chat, "dense", 2_000, 1, false),
+        (SearchSurface::Chat, "sparse", 5_000, 10, false),
+        (
+            SearchSurface::Chat,
+            "unicode-mixed-newlines",
+            2_000,
+            4,
+            true,
+        ),
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path();
+        let db = engine_db_path(&scratch).expect("database path");
+        let mut store = open(&db, 1);
+        let mut text = String::from("Benchmark\n");
+        for index in 0..lines {
+            text.push_str(if index % spacing == 0 {
+                if unicode {
+                    "😀 É NEEDLE 🚀"
+                } else {
+                    "needle"
+                }
+            } else {
+                "ordinary"
+            });
+            text.push_str(match index % 3 {
+                0 => "\r\n",
+                1 => "\r",
+                _ => "\n",
+            });
+        }
+        write_file(&mut store, "benchmark-object", "benchmark.txt", "setup", 10);
+        match surface {
+            SearchSurface::File => {
+                write_file(&mut store, "benchmark-object", "benchmark.txt", &text, 20);
+            }
+            SearchSurface::Chat => {
+                start_thread(
+                    &mut store,
+                    "benchmark-channel",
+                    "benchmark-thread",
+                    &text,
+                    20,
+                );
+            }
+        }
+        ensure_index(&mut store, root, 30);
+        let first = store
+            .read_with(|conn| {
+                search_workspace_page(
+                    conn,
+                    root,
+                    WS,
+                    V,
+                    "needle",
+                    Some(PAGE_SIZE as i64),
+                    40,
+                    None,
+                    None,
+                )
+            })
+            .expect("first page");
+        let generation = first.generation;
+        let mut cursor = first.continuation;
+        let mut total = first.results.len();
+        let mut late_cursor = None;
+        while let Some(after) = cursor {
+            let next = store
+                .read_with(|conn| {
+                    search_workspace_page(
+                        conn,
+                        root,
+                        WS,
+                        V,
+                        "needle",
+                        Some(PAGE_SIZE as i64),
+                        40,
+                        Some(generation),
+                        Some(after),
+                    )
+                })
+                .expect("continued page");
+            assert_eq!(next.disposition, SearchPageDisposition::Results);
+            assert!(!next.results.is_empty());
+            late_cursor = Some(after);
+            total += next.results.len();
+            cursor = next.continuation;
+        }
+        assert_eq!(total, lines / spacing);
+        let late_cursor = late_cursor.expect("late cursor");
+        for (position, after) in [("first", None), ("late", Some(late_cursor))] {
+            let mut expected = None;
+            let mut samples_ms = Vec::new();
+            for sample in 0..36 {
+                let started = Instant::now();
+                let page = store
+                    .read_with(|conn| {
+                        search_workspace_page(
+                            conn,
+                            root,
+                            WS,
+                            V,
+                            "needle",
+                            Some(PAGE_SIZE as i64),
+                            40,
+                            Some(generation),
+                            after,
+                        )
+                    })
+                    .expect("measured page");
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                assert_eq!(page.disposition, SearchPageDisposition::Results);
+                assert_eq!(page.results.len(), PAGE_SIZE);
+                if let Some(expected) = &expected {
+                    assert_eq!(&page.results, expected);
+                } else {
+                    expected = Some(page.results);
+                }
+                if sample >= 5 {
+                    samples_ms.push(elapsed_ms);
+                }
+            }
+            let mut sorted = samples_ms.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "SEARCH_ACTOR_PROFILE {}",
+                json!({
+                    "entryPoint": "search_workspace_page",
+                    "transport": "direct-store",
+                    "surface": format!("{surface:?}"),
+                    "fixture": name,
+                    "position": position,
+                    "sourceBytes": text.len(),
+                    "sourceMatches": total,
+                    "pageSize": PAGE_SIZE,
+                    "anchorLine": after.map(|key| key.line),
+                    "firstResultLine": expected.as_ref().expect("results")[0].result.line,
+                    "samplesMs": samples_ms,
+                    "medianMs": sorted[15],
+                    "p95Ms": sorted[29],
+                })
+            );
+        }
+    }
+}
+
 fn open(db: &Path, now: i64) -> EngineStore {
     EngineStore::open(db, now).expect("open")
 }
@@ -623,6 +785,80 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
         .expect("inclusive continuation page");
     assert_eq!(second.results.len(), 1);
     assert_eq!(second.results[0].result.path, "notes/inclusive-second.md");
+}
+
+#[test]
+fn file_and_chat_line_continuations_preserve_dense_and_sparse_results() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    let db = engine_db_path(&scratch).expect("database path");
+    let mut store = open(&db, 1);
+    let mut text = String::from("heading\r\n");
+    for index in 0..90 {
+        text.push_str(if index < 30 || index % 3 == 0 {
+            "😀 É NEEDLE 🚀"
+        } else {
+            "ordinary"
+        });
+        text.push_str(match index % 3 {
+            0 => "\r\n",
+            1 => "\r",
+            _ => "\n",
+        });
+    }
+    write_file(&mut store, "mixed-lines", "mixed.txt", &text, 10);
+    start_thread(&mut store, "mixed-channel", "mixed-thread", &text, 20);
+    ensure_index(&mut store, root, 30);
+    let expected = store
+        .read_with(|conn| {
+            search_workspace_page(conn, root, WS, V, "needle", Some(1000), 40, None, None)
+        })
+        .expect("all matches");
+    assert!(
+        expected
+            .results
+            .iter()
+            .any(|hit| hit.key.surface == SearchSurface::File)
+    );
+    assert!(
+        expected
+            .results
+            .iter()
+            .any(|hit| hit.key.surface == SearchSurface::Chat)
+    );
+    assert!(!expected.has_more);
+    for size in [1, 7, 25] {
+        let mut actual = Vec::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .read_with(|conn| {
+                    search_workspace_page(
+                        conn,
+                        root,
+                        WS,
+                        V,
+                        "needle",
+                        Some(size),
+                        40,
+                        Some(expected.generation),
+                        after,
+                    )
+                })
+                .expect("continued page");
+            assert_eq!(page.disposition, SearchPageDisposition::Results);
+            assert!(!page.results.is_empty());
+            actual.extend(page.results);
+            if !page.has_more {
+                break;
+            }
+            let next = page.continuation.expect("continuation");
+            assert_ne!(after, Some(next), "cursor must advance");
+            after = Some(next);
+            assert!(actual.len() <= expected.results.len());
+        }
+        assert_eq!(actual, expected.results);
+    }
 }
 
 #[test]

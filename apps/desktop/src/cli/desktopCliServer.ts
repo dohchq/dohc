@@ -23,11 +23,7 @@ import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
-import type {
-  WorkspaceAuthorityLease,
-  WorkspaceAuthorityOperation,
-} from "../workspaces/workspaceAuthorityOwner";
-import type { createWorkspaceChatLifecycle } from "../workspaces/workspaceChatLifecycle";
+import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
   createCollectionRecord,
@@ -42,11 +38,7 @@ import {
   type ResolvedChatRelayIdentity,
 } from "../workspaces/chatRelayIdentity";
 
-type CliAuthorityState = {
-  workspaceChatLifecycle: Pick<ReturnType<typeof createWorkspaceChatLifecycle>, "boot">;
-};
-
-interface DesktopCliServerDependencies<State extends CliAuthorityState> {
+interface DesktopCliServerDependencies<State> {
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -81,15 +73,6 @@ interface DesktopCliServerDependencies<State extends CliAuthorityState> {
     store: DesktopLinkedChatStore,
   ): Promise<ResolvedChatRelayIdentity>;
   currentCredentials(): CloudCredentials | null;
-  workspaceAuthorities: {
-    withAuthority<Result>(
-      workspaceId: string,
-      work: (lease: WorkspaceAuthorityLease<RegistryEntry, State>) => Result | Promise<Result>,
-    ): Promise<Result>;
-  };
-  canonicalWorkspaceFor(
-    lease: WorkspaceAuthorityLease<RegistryEntry, State>,
-  ): RegistryEntry & { attachmentId: symbol };
   startCliServer: typeof startCliServerImplementation;
   stateDir(): string;
   warmCredentialCache(): Promise<unknown>;
@@ -105,7 +88,7 @@ interface DesktopCliServerDependencies<State extends CliAuthorityState> {
   rememberPendingCliRunMessageLink(link: CliRunMessageLink, pending: boolean): void;
 }
 
-export function createDesktopCliServer<State extends CliAuthorityState>(
+export function createDesktopCliServer<State>(
   dependencies: DesktopCliServerDependencies<State>,
 ) {
   const {
@@ -123,8 +106,6 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
     assertWritableWorkspace,
     chatRelayIdentityFor,
     currentCredentials,
-    workspaceAuthorities,
-    canonicalWorkspaceFor,
     startCliServer,
     stateDir,
     warmCredentialCache,
@@ -311,15 +292,6 @@ export function createDesktopCliServer<State extends CliAuthorityState>(
   }
 
   async function startDesktopCliServer(): Promise<CliServerHandle> {
-    await Promise.allSettled(
-      listWorkspaces().map((workspace) =>
-        workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-          lease.state.workspaceChatLifecycle.boot([
-            canonicalWorkspaceFor(lease),
-          ]),
-        ),
-      ),
-    );
     return startCliServer({
       stateDir: stateDir(),
       listWorkspaces: () =>

@@ -7,7 +7,7 @@ import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter } from "./NoticeCenter";
 
 // Extracted shell footer. The sync-status testid + data-state,
-// the "Connect dohc Cloud" button name, and the open-settings testid are
+// the "Connect dohc Drive" button name, and the open-settings testid are
 // pinned by many specs — they move here VERBATIM. New: conflict count,
 // agent-run indicator, theme toggle, and the auto-update "ready" toast
 // (updateMachine's user-visible message finally gets its surface).
@@ -134,7 +134,7 @@ export function StatusBar(props: {
           className="flex items-center gap-1.5 text-[11px] text-muted transition-colors hover:text-ink"
         >
           <Cloud size={12} aria-hidden />
-          Connect dohc Cloud
+          Connect dohc Drive
         </button>
         <button
           type="button"

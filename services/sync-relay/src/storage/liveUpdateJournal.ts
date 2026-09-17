@@ -5,7 +5,7 @@ import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHis
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveDocumentKey, parseLiveUpdateSubmissionMetadata, parseAdmittedLiveUpdateMetadata, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateStructRange, parseServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateStructRange, type AdmittedLiveUpdate } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveDocumentKey, parseLiveUpdateSubmissionMetadata, parseLiveUpdateReceipt, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateStructRange, parseLiveUpdateStructRanges, parseServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateStructRange, type AdmittedLiveUpdate } from "@dohc/live-session-contract/live-update-admission";
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
@@ -97,11 +97,11 @@ export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>
     const a = firstSeen[index - 1]!, b = firstSeen[index]!;
     journalIntegrity(a.clientId < b.clientId || (a.clientId === b.clientId && a.endClock < b.startClock));
   }
-  return parseAdmittedLiveUpdateMetadata({ accepted: {
-    receipt: { deliveryId: raw.delivery_id, updateDigest: raw.update_digest, journalCursor: cursor, acceptingHostEpoch: raw.accepting_host_epoch },
-    binding, authority: { principalKind: raw.principal_kind, principalId: raw.principal_id, grantId: raw.grant_id, grantGeneration: raw.grant_generation },
-    receivedAtMs: raw.received_at_ms,
-  }, firstSeen });
+  const receipt = parseLiveUpdateReceipt({ deliveryId: raw.delivery_id, updateDigest: raw.update_digest, journalCursor: cursor, acceptingHostEpoch: raw.accepting_host_epoch });
+  const authority = parseServerDerivedLiveUpdateAuthority({ principalKind: raw.principal_kind, principalId: raw.principal_id, grantId: raw.grant_id, grantGeneration: raw.grant_generation });
+  const receivedAtMs = raw.received_at_ms;
+  if (typeof receivedAtMs !== "number" || !Number.isSafeInteger(receivedAtMs) || receivedAtMs < 0) throw new TypeError("receivedAtMs must be a non-negative safe integer.");
+  return { accepted: { receipt, binding, authority, receivedAtMs }, firstSeen: parseLiveUpdateStructRanges(firstSeen) };
 }
 export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
   const metadata=decodeJournalMetadata(db,raw,provenance);

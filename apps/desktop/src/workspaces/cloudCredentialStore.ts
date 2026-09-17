@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// dohc Cloud session credentials for this desktop install. The token is
+// dohc Drive session credentials for this desktop install. The token is
 // sealed with Electron safeStorage when the OS keychain is available, but
 // safeStorage cannot be imported under vitest, so the cipher is injected;
 // this module stays unit-testable with a temp dir and a fake cipher.

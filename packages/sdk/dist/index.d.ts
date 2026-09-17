@@ -237,12 +237,9 @@ export type DohcProvenanceRecord = {
  */
 export declare const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
 export type DohcThemeMode = "light" | "dark";
-export type DohcThemeDensity = "comfortable" | "compact";
 export type DohcTheme = {
     /** Which palette is on screen. dohc's "system" mode is already resolved. */
     mode: DohcThemeMode;
-    density: DohcThemeDensity;
-    reduceMotion: boolean;
     /**
      * CSS custom properties, spelled exactly as dohc's own stylesheet spells
      * them ("--dohc-ink", "--font-sans"). Write `var(--dohc-ink)` in panel CSS
@@ -262,9 +259,9 @@ export declare function isDohcTheme(value: unknown): value is DohcTheme;
 export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMessage;
 /**
  * Writes one theme onto an element, normally the guest document's <html>:
- * every token as a custom property, plus the three attributes dohc's own
- * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
- * the same way dohc does.
+ * every token as a custom property, plus the data-theme attribute dohc's
+ * own stylesheet switches on, so a panel can write `[data-theme='dark']`
+ * rules the same way dohc does.
  */
 export declare function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void;
 /** The documented collection query options; unknown keys never travel. */
@@ -347,7 +344,7 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         /**
          * The one line that makes a panel look native: it writes dohc's tokens
          * onto this document and keeps writing them when the user changes
-         * theme, density, or reduced motion. Panel CSS then uses the same
+         * theme. Panel CSS then uses the same
          * names dohc uses — `color: var(--dohc-ink)`.
          *
          * Returns a function that stops following. A panel that never calls
@@ -440,7 +437,7 @@ export declare const dohc: {
         /**
          * The one line that makes a panel look native: it writes dohc's tokens
          * onto this document and keeps writing them when the user changes
-         * theme, density, or reduced motion. Panel CSS then uses the same
+         * theme. Panel CSS then uses the same
          * names dohc uses — `color: var(--dohc-ink)`.
          *
          * Returns a function that stops following. A panel that never calls
