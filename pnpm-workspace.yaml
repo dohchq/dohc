@@ -52,4 +52,5 @@ overrides:
   prosemirror-view: "1.42.2"
 
 patchedDependencies:
+  chokidar@5.0.0: patches/chokidar@5.0.0.patch
   prosemirror-view@1.42.2: patches/prosemirror-view@1.42.2.patch
