@@ -1,4 +1,4 @@
-import { startWindowController } from './window-controller.mjs';
+import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation } from './packaged-process.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -170,10 +170,7 @@ async function launch(runDir, fixture, phase) {
   const page = await waitUntil(async () => browser.contexts().flatMap(c => c.pages()).find(p => p.url().includes('index.html')));
   active.page = page;
   const windowControlStart = performance.now();
-  const windowState = await waitUntil(async () => {
-    const state = await setWindowState(active, 'inspect');
-    return state.visible && !state.minimized ? state : null;
-  }, 10000);
+  const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: cancellation.signal });
   const windowControlObservedMs = performance.now() - windowControlStart;
   if (!windowState.visible || windowState.minimized) throw Error('Fresh release window is not visible; startup sample invalid');
   launchStages.visibleWindowVerifiedObservedMs = performance.now() - started;

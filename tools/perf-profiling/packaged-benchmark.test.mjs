@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment } from './packaged-benchmark-options.mjs';
-import { startWindowController } from './window-controller.mjs';
+import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 
@@ -61,6 +61,58 @@ test('helper completes requests and closes the recorded process', async () => {
   finally { await helper.close(); }
   assert.notEqual(child.exitCode, null);
   await assert.rejects(helper.request({ state: 'ping' }), /closed/);
+});
+test('ordinary helper error rejects one request and the same controller remains usable', async () => {
+  let child;
+  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'Window title is changing'}:{id:r.id,value:{ok:true}}));});`, { onSpawn: value => { child = value; } });
+  try {
+    await assert.rejects(helper.request({ state: 'inspect' }), /Window title is changing/);
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
+    assert.deepEqual(await helper.request({ state: 'visible' }), { ok: true });
+  } finally { await helper.close(); }
+  assert.notEqual(child.exitCode, null);
+});
+test('startup polling retries explicit not-ready replies on the same helper', async () => {
+  const helper = await controller(`let inspections=0;console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);const value=r.state==='inspect'?(++inspections===1?{ready:false,reason:'title-changing'}:{visible:true,minimized:false,inspections}):{ok:true};console.log(JSON.stringify({id:r.id,value}));});`);
+  try {
+    const state = await waitForVisibleWindow(() => helper.request({ state: 'inspect' }));
+    assert.equal(state.inspections, 2);
+    assert.equal(state.visible, true);
+  } finally { await helper.close(); }
+});
+test('startup polling propagates ownership errors without retrying', async () => {
+  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:r.id,error:'PID no longer belongs to the recorded packaged executable'}:{id:r.id,value:true}));});`);
+  let requests = 0;
+  try {
+    await assert.rejects(waitForVisibleWindow(() => { requests++; return helper.request({ state: 'inspect' }); }), /PID no longer belongs/);
+    assert.equal(requests, 1);
+  } finally { await helper.close(); }
+});
+test('startup polling propagates fatal protocol errors after helper cleanup', async () => {
+  let child;
+  const helper = await controller(`console.log(JSON.stringify({ready:true}));readline.createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.state==='exit')process.exit(0);console.log(JSON.stringify(r.state==='inspect'?{id:999,value:true}:{id:r.id,value:true}));});`, { onSpawn: value => { child = value; } });
+  await assert.rejects(waitForVisibleWindow(() => helper.request({ state: 'inspect' })), /Unexpected window helper response id/);
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+});
+test('startup polling never starts a new request after its deadline', async t => {
+  t.mock.method(performance, 'now', (() => {
+    const times = [0, 0, 10000];
+    return () => times.shift() ?? 10000;
+  })());
+  let requests = 0;
+  await assert.rejects(waitForVisibleWindow(async () => { requests++; return { ready: false }; }), /within 10000ms/);
+  assert.equal(requests, 1);
+});
+test('startup polling cancels its wait without starting another request', async () => {
+  const controller = new AbortController();
+  let requests = 0;
+  await assert.rejects(waitForVisibleWindow(async () => {
+    requests++;
+    setImmediate(() => controller.abort(Error('cancel startup wait')));
+    return { ready: false };
+  }, { signal: controller.signal }), error => error.message === 'cancel startup wait' || error.cause?.message === 'cancel startup wait');
+  assert.equal(requests, 1);
 });
 for (const [name, code, options, pattern] of [
   ['malformed readiness', `console.log('not json');setInterval(()=>{},1000);`, {}, /JSON/],

@@ -3,6 +3,22 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { closeElectronApplication } from '../../scripts/verification/close-electron.mjs';
 import { observeExit } from './packaged-process.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+
+class WindowRequestError extends Error {}
+
+export async function waitForVisibleWindow(inspect, { signal, timeoutMs = 10000 } = {}) {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    signal?.throwIfAborted();
+    const state = await inspect();
+    signal?.throwIfAborted();
+    if (performance.now() >= deadline) break;
+    if (state.ready !== false && state.visible && !state.minimized) return state;
+    await delay(Math.min(50, Math.max(0, deadline - performance.now())), undefined, { signal });
+  }
+  throw Error(`Owned window did not become visible within ${timeoutMs}ms`);
+}
 
 export async function startWindowController({
   command = 'pwsh.exe',
@@ -55,11 +71,14 @@ export async function startWindowController({
       const item = pending.get(response.id);
       if (!item) throw Error('Unexpected window helper response id');
       pending.delete(response.id); clearTimeout(item.timer);
-      response.error ? item.reject(Error(response.error)) : item.resolve(response.value);
+      response.error ? item.reject(new WindowRequestError(response.error)) : item.resolve(response.value);
     } catch (error) { fail(error); }
   });
   const request = async payload => {
-    if (failure) throw failure;
+    if (failure) {
+      await stop().catch(cleanupError => { failure.cleanupError = cleanupError.message; });
+      throw failure;
+    }
     if (stopPromise) throw Error('Window helper is closed');
     try {
       return await new Promise((resolve, reject) => {
@@ -69,6 +88,7 @@ export async function startWindowController({
         child.stdin.write(`${JSON.stringify({ ...payload, id })}\n`, error => { if (error) fail(error); });
       });
     } catch (error) {
+      if (error instanceof WindowRequestError) throw error;
       fail(error);
       await stop().catch(cleanupError => { error.cleanupError = cleanupError.message; });
       throw error;

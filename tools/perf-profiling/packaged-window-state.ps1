@@ -51,9 +51,15 @@ function Invoke-WindowRequest($request) {
     throw 'PID no longer belongs to the recorded packaged executable'
   }
 $windows = @([PackagedBenchmarkWindow]::FindWindows($AppProcessId))
+if ($State -eq 'inspect' -and $windows.Count -eq 0) {
+  return @{ ready = $false; reason = 'window-not-ready'; pid = $AppProcessId }
+}
 if ($windows.Count -ne 1) { throw "Recorded packaged process has $($windows.Count) titled app windows; expected one" }
 $window = $windows[0]
 $title = [PackagedBenchmarkWindow]::Title($window)
+if ($State -eq 'inspect' -and $title -ne $ExpectedTitle) {
+  return @{ ready = $false; reason = 'title-changing'; pid = $AppProcessId }
+}
 if ($title -ne $ExpectedTitle) { throw "Owned window title '$title' does not match CDP page title '$ExpectedTitle'" }
 $normalRect = [PackagedBenchmarkWindow]::NormalRect($window)
 if (($normalRect.Right - $normalRect.Left) -lt 300 -or ($normalRect.Bottom - $normalRect.Top) -lt 200) { throw 'Owned window does not have application-sized normal dimensions' }
