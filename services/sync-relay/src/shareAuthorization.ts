@@ -1,6 +1,8 @@
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
+  chatSideOf,
+  fileSideOf,
   isChatChannelSelector,
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
@@ -96,8 +98,13 @@ export function selectorTargetsBlockedChannel(
   workspaceId: string,
   selector: StoredAnyShareSelector,
 ): boolean {
-  if (!("kind" in selector) || selector.kind !== "chat-channel") return false;
+  if (!("kind" in selector)) return false;
   const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
+  // A group is a grant on an ordinary channel and its folder. Whatever the
+  // channel later resolves as, anything else authorizes nothing: a direct
+  // message has no folder, and a grant minted before the log named the
+  // channel must not follow it into one.
+  if (selector.kind === "group") return channelKind !== "channel";
   return channelKind === "agent" || channelKind === null;
 }
 
@@ -174,7 +181,7 @@ export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principalKind" | "principalUserId">,
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principalKind: "link" });
-  if (!result.ok || isChatChannelSelector(result.effectiveSelector)) {
+  if (!result.ok || "kind" in result.effectiveSelector) {
     return { ok: false, reason: "gauntlet" };
   }
   return result as AuthorizedShareAction<ShareSelector>;
@@ -261,27 +268,21 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
     case "list-own-proposals":
     case "withdraw-proposal":
       return true;
-    case "append":
+    case "append": {
       if (authorized.grant.parentGrantId !== null) return false;
-      if (
-        isChatChannelSelector(authorized.effectiveSelector)
-          ? authorized.effectiveSelector.access === "read-write"
-          : authorized.effectiveSelector.paths.length > 0 &&
-            (authorized.effectiveSelector.access === "comment" ||
-              authorized.effectiveSelector.access === "edit")
-      ) {
-        return true;
-      }
-      return false;
-    case "propose":
-      if (
-        !isChatChannelSelector(authorized.effectiveSelector) &&
-        authorized.effectiveSelector.paths.length > 0 &&
-        authorized.effectiveSelector.access === "edit"
-      ) {
-        return true;
-      }
-      return false;
+      const chat = chatSideOf(authorized.effectiveSelector);
+      if (chat) return chat.access === "read-write";
+      const files = fileSideOf(authorized.effectiveSelector);
+      return (
+        files !== null &&
+        files.paths.length > 0 &&
+        (files.access === "comment" || files.access === "edit")
+      );
+    }
+    case "propose": {
+      const files = fileSideOf(authorized.effectiveSelector);
+      return files !== null && files.paths.length > 0 && files.access === "edit";
+    }
     case "live-edit":
       return (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link")
         && isLiveEditShareSelector(authorized.effectiveSelector);
@@ -306,7 +307,7 @@ function accessAtMost(access: string, ceiling: string): boolean {
 }
 
 function effectiveAccessRank(selector: AnyShareSelector): number {
-  if (isChatChannelSelector(selector)) {
+  if ("kind" in selector) {
     return selector.access === "read-write" ? 1 : 0;
   }
   return shareAccessRank(selector.access);

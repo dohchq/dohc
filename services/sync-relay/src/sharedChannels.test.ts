@@ -1,3 +1,4 @@
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
@@ -12,6 +13,7 @@ import {
   json,
   jsonBody,
   logOp,
+  putBlob,
   request,
   resetOpSeq,
   testHandler,
@@ -38,11 +40,17 @@ const WORKSPACE = "workspace-chat";
 const SHARED_WIRE = "wire-shared-channel";
 const PRIVATE_WIRE = "wire-private-channel";
 
-function channelCreate(wireId: string, name: string, kind: "channel" | "agent" = "channel") {
+function channelCreate(wireId: string, name: string, kind: "channel" | "dm" | "agent" = "channel") {
   return logOp(
     "chat.channel.create",
-    chatChannelCreate(wireId, { channelId: `chan-${wireId}`, name, slug: name.toLowerCase(), kind })
-      .payload,
+    chatChannelCreate(wireId, {
+      channelId: `chan-${wireId}`,
+      name,
+      slug: name.toLowerCase(),
+      kind,
+      // An ordinary channel is a group with a folder named for it.
+      ...(kind === "channel" ? { type: "both", purpose: "", folderPath: name.toLowerCase() } : {}),
+    }).payload,
   );
 }
 
@@ -123,6 +131,35 @@ async function createChannelShare(
   return created.shareId as string;
 }
 
+async function createGroupShare(
+  h: SyncRelayHandler,
+  recipient: string,
+  access?: "read-write" | "read-only",
+): Promise<string> {
+  const response = await h(
+    request(
+      OWNER,
+      `/sync/${WORKSPACE}/shares`,
+      jsonBody({
+        recipientUserId: recipient,
+        channelWireId: SHARED_WIRE,
+        paths: ["team"],
+        ...(access ? { access } : {}),
+      }),
+    ),
+  );
+  expect(response.status).toBe(200);
+  const created = await json(response);
+  expect(created).toMatchObject({
+    selector: { kind: "group", channelWireId: SHARED_WIRE, paths: ["team"], versionId: null },
+    access: access ?? "read-write",
+    grantId: expect.any(String),
+    generation: 1,
+  });
+  expect(created.selector).not.toHaveProperty("access");
+  return created.shareId as string;
+}
+
 async function fetchSharePage(
   h: SyncRelayHandler,
   userId: string,
@@ -133,6 +170,204 @@ async function fetchSharePage(
   const page = await json(response);
   return page.ops as Array<{ opKind: string; payload: Record<string, unknown>; originId: string }>;
 }
+
+describe("a group share is one grant for the channel and its folder", () => {
+  it("refuses paths outside the channel folder and accepts its exact folder", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    for (const paths of [["private"], ["team", "private"], ["team/child"], ["team", "team"]]) {
+      const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({
+        recipientUserId: MEMBER_A, channelWireId: SHARED_WIRE, paths,
+      })));
+      expect(response.status).toBe(400);
+      expect(await json(response)).toMatchObject({ code: "invalid_path" });
+    }
+    await createGroupShare(h, MEMBER_A);
+  });
+
+  it("serves the channel's chat and the folder's files, and nothing else", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    // A file inside the group's folder and one outside it.
+    const inSha = await putBlob(h, OWNER, WORKSPACE, "the plan");
+    const outSha = await putBlob(h, OWNER, WORKSPACE, "SENTINEL body");
+    const moment = (momentId: string, path: string, sha: string) =>
+      logOp("moment.append", {
+        momentId,
+        versionId: "main",
+        objectId: `object-${momentId}`,
+        path,
+        recordedAtMs: 1000,
+        operation: "write",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: sha,
+        payloadAfterPath: path,
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      });
+    const written = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({
+          originId: "origin-owner",
+          ops: [moment("m-in", "team/plan.md", inSha), moment("m-out", "private/SENTINEL.md", outSha)],
+        }),
+      ),
+    );
+    expect(written.status).toBe(200);
+
+    const shareId = await createGroupShare(h, MEMBER_A);
+    // The folder half is what a mount pulls: it names no channel.
+    const files = await fetchSharePage(h, MEMBER_A, shareId);
+    const fileKinds = files.map((op) => op.opKind);
+    expect(fileKinds).toContain("moment.append");
+    expect(fileKinds.some((kind) => kind.startsWith("chat."))).toBe(false);
+    const fileBodies = JSON.stringify(files);
+    expect(fileBodies).toContain("team/plan.md");
+    expect(fileBodies).not.toContain("SENTINEL");
+    expect(fileBodies).not.toContain("private");
+    expect(fileBodies).not.toContain(".env.local");
+    // The chat half is what the channel pull names.
+    const chatResponse = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${SHARED_WIRE}`,
+      ),
+    );
+    expect(chatResponse.status).toBe(200);
+    const chat = (await json(chatResponse)).ops as Array<{ opKind: string }>;
+    const chatKinds = chat.map((op) => op.opKind);
+    expect(chatKinds).toContain("chat.channel.create");
+    expect(chatKinds).toContain("chat.message.append");
+    expect(chatKinds).not.toContain("moment.append");
+    const chatBodies = JSON.stringify(chat);
+    expect(chatBodies).toContain("welcome to the shared channel");
+    expect(chatBodies).not.toContain("SENTINEL");
+    expect(chatBodies).not.toContain("team/plan.md");
+    // The group names its folder; a chat-only share of the same channel
+    // does not.
+    expect(chat.find((op) => op.opKind === "chat.channel.create")).toMatchObject({
+      payload: { folderPath: "team" },
+    });
+    const chatOnly = await createChannelShare(h, MEMBER_B);
+    const chatOnlyPage = await fetchSharePage(h, MEMBER_B, chatOnly);
+    const create = chatOnlyPage.find((op) => op.opKind === "chat.channel.create");
+    expect(create).toBeTruthy();
+    expect(create!.payload).not.toHaveProperty("folderPath");
+    // Naming another channel is a miss, as it is for a channel share.
+    const other = await h(
+      request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=wire-other`),
+    );
+    expect(other.status).toBe(404);
+
+    // The recipient posts into the group's channel through the same grant.
+    const append = await h(
+      request(
+        MEMBER_A,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "origin-member-a",
+          ops: [
+            { ...messageAppend("msg-member-a", "thread-shared-1", "hello from the group", MEMBER_A), originSeq: 0 },
+          ],
+        }),
+      ),
+    );
+    expect(append.status).toBe(200);
+
+    // Listed on both sides as one group grant.
+    const owner = await json(await h(request(OWNER, "/sync/shares")));
+    expect(
+      (owner.granted as Array<Record<string, unknown>>).find((row) => row.shareId === shareId)
+        ?.selector,
+    ).toEqual({ kind: "group", channelWireId: SHARED_WIRE, paths: ["team"], versionId: null });
+    const member = await json(await h(request(MEMBER_A, "/sync/shares")));
+    expect(
+      (member.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
+    ).toMatchObject({ selector: { kind: "group" }, access: "read-write", genericChatWritable: true });
+
+    // One revoke ends both halves.
+    const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }));
+    expect(revoke.status).toBe(200);
+    const after = await h(
+      request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100`),
+    );
+    expect(after.status).toBe(404);
+    const afterChat = await h(
+      request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${SHARED_WIRE}`),
+    );
+    expect(afterChat.status).toBe(404);
+  });
+
+  it("refuses a group share on a direct message, an unknown channel, the general channel, or an agent channel", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    const seed = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({
+          originId: "origin-owner",
+          ops: [channelCreate("wire-dm", "someone", "dm"), channelCreate("wire-bot", "bot", "agent")],
+        }),
+      ),
+    );
+    expect(seed.status).toBe(200);
+    const dm = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "wire-dm", paths: ["people"] }),
+      ),
+    );
+    expect(dm.status).toBe(400);
+    expect((await json(dm)).code).toBe("invalid_channel");
+    const agent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "wire-bot", paths: ["bot"] }),
+      ),
+    );
+    expect(agent.status).toBe(400);
+    expect((await json(agent)).code).toBe("invalid_channel");
+    // A wire the log has not named yet could become a direct message later
+    // and carry the folder grant with it, so a group needs a known channel.
+    const unknown = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "wire-not-yet", paths: ["people"] }),
+      ),
+    );
+    expect(unknown.status).toBe(400);
+    expect((await json(unknown)).code).toBe("invalid_channel");
+    // The general channel is personal to each workspace, as a chat share or
+    // as a group.
+    for (const body of [
+      { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID },
+      { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID, paths: ["general"] },
+    ]) {
+      const general = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
+      expect(general.status).toBe(400);
+      expect((await json(general)).code).toBe("invalid_channel");
+    }
+    const empty = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: SHARED_WIRE, paths: [] }),
+      ),
+    );
+    expect(empty.status).toBe(400);
+    expect((await json(empty)).code).toBe("empty_selector");
+  });
+});
 
 describe("shared channels (MU-C4)", () => {
   // A damaged row loses its selector, and with it the KIND that routes it to
@@ -432,6 +667,7 @@ describe("shared channels (MU-C4)", () => {
     expect(append.status).toBe(200);
     expect(await json(append)).toMatchObject({ ok: true, accepted: 3, inserted: 3 });
 
+
     // The owner sees member A's ops in their own bucket, under a
     // share-namespaced origin (a member can never extend an owner origin).
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
@@ -453,6 +689,61 @@ describe("shared channels (MU-C4)", () => {
     // And member A sees their own echo plus the owner's history identically.
     const opsForA = await fetchSharePage(h, MEMBER_A, shareA);
     expect(opsForA.map((op) => op.opKind)).toEqual(opsForB.map((op) => op.opKind));
+    // A poll a member resolves names one of its choices; a choice outside
+    // them, or a resolved poll with none, is refused before it is stored.
+    const decision = (messageId: string, fields: Record<string, unknown>) => logOp("chat.decision.set", {
+      threadId: "thread-by-a", messageId, state: "resolved", resolvedByMessageId: "msg-a-1", atMs: 5, ...fields,
+    });
+    const badChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(badChoice.status).toBe(403);
+    expect((await json(badChoice)).code).toBe("share_op_rejected");
+    // The engine refuses a line break inside a choice, and trims with
+    // Rust's whitespace set, which leaves U+FEFF alone.
+    const lineBreak = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday\nMonday", "Sunday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(lineBreak.status).toBe(403);
+    const carriage = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday\rMonday", "Sunday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(carriage.status).toBe(403);
+    const bom = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["\uFEFFFriday", "Monday"], chosenOption: "Monday" }), originSeq: 3 }],
+    })));
+    expect(bom.status).toBe(200);
+    // The pick is compared as written: a padded pick is not one of the choices.
+    const padded = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday"], chosenOption: " Friday " }), originSeq: 4 }],
+    })));
+    expect(padded.status).toBe(403);
+    // The engine reads null choices as absent, and refuses a null pick.
+    const nullPick = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: null, chosenOption: null }), originSeq: 4 }],
+    })));
+    expect(nullPick.status).toBe(403);
+    const bare = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: null }), originSeq: 4 }],
+    })));
+    expect(bare.status).toBe(200);
+    const noChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 5 }],
+    })));
+    expect(noChoice.status).toBe(403);
+    const goodChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 5 }],
+    })));
+    expect(goodChoice.status).toBe(200);
   });
 
   it("refuses a read-only member's append but keeps serving them reads", async () => {

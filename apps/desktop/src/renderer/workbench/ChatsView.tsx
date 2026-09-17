@@ -1,6 +1,7 @@
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
 import { ChatAvatar } from "./ChatAvatar";
+import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
   AgentPresenceHint,
@@ -60,6 +61,7 @@ import type {
   ChatChannelShareGrantRow,
   ChatDecisionRecord,
   ChatDispatchStateForThreadResult,
+  ChatFeedItemRecord,
   ChatMessageRecord,
   ChatBookmarkRecord,
   ChatReactionRecord,
@@ -82,6 +84,8 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { AddAgentForm } from "./AddAgentForm";
+import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
@@ -184,6 +188,8 @@ export interface ChatsDrafts {
   dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
+  // The poll choice taken with the answer, when the poll had choices.
+  resolveChosenOption?: string | null;
 }
 
 interface ThreadSnapshot {
@@ -332,10 +338,16 @@ export function ChatsView(props: {
   workspaceFiles?: readonly WorkspaceFileEntry[];
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
-  // Main-derived settings/status summary. The CTA only navigates to settings;
-  // Chats never configures executables or grants capabilities itself.
+  // Main-derived settings/status summary. The Agents section reads it to
+  // say whether the user's agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
+  // The user settings the add-agent form writes, and the save that persists
+  // them. Absent in embedded surfaces, which then offer no add-agent form.
+  userSettings?: DesktopUserSettings | null;
+  onSaveUserSettings?: (settings: DesktopUserSettings) => Promise<void>;
+  // What the agent reaches: the workspace folder its runner is started in.
+  workspacePath?: string;
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -442,11 +454,20 @@ export function ChatsView(props: {
   const [composer, setComposer] = useState("");
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
+  const [resolveChosenOption, setResolveChosenOption] = useState<string | null>(null);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
+  const [newGroupPurpose, setNewGroupPurpose] = useState("");
+  const resetGroupForm = useCallback(() => {
+    setCreatingChannel(null);
+    setNewGroupType("posts");
+    setNewGroupPurpose("");
+  }, []);
+  const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
   // is on (signed in + relay) or a DM already exists locally — a solo user
   // sees none of it.
@@ -516,7 +537,6 @@ export function ChatsView(props: {
     loadPersonalFeed,
     resetForWorkspace,
     prepareOpen,
-    clearRows,
     invalidate,
     setMessageReactions,
   } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
@@ -1126,7 +1146,7 @@ export function ChatsView(props: {
     setFlashMessageId(null);
     messageNodes.current.clear();
     setNewThreadBody("");
-    setCreatingChannel(null);
+    resetGroupForm();
     setChannelShares(null);
     setShareReadFailure(null);
     setSharesWorkspaceId(null);
@@ -1169,7 +1189,7 @@ export function ChatsView(props: {
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
     };
-  }, [invalidate, refreshBookmarks, refreshDms, refreshOverview, resetForWorkspace]);
+  }, [invalidate, refreshBookmarks, refreshDms, refreshOverview, resetForWorkspace, resetGroupForm]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -1826,11 +1846,13 @@ export function ChatsView(props: {
     if (nav.level !== "thread") return;
     const trimmedBody = composer.trim();
     const resolvingMessageId = resolveTargetMessageId;
+    const chosenOption = resolvingMessageId !== null ? resolveChosenOption : null;
+    // An answer with no words of its own says the choice, or the fact.
     const body =
       trimmedBody.length > 0
         ? trimmedBody
         : resolvingMessageId !== null
-          ? "Resolved ✓"
+          ? chosenOption ?? "Resolved ✓"
           : "";
     if (
       body.length === 0 ||
@@ -1860,6 +1882,7 @@ export function ChatsView(props: {
       if (latest.resolveTargetMessageId === resolvingMessageId) {
         next.resolveTargetMessageId = null;
         setResolveTargetMessageId(null);
+        setResolveChosenOption(null);
       }
       latestComposerState.current = next;
     };
@@ -1888,6 +1911,7 @@ export function ChatsView(props: {
           threadId: nav.thread.id,
           messageId: resolvingMessageId,
           resolvedByMessageId: result.message.id,
+          ...(chosenOption ? { chosenOption } : {}),
         });
         if (!requestOwnsActiveContext()) return;
         resolvedDecision = resolution.decision;
@@ -1959,6 +1983,7 @@ export function ChatsView(props: {
     nav,
     props.onError,
     replyTarget,
+    resolveChosenOption,
     resolveTargetMessageId,
     sendContextKey,
     sending,
@@ -2195,6 +2220,7 @@ export function ChatsView(props: {
       dmDraft,
       replyTarget,
       resolveTargetMessageId,
+      resolveChosenOption,
     });
   }, [
     composer,
@@ -2203,6 +2229,7 @@ export function ChatsView(props: {
     newThreadBody,
     onDraftsChange,
     replyTarget,
+    resolveChosenOption,
     resolveTargetMessageId,
   ]);
 
@@ -2239,6 +2266,7 @@ export function ChatsView(props: {
       // decision resolution) as a plain top-level comment.
       setReplyTarget(drafts.replyTarget);
       setResolveTargetMessageId(drafts.resolveTargetMessageId);
+      setResolveChosenOption(drafts.resolveChosenOption ?? null);
     }
   }, [
     openChannel,
@@ -2485,6 +2513,26 @@ export function ChatsView(props: {
     overview.status === "ready"
       ? overview.channels.find((channel) => channel.kind === "agent") ?? null
       : null;
+  // Other people's agents that reach this workspace: an agent that posted in
+  // a channel shared to the user belongs to whoever shared it. Derived from
+  // the Home items already read, so it costs nothing and lists exactly the
+  // agents whose work the user has seen arrive. Read-only: nothing here runs
+  // or configures them.
+  const otherAgents = useMemo(() => {
+    const seen = new Map<string, { key: string; label: string; owner: string; latest: ChatFeedItemRecord }>();
+    for (const item of personalFeed) {
+      if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
+      const joined = joinedByWire.get(item.channel.wireId);
+      if (!joined) continue;
+      const owner = joined.granterEmail ?? "someone else";
+      const key = `${joined.shareId}\u0000${item.authorFollowTarget?.targetId ?? item.message.authorDisplayName}`;
+      const known = seen.get(key);
+      if (!known || known.latest.message.createdAtMs < item.message.createdAtMs) {
+        seen.set(key, { key, label: chatAuthorLabel(item.message), owner, latest: item });
+      }
+    }
+    return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [joinedByWire, personalFeed]);
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
   // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
@@ -2810,18 +2858,23 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
+  // Which lane a "both" group shows.
+  const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
       if (trimmed.length === 0) return;
       const token = liveToken.current;
       try {
+        const purpose = newGroupPurpose.trim();
         const result = await bridge().createChatChannel({
           workspaceId,
           name: trimmed,
+          type: newGroupType,
+          ...(purpose ? { purpose } : {}),
         });
         if (token !== liveToken.current) return;
-        setCreatingChannel(null);
+        resetGroupForm();
         setOverview((current) =>
           current.status === "ready"
             ? { ...current, channels: [...current.channels, result.channel] }
@@ -2843,7 +2896,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [openChannel, props.onError, props.onNavCommand, workspaceId],
+    [newGroupPurpose, newGroupType, resetGroupForm, openChannel, props.onError, props.onNavCommand, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -2866,7 +2919,8 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
-      clearRows();
+      // Home's rows stay: the nav lists other people's agents from them, and
+      // opening Home again reloads them before it paints.
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -2878,7 +2932,7 @@ export function ChatsView(props: {
       setDmDraft("");
       void refreshDms();
     }
-  }, [clearRows, nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
+  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
   // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
   // The conversation drops out of `dms` immediately; the next
@@ -3022,8 +3076,9 @@ export function ChatsView(props: {
     });
   }, []);
 
-  const beginResolve = useCallback((message: ChatMessageRecord) => {
+  const beginResolve = useCallback((message: ChatMessageRecord, option?: string) => {
     setResolveTargetMessageId(message.id);
+    setResolveChosenOption(option ?? null);
     // A resolving message is also an explicit reply to the decision-bearing
     // message, preserving both pieces of causal structure in one send.
     setReplyTarget({
@@ -3719,7 +3774,11 @@ export function ChatsView(props: {
                 data-testid="chats-resolving-mode"
                 className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
               >
-                <span className="min-w-0 flex-1">Answering the poll</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {resolveChosenOption
+                    ? `Answering the poll · ${resolveChosenOption}`
+                    : "Answering the poll"}
+                </span>
                 <button
                   type="button"
                   data-testid="chats-resolving-cancel"
@@ -3729,6 +3788,7 @@ export function ChatsView(props: {
                       setReplyTarget(null);
                     }
                     setResolveTargetMessageId(null);
+                    setResolveChosenOption(null);
                   }}
                   className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
                 >
@@ -3790,9 +3850,14 @@ export function ChatsView(props: {
     );
   }
 
+  // An agent is set up when it has a name to post as and something runs it.
+  const agentReady = Boolean(props.agentSetup?.preferredName && props.agentSetup.runnerEnabled);
+
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
+    const groupType = nav.channel.type ?? "posts";
+    const showLane = groupType === "chat" || (groupType === "both" && groupLane === "chat");
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -3815,6 +3880,7 @@ export function ChatsView(props: {
       <div
         data-testid="chats-channel-view"
         data-variant={variant}
+        data-group-type={groupType}
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
@@ -3874,47 +3940,46 @@ export function ChatsView(props: {
             ) : undefined
           }
         />
+        {nav.channel.purpose?.trim() ? (
+          <p data-testid="chats-channel-purpose" className="m-0 truncate px-3 pb-2 text-[12px] text-muted">
+            {nav.channel.purpose}
+          </p>
+        ) : null}
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
-            data-testid="chats-agent-setup-card"
-            data-state={
-              props.agentSetup.preferredName && props.agentSetup.runnerEnabled
-                ? "ready"
-                : "needs-setup"
-            }
-            className="flex shrink-0 items-center gap-3 border-b border-line bg-panel-2/50 px-3 py-2.5"
+            data-testid="chats-agent-screen"
+            data-state={agentReady ? "ready" : "needs-setup"}
+            className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
-            <span className="grid size-7 shrink-0 place-items-center rounded-md border border-agent/30 bg-bg text-agent">
-              <Bot size={14} aria-hidden />
+            <Bot size={12} aria-hidden className="shrink-0 text-agent" />
+            <span data-testid="chats-agent-screen-runner" className="min-w-0 flex-1 truncate">
+              {agentReady
+                ? props.userSettings?.runner.command.trim()
+                  ? `Runs ${props.userSettings.runner.command.trim()}`
+                  : "Runner on"
+                : props.agentSetup.runnerConfigured
+                  ? "Runner configured · dispatch is off"
+                  : props.agentSetup.mcpEnabled
+                    ? "Workspace MCP on · connect an agent to reply here"
+                    : "No runner yet · add an agent under Agents"}
             </span>
-            <div className="min-w-0 flex-1">
-              <p data-testid="chats-agent-setup-name" className="m-0 truncate text-[12px] font-medium text-ink">
-                {props.agentSetup.preferredName
-                  ? agentDisplayLabel(props.agentSetup.preferredName)
-                  : "Set up your agent"}
-              </p>
-              <p className="m-0 mt-0.5 truncate text-[10px] text-subtle">
-                {!props.agentSetup.preferredName
-                  ? "Choose your name so agent work is attributed correctly."
-                  : props.agentSetup.runnerEnabled
-                    ? "Chat runner ready"
-                    : props.agentSetup.runnerConfigured
-                        ? "Runner configured · dispatch is off"
-                        : props.agentSetup.mcpEnabled
-                          ? "Workspace MCP enabled · copy its config into your agent."
-                          : "Connect a local agent to reply and work in this workspace."}
-              </p>
-            </div>
+            {props.workspacePath ? (
+              <span
+                data-testid="chats-agent-screen-reach"
+                title={props.workspacePath}
+                className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
+              >
+                reaches {props.workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? props.workspacePath}
+              </span>
+            ) : null}
             {props.onSetupAgent ? (
               <button
                 type="button"
-                data-testid="chats-agent-setup-action"
+                data-testid="chats-agent-screen-manage"
                 onClick={props.onSetupAgent}
-                className="shrink-0 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink"
+                className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible"
               >
-                {props.agentSetup.preferredName && props.agentSetup.runnerEnabled
-                  ? "Manage"
-                  : "Set up"}
+                Manage
               </button>
             ) : null}
           </div>
@@ -4024,6 +4089,50 @@ export function ChatsView(props: {
             </form>
           </div>
         ) : null}
+        {groupType === "both" ? (
+          <div
+            role="tablist"
+            aria-label="Group lanes"
+            className="flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
+          >
+            {(
+              [
+                ["posts", "Posts"],
+                ["chat", "Chat"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={groupLane === value}
+                data-testid={`chats-group-lane-${value}`}
+                onClick={() => setGroupLane(value)}
+                className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
+                  groupLane === value
+                    ? "bg-panel-2 text-ink"
+                    : "text-muted hover:bg-panel-2 hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {showLane ? (
+          <ChatLane
+            workspaceId={workspaceId}
+            channel={nav.channel}
+            locked={channelLocked}
+            mentionCandidates={mentionCandidates}
+            fileCandidates={fileMentionCandidates}
+            loadFileHeadings={loadFileHeadings}
+            onOpenPath={props.onOpenPath}
+            onError={props.onError}
+            onThreadRead={props.onThreadRead}
+            revision={props.threadRevision ?? 0}
+          />
+        ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             data-testid="chats-feed-column"
@@ -4109,7 +4218,8 @@ export function ChatsView(props: {
             )}
           </div>
         </div>
-        {channelLocked ? (
+        )}
+        {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
             {channelJoined?.ended
               ? "This channel is no longer shared with you. You can still read it."
@@ -4347,29 +4457,114 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChannel ? (
+          {agentChannel || props.userSettings || otherAgents.length > 0 ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mb-1 mt-4 px-4">
                 Agents
               </SectionLabel>
-              <NavRow
-                testId="chats-my-agent"
-                data={{ "data-channel-id": agentChannel.id }}
-                active={selectedChannelId === agentChannel.id}
-                onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
-                label={agentLabel}
-                labelTestId="chats-my-agent-name"
-                trailing={
-                  <>
-                    <AgentPresenceHint
-                      activity={agentSummaryActivity}
-                      testId="chats-my-agent-presence"
-                    />
-                    <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
-                  </>
-                }
-              />
+              {agentChannel ? (
+                <NavRow
+                  testId="chats-my-agent"
+                  data={{ "data-channel-id": agentChannel.id }}
+                  active={selectedChannelId === agentChannel.id}
+                  onClick={() => openConversation({ level: "channel", channel: agentChannel })}
+                  icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
+                  label={agentLabel}
+                  labelTestId="chats-my-agent-name"
+                  trailing={
+                    <>
+                      {agentReady ? null : (
+                        <span
+                          data-testid="chats-my-agent-state"
+                          className="shrink-0 font-mono text-[10px] text-subtle"
+                        >
+                          not set up
+                        </span>
+                      )}
+                      <AgentPresenceHint
+                        activity={agentSummaryActivity}
+                        testId="chats-my-agent-presence"
+                      />
+                      <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
+                    </>
+                  }
+                />
+              ) : null}
+              {otherAgents.length > 0 ? (
+                <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
+                  {otherAgents.map((agent) => (
+                    <li key={agent.key}>
+                      <NavRow
+                        testId="chats-other-agent"
+                        data={{ "data-owner": agent.owner }}
+                        active={false}
+                        onClick={() => {
+                          const item = agent.latest;
+                          if (!item.channel) return;
+                          openConversation({
+                            level: "thread",
+                            channel: {
+                              ...item.channel,
+                              wireId: item.channel.wireId,
+                              createdAtMs: 0,
+                              updatedAtMs: 0,
+                              threadCount: 0,
+                              unreadCount: 0,
+                            },
+                            thread: {
+                              ...item.thread,
+                              channelId: item.channel.id,
+                              messageCount: 0,
+                              lastReadSequence: 0,
+                              unreadCount: 0,
+                            },
+                            focusMessageId: item.message.id,
+                          });
+                        }}
+                        icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
+                        label={agent.label}
+                        labelTestId="chats-other-agent-name"
+                        muted
+                        trailing={
+                          <span className="shrink-0 truncate font-mono text-[10px] text-subtle">
+                            via {agent.owner}
+                          </span>
+                        }
+                      />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {addingAgent && props.userSettings && props.onSaveUserSettings ? (
+                <AddAgentForm
+                  workspaceId={workspaceId}
+                  settings={props.userSettings}
+                  onSave={props.onSaveUserSettings}
+                  onDone={() => setAddingAgent(false)}
+                  onCancel={() => setAddingAgent(false)}
+                />
+              ) : props.userSettings && props.onSaveUserSettings ? (
+                <button
+                  type="button"
+                  data-testid={agentReady ? "chats-manage-agent" : "chats-add-agent-open"}
+                  onClick={() =>
+                    agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
+                  }
+                  className="mx-2 flex h-7 w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  {agentReady ? (
+                    <>
+                      <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
+                      Manage agent
+                    </>
+                  ) : (
+                    <>
+                      <Plus size={13} aria-hidden className="shrink-0 text-subtle" />
+                      Add an agent
+                    </>
+                  )}
+                </button>
+              ) : null}
             </section>
           ) : null}
         </nav>
@@ -4406,11 +4601,66 @@ export function ChatsView(props: {
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   event.stopPropagation();
-                  setCreatingChannel(null);
+                  resetGroupForm();
                 }
               }}
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
+            <label className="sr-only" htmlFor="chats-new-channel-purpose">
+              Purpose
+            </label>
+            <input
+              id="chats-new-channel-purpose"
+              data-testid="chats-new-channel-purpose"
+              value={newGroupPurpose}
+              maxLength={200}
+              placeholder="What it's for"
+              onChange={(event) => setNewGroupPurpose(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  resetGroupForm();
+                }
+              }}
+              className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
+            />
+            <div
+              role="radiogroup"
+              aria-label="Group type"
+              className="mt-1.5 flex gap-1"
+            >
+              {(
+                [
+                  ["posts", "Posts"],
+                  ["chat", "Chat"],
+                  ["both", "Both"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={newGroupType === value}
+                  data-testid={`chats-new-channel-type-${value}`}
+                  onClick={() => setNewGroupType(value)}
+                  className={`h-7 flex-1 rounded-md border text-[12px] transition-colors dohc-focus-visible ${
+                    newGroupType === value
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line text-muted hover:bg-panel-2 hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="submit"
+              data-testid="chats-new-channel-submit"
+              disabled={creatingChannel.trim().length === 0}
+              className="mt-1.5 h-7 w-full rounded-md bg-ink text-[12px] font-medium text-bg hover:opacity-90 disabled:opacity-40 dohc-focus-visible"
+            >
+              Create group
+            </button>
           </form>
         )}
       </div>

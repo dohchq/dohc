@@ -1,8 +1,11 @@
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   filterOpForShare,
+  groupChannelIsOrdinary,
   hasValidShareMomentShape,
+  fileSideOf,
   isChatChannelSelector,
+  isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
   targetVersionId,
   type AnyShareSelector,
@@ -100,9 +103,11 @@ export function createShareReadQueries(
     row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
     chatResolver: ChatShareThreadResolver,
   ): unknown | null => {
-    if (isChatChannelSelector(selector) || row.opKind !== "moment.append") {
-      return null;
-    }
+    if (row.opKind !== "moment.append") return null;
+    if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolver)) return null;
+    const fileSelector = fileSideOf(selector);
+    if (!fileSelector) return null;
+    selector = fileSelector;
     const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
     if (!parsed) return null;
     const { payload } = parsed;
@@ -170,15 +175,17 @@ export function createShareReadQueries(
     since: number,
     limit: number,
     audience: "authenticated" | "accountless",
+    half?: "chat" | "files",
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
     hasMore: boolean;
   } => {
     const chatResolver = chatResolverFor(workspaceId);
+    const fileSelector = fileSideOf(selector);
     const accountlessProjection =
-      audience === "accountless" && !isChatChannelSelector(selector)
-        ? createAccountlessPathProjection(selector)
+      audience === "accountless" && fileSelector
+        ? createAccountlessPathProjection(fileSelector)
         : null;
     const ops: Array<Record<string, unknown>> = [];
     let nextCursor = since;
@@ -212,6 +219,7 @@ export function createShareReadQueries(
           row.opKind,
           row.payloadJson,
           chatResolver,
+          half,
         );
         const payload = decision.allowed
           ? accountlessProjection
@@ -266,9 +274,10 @@ export function createShareReadQueries(
     | { lastSettledAtMs: null; lastSettledKnown: false } => {
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
-    const accountlessProjection = isChatChannelSelector(selector)
-      ? null
-      : createAccountlessPathProjection(selector);
+    const fileSelector = fileSideOf(selector);
+    const accountlessProjection = fileSelector
+      ? createAccountlessPathProjection(fileSelector)
+      : null;
     for (
       let pagesRead = 0;
       pagesRead < LINK_FRESHNESS_PAGE_BUDGET;
@@ -284,7 +293,7 @@ export function createShareReadQueries(
           return { lastSettledAtMs: null, lastSettledKnown: true };
         }
         if (
-          !isChatChannelSelector(selector) &&
+          !("kind" in selector) &&
           !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
         ) {
           continue;
@@ -317,7 +326,12 @@ export function createShareReadQueries(
     selector: AnyShareSelector,
     sha256: string,
   ): Uint8Array | null => {
-    if (isChatChannelSelector(selector)) return null;
+    if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolverFor(workspaceId))) {
+      return null;
+    }
+    const fileSelector = fileSideOf(selector);
+    if (!fileSelector) return null;
+    selector = fileSelector;
     const versionId = targetVersionId(selector);
     const candidates = [
       ...storage.listObjectMomentLogRowsByBlob({

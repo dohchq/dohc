@@ -3,6 +3,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
+import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -122,6 +123,9 @@ type ChatChannelCreateParams = ChatsJsonObject & {
   channelId: string;
   name: string;
   kind: "channel" | "dm" | "agent";
+  type?: ChatChannelType;
+  purpose?: string;
+  folderPath?: string;
   nowMs?: number;
 };
 type ChatChannelEnsureParams = ChatsJsonObject & {
@@ -135,12 +139,14 @@ type ChatThreadStartParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   title?: string;
+  lane?: ChatThreadLane;
   authorKind: "human" | "agent";
   authorDisplayName: string;
   authorUserId?: string;
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
+  options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
@@ -151,7 +157,10 @@ type ChatThreadCreateParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
-type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
+type ChatThreadsListForChannelParams = ChatPageParams & {
+  channelId: string;
+  lane?: ChatThreadLane;
+};
 type ChatThreadParams = ChatsJsonObject & { threadId: string };
 type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
@@ -166,6 +175,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
+  options?: string[];
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
@@ -188,6 +198,7 @@ type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   resolvedByMessageId: string;
+  chosenOption?: string;
   nowMs?: number;
 };
 type ChatReactionSetParams = ChatsJsonObject & {
@@ -431,6 +442,7 @@ const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
 const ActorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
+const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
 const FollowTargetKindSchema = Schema.Literals([
   "person",
   "agent",
@@ -443,6 +455,7 @@ const ChatActorSchema = mutableStruct({
   kind: ActorKindSchema,
   displayName: Schema.String,
 });
+const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
   objectId: Schema.String,
   pathHint: Schema.optionalKey(Schema.String),
@@ -454,6 +467,7 @@ const ChatThreadSchema = mutableStruct({
   title: Schema.String,
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
+  lane: Schema.optionalKey(ThreadLaneSchema),
   linkedFile: Schema.optionalKey(ChatLinkedFileSchema),
   channelId: Schema.optionalKey(Schema.String),
 });
@@ -487,6 +501,8 @@ const ChatDecisionSchema = mutableStruct({
   state: Schema.Literals(["open", "resolved"]),
   resolvedByMessageId: Schema.optionalKey(Schema.String),
   atMs: AnyInt,
+  options: Schema.optionalKey(Schema.Array(Schema.String)),
+  chosenOption: Schema.optionalKey(Schema.String),
 });
 const ChatReactionAuthorSchema = mutableStruct({
   authorId: Schema.String,
@@ -571,6 +587,9 @@ const ChatChannelSchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
 });
@@ -580,6 +599,9 @@ const ChatChannelSummarySchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
   threadCount: NonnegativeInt,
@@ -591,6 +613,7 @@ const ChatThreadWireRecordSchema = mutableStruct({
   title: Schema.String,
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
+  lane: ThreadLaneSchema,
   channelId: NullableString,
   linkedObjectId: NullableString,
 });
@@ -655,6 +678,9 @@ const ChatFeedChannelSchema = mutableStruct({
   name: Schema.String,
   slug: Schema.String,
   kind: ChannelKindSchema,
+  type: ChannelTypeSchema,
+  purpose: Schema.String,
+  folderPath: Schema.optional(Schema.String),
   createdAtMs: AnyInt,
   updatedAtMs: AnyInt,
 });

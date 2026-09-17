@@ -83,6 +83,14 @@ pub const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
 const MAX_CHANNEL_NAME_CHARS: usize = 80;
+/// Group purpose char cap: one line.
+const MAX_CHANNEL_PURPOSE_CHARS: usize = 200;
+/// A poll holds at most this many choices, each one line of at most this
+/// many characters.
+const MAX_POLL_OPTIONS: usize = 12;
+const MAX_POLL_OPTION_CHARS: usize = 200;
+/// Group folder path char cap.
+const MAX_CHANNEL_FOLDER_PATH_CHARS: usize = 512;
 /// Display-name char cap (`normalizeDisplayName`).
 const MAX_DISPLAY_NAME_CHARS: usize = 200;
 /// Opaque relay user-id char cap (`normalizeAuthorUserId`).
@@ -164,6 +172,50 @@ impl ChatChannelKind {
     }
 }
 
+/// What a group holds: posts, one running chat, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatChannelType {
+    #[default]
+    Posts,
+    Chat,
+    Both,
+}
+
+impl ChatChannelType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatChannelType::Posts => "posts",
+            ChatChannelType::Chat => "chat",
+            ChatChannelType::Both => "both",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "posts" => Some(ChatChannelType::Posts),
+            "chat" => Some(ChatChannelType::Chat),
+            "both" => Some(ChatChannelType::Both),
+            _ => None,
+        }
+    }
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        Self::parse(raw).ok_or(DomainError::StateCorrupt {
+            reason: "chat channel has an unknown type",
+        })
+    }
+}
+
+/// The group fields a creator sets beyond name and kind. All default: a
+/// bare channel is a posts group with no purpose and no folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelGroup {
+    pub channel_type: ChatChannelType,
+    pub purpose: String,
+    /// The workspace-relative folder the group's files live in. `None` for
+    /// `dm` and `agent` channels, and for channels older than the groups
+    /// migration.
+    pub folder_path: Option<String>,
+}
+
 /// A chat message author kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatActorKind {
@@ -197,6 +249,7 @@ pub struct ChatChannel {
     pub name: String,
     pub slug: String,
     pub kind: ChatChannelKind,
+    pub group: ChannelGroup,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -209,6 +262,37 @@ pub struct ChatChannelSummary {
     pub unread_count: i64,
 }
 
+/// Which lane a channel thread sits in. The posts lane is the feed; the
+/// chat lane is the group's one running conversation, kept out of the
+/// feed and the post list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatThreadLane {
+    #[default]
+    Posts,
+    Chat,
+}
+
+impl ChatThreadLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatThreadLane::Posts => "posts",
+            ChatThreadLane::Chat => "chat",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "posts" => Some(ChatThreadLane::Posts),
+            "chat" => Some(ChatThreadLane::Chat),
+            _ => None,
+        }
+    }
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        Self::parse(raw).ok_or(DomainError::StateCorrupt {
+            reason: "chat thread has an unknown lane",
+        })
+    }
+}
+
 /// A durable chat thread row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatThread {
@@ -217,6 +301,7 @@ pub struct ChatThread {
     pub title: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub lane: ChatThreadLane,
     pub channel_id: Option<String>,
     pub linked_object_id: Option<String>,
     pub linked_path_hint: Option<String>,
@@ -334,6 +419,10 @@ pub struct ChatDecision {
     pub state: ChatDecisionState,
     pub resolved_by_message_id: Option<String>,
     pub at_ms: i64,
+    /// A poll's choices, in order. Empty for a bare question.
+    pub options: Vec<String>,
+    /// The choice the answer named, when the poll had choices.
+    pub chosen_option: Option<String>,
 }
 
 /// A durable file attachment / file mention target.
@@ -693,12 +782,15 @@ pub struct StartChannelThread {
     pub thread_id: String,
     pub message_id: String,
     pub title: Option<String>,
+    pub lane: ChatThreadLane,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
     pub author_user_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
     pub needs_decision: bool,
+    /// A poll's choices. Implies `needs_decision`.
+    pub options: Vec<String>,
     pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
@@ -720,6 +812,8 @@ pub struct SendMessage {
     pub origin: Option<String>,
     pub body: String,
     pub needs_decision: bool,
+    /// A poll's choices. Implies `needs_decision`.
+    pub options: Vec<String>,
     pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
@@ -760,6 +854,8 @@ pub struct ResolveDecision {
     pub thread_id: String,
     pub message_id: String,
     pub resolved_by_message_id: String,
+    /// The choice, when the poll has choices. Must be one of them.
+    pub chosen_option: Option<String>,
     pub now_ms: i64,
     pub request_id: String,
 }
@@ -1739,6 +1835,31 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatChannel, DomainError> {
+        self.create_group(
+            workspace_id,
+            channel_id,
+            name,
+            kind,
+            ChannelGroup::default(),
+            now_ms,
+            faults,
+        )
+    }
+
+    /// [`Self::create_channel`] with the group fields set. A `dm` or `agent`
+    /// channel carries no folder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_group(
+        &mut self,
+        workspace_id: &str,
+        channel_id: &str,
+        name: &str,
+        kind: ChatChannelKind,
+        group: ChannelGroup,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatChannel, DomainError> {
+        let group = normalize_channel_group(group, kind)?;
         non_empty(
             workspace_id,
             "invalid-channel-name",
@@ -1778,6 +1899,7 @@ impl<'a> LinkedChatStore<'a> {
         let cid = channel_id;
         let slug_c = slug.clone();
         let name_c = name.clone();
+        let group_c = group.clone();
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if channel_by_slug(tx, &ws, &slug_c)?.is_some() {
                 return Err(DomainError::chat(
@@ -1788,21 +1910,14 @@ impl<'a> LinkedChatStore<'a> {
             // Persist the validated kind (`channel` or `dm`) — not hardcoded:
             // DM privacy depends on the stored kind (`list_personal_feed`
             // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group_c, now_ms)?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
             journal_local_op_in_tx(
                 tx,
                 &ws,
                 "chat.channel.create",
-                &serde_json::json!({
-                    "channelId": cid,
-                    "name": name_c,
-                    "slug": slug_c,
-                    "kind": kind.as_str(),
-                    "createdAtMs": now_ms,
-                    "wireId": cid,
-                }),
+                &channel_create_payload(&cid, &name_c, &slug_c, kind, &group_c, now_ms, &cid),
                 now_ms,
             )?;
             Ok::<_, DomainError>(ChatChannel {
@@ -1811,6 +1926,7 @@ impl<'a> LinkedChatStore<'a> {
                 name: name_c.clone(),
                 slug: slug_c.clone(),
                 kind,
+                group: group_c.clone(),
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -1909,20 +2025,14 @@ impl<'a> LinkedChatStore<'a> {
                 }
                 return Ok::<_, DomainError>(existing);
             }
-            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
+            let group = ChannelGroup::default();
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, &group, now_ms)?;
             record_channel_wire_id(tx, &ws, &wire, &cid)?;
             journal_local_op_in_tx(
                 tx,
                 &ws,
                 "chat.channel.create",
-                &serde_json::json!({
-                    "channelId": cid,
-                    "name": name_c,
-                    "slug": slug_c,
-                    "kind": kind.as_str(),
-                    "createdAtMs": now_ms,
-                    "wireId": wire,
-                }),
+                &channel_create_payload(&cid, &name_c, &slug_c, kind, &group, now_ms, &wire),
                 now_ms,
             )?;
             Ok::<_, DomainError>(ChatChannel {
@@ -1931,6 +2041,7 @@ impl<'a> LinkedChatStore<'a> {
                 name: name_c.clone(),
                 slug: slug_c.clone(),
                 kind,
+                group,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -1970,6 +2081,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
                             ch.created_at_ms, ch.updated_at_ms, \
+                            ch.type, ch.purpose, ch.folder_path, \
                             COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
                      FROM chat_channels ch \
                      LEFT JOIN ( \
@@ -1995,8 +2107,8 @@ impl<'a> LinkedChatStore<'a> {
             let rows = stmt
                 .query_map(params![workspace_id, MAX_LIST_ROWS], |row| {
                     let channel = map_channel_row(row)?;
-                    let thread_count = row.get(7)?;
-                    let unread_count = row.get(8)?;
+                    let thread_count = row.get(10)?;
+                    let unread_count = row.get(11)?;
                     Ok(channel.map(|channel| ChatChannelSummary {
                         channel,
                         thread_count,
@@ -2156,6 +2268,7 @@ impl<'a> LinkedChatStore<'a> {
                 title: title_c.clone(),
                 created_at_ms: input.now_ms,
                 updated_at_ms: input.now_ms,
+                lane: ChatThreadLane::Posts,
                 channel_id: None,
                 linked_object_id: Some(object_id_c.clone()),
                 linked_path_hint: path_hint_c.clone(),
@@ -2189,6 +2302,8 @@ impl<'a> LinkedChatStore<'a> {
             });
         }
         let title = normalize_optional_thread_title(input.title.as_deref())?;
+        let options_c = normalize_poll_options(&input.options)?;
+        let options_fingerprint = options_c.join("\u{0}");
         let display_name = normalize_display_name(&input.author_display_name)?;
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
@@ -2214,6 +2329,7 @@ impl<'a> LinkedChatStore<'a> {
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
             if input.needs_decision { b"1" } else { b"0" },
+            options_fingerprint.as_bytes(),
             attachment_fingerprint.as_slice(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
@@ -2226,11 +2342,7 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
-            return self.reconstruct_thread_message(
-                &input.workspace_id,
-                &thread_id,
-                &input.message_id,
-            );
+            return self.reconstruct_thread_message(&input.workspace_id, &input.message_id);
         }
 
         let mut input = input.clone();
@@ -2255,22 +2367,46 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "chat channel identity cannot be replicated",
                 });
             }
-            tx.execute(
-                "INSERT INTO chat_threads \
-                 (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
-                  linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, NULL, NULL, ?5)",
-                params![input.workspace_id, input.thread_id, title_c, now, channel.channel_id],
-            )
-            .map_err(DomainError::sql_persist)?;
+            let existing: Option<String> = if input.lane == ChatThreadLane::Chat {
+                tx.query_row(
+                    "SELECT thread_id FROM chat_threads \
+                     WHERE workspace_id = ?1 AND channel_id = ?2 AND lane = 'chat' \
+                     ORDER BY created_at_ms, thread_id LIMIT 1",
+                    params![input.workspace_id, channel.channel_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?
+            } else {
+                None
+            };
+            let thread_id = existing.as_deref().unwrap_or(&input.thread_id);
+            if existing.is_none() {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
+                      linked_object_id, linked_path_hint, linked_at_ms, channel_id, lane) \
+                     VALUES (?1, ?2, ?3, ?4, ?4, NULL, NULL, NULL, ?5, ?6)",
+                    params![
+                        input.workspace_id,
+                        thread_id,
+                        title_c,
+                        now,
+                        channel.channel_id,
+                        input.lane.as_str()
+                    ],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
+            let order = next_message_order(tx, &input.workspace_id, thread_id)?;
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
-                 VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
                 params![
                     input.workspace_id,
-                    input.thread_id,
+                    thread_id,
                     input.message_id,
                     input.author_kind.as_str(),
                     display_c,
@@ -2278,29 +2414,35 @@ impl<'a> LinkedChatStore<'a> {
                     origin_c,
                     body_c,
                     now,
+                    order,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
-                &input.thread_id,
+                thread_id,
                 &input.message_id,
                 input.author_kind,
                 &body_c,
                 now,
             )?;
-            mark_live_bookmarks_pending(tx, &input.workspace_id, &input.thread_id, now)?;
+            tx.execute(
+                "UPDATE chat_threads SET updated_at_ms = ?3 WHERE workspace_id = ?1 AND thread_id = ?2",
+                params![input.workspace_id, thread_id, now],
+            ).map_err(DomainError::sql_persist)?;
+            mark_live_bookmarks_pending(tx, &input.workspace_id, thread_id, now)?;
             if input.author_kind == ChatActorKind::Human {
-                advance_read_cursor(tx, &input.workspace_id, &input.thread_id, 1, now, None)?;
+                advance_read_cursor(tx, &input.workspace_id, thread_id, order.saturating_add(1), now, None)?;
             }
-            let display_title = chat_thread_display_title(&title_c, Some(&body_c));
+            let thread = require_thread(tx, &input.workspace_id, thread_id)?;
+            let display_title = &thread.title;
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
-                &input.thread_id,
+                thread_id,
                 CHAT_THREAD_HEADER_MESSAGE_ID,
-                &display_title,
+                display_title,
             )
             .map_err(DomainError::sql_persist)?;
             let message_search_text = chat_message_search_text(
@@ -2311,14 +2453,14 @@ impl<'a> LinkedChatStore<'a> {
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
-                &input.thread_id,
+                thread_id,
                 &input.message_id,
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
             let mut message_payload = serde_json::json!({
                 "messageId": input.message_id,
-                "threadId": input.thread_id,
+                "threadId": thread_id,
                 "authorKind": input.author_kind.as_str(),
                 "authorDisplayName": display_c,
                 "body": body_c,
@@ -2338,7 +2480,7 @@ impl<'a> LinkedChatStore<'a> {
                 ensure_thread_structure_exported(
                     tx,
                     &input.workspace_id,
-                    &input.thread_id,
+                    thread_id,
                     now,
                 )?;
                 journal_local_op_in_tx(
@@ -2349,13 +2491,26 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                 )?;
             }
-            if input.needs_decision {
+            if let Some(author_user_id) = &author_user_c
+                && input.author_kind == ChatActorKind::Human
+            {
+                follow_thread_implicitly(
+                    tx,
+                    &input.workspace_id,
+                    author_user_id,
+                    thread_id,
+                    now,
+                )?;
+            }
+            if input.needs_decision || !options_c.is_empty() {
                 journal_decision_set(
                     tx,
                     &input.workspace_id,
-                    &input.thread_id,
+                    thread_id,
                     &input.message_id,
                     ChatDecisionState::Open,
+                    None,
+                    &options_c,
                     None,
                     now,
                 )?;
@@ -2363,30 +2518,19 @@ impl<'a> LinkedChatStore<'a> {
             let message_attachments = add_local_attachments(
                 tx,
                 &input.workspace_id,
-                &input.thread_id,
+                thread_id,
                 &input.message_id,
                 &attachments_c,
                 now,
                 replicate,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
-            bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
-            let thread = ChatThread {
-                workspace_id: input.workspace_id.clone(),
-                thread_id: input.thread_id.clone(),
-                title: display_title,
-                created_at_ms: now,
-                updated_at_ms: now,
-                channel_id: Some(channel.channel_id.clone()),
-                linked_object_id: None,
-                linked_path_hint: None,
-                linked_at_ms: None,
-            };
+            bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
             let message = ChatMessage {
                 workspace_id: input.workspace_id.clone(),
-                thread_id: input.thread_id.clone(),
+                thread_id: thread_id.to_owned(),
                 message_id: input.message_id.clone(),
-                message_order: 0,
+                message_order: order,
                 author_kind: input.author_kind,
                 author_display_name: display_c.clone(),
                 author_user_id: author_user_c.clone(),
@@ -2440,6 +2584,8 @@ impl<'a> LinkedChatStore<'a> {
             Some(p) => Some(p.clone()),
         };
         let body = normalize_body(&input.body)?;
+        let options_c = normalize_poll_options(&input.options)?;
+        let options_fingerprint = options_c.join("\u{0}");
         let attachments = normalize_attachments(&input.attachments)?;
         let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
@@ -2454,6 +2600,7 @@ impl<'a> LinkedChatStore<'a> {
             parent.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
             if input.needs_decision { b"1" } else { b"0" },
+            options_fingerprint.as_bytes(),
             attachment_fingerprint.as_slice(),
         ]);
         if let Some(request_id) = &input.request_id
@@ -2600,13 +2747,26 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                 )?;
             }
-            if input.needs_decision {
+            if let Some(author_user_id) = &author_user_c
+                && input.author_kind == ChatActorKind::Human
+            {
+                follow_thread_implicitly(
+                    tx,
+                    &input.workspace_id,
+                    author_user_id,
+                    &input.thread_id,
+                    now,
+                )?;
+            }
+            if input.needs_decision || !options_c.is_empty() {
                 journal_decision_set(
                     tx,
                     &input.workspace_id,
                     &input.thread_id,
                     &input.message_id,
                     ChatDecisionState::Open,
+                    None,
+                    &options_c,
                     None,
                     now,
                 )?;
@@ -2677,6 +2837,7 @@ impl<'a> LinkedChatStore<'a> {
             thread_id.as_bytes(),
             input.message_id.as_bytes(),
             input.resolved_by_message_id.as_bytes(),
+            input.chosen_option.as_deref().unwrap_or("").as_bytes(),
         ]);
         if let Some(recorded) = self
             .store
@@ -2698,6 +2859,7 @@ impl<'a> LinkedChatStore<'a> {
                 record_request(tx, Some(&input.request_id), &payload_hash, current.at_ms)?;
                 return Ok(current);
             }
+            let chosen = validate_chosen_option(&current.options, input.chosen_option.as_deref())?;
             let next = current
                 .at_ms
                 .checked_add(1)
@@ -2717,6 +2879,8 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 ChatDecisionState::Resolved,
                 Some(&input.resolved_by_message_id),
+                &current.options,
+                chosen.as_deref(),
                 at_ms,
             )?;
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
@@ -2743,7 +2907,8 @@ impl<'a> LinkedChatStore<'a> {
             let (has_after, after_ms, after_id) = chat_after(after);
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms \
+                    "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms, \
+                            d.options_json, d.chosen_option \
                      FROM chat_decisions d \
                      JOIN chat_messages m ON m.workspace_id = d.workspace_id \
                        AND m.thread_id = d.thread_id AND m.message_id = d.message_id \
@@ -2774,12 +2939,11 @@ impl<'a> LinkedChatStore<'a> {
     fn reconstruct_thread_message(
         &self,
         workspace_id: &str,
-        thread_id: &str,
         message_id: &str,
     ) -> Result<(ChatThread, ChatMessage), DomainError> {
         self.store.read_with(|conn| {
-            let thread = require_thread(conn, workspace_id, thread_id)?;
             let message = require_message(conn, workspace_id, message_id)?;
+            let thread = require_thread(conn, workspace_id, &message.thread_id)?;
             Ok((thread, message))
         })
     }
@@ -2800,7 +2964,7 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-                     t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
+                     t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, t.lane, \
                      (SELECT m.body FROM chat_messages m \
                       WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
                       ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
@@ -2825,6 +2989,25 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
+        self.list_channel_threads_in_lane(
+            workspace_id,
+            channel_id,
+            ChatThreadLane::Posts,
+            after,
+            limit,
+        )
+    }
+
+    /// [`Self::list_channel_threads`] for one lane. The posts lane is the
+    /// group's feed; the chat lane holds its running conversation.
+    pub fn list_channel_threads_in_lane(
+        &self,
+        workspace_id: &str,
+        channel_id: &str,
+        lane: ChatThreadLane,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
         validate_chat_page_limit(limit)?;
         let (has_after, after_updated_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
@@ -2837,7 +3020,7 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                                 t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                                t.linked_path_hint, t.linked_at_ms, \
+                                t.linked_path_hint, t.linked_at_ms, t.lane, \
                                 (SELECT m.body FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id \
                                    AND m.thread_id = t.thread_id \
@@ -2862,7 +3045,7 @@ impl<'a> LinkedChatStore<'a> {
                                    AND m.thread_id = t.thread_id \
                                  ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
                          FROM chat_threads t \
-                         WHERE t.workspace_id = ?1 AND t.channel_id = ?2 \
+                         WHERE t.workspace_id = ?1 AND t.channel_id = ?2 AND t.lane = ?7 \
                            AND (?3 = 0 OR t.updated_at_ms < ?4 \
                              OR (t.updated_at_ms = ?4 AND t.thread_id < ?5)) \
                          ORDER BY t.updated_at_ms DESC, t.thread_id DESC LIMIT ?6",
@@ -2876,14 +3059,15 @@ impl<'a> LinkedChatStore<'a> {
                             has_after,
                             after_updated_at_ms,
                             after_thread_id,
-                            limit
+                            limit,
+                            lane.as_str()
                         ],
                         |row| {
                             let thread = map_thread_row(row)?;
-                            let message_count: i64 = row.get(11)?;
-                            let stored_read_sequence: Option<i64> = row.get(12)?;
-                            let open_decision_count: i64 = row.get(13)?;
-                            let opening_message_id: Option<String> = row.get(14)?;
+                            let message_count: i64 = row.get(12)?;
+                            let stored_read_sequence: Option<i64> = row.get(13)?;
+                            let open_decision_count: i64 = row.get(14)?;
+                            let opening_message_id: Option<String> = row.get(15)?;
                             Ok(thread.map(|thread| {
                                 (
                                     thread,
@@ -3008,7 +3192,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                             t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                            t.linked_path_hint, t.linked_at_ms, \
+                            t.linked_path_hint, t.linked_at_ms, t.lane, \
                             (SELECT m.body FROM chat_messages m \
                              WHERE m.workspace_id = t.workspace_id \
                                AND m.thread_id = t.thread_id \
@@ -3353,7 +3537,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                             t.updated_at_ms, t.channel_id, t.linked_object_id, \
-                            t.linked_path_hint, t.linked_at_ms, \
+                            t.linked_path_hint, t.linked_at_ms, t.lane, \
                             (SELECT m.body FROM chat_messages m \
                              WHERE m.workspace_id = t.workspace_id \
                                AND m.thread_id = t.thread_id \
@@ -3396,8 +3580,8 @@ impl<'a> LinkedChatStore<'a> {
                     ],
                     |row| {
                         let thread = map_thread_row(row)?;
-                        let latest_created_at_ms = row.get(11)?;
-                        let latest_message_id = row.get(12)?;
+                        let latest_created_at_ms = row.get(12)?;
+                        let latest_message_id = row.get(13)?;
                         Ok(thread.map(|thread| AgentUnreadThreadRow {
                             thread,
                             latest_created_at_ms,
@@ -4745,6 +4929,7 @@ FROM chat_messages m
 JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
 LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
 WHERE m.workspace_id = ?1
+  AND t.lane = 'posts'
   AND (t.channel_id IS NULL OR c.kind <> 'dm')
   AND (t.channel_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM chat_channel_placeholders placeholder
@@ -4781,6 +4966,7 @@ FROM chat_messages m
 JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
 LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
 WHERE m.workspace_id = ?1 AND m.message_id = ?3 AND m.created_at_ms = ?4
+  AND t.lane = 'posts'
   AND (t.channel_id IS NULL OR c.kind <> 'dm')
   AND (t.channel_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM chat_channel_placeholders placeholder
@@ -5283,6 +5469,7 @@ pub struct PendingChatRefusal {
     pub reason: &'static str,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_channel(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -5290,16 +5477,103 @@ fn insert_channel(
     name: &str,
     slug: &str,
     kind: ChatChannelKind,
+    group: &ChannelGroup,
     now_ms: i64,
 ) -> Result<(), DomainError> {
     tx.execute(
         "INSERT INTO chat_channels \
-         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![workspace_id, channel_id, name, slug, kind.as_str(), now_ms],
+         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+          type, purpose, folder_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+        params![
+            workspace_id,
+            channel_id,
+            name,
+            slug,
+            kind.as_str(),
+            now_ms,
+            group.channel_type.as_str(),
+            group.purpose,
+            group.folder_path
+        ],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+/// The `chat.channel.create` wire payload. The group fields ride beside the
+/// kind so a receiving replica draws the group the way its creator did.
+fn channel_create_payload(
+    channel_id: &str,
+    name: &str,
+    slug: &str,
+    kind: ChatChannelKind,
+    group: &ChannelGroup,
+    created_at_ms: i64,
+    wire_id: &str,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "channelId": channel_id,
+        "name": name,
+        "slug": slug,
+        "kind": kind.as_str(),
+        "type": group.channel_type.as_str(),
+        "purpose": group.purpose,
+        "createdAtMs": created_at_ms,
+        "wireId": wire_id,
+    });
+    if let Some(folder) = &group.folder_path {
+        payload["folderPath"] = serde_json::json!(folder);
+    }
+    payload
+}
+
+/// Trim and bound the group fields. A `dm` or `agent` channel has no folder;
+/// a folder path is workspace-relative with no leading, trailing, or doubled
+/// separator and no `.` or `..` segment.
+pub fn normalize_channel_group(
+    group: ChannelGroup,
+    kind: ChatChannelKind,
+) -> Result<ChannelGroup, DomainError> {
+    let purpose = group.purpose.trim().to_owned();
+    if purpose.encode_utf16().count() > MAX_CHANNEL_PURPOSE_CHARS || purpose.contains(['\n', '\r'])
+    {
+        return Err(DomainError::chat(
+            "invalid-channel-purpose",
+            "A group's purpose is one line of at most 200 characters.",
+        ));
+    }
+    let folder_path = match group.folder_path {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                if kind != ChatChannelKind::Channel {
+                    return Err(DomainError::chat(
+                        "invalid-channel-folder",
+                        "Only a group has a folder.",
+                    ));
+                }
+                if raw != trimmed
+                    || trimmed.chars().count() > MAX_CHANNEL_FOLDER_PATH_CHARS
+                    || !matches!(crate::validate_addressable_plaintext_path(&raw), Ok(normalized) if normalized == raw)
+                {
+                    return Err(DomainError::chat(
+                        "invalid-channel-folder",
+                        "A group's folder is a workspace-relative path.",
+                    ));
+                }
+                Some(trimmed.to_owned())
+            }
+        }
+    };
+    Ok(ChannelGroup {
+        channel_type: group.channel_type,
+        purpose,
+        folder_path,
+    })
 }
 
 fn record_channel_wire_id(
@@ -5338,7 +5612,8 @@ fn channel_by_slug(
     slug: &str,
 ) -> Result<Option<ChatChannel>, DomainError> {
     conn.query_row(
-        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms \
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path \
          FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
         params![workspace_id, slug],
         map_channel_row,
@@ -5370,7 +5645,8 @@ fn require_channel(
     channel_id: &str,
 ) -> Result<ChatChannel, DomainError> {
     conn.query_row(
-        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms \
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path \
          FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
         params![workspace_id, channel_id],
         map_channel_row,
@@ -5388,7 +5664,7 @@ fn require_thread(
 ) -> Result<ChatThread, DomainError> {
     conn.query_row(
         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-         t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
+         t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, t.lane, \
          (SELECT m.body FROM chat_messages m \
           WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
           ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
@@ -5626,6 +5902,64 @@ fn advance_read_cursor(
     Ok(next)
 }
 
+/// Following is implicit: the person who posts, comments, or reacts in a
+/// thread follows it from then on. Writes the same LWW cell `set_follow`
+/// does and journals it so the follow reaches the person's other devices.
+/// A row that already says `following` is left alone, so an explicit
+/// unfollow later still wins on its own clock. Only a relay identity can
+/// follow: a local-only author has no feed owner to follow as.
+pub(crate) fn follow_thread_implicitly(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    owner_user_id: &str,
+    thread_id: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT state FROM chat_follows \
+             WHERE workspace_id = ?1 AND owner_user_id = ?2 \
+               AND target_kind = 'thread' AND target_id = ?3",
+            params![workspace_id, owner_user_id, thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if existing.is_some() {
+        // Following already, or unfollowed on purpose: either way, the
+        // person's own choice stands.
+        return Ok(());
+    }
+    let input = SetFollow {
+        workspace_id: workspace_id.to_owned(),
+        owner_user_id: owner_user_id.clone(),
+        replication_owner_user_id: Some(owner_user_id.clone()),
+        target_kind: FollowTargetKind::Thread,
+        target_id: thread_id.to_owned(),
+        state: FollowState::Following,
+        now_ms,
+    };
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, now_ms)?;
+    upsert_follow_lww(tx, &input, now_ms, &origin_id, origin_seq)?;
+    insert_local_replication_op(
+        tx,
+        workspace_id,
+        &origin_id,
+        origin_seq,
+        "chat.follow.set",
+        &serde_json::json!({
+            "ownerUserId": owner_user_id,
+            "targetKind": "thread",
+            "targetId": thread_id,
+            "state": "following",
+            "atMs": now_ms,
+        }),
+        now_ms,
+    )?;
+    Ok(())
+}
+
 fn upsert_follow_lww(
     tx: &Transaction<'_>,
     input: &SetFollow,
@@ -5672,18 +6006,23 @@ fn upsert_decision_lww(
     message_id: &str,
     state: ChatDecisionState,
     resolved_by_message_id: Option<&str>,
+    options: &[String],
+    chosen_option: Option<&str>,
     at_ms: i64,
     origin_id: &str,
     origin_seq: i64,
 ) -> Result<bool, DomainError> {
+    let options_json = encode_poll_options(options);
     let updated = tx.execute(
         "INSERT INTO chat_decisions \
-         (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
+         (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq, \
+          options_json,chosen_option) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
          ON CONFLICT(workspace_id,message_id) DO UPDATE SET \
            thread_id=excluded.thread_id,state=excluded.state,\
            resolved_by_message_id=excluded.resolved_by_message_id,at_ms=excluded.at_ms,\
-           origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
+           origin_id=excluded.origin_id,origin_seq=excluded.origin_seq,\
+           options_json=excluded.options_json,chosen_option=excluded.chosen_option \
          WHERE excluded.at_ms > chat_decisions.at_ms \
             OR (excluded.at_ms = chat_decisions.at_ms AND \
                 (CASE excluded.state WHEN 'resolved' THEN 1 ELSE 0 END) > \
@@ -5701,13 +6040,97 @@ fn upsert_decision_lww(
             resolved_by_message_id,
             at_ms,
             origin_id,
-            origin_seq
+            origin_seq,
+            options_json,
+            chosen_option
         ],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(updated > 0)
 }
 
+/// A poll's choices on disk: a JSON array, or null for a bare question.
+pub fn encode_poll_options(options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(options).expect("strings encode"))
+    }
+}
+
+pub fn decode_poll_options(raw: Option<&str>) -> Result<Vec<String>, DomainError> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(raw) => {
+            serde_json::from_str::<Vec<String>>(raw).map_err(|_| DomainError::StateCorrupt {
+                reason: "chat decision options are corrupt",
+            })
+        }
+    }
+}
+
+/// Trim and bound a poll's choices: at most twelve, each one line of at
+/// most 200 characters, none empty, none repeated.
+pub fn normalize_poll_options(options: &[String]) -> Result<Vec<String>, DomainError> {
+    if options.len() > MAX_POLL_OPTIONS {
+        return Err(DomainError::chat(
+            "invalid-poll-options",
+            "A poll has at most twelve choices.",
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(options.len());
+    for raw in options {
+        let option = raw.trim();
+        if option.is_empty()
+            || option.encode_utf16().count() > MAX_POLL_OPTION_CHARS
+            || option.contains(['\n', '\r'])
+        {
+            return Err(DomainError::chat(
+                "invalid-poll-options",
+                "Each choice is one line of at most 200 characters.",
+            ));
+        }
+        if out.iter().any(|seen| seen == option) {
+            return Err(DomainError::chat(
+                "invalid-poll-options",
+                "Each choice appears once.",
+            ));
+        }
+        out.push(option.to_owned());
+    }
+    Ok(out)
+}
+
+/// The answer to a poll names one of its choices. A bare question takes
+/// no choice.
+fn validate_chosen_option(
+    options: &[String],
+    chosen: Option<&str>,
+) -> Result<Option<String>, DomainError> {
+    match (options.is_empty(), chosen.map(str::trim)) {
+        (true, None) | (true, Some("")) => Ok(None),
+        (true, Some(_)) => Err(DomainError::chat(
+            "invalid-poll-choice",
+            "This question has no choices to pick from.",
+        )),
+        (false, None) | (false, Some("")) => Err(DomainError::chat(
+            "invalid-poll-choice",
+            "Pick one of the poll's choices.",
+        )),
+        (false, Some(value)) => {
+            if options.iter().any(|option| option == value) {
+                Ok(Some(value.to_owned()))
+            } else {
+                Err(DomainError::chat(
+                    "invalid-poll-choice",
+                    "Pick one of the poll's choices.",
+                ))
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn journal_decision_set(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -5715,6 +6138,8 @@ fn journal_decision_set(
     message_id: &str,
     state: ChatDecisionState,
     resolved_by_message_id: Option<&str>,
+    options: &[String],
+    chosen_option: Option<&str>,
     at_ms: i64,
 ) -> Result<(), DomainError> {
     let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
@@ -5725,6 +6150,8 @@ fn journal_decision_set(
         message_id,
         state,
         resolved_by_message_id,
+        options,
+        chosen_option,
         at_ms,
         &origin_id,
         origin_seq,
@@ -5739,6 +6166,12 @@ fn journal_decision_set(
             "state": state.as_str(),
             "atMs": at_ms,
         });
+        if !options.is_empty() {
+            payload["options"] = serde_json::json!(options);
+        }
+        if let Some(chosen) = chosen_option {
+            payload["chosenOption"] = serde_json::json!(chosen);
+        }
         if let Some(resolver) = resolved_by_message_id
             && relay_log_has_authored_message(tx, workspace_id, thread_id, resolver)?
         {
@@ -5811,6 +6244,18 @@ fn relay_log_has_authored_message(
     .map_err(DomainError::sql_corrupt)
 }
 
+/// One thread row as the export path reads it: title, created_at_ms,
+/// channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane.
+type ThreadStructureRow = (
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    String,
+);
+
 fn ensure_thread_structure_exported(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -5824,17 +6269,11 @@ fn ensure_thread_structure_exported(
         return Ok(());
     }
 
-    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms): (
-        String,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    ) = tx
+    let (title, created_at_ms, channel_id, linked_object_id, linked_path_hint, linked_at_ms, lane): ThreadStructureRow =
+        tx
         .query_row(
             "SELECT title, created_at_ms, channel_id, linked_object_id, \
-                    linked_path_hint, linked_at_ms \
+                    linked_path_hint, linked_at_ms, lane \
              FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
             params![workspace_id, thread_id],
             |row| {
@@ -5845,6 +6284,7 @@ fn ensure_thread_structure_exported(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -5854,6 +6294,7 @@ fn ensure_thread_structure_exported(
         "threadId": thread_id,
         "title": title,
         "createdAtMs": created_at_ms,
+        "lane": lane,
     });
     let payload_object = payload
         .as_object_mut()
@@ -6123,7 +6564,8 @@ fn require_decision(
     message_id: &str,
 ) -> Result<ChatDecision, DomainError> {
     conn.query_row(
-        "SELECT thread_id, message_id, state, resolved_by_message_id, at_ms \
+        "SELECT thread_id, message_id, state, resolved_by_message_id, at_ms, \
+                options_json, chosen_option \
          FROM chat_decisions WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
         params![workspace_id, thread_id, message_id],
         map_decision_row,
@@ -6324,25 +6766,44 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
     let kind_str: String = row.get(4)?;
     let created_at_ms: i64 = row.get(5)?;
     let updated_at_ms: i64 = row.get(6)?;
-    Ok(ChatChannelKind::from_db(&kind_str).map(|kind| ChatChannel {
-        workspace_id,
-        channel_id,
-        name,
-        slug,
-        kind,
-        created_at_ms,
-        updated_at_ms,
+    let type_str: String = row.get(7)?;
+    let purpose: String = row.get(8)?;
+    let folder_path: Option<String> = row.get(9)?;
+    Ok(ChatChannelKind::from_db(&kind_str).and_then(|kind| {
+        let channel_type = ChatChannelType::from_db(&type_str)?;
+        Ok(ChatChannel {
+            workspace_id,
+            channel_id,
+            name,
+            slug,
+            kind,
+            group: ChannelGroup {
+                channel_type,
+                purpose,
+                folder_path,
+            },
+            created_at_ms,
+            updated_at_ms,
+        })
     }))
 }
 
+/// Column layout every thread select shares: 0..=8 the row, 9 `lane`,
+/// 10 the opening body, 11 whether the owning channel exists. Callers
+/// that add aggregates start at 12.
 fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread, DomainError>> {
     let stored_title: String = row.get(2)?;
-    let first_body: Option<String> = row.get(9)?;
+    let lane_str: String = row.get(9)?;
+    let first_body: Option<String> = row.get(10)?;
     let mut channel_id: Option<String> = row.get(5)?;
     let mut linked_object_id: Option<String> = row.get(6)?;
     let mut linked_path_hint: Option<String> = row.get(7)?;
     let mut linked_at_ms: Option<i64> = row.get(8)?;
-    let channel_owner_exists: i64 = row.get(10)?;
+    let channel_owner_exists: i64 = row.get(11)?;
+    let lane = match ChatThreadLane::from_db(&lane_str) {
+        Ok(lane) => lane,
+        Err(error) => return Ok(Err(error)),
+    };
     let created_at_ms: i64 = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
     let has_linked_owner = linked_object_id
@@ -6375,6 +6836,7 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread
         title: chat_thread_display_title(&stored_title, first_body.as_deref()),
         created_at_ms,
         updated_at_ms,
+        lane,
         channel_id,
         linked_object_id,
         linked_path_hint,
@@ -6454,6 +6916,8 @@ fn map_decision_row(
     let state: String = row.get(2)?;
     let resolved_by_message_id: Option<String> = row.get(3)?;
     let at_ms: i64 = row.get(4)?;
+    let options_json: Option<String> = row.get(5)?;
+    let chosen_option: Option<String> = row.get(6)?;
     Ok((|| {
         let state = ChatDecisionState::from_db(&state)?;
         if !persisted_safe_integer(at_ms) {
@@ -6461,12 +6925,15 @@ fn map_decision_row(
                 reason: "chat decision row is corrupt",
             });
         }
+        let options = decode_poll_options(options_json.as_deref())?;
         Ok(ChatDecision {
             thread_id,
             message_id,
             state,
             resolved_by_message_id,
             at_ms,
+            options,
+            chosen_option,
         })
     })())
 }

@@ -55,7 +55,7 @@ async function harness() {
   const events: string[] = [];
   const channel: ChatChannelSummary = {
     id: "channel", workspaceId: "workspace", name: "peer@example.test", slug: "peer", kind: "dm",
-    createdAtMs: 1, updatedAtMs: 2, threadCount: 1, unreadCount: 0,
+    type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 2, threadCount: 1, unreadCount: 0,
   };
   const thread: ChannelThreadSummary = {
     thread: { id: "thread", workspaceId: "workspace", channelId: "channel", title: "", createdAtMs: 1, updatedAtMs: 2 },
@@ -121,10 +121,10 @@ async function harness() {
     registerHandler: () => undefined, assertTrustedSender, withRendererWorkspaceOperation,
     requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor,
     remoteForWorkspace: remote, currentCredentialGeneration: () => generation, currentCredentials: () => current,
-    warmCredentialCache: warm,
+    warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => ({}),
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
     listWorkspaces: () => [workspace], setWorkspaceSharedChannels: writeChannels,
-    relayClientForWorkspace: () => ({ pullSharedChannel: pull }), projectPendingChatBookmarksAfterPull: project,
+    relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
   });

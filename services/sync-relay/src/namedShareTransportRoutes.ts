@@ -7,8 +7,9 @@ import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./r
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
+  chatSideOf,
   filterOpForShareAppend,
-  isChatChannelSelector,
+  isGroupSelector,
   type ChatShareThreadResolver,
   type ThreadFileBinding,
 } from "./shareFilter";
@@ -60,15 +61,24 @@ export function createNamedShareTransportRoutes(
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
+      const chatSide = chatSideOf(share.selector);
       if (
         channelWireId !== null &&
-        (!isChatChannelSelector(share.selector) ||
-          share.selector.channelWireId !== channelWireId)
+        (!chatSide || chatSide.channelWireId !== channelWireId)
       ) {
         throw notFound();
       }
       const since = parseCursor(url.searchParams.get("since"));
       const limit = parseLimit(url.searchParams.get("limit"));
+      // A group is read one half at a time. The channel pull names the
+      // channel and gets its chat; the folder mount names nothing and gets
+      // its files. Each client refuses the other half's ops, so one page
+      // carrying both would only produce refusals.
+      const half = isGroupSelector(share.selector)
+        ? channelWireId !== null
+          ? ("chat" as const)
+          : ("files" as const)
+        : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
       const page = filteredLogPage(
@@ -77,6 +87,7 @@ export function createNamedShareTransportRoutes(
         since,
         limit,
         "authenticated",
+        half,
       );
       // Re-check revocation immediately before returning the body: a revoke
       // that raced with this in-flight read (after the entry check, while
@@ -183,9 +194,10 @@ export function createNamedShareTransportRoutes(
             linkedPath?: unknown;
           };
           const threadId = created.threadId;
+          const chatSideForBinding = chatSideOf(share.selector);
           if (typeof threadId === "string" && threadId.length > 0) {
-            if (isChatChannelSelector(share.selector)) {
-              pendingThreadBindings.set(threadId, share.selector.channelWireId);
+            if (chatSideForBinding) {
+              pendingThreadBindings.set(threadId, chatSideForBinding.channelWireId);
             } else if (
               typeof created.linkedPath === "string" &&
               created.linkedPath.length > 0

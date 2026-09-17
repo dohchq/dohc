@@ -51,6 +51,8 @@ struct ChatMessageSendParams {
     #[serde(default)]
     needs_decision: bool,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    options: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
 }
@@ -61,6 +63,7 @@ struct ChatDecisionResolveParams {
     thread_id: String,
     message_id: String,
     resolved_by_message_id: String,
+    chosen_option: Option<String>,
     now_ms: Option<i64>,
 }
 
@@ -197,6 +200,12 @@ fn decision_json(decision: &ChatDecision) -> Value {
         },
         "atMs": decision.at_ms,
     });
+    if !decision.options.is_empty() {
+        value["options"] = json!(decision.options);
+    }
+    if let Some(chosen) = &decision.chosen_option {
+        value["chosenOption"] = json!(chosen);
+    }
     if let Some(resolved_by_message_id) = &decision.resolved_by_message_id {
         value
             .as_object_mut()
@@ -487,6 +496,7 @@ impl EngineService {
                     origin: params.origin,
                     body: params.body,
                     needs_decision: params.needs_decision,
+                    options: params.options.unwrap_or_default(),
                     attachments: params
                         .attachments
                         .unwrap_or_default()
@@ -523,6 +533,7 @@ impl EngineService {
                     thread_id: params.thread_id,
                     message_id: params.message_id,
                     resolved_by_message_id: params.resolved_by_message_id,
+                    chosen_option: params.chosen_option,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },

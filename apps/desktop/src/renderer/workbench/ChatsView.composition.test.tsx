@@ -1,15 +1,19 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import {
   NOW,
   channel,
+  personalFeedItem,
+  shareListing,
   thread,
   message,
   bridgeMock,
   renderView,
+  navigatorView,
   mentionRoster,
 } from "./ChatsView.testHarness";
 
@@ -68,7 +72,7 @@ describe("ChatsView My agent", () => {
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
   });
 
-  it("shows setup guidance and a configured owner label in My agent", async () => {
+  it("names a set-up agent under Agents and offers Manage, with no card in the conversation", async () => {
     const user = userEvent.setup();
     const onSetupAgent = vi.fn();
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -90,47 +94,122 @@ describe("ChatsView My agent", () => {
         mcpEnabled: false,
       },
       onSetupAgent,
+      userSettings: DEFAULT_USER_SETTINGS,
+      onSaveUserSettings: vi.fn(async () => undefined),
+      workspacePath: "C:\\people\\ice\\work",
     });
 
-    await user.click(await screen.findByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe("ready");
-    expect(screen.getByTestId("chats-agent-setup-name").textContent).toBe("Ice's agent");
-    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Manage");
-    await user.click(screen.getByTestId("chats-agent-setup-action"));
+    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe("Ice's agent");
+    expect(screen.queryByTestId("chats-my-agent-state")).toBeNull();
+    await user.click(screen.getByTestId("chats-manage-agent"));
     expect(onSetupAgent).toHaveBeenCalledOnce();
+    await user.click(screen.getByTestId("chats-my-agent"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.queryByTestId("chats-agent-setup-card")).toBeNull();
+    // The agent's screen says what runs it and what it reaches.
+    const agentScreen = screen.getByTestId("chats-agent-screen");
+    expect(agentScreen.dataset.state).toBe("ready");
+    expect(screen.getByTestId("chats-agent-screen-runner").textContent).toBe("Runner on");
+    expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
+    await user.click(screen.getByTestId("chats-agent-screen-manage"));
+    expect(onSetupAgent).toHaveBeenCalledTimes(2);
   });
 
-  it("does not present an enabled MCP server as a connected agent", async () => {
+  it("lists other people's agents from joined channels, read-only, under who shared them", async () => {
     const user = userEvent.setup();
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [
-        channel({
-          id: "channel-agent",
-          name: "agent-internal",
-          slug: "agent",
-          kind: "agent",
-        }),
+    const shared = channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), shared], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: [
+          {
+            shareId: "share-team",
+            channelWireId: "wire-team",
+            access: "read-write",
+            granterEmail: "owner@example.com",
+            ended: false,
+          },
+        ],
+      }),
+    );
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          ...personalFeedItem("Rebuilt the index.", "message-their-agent"),
+          message: message({
+            id: "message-their-agent",
+            authorKind: "agent",
+            authorDisplayName: "Owner",
+            body: "Rebuilt the index.",
+          }),
+          channel: { id: "channel-team", wireId: "wire-team", name: "team", slug: "team", kind: "channel" as const },
+        },
+        // The user's own agent in their own channel is not someone else's.
+        {
+          ...personalFeedItem("Checked the exports.", "message-my-agent"),
+          message: message({
+            id: "message-my-agent",
+            authorKind: "agent",
+            authorDisplayName: "You",
+            body: "Checked the exports.",
+          }),
+        },
       ],
-      fileThreads: [],
     });
+    renderView();
+
+    // Home reads what arrived; the nav lists the agents among it.
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Rebuilt the index.");
+    await user.click(screen.getByTestId("chats-feed-back"));
+    const rows = await screen.findAllByTestId("chats-other-agent");
+    expect(rows).toHaveLength(1);
+    expect(screen.getByTestId("chats-other-agent-name").textContent).toBe("Owner's agent");
+    expect(rows[0]!.dataset.owner).toBe("owner@example.com");
+    expect(rows[0]!.textContent).toContain("via owner@example.com");
+    // Opening one goes to its latest work; there is nothing here to configure.
+    await user.click(rows[0]!);
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-add-agent")).toBeNull();
+  });
+
+  it("adds an agent from Agents: name, runner, check, and one settings write", async () => {
+    const user = userEvent.setup();
+    const onSaveUserSettings = vi.fn(async () => undefined);
+    const runnerSelfTest = vi.fn(async () => ({ ok: true, detail: "The runner answered." }));
+    vi.stubGlobal("dohcDesktop", { ...(globalThis as { dohcDesktop?: object }).dohcDesktop, runnerSelfTest });
+    // An enabled MCP server is not a set-up agent.
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
-        preferredName: "Ice",
         runnerConfigured: false,
         runnerEnabled: false,
         mcpEnabled: true,
       },
       onSetupAgent: vi.fn(),
+      userSettings: DEFAULT_USER_SETTINGS,
+      onSaveUserSettings,
     });
 
-    await user.click(await screen.findByTestId("chats-my-agent"));
-    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe(
-      "needs-setup",
+    await user.click(await screen.findByTestId("chats-add-agent-open"));
+    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Your agent");
+    await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
+    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Ice's agent");
+    await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
+    await user.click(screen.getByTestId("chats-add-agent-check"));
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-add-agent-check-result").dataset.state).toBe("ok"),
     );
-    expect(screen.getByTestId("chats-agent-setup-card").textContent).toContain(
-      "Workspace MCP enabled · copy its config into your agent.",
-    );
-    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Set up");
+    expect(runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" });
+    await user.click(screen.getByTestId("chats-add-agent-submit"));
+    await waitFor(() => expect(screen.queryByTestId("chats-add-agent")).toBeNull());
+    // The check and the add each wrote the same settings: the name, the
+    // command, dispatch on.
+    expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
+    expect(onSaveUserSettings).toHaveBeenLastCalledWith({
+      ...DEFAULT_USER_SETTINGS,
+      profile: { preferredName: "Ice" },
+      runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
+    });
   });
 });
 
@@ -457,5 +536,58 @@ describe("ChatsView mentions", () => {
     expect(item.textContent).toContain("Which draft should I keep?");
     expect(item.tagName).toBe("DIV");
     expect(item.closest("button")).toBeNull();
+  });
+});
+
+
+describe("group details", () => {
+  it("shows the saved purpose under the group header", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ purpose: "Plan the launch" })], fileThreads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-channel-purpose")).textContent).toBe("Plan the launch");
+  });
+
+  it("resets group purpose and type after a workspace switch", async () => {
+    const view = render(navigatorView(0));
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: "Old purpose" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Chat" }));
+    view.rerender(navigatorView(0, { workspaceId: "workspace-b" }));
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("keeps agents distinct across shares with null emails and within one owner's share", async () => {
+    const channels = [channel({ id: "c1", wireId: "w1" }), channel({ id: "c2", wireId: "w2" })];
+    bridgeMock.listChatChannels.mockResolvedValue({ channels, fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: channels.map((channel, index) => ({
+      shareId: `share-${index}`, channelWireId: channel.wireId, granterEmail: null, access: "read-write", ended: false,
+    })) }));
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [
+      [0, "agent-a"], [0, "agent-b"], [1, "agent-a"],
+    ].map(([channelIndex, targetId], index) => ({
+      ...personalFeedItem("Update", `agent-message-${index}`),
+      message: message({ id: `agent-message-${index}`, authorKind: "agent", authorDisplayName: "Same name" }),
+      channel: channels[Number(channelIndex)], authorFollowTarget: { targetKind: "agent", targetId },
+    })), nextCursor: null });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-feed-link"));
+    await waitFor(() => expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalled());
+    fireEvent.click(await screen.findByTestId("chats-feed-back"));
+    await waitFor(() => expect(screen.getAllByTestId("chats-other-agent")).toHaveLength(3));
+    expect(screen.getByTestId("chats-other-agents").textContent).toContain("via someone else");
+  });
+
+  it("resets purpose and type when Escape cancels group creation", async () => {
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: "Cancelled purpose" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Chat" }));
+    fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Escape" });
+    fireEvent.click(screen.getByTestId("chats-new-channel"));
+    expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
   });
 });

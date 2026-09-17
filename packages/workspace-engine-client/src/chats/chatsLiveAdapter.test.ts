@@ -186,6 +186,8 @@ const channel = {
   name: "General",
   slug: "general",
   kind: "channel",
+  type: "posts",
+  purpose: "",
   createdAtMs: 1,
   updatedAtMs: 2,
 };
@@ -195,6 +197,7 @@ const threadWire = {
   title: "Thread",
   createdAtMs: 1,
   updatedAtMs: 2,
+  lane: "posts",
   channelId: "channel",
   linkedObjectId: null,
 };
@@ -501,6 +504,7 @@ describe("ChatsLiveAdapter", () => {
             title: "Linked",
             createdAtMs: 11,
             updatedAtMs: 12,
+            lane: "posts",
             channelId: null,
             linkedObjectId: "object-1",
           },
@@ -510,6 +514,7 @@ describe("ChatsLiveAdapter", () => {
             title: "Channel",
             createdAtMs: 21,
             updatedAtMs: 22,
+            lane: "chat",
             channelId: "channel-1",
             linkedObjectId: null,
           },
@@ -528,6 +533,7 @@ describe("ChatsLiveAdapter", () => {
         title: "Linked",
         createdAtMs: 11,
         updatedAtMs: 12,
+        lane: "posts",
         linkedFile: {
           objectId: "object-1",
           // thread_json has no linkedAtMs, so the adapter substitutes createdAtMs.
@@ -540,6 +546,7 @@ describe("ChatsLiveAdapter", () => {
         title: "Channel",
         createdAtMs: 21,
         updatedAtMs: 22,
+        lane: "chat",
         channelId: "channel-1",
       },
     ]);
@@ -1285,5 +1292,23 @@ describe("ChatsLiveAdapter", () => {
         ownerUserId: "owner",
       }),
     ).resolves.toHaveLength(2);
+  });
+});
+
+
+describe("loopback poll validation", () => {
+  it.each([
+    ["non-string", [7]], ["empty", ["  "]], ["duplicate", [" a ", "a"]],
+    ["too many", Array.from({ length: 13 }, (_, index) => String(index))],
+    ["too long", ["x".repeat(201)]], ["UTF-16 too long", ["💥".repeat(101)]],
+    ["multiline", ["a\nb"]],
+  ])("rejects %s options before writing a message", async (_name, options) => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Ice" }, body: "Hello" });
+    await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "bad-poll", authorKind: "human", authorDisplayName: "Ice", body: "Choose", options,
+    } })).rejects.toThrow("invalid-poll-options");
+    expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
   });
 });

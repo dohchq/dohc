@@ -26,10 +26,6 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     setPersonalFeedNextCursor(undefined);
   }, []);
 
-  const clearRows = useCallback(() => {
-    setPersonalFeed([]);
-  }, []);
-
   const invalidate = useCallback(() => {
     feedRefreshSeq.current += 1;
   }, []);
@@ -102,7 +98,6 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     loadPersonalFeed,
     resetForWorkspace,
     prepareOpen,
-    clearRows,
     invalidate,
     setMessageReactions,
   };

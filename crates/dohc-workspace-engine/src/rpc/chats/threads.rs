@@ -20,6 +20,7 @@ use dohc_engine_domain::ChannelThreadSummary;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatProjectionFileAccess;
 use dohc_engine_domain::ChatThread;
+use dohc_engine_domain::ChatThreadLane;
 use dohc_engine_domain::CreateFileThread;
 use dohc_engine_domain::LocalAttachmentInput;
 use dohc_engine_domain::StartChannelThread;
@@ -38,6 +39,7 @@ struct ChatThreadStartParams {
     thread_id: String,
     message_id: String,
     title: Option<String>,
+    lane: Option<String>,
     author_kind: String,
     author_display_name: String,
     author_user_id: Option<String>,
@@ -45,6 +47,8 @@ struct ChatThreadStartParams {
     body: String,
     #[serde(default)]
     needs_decision: bool,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
@@ -137,6 +141,7 @@ struct ChatThreadsListForFileParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadsListForChannelParams {
     channel_id: String,
+    lane: Option<String>,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
@@ -149,9 +154,18 @@ fn thread_json(thread: &ChatThread) -> Value {
         "title": thread.title,
         "createdAtMs": thread.created_at_ms,
         "updatedAtMs": thread.updated_at_ms,
+        "lane": thread.lane.as_str(),
         "channelId": thread.channel_id,
         "linkedObjectId": thread.linked_object_id,
     })
+}
+
+fn parse_thread_lane(raw: Option<&str>) -> Result<ChatThreadLane, WireError> {
+    match raw {
+        None => Ok(ChatThreadLane::default()),
+        Some(raw) => ChatThreadLane::parse(raw)
+            .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "unknown chat thread lane")),
+    }
 }
 
 pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
@@ -161,6 +175,7 @@ pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
         "title": thread.title,
         "createdAtMs": thread.created_at_ms,
         "updatedAtMs": thread.updated_at_ms,
+        "lane": thread.lane.as_str(),
     });
     let object = value.as_object_mut().expect("thread is an object");
     if let Some(channel_id) = &thread.channel_id {
@@ -223,6 +238,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatThreadStartParams = parse(params)?;
+        let lane = parse_thread_lane(params.lane.as_deref())?;
         reject_capture_origin(params.origin.as_deref())?;
         let author_kind = parse_actor_kind(&params.author_kind)?;
         let open = self.open(handle.as_ref())?;
@@ -237,12 +253,14 @@ impl EngineService {
                     thread_id: params.thread_id,
                     message_id: params.message_id,
                     title: params.title,
+                    lane,
                     author_kind,
                     author_display_name: params.author_display_name,
                     author_user_id: params.author_user_id,
                     origin: params.origin,
                     body: params.body,
                     needs_decision: params.needs_decision,
+                    options: params.options.unwrap_or_default(),
                     attachments: params
                         .attachments
                         .unwrap_or_default()
@@ -401,13 +419,14 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ChatThreadsListForChannelParams = parse(params)?;
+        let lane = parse_thread_lane(params.lane.as_deref())?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
         let binding = chat_cursor_binding(
             "chats.threads.listForChannel",
             &workspace_id,
-            &[&params.channel_id],
+            &[&params.channel_id, lane.as_str()],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor
@@ -420,6 +439,7 @@ impl EngineService {
             open.actor.chat_threads_list_for_channel(
                 workspace_id,
                 params.channel_id,
+                lane,
                 after,
                 page_limit + 1,
             ),

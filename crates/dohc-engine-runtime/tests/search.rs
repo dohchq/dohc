@@ -9,8 +9,8 @@
 //! same row shapes the product writes — the round-trip is non-tautological.
 
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, DomainError, LinkedChatStore, SendMessage, StartChannelThread,
-    VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
+    ChatActorKind, ChatChannelKind, ChatThreadLane, DomainError, LinkedChatStore, SendMessage,
+    StartChannelThread, VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_runtime::search::{
     CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
@@ -265,12 +265,14 @@ fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body
                 thread_id: thread_id.to_owned(),
                 message_id: format!("{thread_id}-msg-0"),
                 title: None,
+                lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: Some("user-ada".to_owned()),
                 origin: None,
                 body: body.to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: now,
                 request_id: None,
@@ -295,6 +297,7 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
                 origin: None,
                 body: body.to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: now,
                 request_id: None,

@@ -4,6 +4,7 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
+import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -110,6 +111,9 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     name: string;
     kind?: "channel" | "dm" | "agent";
+    type?: ChatChannelType;
+    purpose?: string;
+    folderPath?: string;
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     const channelId = this.createId("channel");
@@ -117,6 +121,9 @@ export class ChatsLiveAdapter {
       channelId,
       name: input.name,
       kind: input.kind ?? "channel",
+      ...(input.type ? { type: input.type } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      ...(input.folderPath !== undefined ? { folderPath: input.folderPath } : {}),
     });
   }
 
@@ -198,11 +205,13 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     channelId: string;
     title?: string;
+    lane?: ChatThreadLane;
     author: ChatActor;
     authorUserId?: string;
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    options?: string[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<{ thread: ChatThread; message: ChatMessage }> {
     this.assertWorkspace(input.workspaceId);
@@ -215,6 +224,7 @@ export class ChatsLiveAdapter {
         threadId,
         messageId,
         ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.lane !== undefined ? { lane: input.lane } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
         ...(input.authorUserId !== undefined
@@ -225,6 +235,7 @@ export class ChatsLiveAdapter {
         ...(input.needsDecision !== undefined
           ? { needsDecision: input.needsDecision }
           : {}),
+        ...(input.options !== undefined ? { options: input.options } : {}),
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
@@ -236,6 +247,7 @@ export class ChatsLiveAdapter {
   async listChannelThreads(input: {
     workspaceId: string;
     channelId: string;
+    lane?: ChatThreadLane;
   }): Promise<ChatChannelThreadSummary[]> {
     this.assertWorkspace(input.workspaceId);
     const rows: ChatChannelThreadSummary[] = [];
@@ -243,6 +255,7 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.threadsListForChannel, {
         channelId: input.channelId,
+        ...(input.lane !== undefined ? { lane: input.lane } : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -319,6 +332,7 @@ export class ChatsLiveAdapter {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    options?: string[];
     attachments?: ChatLocalAttachmentParams[];
   }): Promise<ChatMessage> {
     this.assertWorkspace(input.workspaceId);
@@ -341,6 +355,7 @@ export class ChatsLiveAdapter {
         ...(input.needsDecision !== undefined
           ? { needsDecision: input.needsDecision }
           : {}),
+        ...(input.options !== undefined ? { options: input.options } : {}),
         ...(input.attachments !== undefined
           ? { attachments: input.attachments }
           : {}),
@@ -373,6 +388,7 @@ export class ChatsLiveAdapter {
     threadId: string;
     messageId: string;
     resolvedByMessageId: string;
+    chosenOption?: string;
   }): Promise<ChatDecision & { workspaceId: string }> {
     this.assertWorkspace(input.workspaceId);
     const decision = await this.request(
@@ -381,6 +397,7 @@ export class ChatsLiveAdapter {
         threadId: input.threadId,
         messageId: input.messageId,
         resolvedByMessageId: input.resolvedByMessageId,
+        ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
       },
       {
         idempotencyKey: `${input.messageId}:${input.resolvedByMessageId}`,
@@ -1046,6 +1063,7 @@ export class ChatsLiveAdapter {
       title: thread.title,
       createdAtMs: thread.createdAtMs,
       updatedAtMs: thread.updatedAtMs,
+      lane: thread.lane,
       ...(thread.channelId !== null ? { channelId: thread.channelId } : {}),
       ...(thread.linkedObjectId !== null
         ? {

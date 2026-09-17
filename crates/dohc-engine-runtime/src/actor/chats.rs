@@ -1,25 +1,27 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, ChannelThreadSummary, ChatAgentReadState, ChatAttachment,
-    ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary,
-    ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention,
-    ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
-    LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
-    UnreadFileThread,
+    AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
+    DispatchRecovery, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
+    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    ThreadDispatchPause, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_channel_create(
         &self,
         workspace_id: String,
         channel_id: String,
         name: String,
         kind: ChatChannelKind,
+        group: ChannelGroup,
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
@@ -28,7 +30,15 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 LinkedChatStore::new(store)
-                    .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
+                    .create_group(
+                        &workspace_id,
+                        &channel_id,
+                        &name,
+                        kind,
+                        group,
+                        now_ms,
+                        &NoFaults,
+                    )
                     .map_err(RuntimeError::from)
             }
         })
@@ -176,12 +186,13 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         channel_id: String,
+        lane: ChatThreadLane,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChannelThreadSummary>, RuntimeError> {
         self.run(move |store, _| {
             LinkedChatStore::new(store)
-                .list_channel_threads(&workspace_id, &channel_id, after, limit)
+                .list_channel_threads_in_lane(&workspace_id, &channel_id, lane, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

@@ -76,6 +76,7 @@ import {
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
 import { useAgentSetup } from "./shell/useAgentSetup";
+import type { DesktopUserSettings } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
@@ -4192,6 +4193,15 @@ export function DesktopWorkspaceShell(props: {
     () => openSettings("agents"),
     [openSettings],
   );
+  // The add-agent form writes the same settings file the dialog does. The
+  // root hears the write through the settings-changed broadcast and the
+  // agent setup summary follows.
+  const saveUserSettingsFromChats = useCallback(
+    async (settings: DesktopUserSettings) => {
+      await bridge().setUserSettings({ settings });
+    },
+    [],
+  );
   const chatsViewProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -4212,6 +4222,9 @@ export function DesktopWorkspaceShell(props: {
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    userSettings: props.userSettings?.settings ?? null,
+    onSaveUserSettings: saveUserSettingsFromChats,
+    workspacePath: props.workspace.rootPath,
   } as const;
   // The panel intentionally stays on the overview and only selects editor
   // destinations. While the Chats editor is active, the page instance owns the
@@ -4256,6 +4269,9 @@ export function DesktopWorkspaceShell(props: {
     suspendPolling: chatsTabIsLive,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    userSettings: props.userSettings?.settings ?? null,
+    onSaveUserSettings: saveUserSettingsFromChats,
+    workspacePath: props.workspace.rootPath,
   } as const;
 
   function handleMountedShare(label: string) {

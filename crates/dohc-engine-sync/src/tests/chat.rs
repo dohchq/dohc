@@ -143,12 +143,14 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 thread_id: "decision-thread".to_owned(),
                 message_id: "decision-message".to_owned(),
                 title: None,
+                lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
                 author_user_id: Some("verified-user".to_owned()),
                 origin: None,
                 body: "Choose a launch date".to_owned(),
                 needs_decision: true,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 20,
                 request_id: Some("decision-thread".to_owned()),
@@ -169,6 +171,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 origin: None,
                 body: "Resolve while signed out".to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 30,
                 request_id: Some("local-resolver".to_owned()),
@@ -183,6 +186,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 thread_id: "decision-thread".to_owned(),
                 message_id: "decision-message".to_owned(),
                 resolved_by_message_id: "local-resolver".to_owned(),
+                chosen_option: None,
                 now_ms: 40,
                 request_id: "resolve-with-local-message".to_owned(),
             },
@@ -547,6 +551,139 @@ fn imported_opening_message_uses_zero_based_order() {
         })
         .expect("opening message order");
     assert_eq!(order, 0);
+}
+
+#[test]
+fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
+    let (_scratch, _path, mut engine) = open_store();
+    let with_group = envelope(
+        "group-fields",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "trip",
+            "name": "Lisbon trip",
+            "slug": "lisbon-trip",
+            "kind": "channel",
+            "type": "both",
+            "purpose": "Dates and flights",
+            "folderPath": "trips/lisbon",
+            "createdAtMs": 10
+        }),
+    );
+    // An op written before the groups migration names no group fields.
+    let older = envelope(
+        "group-fields",
+        1,
+        "chat.channel.create",
+        json!({
+            "channelId": "old",
+            "name": "Old",
+            "slug": "old",
+            "kind": "channel",
+            "createdAtMs": 11
+        }),
+    );
+    for op in [&with_group, &older] {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply channel"),
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
+        );
+    }
+    let rows: Vec<(String, String, String, Option<String>)> = engine
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT channel_id, type, purpose, folder_path FROM chat_channels \
+                 WHERE workspace_id = 'ws' ORDER BY channel_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect()
+        })
+        .expect("read channels");
+    assert_eq!(
+        rows,
+        vec![
+            ("old".to_owned(), "posts".to_owned(), String::new(), None),
+            (
+                "trip".to_owned(),
+                "both".to_owned(),
+                "Dates and flights".to_owned(),
+                Some("trips/lisbon".to_owned())
+            ),
+        ]
+    );
+
+    // A group with a folder on a dm is refused.
+    let bad = envelope(
+        "group-fields-bad",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "dm-with-folder",
+            "name": "someone",
+            "slug": "someone",
+            "kind": "dm",
+            "folderPath": "people/someone",
+            "createdAtMs": 12
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &bad, &NoFaults));
+}
+
+#[test]
+fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
+    let (_scratch, _path, mut engine) = open_store();
+    // A resolved poll with choices that names no choice is refused; the
+    // domain never writes one, so a peer that sends one is malformed.
+    let unanswered = envelope(
+        "poll-no-answer",
+        0,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "poll-message",
+            "state": "resolved",
+            "resolvedByMessageId": "answer-message",
+            "atMs": 20,
+            "options": ["Friday", "Monday"]
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &unanswered, &NoFaults));
+    // A bare question resolves with no choice, as before.
+    let bare = envelope(
+        "poll-no-answer",
+        1,
+        "chat.decision.set",
+        json!({
+            "threadId": "thread-poll",
+            "messageId": "question-message",
+            "state": "resolved",
+            "resolvedByMessageId": "answer-message",
+            "atMs": 21
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &bare, &NoFaults).expect("apply bare question"),
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
+    );
+
+    // A file-linked thread is always a post, whatever lane the op claims.
+    let file_chat_lane = envelope(
+        "file-thread-lane",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "thread-file",
+            "title": "About a file",
+            "createdAtMs": 30,
+            "linkedPath": "docs/plan.md",
+            "linkedAtMs": 30,
+            "lane": "chat"
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &file_chat_lane, &NoFaults));
 }
 
 #[test]
@@ -2106,12 +2243,14 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 message_id: "default-message".to_owned(),
                 channel_id: "default-channel".to_owned(),
                 title: Some("Default thread".to_owned()),
+                lane: ChatThreadLane::Posts,
                 body: "Default opening message".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: Some("ada".to_owned()),
                 origin: None,
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 20,
                 request_id: Some("default-thread-request".to_owned()),
@@ -2327,12 +2466,14 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 thread_id: "long-wire-local-thread".to_owned(),
                 message_id: "long-wire-local-message".to_owned(),
                 title: Some("Local follow-up".to_owned()),
+                lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_user_id: Some("ada".to_owned()),
                 origin: None,
                 body: "Replicate this".to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 20,
                 request_id: Some("long-wire-local-request".to_owned()),
@@ -2754,6 +2895,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                 thread_id: "thread-imported".to_owned(),
                 message_id: "message-imported".to_owned(),
                 resolved_by_message_id: "message-imported".to_owned(),
+                chosen_option: None,
                 now_ms: 0,
                 request_id: "local-decision-after-import".to_owned(),
             },
@@ -2908,6 +3050,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 origin: None,
                 body: "This message stays local.".to_owned(),
                 needs_decision: true,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-message-after-refusal".to_owned()),
@@ -2946,6 +3089,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 origin: None,
                 body: "This authored child must not export the local parent.".to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 33,
                 request_id: Some("authored-child-after-refusal".to_owned()),
@@ -2960,6 +3104,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 thread_id: "thread-imported".to_owned(),
                 message_id: "refused-message-id".to_owned(),
                 resolved_by_message_id: "authored-child".to_owned(),
+                chosen_option: None,
                 now_ms: 34,
                 request_id: "resolve-after-refusal".to_owned(),
             },
@@ -3087,12 +3232,14 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 thread_id: "refused-thread-id".to_owned(),
                 message_id: "message-after-refused-thread".to_owned(),
                 title: Some("Valid local thread".to_owned()),
+                lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
                 author_user_id: Some("verified-user".to_owned()),
                 origin: None,
                 body: "The valid thread must reach peers first.".to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-thread-after-refusal".to_owned()),
@@ -3113,6 +3260,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 origin: None,
                 body: "The thread structure must export only once.".to_owned(),
                 needs_decision: false,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 now_ms: 32,
                 request_id: Some("second-local-message-after-refusal".to_owned()),
@@ -3131,7 +3279,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                    ON identity.workspace_id=operation.workspace_id \
                   AND identity.origin_id=operation.origin_id \
                  WHERE operation.workspace_id='ws' AND operation.imported=0 \
-                   AND json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                   AND (json_extract(operation.payload_json,'$.threadId')='refused-thread-id' \
+                     OR json_extract(operation.payload_json,'$.targetId')='refused-thread-id') \
                  ORDER BY operation.origin_seq",
             )?;
             statement
@@ -3164,6 +3313,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         vec![
             "chat.thread.create",
             "chat.message.append",
+            "chat.follow.set",
             "chat.message.append"
         ],
         "the current origin must export one valid structure before its messages"
@@ -3193,7 +3343,12 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                     [],
                     |row| row.get(0),
                 )?,
-                conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                // The replier's implicit follow parks until the placeholder
+                // channel is adopted; only the message's own park counts here.
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_pending_replication WHERE dependency_kind <> 'follow-target'",
+                    [],
+                    |row| {
                     row.get(0)
                 })?,
             ))

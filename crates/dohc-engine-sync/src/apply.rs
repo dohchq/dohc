@@ -8,14 +8,16 @@ use dohc_engine_domain::chats::{
     index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
-    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
-    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, has_projection_control_char,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
+    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
+    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
+    attachment_id_for, channel_slug_for_name, encode_poll_options, has_projection_control_char,
     is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
-    normalize_channel_name, normalize_display_name, normalize_feed_identity,
-    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, validate_addressable_plaintext_path,
+    normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path,
 };
 
 use crate::error::local_corruption;
@@ -624,6 +626,13 @@ struct ChannelCreate {
     kind: String,
     created_at_ms: i64,
     wire_id: Option<String>,
+    /// Group fields, absent from ops written before the groups migration.
+    #[serde(rename = "type", default)]
+    channel_type: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    folder_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -643,6 +652,9 @@ struct ThreadCreate {
     linked_at_ms: Option<i64>,
     channel_slug: Option<String>,
     channel_wire_id: Option<String>,
+    /// Absent from ops written before the groups migration: a post.
+    #[serde(default)]
+    lane: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -671,6 +683,12 @@ struct DecisionSet {
     at_ms: i64,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     resolved_by_message_id: Option<String>,
+    /// A poll's choices. Absent for a bare question and for ops written
+    /// before the groups migration.
+    #[serde(default)]
+    options: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    chosen_option: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -825,6 +843,26 @@ fn apply_channel(
             reason: "chat channel kind is invalid",
         });
     }
+    let kind = match payload.kind.as_str() {
+        "channel" => ChatChannelKind::Channel,
+        "dm" => ChatChannelKind::Dm,
+        _ => ChatChannelKind::Agent,
+    };
+    let channel_type = match payload.channel_type.as_deref() {
+        None => ChatChannelType::default(),
+        Some(raw) => ChatChannelType::parse(raw).ok_or(SyncError::InvalidInput {
+            reason: "chat channel type is invalid",
+        })?,
+    };
+    let group = normalize_channel_group(
+        ChannelGroup {
+            channel_type,
+            purpose: payload.purpose.clone().unwrap_or_default(),
+            folder_path: payload.folder_path.clone(),
+        },
+        kind,
+    )
+    .map_err(|error| map_chat_rule(error, "chat channel group is invalid"))?;
     if !is_replicated_timestamp(payload.created_at_ms) {
         return Err(SyncError::InvalidInput {
             reason: "chat channel timestamp is invalid",
@@ -880,9 +918,20 @@ fn apply_channel(
             )?;
             debug_assert!(is_replicated_channel_slug(&slug));
             tx.execute(
-                "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6 \
+                "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6, \
+                     type = ?7, purpose = ?8, folder_path = ?9 \
                  WHERE workspace_id = ?1 AND channel_id = ?2",
-                params![op.workspace_id, channel_id, name, slug, payload.kind, payload.created_at_ms],
+                params![
+                    op.workspace_id,
+                    channel_id,
+                    name,
+                    slug,
+                    payload.kind,
+                    payload.created_at_ms,
+                    group.channel_type.as_str(),
+                    group.purpose,
+                    group.folder_path
+                ],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
@@ -897,15 +946,19 @@ fn apply_channel(
     debug_assert!(is_replicated_channel_slug(&slug));
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
-         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+         (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+          type, purpose, folder_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
         params![
             op.workspace_id,
             channel_id,
             name,
             slug,
             payload.kind,
-            payload.created_at_ms
+            payload.created_at_ms,
+            group.channel_type.as_str(),
+            group.purpose,
+            group.folder_path
         ],
     )
     .map_err(SyncError::persist)?;
@@ -1150,11 +1203,25 @@ fn apply_thread(
         None
     };
     let (linked_object_id, linked_path_hint) = linked_object_for_apply(tx, op, &payload)?;
+    let lane = match payload.lane.as_deref() {
+        None => ChatThreadLane::default(),
+        Some(raw) => ChatThreadLane::parse(raw).ok_or(SyncError::InvalidInput {
+            reason: "chat thread lane is invalid",
+        })?,
+    };
+    // A file-linked thread has no lane of its own; it is always a post. The
+    // owner shape above already refuses a thread that names both a channel
+    // and a file, so a chat lane needs a channel and nothing linked.
+    if lane == ChatThreadLane::Chat && (channel_id.is_none() || linked_object_id.is_some()) {
+        return Err(SyncError::InvalidInput {
+            reason: "only a channel thread has a chat lane",
+        });
+    }
     tx.execute(
         "INSERT OR IGNORE INTO chat_threads \
-         (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
-          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
-        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, linked_object_id, linked_path_hint, payload.linked_at_ms, channel_id],
+         (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id, lane) \
+          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, linked_object_id, linked_path_hint, payload.linked_at_ms, channel_id, lane.as_str()],
     )
     .map_err(SyncError::persist)?;
     upsert_chat_search_index_row(
@@ -1498,6 +1565,28 @@ fn apply_decision(
             reason: "chat decision payload is invalid",
         });
     }
+    let options = normalize_poll_options(p.options.as_deref().unwrap_or(&[]))
+        .map_err(|error| map_chat_rule(error, "chat decision options are invalid"))?;
+    let chosen_option = match p.chosen_option.as_deref() {
+        None => {
+            // A resolved poll names its answer; a bare question has none.
+            if p.state == "resolved" && !options.is_empty() {
+                return Err(SyncError::InvalidInput {
+                    reason: "chat decision choice is invalid",
+                });
+            }
+            None
+        }
+        Some(chosen) => {
+            if p.state != "resolved" || !options.iter().any(|option| option == chosen) {
+                return Err(SyncError::InvalidInput {
+                    reason: "chat decision choice is invalid",
+                });
+            }
+            Some(chosen.to_owned())
+        }
+    };
+    let options_json = encode_poll_options(&options);
     let prior_thread_id = tx
         .query_row(
             "SELECT thread_id FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
@@ -1508,14 +1597,16 @@ fn apply_decision(
         .map_err(SyncError::corrupt)?;
     let updated = tx.execute(
         "INSERT INTO chat_decisions \
-         (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq, \
+          options_json, chosen_option) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(workspace_id, message_id) DO UPDATE SET \
            thread_id=excluded.thread_id, state=excluded.state, resolved_by_message_id=excluded.resolved_by_message_id, \
-           at_ms=excluded.at_ms, origin_id=excluded.origin_id, origin_seq=excluded.origin_seq \
+           at_ms=excluded.at_ms, origin_id=excluded.origin_id, origin_seq=excluded.origin_seq, \
+           options_json=excluded.options_json, chosen_option=excluded.chosen_option \
          WHERE (excluded.at_ms, excluded.state='resolved', excluded.origin_id, excluded.origin_seq) > \
                (at_ms, state='resolved', origin_id, origin_seq)",
-        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq],
+        params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq, options_json, chosen_option],
     )
     .map_err(SyncError::persist)?;
     if updated > 0 {

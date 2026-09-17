@@ -551,6 +551,8 @@ type ChatChannelId = string;
 // A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
+/// What a group holds: posts, one running chat, or both.
+export type ChatChannelType = "posts" | "chat" | "both";
 
 type ChatActor =
   | { kind: "human"; displayName: string }
@@ -572,6 +574,11 @@ export interface ChatChannel {
   name: string;
   slug: string;
   kind: ChatChannelKind;
+  type: ChatChannelType;
+  purpose: string;
+  // The workspace-relative folder the group's files live in. Absent for
+  // dm and agent channels and for channels older than the groups migration.
+  folderPath?: string;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -595,6 +602,11 @@ interface ChatThreadReadState {
   updatedAtMs: number;
 }
 
+/// Which lane a channel thread sits in. The posts lane is the feed; the
+/// chat lane is the group's one running conversation, kept out of the feed
+/// and the post list.
+export type ChatThreadLane = "posts" | "chat";
+
 export interface ChatThread {
   id: ChatThreadId;
   workspaceId: WorkspaceId;
@@ -603,6 +615,8 @@ export interface ChatThread {
   title: string;
   createdAtMs: number;
   updatedAtMs: number;
+  // Absent on older fixtures; a thread without a lane is a post.
+  lane?: ChatThreadLane;
   // Exactly-one-owner (P0E rule, tightened at the WS-E gate): a thread is
   // file-linked OR belongs to a channel — never both, never neither. The
   // store enforces this at creation (createThread requires a linked file;
@@ -641,6 +655,10 @@ interface ChatDecisionRecord {
   state: ChatDecisionState;
   resolvedByMessageId?: ChatMessageId;
   atMs: number;
+  // A poll's choices, in order. Absent for a bare question.
+  options?: readonly string[];
+  // The choice the answer named, when the poll had choices.
+  chosenOption?: string;
 }
 
 interface ChatAttachment {
@@ -829,6 +847,9 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     name: string;
     kind?: ChatChannelKind;
+    type?: ChatChannelType;
+    purpose?: string;
+    folderPath?: string;
   }): Promise<ChatChannel>;
   // Idempotent: creates the workspace's default "general" channel on first
   // chat use, returns the existing one afterwards.
@@ -863,6 +884,7 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
     title?: string;
+    lane?: ChatThreadLane;
     author: ChatActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -871,6 +893,8 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    // A poll's choices. Implies needsDecision.
+    options?: string[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;
@@ -880,9 +904,11 @@ export interface LinkedChatStore {
     }>;
   }): Promise<{ thread: ChatThread; message: ChatMessage }>;
   // Most-recent-activity first, with derived unread counts.
+  // The posts lane unless a lane is named.
   listChannelThreads(input: {
     workspaceId: WorkspaceId;
     channelId: ChatChannelId;
+    lane?: ChatThreadLane;
   }): Promise<ChannelThreadSummary[]>;
   // Monotonic cursor advance: a lower-or-equal sequence is a no-op returning
   // the current state (revision unchanged); upToSequence clamps to the
@@ -915,6 +941,8 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
+    // A poll's choices. Implies needsDecision.
+    options?: string[];
     attachments?: Array<{
       objectId: WorkspaceObjectId;
       pathHint?: string;
@@ -936,6 +964,8 @@ export interface LinkedChatStore {
     threadId: ChatThreadId;
     messageId: ChatMessageId;
     resolvedByMessageId: ChatMessageId;
+    // The choice, when the poll has choices. Must be one of them.
+    chosenOption?: string;
   }): Promise<ChatDecisionRecord>;
   listThreadDecisions(
     workspaceId: WorkspaceId,

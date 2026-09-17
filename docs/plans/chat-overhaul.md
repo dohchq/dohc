@@ -79,7 +79,7 @@ Gate: `pnpm verify:pr --base main` green. `pnpm test:desktop:e2e` green on the c
 
 ## Phase 2: engine, group as folder
 
-**Status: not started. Do not start before phase 1 ships.**
+**Status: implemented on `feat/chat-engine`, stacked on phase 1; in review. Item 2, members as an engine op, is not built: members remain relay grants, and `chat-overhaul-phase2.md` records why.**
 
 The changes the prototype needs that the engine does not have. Each is small on its own. Together they replace two share systems with one.
 
@@ -103,7 +103,7 @@ Gate: `pnpm verify:pr --base main` with both `--job js` and `--job rust` green. 
 
 ## Phase 3: agents
 
-**Status: not started. Depends on phase 2 item 6.**
+**Status: implemented on `feat/chat-engine` with phase 2; in review.**
 
 1. Add agent under Agents in the nav: name, runner, check. Writes the existing `runner` settings. Replaces the "Set up your agent" card in the channel view.
 2. The agent's screen: runner, what it reaches, recent work.

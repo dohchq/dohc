@@ -38,7 +38,7 @@ struct ChatFeedListParams {
 }
 
 fn feed_channel_json(channel: &ChatChannel) -> Value {
-    json!({
+    let mut value = json!({
         "id": channel.channel_id,
         "workspaceId": channel.workspace_id,
         "name": channel.name,
@@ -48,9 +48,15 @@ fn feed_channel_json(channel: &ChatChannel) -> Value {
             ChatChannelKind::Dm => "dm",
             ChatChannelKind::Agent => "agent",
         },
+        "type": channel.group.channel_type.as_str(),
+        "purpose": channel.group.purpose,
         "createdAtMs": channel.created_at_ms,
         "updatedAtMs": channel.updated_at_ms,
-    })
+    });
+    if let Some(folder) = &channel.group.folder_path {
+        value["folderPath"] = json!(folder);
+    }
+    value
 }
 
 fn feed_read_state_json(state: &ChatFeedReadState) -> Value {

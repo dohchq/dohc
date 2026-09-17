@@ -55,12 +55,46 @@ describe("ChatsView channels", () => {
       expect(bridgeMock.createChatChannel).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         name: "launch",
+        type: "posts",
       }),
     );
     // Straight into the new channel — no extra click.
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
       "launch",
     );
+  });
+
+  it("creates a group with the type and purpose the form holds", async () => {
+    const user = userEvent.setup();
+    bridgeMock.createChatChannel.mockResolvedValue({
+      channel: channel({
+        id: "channel-10",
+        name: "Launch team",
+        slug: "launch-team",
+        type: "both",
+        purpose: "Ship it.",
+        wireId: "channel-10",
+      }),
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "Launch team");
+    await user.type(screen.getByTestId("chats-new-channel-purpose"), "Ship it.");
+    await user.click(screen.getByTestId("chats-new-channel-type-both"));
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+
+    await waitFor(() =>
+      expect(bridgeMock.createChatChannel).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        name: "Launch team",
+        type: "both",
+        purpose: "Ship it.",
+      }),
+    );
+    const view = await screen.findByTestId("chats-channel-view");
+    expect(view.dataset.groupType).toBe("both");
+    expect(screen.getByTestId("chats-group-lane-chat")).toBeTruthy();
   });
 
   // A channel on screen with no answer in the joined lane is a locked

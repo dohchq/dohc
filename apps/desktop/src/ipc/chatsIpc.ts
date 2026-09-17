@@ -1,3 +1,4 @@
+import { groupFolderForName } from "@dohc/security-contract";
 import {
   ListFileChatsPayload,
   CreateFileChatPayload,
@@ -173,6 +174,8 @@ export function registerChatsIpcHandlers<
     ): Promise<ChatBookmark>;
   };
   notifyRenderer(input: { workspaceId: string }): void;
+  // A group is a folder. Main creates it when the group is created.
+  ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor,
@@ -180,7 +183,7 @@ export function registerChatsIpcHandlers<
     localReactorFallbackId, currentCredentials, verifiedChatAuthorUserIdFor, revalidateChatWrite,
     chatRelayIdentityFor, syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
-    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer, ensureGroupFolder,
   } = dependencies;
   const { requireChatScope, syncChatWriteFor, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark, materializePendingChatBookmarks } = desktopChatBookmarks;
@@ -529,6 +532,8 @@ export function registerChatsIpcHandlers<
         ...(decision.resolvedByMessageId
           ? { resolvedByMessageId: decision.resolvedByMessageId }
           : {}),
+        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
         atMs: decision.atMs,
       })),
     });
@@ -552,6 +557,7 @@ export function registerChatsIpcHandlers<
       threadId: input.threadId,
       messageId: input.messageId,
       resolvedByMessageId: input.resolvedByMessageId,
+      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
     });
     syncChatWriteFor(scope, { threadId: input.threadId });
     return ResolveChatDecisionResult.parse({
@@ -562,6 +568,8 @@ export function registerChatsIpcHandlers<
         ...(decision.resolvedByMessageId
           ? { resolvedByMessageId: decision.resolvedByMessageId }
           : {}),
+        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
         atMs: decision.atMs,
       },
     });
@@ -592,6 +600,9 @@ export function registerChatsIpcHandlers<
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      type: channel.type,
+      purpose: channel.purpose,
+      ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
       createdAtMs: channel.createdAtMs,
       updatedAtMs: channel.updatedAtMs,
       threadCount: channel.threadCount,
@@ -929,10 +940,21 @@ export function registerChatsIpcHandlers<
         requireEngineCapture(workspaceId, "Chats"),
       assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),
       run: async ({ workspace }, input) => {
+        // A group is a folder: the folder is the group's slug unless the
+        // creator named one. Main creates it so the group's files have a
+        // home before the first post.
+        const folderPath = input.folderPath ?? groupFolderForName(input.name);
+        if (!folderPath) {
+          throw new Error("Give the group a name with a letter or a number, or name its folder.");
+        }
+        await ensureGroupFolder(workspace, folderPath);
         const channel = await linkedChatStoreFor(workspace).createChannel({
           workspaceId: workspace.workspaceId,
           name: input.name,
           kind: "channel",
+          ...(input.type ? { type: input.type } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          ...(folderPath ? { folderPath } : {}),
         });
         return CreateChatChannelResult.parse({
           // A locally created channel's wire identity is its own id.
@@ -974,6 +996,7 @@ export function registerChatsIpcHandlers<
     const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
+      ...(input.lane ? { lane: input.lane } : {}),
     });
     return ListChannelThreadsResult.parse({
       threads: threads.map((thread) =>
@@ -1019,6 +1042,7 @@ export function registerChatsIpcHandlers<
         store.startChannelThread({
           workspaceId: workspace.workspaceId,
           channelId: input.channelId,
+          ...(input.lane ? { lane: input.lane } : {}),
           author: { kind: "human", displayName: localUserDisplayName() },
           ...(authorUserId ? { authorUserId } : {}),
           body: input.body,

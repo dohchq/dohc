@@ -14,15 +14,12 @@ import type {
 // manager owns it; `undefined` means even that could not be read.
 function storedSelectorKind(
   selectorJson: string,
-): { selectorKind: "chat-channel" } | Record<string, never> {
+): { selectorKind: "chat-channel" | "group" } | Record<string, never> {
   try {
     const parsed: unknown = JSON.parse(selectorJson);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      (parsed as { kind?: unknown }).kind === "chat-channel"
-    ) {
-      return { selectorKind: "chat-channel" };
+    const kind = (parsed as { kind?: unknown } | null)?.kind;
+    if (typeof parsed === "object" && parsed !== null && (kind === "chat-channel" || kind === "group")) {
+      return { selectorKind: kind };
     }
   } catch {
     // Unreadable JSON names no kind.

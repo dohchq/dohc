@@ -38,6 +38,7 @@ const postArgsSchema = z
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
+    options: z.array(z.string().min(1)).max(12).optional(),
     body: z.string().min(1),
   })
   .strict();
@@ -49,7 +50,9 @@ const replyArgsSchema = z
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
+    options: z.array(z.string().min(1)).max(12).optional(),
     resolve: z.string().min(1).optional(),
+    choose: z.string().min(1).optional(),
     body: z.string().min(1),
   })
   .strict();
@@ -313,6 +316,7 @@ const cliChannelSchema = z
     name: z.string().min(1),
     slug: z.string().min(1),
     kind: z.enum(["channel", "dm", "agent"]),
+    purpose: z.string().min(1).optional(),
   })
   .strict();
 export type CliChannel = z.infer<typeof cliChannelSchema>;
@@ -327,6 +331,7 @@ export type CliAuthor = z.infer<typeof cliAuthorSchema>;
 
 const cliThreadSummarySchema = z
   .object({
+    lane: z.enum(["posts", "chat"]).optional(),
     id: z.string().min(1),
     title: z.string(),
     commentCount: z.number().int().nonnegative(),
@@ -366,6 +371,8 @@ const cliShowMessageSchema = z
     createdAtMs: z.number().int().nonnegative(),
     parentMessageId: z.string().min(1).optional(),
     decisionState: z.enum(["open", "resolved"]).optional(),
+    decisionOptions: z.array(z.string()).optional(),
+    decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
   })
@@ -602,12 +609,14 @@ const channelsFullResultSchema = z.discriminatedUnion("ok", [
             name: z.string().min(1),
             slug: z.string().min(1),
             kind: z.enum(["channel", "dm", "agent"]),
+            purpose: z.string().min(1).optional(),
             threadCount: z.number().int().nonnegative(),
             threads: z.array(
               z
                 .object({
                   id: rawThreadIdSchema,
                   title: z.string(),
+                  lane: z.enum(["posts", "chat"]).optional(),
                   messageCount: z.number().int().nonnegative(),
                   updatedAtMs: z.number().int().nonnegative(),
                 })

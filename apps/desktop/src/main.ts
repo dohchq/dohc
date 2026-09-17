@@ -132,6 +132,7 @@ import {
   resetFailedJoinFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
+import { createFolder } from "./workspaces/workspaceFiles";
 import {
   completePendingEngineStoreMove,
   EngineStoreRecoveryFailedError,
@@ -203,7 +204,7 @@ import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
 import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
-import { relayUrlsMatch } from "./workspaces/syncCode";
+import { buildShareCode, relayUrlsMatch } from "./workspaces/syncCode";
 import {
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
@@ -4133,6 +4134,15 @@ function registerIpcHandlers(): void {
     peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
+    unmountShareFolder: ({ workspace, shareId, assertCurrent }) =>
+      shareMountCommands.unmount({ workspace, shareId, assertCurrent }),
+    mountShareFolder: ({ workspace, shareId, relayUrl, labelHint, assertCurrent }) =>
+      shareMountCommands.mount({
+        workspace,
+        shareCode: buildShareCode({ shareId, relayUrl }),
+        ...(labelHint.length > 0 ? { labelHint } : {}),
+        assertCurrent,
+      }),
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
@@ -4324,6 +4334,9 @@ function registerIpcHandlers(): void {
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    ensureGroupFolder: async (workspace, folderPath) => {
+      await createFolder(workspace.rootPath, folderPath);
+    },
   });
 
   agentRunsIpc.registerChatRunRecords();
@@ -4355,6 +4368,11 @@ function registerIpcHandlers(): void {
     setCachedPreferredName: (preferredName) => { cachedPreferredName = preferredName; },
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService, withRendererWorkspaceOperation,
+    broadcastUserSettings: (result) => {
+      for (const window of workspaceWindows.allLive()) {
+        window.webContents.send(CHANNELS.userSettingsChanged, result);
+      }
+    },
   });
   settingsIpc.registerSettingsIpcHandlers();
 

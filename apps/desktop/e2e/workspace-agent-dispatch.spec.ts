@@ -15,13 +15,13 @@ import {
 const REPORT = "done: checked the exports";
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
 
-function runnerCommand(mode: "report" | "silent-fail"): string {
+function runnerCommand(mode: "report" | "silent-fail" | "ask"): string {
   return `node "${fakeRunner.replaceAll('"', '\\"')}" ${mode}`;
 }
 
 async function seedRunnerSettings(
   temp: Pick<TempWorkspace, "homeDir">,
-  mode: "report" | "silent-fail",
+  mode: "report" | "silent-fail" | "ask",
 ): Promise<string> {
   const command = runnerCommand(mode);
   const settings = {
@@ -116,6 +116,51 @@ test("My agent dispatches a fresh successful run for each human message", async 
     await expect(
       agentReplies.nth(1).getByTestId("chats-comment-agent-badge"),
     ).toHaveText("agent");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("an agent's question with choices is a poll; picking one answers it and the answer reaches the next run", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "agent-dispatch-ask-e2e";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedRunnerSettings(temp, "ask");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    await openMyAgent(page);
+
+    await page.getByTestId("chats-new-thread-composer").fill("plan the release");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+
+    // The agent asks with choices. The question is a poll: its choices are
+    // on screen and there is no bare Answer button.
+    const question = page.getByTestId("chats-message").filter({ hasText: "Which day do we ship?" });
+    await expect(question).toHaveCount(1);
+    await expect(question.getByTestId("chats-comment-agent-badge")).toHaveText("agent");
+    await expect(question.getByTestId("chats-comment-decision-open")).toHaveText("Poll open");
+    const options = question.getByTestId("chats-comment-poll-option");
+    await expect(options).toHaveText(["Friday", "Monday"]);
+    await expect(question.getByTestId("chats-comment-decision-resolve")).toHaveCount(0);
+
+    // Picking a choice answers the poll with that choice.
+    await options.nth(1).click();
+    await expect(page.getByTestId("chats-resolving-mode")).toContainText("Monday");
+    await page.getByTestId("chats-composer").press("Enter");
+    await expect(question.getByTestId("chats-comment-decision-resolved")).toHaveText("Answered");
+    await expect(options.nth(1)).toHaveAttribute("data-chosen", "true");
+    await expect(page.getByTestId("chats-message").filter({ hasText: "Monday" }).first()).toBeVisible();
+
+    // The answer is a human message, so it triggers a run. That run reads
+    // the taken choice out of the thread and reports it back.
+    await expect(
+      page.getByTestId("chats-message").filter({ hasText: "going with Monday" }),
+    ).toHaveCount(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

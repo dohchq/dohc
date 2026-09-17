@@ -1,5 +1,6 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, CreateFileThread, SendMessage, StartChannelThread,
+    ChannelGroup, ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, SendMessage,
+    StartChannelThread,
 };
 use dohc_engine_runtime::{CancellationToken, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -18,6 +19,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
             "existing-channel".to_owned(),
             "Project".to_owned(),
             ChatChannelKind::Channel,
+            ChannelGroup::default(),
             10,
             CancellationToken::new(),
         )
@@ -29,12 +31,14 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         thread_id: "existing-thread".to_owned(),
         message_id: "opening-message".to_owned(),
         title: Some("Project discussion".to_owned()),
+        lane: ChatThreadLane::Posts,
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
         author_user_id: Some("user-ada".to_owned()),
         origin: None,
         body: "Opening message".to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: 20,
         request_id: Some("existing-thread-request".to_owned()),
@@ -92,6 +96,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         origin: None,
         body: "Reply to the opening message".to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: 30,
         request_id: Some("cancelled-send-request".to_owned()),
@@ -106,6 +111,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
                 "cancelled-channel".to_owned(),
                 "Cancelled channel".to_owned(),
                 ChatChannelKind::Channel,
+                ChannelGroup::default(),
                 30,
                 token.clone(),
             )
@@ -196,6 +202,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
             "cancelled-channel".to_owned(),
             "Cancelled channel".to_owned(),
             ChatChannelKind::Channel,
+            ChannelGroup::default(),
             30,
             CancellationToken::new(),
         )

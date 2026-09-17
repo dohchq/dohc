@@ -274,11 +274,13 @@ describe("DM grants over the relay", () => {
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
 
-    // Defense in depth: an ambiguous body carrying both a chat-channel selector
-    // (channelWireId) and a path/version selector is a caller intent mismatch
-    // (e.g. reused request plumbing leaving a stale `paths`). It fails closed
-    // with 400 rather than silently dropping the paths and minting a full
-    // chat-channel grant.
+    // A channel with paths is a group share. A direct message is not a
+    // group: it has no folder, so the body is refused rather than minting a
+    // grant on a folder the DM never had.
+    const seeded = await h(
+      request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops: [dmChannelCreate()] })),
+    );
+    expect(seeded.status).toBe(200);
     const mixed = await h(
       request(
         OWNER,
@@ -287,7 +289,7 @@ describe("DM grants over the relay", () => {
       ),
     );
     expect(mixed.status).toBe(400);
-    expect((await json(mixed)).code).toBe("ambiguous_selector");
+    expect((await json(mixed)).code).toBe("invalid_channel");
 
     const granted = await json(await h(request(OWNER, "/sync/shares")));
     const grantedRow = (granted.granted as Array<Record<string, unknown>>).find(

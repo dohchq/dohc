@@ -62,6 +62,9 @@ type SeedChannelInput = {
   channelId: string;
   name: string;
   kind?: "channel" | "dm" | "agent";
+  type?: "posts" | "chat" | "both";
+  purpose?: string;
+  folderPath?: string;
   wireId?: string | null;
   createdAtMs?: number;
 };
@@ -544,7 +547,8 @@ function page<T>(
 
 function allowedKeys(method: string): readonly string[] {
   switch (method) {
-    case CHATS_METHOD.channelCreate: return ["channelId", "name", "kind", "nowMs"];
+    case CHATS_METHOD.channelCreate:
+      return ["channelId", "name", "kind", "type", "purpose", "folderPath", "nowMs"];
     case CHATS_METHOD.channelEnsureAgent:
     case CHATS_METHOD.channelEnsureGeneral:
       return ["channelId", "nowMs"];
@@ -557,12 +561,12 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
-        "channelId", "threadId", "messageId", "title", "authorKind", "authorDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "attachments", "nowMs",
+        "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName",
+        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
-    case CHATS_METHOD.threadsListForChannel: return ["channelId", "pageLimit", "cursor"];
+    case CHATS_METHOD.threadsListForChannel: return ["channelId", "lane", "pageLimit", "cursor"];
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
@@ -572,7 +576,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "attachments", "nowMs",
+        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -581,7 +585,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.readStateMarkThreadRead:
       return ["threadId", "upToSequence", "expectedRevision", "nowMs"];
     case CHATS_METHOD.decisionResolve:
-      return ["threadId", "messageId", "resolvedByMessageId", "nowMs"];
+      return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs"];
     case CHATS_METHOD.reactionSet:
       return [
         "threadId", "messageId", "emoji", "author", "replicationAuthorId",
@@ -680,6 +684,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name,
       slug: wantedSlug,
       kind: input.kind ?? "channel",
+      type: input.type ?? "posts",
+      purpose: input.purpose ?? "",
+      ...(input.folderPath !== undefined ? { folderPath: input.folderPath } : {}),
       createdAtMs: atMs,
       updatedAtMs: atMs,
       wireId: input.wireId === undefined ? input.channelId : input.wireId,
@@ -1091,6 +1098,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name: channel.name,
       slug: channel.slug,
       kind: channel.kind,
+      type: channel.type,
+      purpose: channel.purpose,
+      ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
       createdAtMs: channel.createdAtMs,
       updatedAtMs: channel.updatedAtMs,
     };
@@ -1110,6 +1120,24 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (kind !== "channel" && kind !== "dm" && kind !== "agent") {
       throw new Error("invalid-channel-kind");
     }
+    const type = optionalString(params, "type") ?? "posts";
+    if (type !== "posts" && type !== "chat" && type !== "both") {
+      throw new Error("invalid-channel-type");
+    }
+    const purpose = (optionalString(params, "purpose") ?? "").trim();
+    if (purpose.length > 200 || /[\r\n]/u.test(purpose)) throw new Error("invalid-channel-purpose");
+    const folderPath = optionalString(params, "folderPath")?.trim();
+    if (folderPath && kind !== "channel") throw new Error("invalid-channel-folder");
+    if (
+      folderPath !== undefined &&
+      (folderPath.length === 0 ||
+        folderPath.startsWith("/") ||
+        folderPath.includes("\\") ||
+        folderPath.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+        /[\p{Cc}]/u.test(folderPath))
+    ) {
+      throw new Error("invalid-channel-folder");
+    }
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const channelSlug = slug(name);
     if (
@@ -1126,6 +1154,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       name,
       slug: channelSlug,
       kind,
+      type,
+      purpose,
+      ...(folderPath ? { folderPath } : {}),
       createdAtMs: atMs,
       updatedAtMs: atMs,
       wireId: channelId,
@@ -1215,12 +1246,28 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const title = optionalString(params, "title")?.trim() || body.split("\n")[0]?.slice(0, 80) || "New chat";
+    const lane = optionalString(params, "lane") ?? "posts";
+    if (lane !== "posts" && lane !== "chat") throw new Error("invalid-thread-lane");
+    // One chat lane per channel: a second start appends to the oldest,
+    // the way the engine does, and the caller's thread id is not used.
+    const existingLane = lane === "chat"
+      ? [...state.threads.values()]
+          .filter((thread) => thread.channelId === channelId && thread.lane === "chat")
+          .sort((a, b) => a.createdAtMs - b.createdAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+      : undefined;
+    if (existingLane) {
+      const message = this.insertMessage(state, workspace, params, existingLane.id, atMs);
+      existingLane.updatedAtMs = atMs;
+      this.bumpThreadRevision(state, existingLane.id);
+      return jsonResult({ thread: existingLane, message });
+    }
     const thread: ChatThread = {
       id: threadId,
       workspaceId: workspace,
       title,
       createdAtMs: atMs,
       updatedAtMs: atMs,
+      lane,
       channelId,
     };
     state.threads.set(threadId, thread);
@@ -1274,6 +1321,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         title: thread.title,
         createdAtMs: thread.createdAtMs,
         updatedAtMs: thread.updatedAtMs,
+        lane: thread.lane ?? "posts",
         channelId: thread.channelId ?? null,
         linkedObjectId: thread.linkedFile?.objectId ?? null,
       }));
@@ -1403,6 +1451,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     threadId: string,
     atMs: number,
   ): ChatMessage {
+    const options = params.options;
+    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid-poll-options");
+    const pollOptions: string[] = [];
+    if (Array.isArray(options)) {
+      if (options.length > 12) throw new Error("invalid-poll-options");
+      for (const raw of options) {
+        if (typeof raw !== "string") throw new Error("invalid-poll-options");
+        const option = raw.trim();
+        if (!option || option.length > 200 || /[\r\n]/u.test(option) || pollOptions.includes(option)) {
+          throw new Error("invalid-poll-options");
+        }
+        pollOptions.push(option);
+      }
+    }
     const messageId = requiredString(params, "messageId", "invalid-message-body");
     if (state.messages.has(messageId)) throw new Error("target-exists");
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
@@ -1464,12 +1526,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
         createdAtMs: atMs,
       });
     }
-    if (optionalBoolean(params, "needsDecision") === true) {
+    if (optionalBoolean(params, "needsDecision") === true || pollOptions.length > 0) {
       state.decisions.set(messageId, {
         threadId,
         messageId,
         state: "open",
         atMs,
+        ...(pollOptions.length > 0 ? { options: pollOptions } : {}),
       });
       this.bumpThreadRevision(state, threadId);
     }
@@ -1531,8 +1594,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const channelId = requiredString(params, "channelId");
     if (!state.channels.has(channelId)) throw new Error("channel-not-found");
+    const lane = optionalString(params, "lane") ?? "posts";
     const rows = [...state.threads.values()]
-      .filter((thread) => thread.channelId === channelId)
+      .filter((thread) => thread.channelId === channelId && (thread.lane ?? "posts") === lane)
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs || compareText(right.id, left.id))
       .map((thread) => {
         const messages = threadMessages(state, thread.id);
@@ -1632,6 +1696,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
       "invalid-message-body",
     );
     if (decision.state === "resolved") return jsonResult(decision);
+    const chosen = optionalString(params, "chosenOption")?.trim();
+    if (decision.options && decision.options.length > 0) {
+      if (!chosen || !decision.options.includes(chosen)) throw new Error("invalid-poll-choice");
+      decision.chosenOption = chosen;
+    } else if (chosen) {
+      throw new Error("invalid-poll-choice");
+    }
     decision.state = "resolved";
     decision.resolvedByMessageId = resolvedByMessageId;
     decision.atMs = Math.max(this.tick(optionalSafeInteger(params, "nowMs")), decision.atMs + 1);
@@ -2122,6 +2193,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
                   name: channel.name,
                   slug: channel.slug,
                   kind: channel.kind,
+                  type: channel.type,
+                  purpose: channel.purpose,
+                  ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
                   createdAtMs: channel.createdAtMs,
                   updatedAtMs: channel.updatedAtMs,
                 },

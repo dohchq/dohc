@@ -572,6 +572,13 @@ describe("readRelayChatShareLanes", () => {
               selector: { kind: "chat-channel", channelWireId: "wire-in" },
               access: "read-write",
             },
+            // A group is an invitation to its channel; the folder follows.
+            {
+              shareId: "share-group",
+              granterEmail: "owner@example.com",
+              selector: { kind: "group", channelWireId: "wire-group", paths: ["team"], versionId: null },
+              access: "read-only",
+            },
             { shareId: "share-other", selector: { kind: "document" } },
           ],
         }),
@@ -593,6 +600,12 @@ describe("readRelayChatShareLanes", () => {
           shareId: "share-in",
           channelWireId: "wire-in",
           access: "read-write",
+          granterEmail: "owner@example.com",
+        },
+        {
+          shareId: "share-group",
+          channelWireId: "wire-group",
+          access: "read-only",
           granterEmail: "owner@example.com",
         },
       ],

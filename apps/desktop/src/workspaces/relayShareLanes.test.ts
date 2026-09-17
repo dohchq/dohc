@@ -23,6 +23,13 @@ const chatRow = (shareId: string) => ({
   grantId: `grant-${shareId}`,
   generation: 1,
 });
+const groupRow = (shareId: string) => ({
+  shareId,
+  selector: { kind: "group", channelWireId: "wire-1", paths: ["team"], versionId: null },
+  access: "read-write",
+  grantId: `grant-${shareId}`,
+  generation: 1,
+});
 // What the relay sends for a row it could not read: no selector, and the
 // kind only when it survived.
 const damagedChatRow = (shareId: string) => ({
@@ -48,6 +55,17 @@ describe("relay share lanes", () => {
     const lanes = pathShareLanes({
       granted: [pathRow("s-path"), chatRow("s-chat")],
       received: [pathRow("r-path"), chatRow("r-chat")],
+    });
+    expect(lanes.granted.map((row) => row.shareId)).toEqual(["s-path"]);
+    expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);
+  });
+
+  // A group is one grant: its folder is not a second path share for
+  // Settings to list and end on its own.
+  it("sends a group grant to the chat manager too", () => {
+    const lanes = pathShareLanes({
+      granted: [pathRow("s-path"), groupRow("s-group")],
+      received: [pathRow("r-path"), groupRow("r-group"), { ...groupRow("r-damaged"), selector: null, damaged: true, selectorKind: "group" }],
     });
     expect(lanes.granted.map((row) => row.shareId)).toEqual(["s-path"]);
     expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);

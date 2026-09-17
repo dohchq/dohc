@@ -1639,6 +1639,9 @@ export const ChatDecisionRecord = z.object({
   state: z.enum(["open", "resolved"]),
   resolvedByMessageId: OPAQUE_ID.optional(),
   atMs: z.number(),
+  // A poll's choices, in order. Absent for a bare question.
+  options: z.array(z.string().min(1).max(200)).max(12).optional(),
+  chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
@@ -1662,6 +1665,7 @@ export const ResolveChatDecisionPayload = z.object({
   threadId: OPAQUE_ID,
   messageId: OPAQUE_ID,
   resolvedByMessageId: OPAQUE_ID,
+  chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ResolveChatDecisionPayload = z.infer<
   typeof ResolveChatDecisionPayload
@@ -1769,6 +1773,10 @@ export const ChatChannelRecord = z.object({
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   slug: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
   kind: z.enum(["channel", "dm", "agent"]),
+  // What the group holds and why it exists. Older fixtures omit them.
+  type: z.enum(["posts", "chat", "both"]).optional(),
+  purpose: z.string().max(200).optional(),
+  folderPath: PATH_STRING.optional(),
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
@@ -1920,6 +1928,10 @@ export type MarkPersonalChatFeedSeenPayload = z.infer<
 export const CreateChatChannelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   name: z.string().min(1).max(CHAT_CHANNEL_NAME_MAX),
+  type: z.enum(["posts", "chat", "both"]).optional(),
+  purpose: z.string().max(200).optional(),
+  // The group's folder. When absent main derives it from the name.
+  folderPath: PATH_STRING.optional(),
 });
 export type CreateChatChannelPayload = z.infer<typeof CreateChatChannelPayload>;
 
@@ -1931,6 +1943,8 @@ export type CreateChatChannelResult = z.infer<typeof CreateChatChannelResult>;
 export const ListChannelThreadsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
+  // The posts lane unless named.
+  lane: z.enum(["posts", "chat"]).optional(),
 });
 export type ListChannelThreadsPayload = z.infer<typeof ListChannelThreadsPayload>;
 
@@ -1948,6 +1962,7 @@ export const StartChannelThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
   body: CHAT_BODY,
+  lane: z.enum(["posts", "chat"]).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;

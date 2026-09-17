@@ -6,10 +6,11 @@
 //! base64url feed cursor) validated against real TS output — not Rust's own.
 
 use dohc_engine_domain::{
-    AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
-    ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
-    LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
+    ChatChannelKind, ChatChannelType, ChatDecisionState, ChatReactionState, ChatThreadLane,
+    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
+    LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
     encode_feed_cursor, linked_chat_projection_path,
 };
@@ -39,12 +40,14 @@ fn start_thread(
         thread_id: thread_id.to_owned(),
         message_id: message_id.to_owned(),
         title: None,
+        lane: ChatThreadLane::Posts,
         author_kind: kind,
         author_display_name: "Ada".to_owned(),
         author_user_id: Some("user-ada".to_owned()),
         origin: None,
         body: body.to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -69,6 +72,7 @@ fn send_msg(
         origin: None,
         body: body.to_owned(),
         needs_decision: false,
+        options: Vec::new(),
         attachments: Vec::new(),
         now_ms: now,
         request_id: None,
@@ -107,6 +111,508 @@ fn create_list_find_channel_round_trip() {
         .find_channel_by_slug(WS, "general-chat")
         .expect("find");
     assert_eq!(found.map(|c| c.channel_id), Some("chan-1".to_owned()));
+}
+
+#[test]
+fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+
+    let group = chats
+        .create_group(
+            WS,
+            "trip",
+            "Lisbon trip",
+            ChatChannelKind::Channel,
+            ChannelGroup {
+                channel_type: ChatChannelType::Both,
+                purpose: "  Dates, flights, the flat.  ".to_owned(),
+                folder_path: Some("trips/lisbon".to_owned()),
+            },
+            10,
+            &NO_FAULTS,
+        )
+        .expect("create group");
+    assert_eq!(group.group.channel_type, ChatChannelType::Both);
+    assert_eq!(group.group.purpose, "Dates, flights, the flat.");
+    assert_eq!(group.group.folder_path.as_deref(), Some("trips/lisbon"));
+
+    // The row reads back the same through every channel read.
+    let listed = chats.list_channels(WS).expect("list");
+    assert_eq!(listed[0].channel.group, group.group);
+    let found = chats
+        .find_channel_by_slug(WS, "lisbon-trip")
+        .expect("find")
+        .expect("present");
+    assert_eq!(found.group, group.group);
+
+    // A bare channel is a posts group with no folder.
+    let plain = chats
+        .create_channel(
+            WS,
+            "plain",
+            "Plain",
+            ChatChannelKind::Channel,
+            11,
+            &NO_FAULTS,
+        )
+        .expect("create plain");
+    assert_eq!(plain.group, ChannelGroup::default());
+
+    // A DM carries no folder.
+    let err = chats
+        .create_group(
+            WS,
+            "dm",
+            "someone@example.test",
+            ChatChannelKind::Dm,
+            ChannelGroup {
+                folder_path: Some("people/someone".to_owned()),
+                ..ChannelGroup::default()
+            },
+            12,
+            &NO_FAULTS,
+        )
+        .expect_err("a dm has no folder");
+    assert_eq!(err.code(), "invalid-channel-folder");
+
+    // Traversal and absolute paths are refused.
+    for bad in [
+        "../up",
+        "/abs",
+        "a//b",
+        "a/./b",
+        ".dohc/chats",
+        ".git/config",
+        "a/%2e%2e/b",
+        "a/%2e/b",
+        " team",
+        "team ",
+    ] {
+        let err = chats
+            .create_group(
+                WS,
+                &format!("bad-{}", bad.len()),
+                &format!("Bad {}", bad.len()),
+                ChatChannelKind::Channel,
+                ChannelGroup {
+                    folder_path: Some(bad.to_owned()),
+                    ..ChannelGroup::default()
+                },
+                13,
+                &NO_FAULTS,
+            )
+            .expect_err("bad folder");
+        assert_eq!(err.code(), "invalid-channel-folder", "{bad}");
+    }
+
+    // The create op carries the group so a replica draws it the same way.
+    let payload: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.channel.create' \
+                 ORDER BY origin_seq LIMIT 1",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled create");
+    let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+    assert_eq!(payload["type"], "both");
+    assert_eq!(payload["purpose"], "Dates, flights, the flat.");
+    assert_eq!(payload["folderPath"], "trips/lisbon");
+}
+
+#[test]
+fn competing_chat_lane_starts_append_to_one_thread_and_retry_the_same_message() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "Team",
+            ChatChannelKind::Channel,
+            1,
+            &NO_FAULTS,
+        )
+        .unwrap();
+    let mut first = start_thread(
+        "chan-1",
+        "lane-a",
+        "msg-a",
+        "First",
+        ChatActorKind::Human,
+        10,
+    );
+    first.lane = ChatThreadLane::Chat;
+    let mut second = start_thread(
+        "chan-1",
+        "lane-b",
+        "msg-b",
+        "Second",
+        ChatActorKind::Human,
+        10,
+    );
+    second.lane = ChatThreadLane::Chat;
+    second.author_user_id = Some("user-bob".to_owned());
+    second.request_id = Some("second-start".to_owned());
+    chats.start_channel_thread(&first, &NO_FAULTS).unwrap();
+    let (thread, message) = chats.start_channel_thread(&second, &NO_FAULTS).unwrap();
+    assert_eq!(thread.thread_id, "lane-a");
+    assert_eq!(message.thread_id, "lane-a");
+    assert_eq!(message.message_order, 1);
+    let (retry_thread, retry_message) = chats.start_channel_thread(&second, &NO_FAULTS).unwrap();
+    assert_eq!(retry_thread.thread_id, "lane-a");
+    assert_eq!(retry_message.message_id, "msg-b");
+    let threads = chats
+        .list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10)
+        .unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].message_count, 2);
+}
+
+#[test]
+fn group_purpose_counts_utf16_units() {
+    let group = ChannelGroup {
+        purpose: "💥".repeat(101),
+        ..ChannelGroup::default()
+    };
+    assert_eq!(
+        dohc_engine_domain::normalize_channel_group(group, ChatChannelKind::Channel)
+            .unwrap_err()
+            .code(),
+        "invalid-channel-purpose"
+    );
+}
+
+#[test]
+fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    chats
+        .ensure_default_channel_follows(WS, "user-ada", &NO_FAULTS)
+        .expect("follows");
+
+    let post = start_thread(
+        "chan-1",
+        "post-1",
+        "post-msg",
+        "A post",
+        ChatActorKind::Human,
+        20,
+    );
+    chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    let mut lane = start_thread(
+        "chan-1",
+        "lane-1",
+        "lane-msg",
+        "hey",
+        ChatActorKind::Human,
+        30,
+    );
+    lane.lane = ChatThreadLane::Chat;
+    let (started, _) = chats
+        .start_channel_thread(&lane, &NO_FAULTS)
+        .expect("chat lane");
+    assert_eq!(started.lane, ChatThreadLane::Chat);
+
+    // The posts lane lists the post only; the chat lane lists the conversation only.
+    let posts = chats
+        .list_channel_threads(WS, "chan-1", None, 10)
+        .expect("posts");
+    assert_eq!(
+        posts
+            .iter()
+            .map(|row| row.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["post-1"]
+    );
+    let chat = chats
+        .list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10)
+        .expect("chat lane");
+    assert_eq!(
+        chat.iter()
+            .map(|row| row.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lane-1"]
+    );
+    assert_eq!(chat[0].thread.lane, ChatThreadLane::Chat);
+
+    // Home never shows a chat line, even from a followed channel.
+    let feed = chats
+        .list_personal_feed(WS, "user-ada", Some(10), None)
+        .expect("feed");
+    assert_eq!(
+        feed.items
+            .iter()
+            .map(|item| item.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["post-1"]
+    );
+
+    // The lane rides the wire so a replica keeps the line out of its feed too.
+    let payload: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT payload_json FROM replication_log                  WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create'                  ORDER BY origin_seq DESC LIMIT 1",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled thread");
+    let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+    assert_eq!(payload["lane"], "chat");
+}
+
+#[test]
+fn a_poll_carries_its_choices_and_the_answer_names_one() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    let mut question = start_thread(
+        "chan-1",
+        "poll-1",
+        "poll-msg",
+        "Which fare?",
+        ChatActorKind::Agent,
+        20,
+    );
+    question.options = vec![" 7am direct ".to_owned(), "2pm with a stop".to_owned()];
+    chats
+        .start_channel_thread(&question, &NO_FAULTS)
+        .expect("poll");
+
+    let open = chats
+        .list_thread_decisions(WS, "poll-1", None, 10)
+        .expect("decisions");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].state, ChatDecisionState::Open);
+    assert_eq!(open[0].options, vec!["7am direct", "2pm with a stop"]);
+    assert_eq!(open[0].chosen_option, None);
+
+    // Twelve is the cap; a repeated or empty choice is refused.
+    for bad in [
+        vec!["a".to_owned(), "a".to_owned()],
+        vec!["".to_owned()],
+        vec!["💥".repeat(101)],
+        (0..13).map(|n| n.to_string()).collect::<Vec<_>>(),
+    ] {
+        let mut attempt = start_thread(
+            "chan-1",
+            &format!("bad-{}", bad.len()),
+            &format!("bad-msg-{}", bad.len()),
+            "?",
+            ChatActorKind::Agent,
+            21,
+        );
+        attempt.options = bad;
+        let err = chats
+            .start_channel_thread(&attempt, &NO_FAULTS)
+            .expect_err("bad options");
+        assert_eq!(err.code(), "invalid-poll-options");
+    }
+
+    // The answer names a choice, and only one of the poll's.
+    let answer = send_msg(
+        "poll-1",
+        "answer-msg",
+        Some("poll-msg"),
+        "The early one.",
+        30,
+    );
+    chats.send_message(&answer, &NO_FAULTS).expect("answer");
+    let resolve = |chosen: Option<&str>, request: &str| ResolveDecision {
+        workspace_id: WS.to_owned(),
+        thread_id: "poll-1".to_owned(),
+        message_id: "poll-msg".to_owned(),
+        resolved_by_message_id: "answer-msg".to_owned(),
+        chosen_option: chosen.map(str::to_owned),
+        now_ms: 31,
+        request_id: request.to_owned(),
+    };
+    let err = chats
+        .resolve_decision(&resolve(None, "r-none"), &NO_FAULTS)
+        .expect_err("a poll needs a choice");
+    assert_eq!(err.code(), "invalid-poll-choice");
+    let err = chats
+        .resolve_decision(&resolve(Some("noon"), "r-noon"), &NO_FAULTS)
+        .expect_err("not a choice");
+    assert_eq!(err.code(), "invalid-poll-choice");
+    let resolved = chats
+        .resolve_decision(&resolve(Some("7am direct"), "r-ok"), &NO_FAULTS)
+        .expect("answered");
+    assert_eq!(resolved.state, ChatDecisionState::Resolved);
+    assert_eq!(resolved.chosen_option.as_deref(), Some("7am direct"));
+    assert_eq!(resolved.options, vec!["7am direct", "2pm with a stop"]);
+
+    // The choices and the answer ride the wire.
+    let payloads: Vec<String> = store
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload_json FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.decision.set' \
+                     ORDER BY origin_seq",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([WS], |row| row.get::<_, String>(0))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled decisions");
+    let last: serde_json::Value =
+        serde_json::from_str(payloads.last().expect("one")).expect("json");
+    assert_eq!(last["state"], "resolved");
+    assert_eq!(
+        last["options"],
+        serde_json::json!(["7am direct", "2pm with a stop"])
+    );
+    assert_eq!(last["chosenOption"], "7am direct");
+}
+
+#[test]
+fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+
+    // The poster follows the post. (start_thread signs as user-ada.)
+    let post = start_thread(
+        "chan-1",
+        "post-1",
+        "post-msg",
+        "A post",
+        ChatActorKind::Human,
+        20,
+    );
+    chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    let follows = |chats: &LinkedChatStore<'_>, owner: &str| {
+        chats
+            .list_follows(WS, owner, Some("following"))
+            .expect("follows")
+            .into_iter()
+            .filter(|f| f.target_kind == FollowTargetKind::Thread)
+            .map(|f| f.target_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
+
+    // A commenter follows it too.
+    let mut comment = send_msg("post-1", "comment-msg", Some("post-msg"), "Nice", 30);
+    comment.author_user_id = Some("user-bob".to_owned());
+    chats.send_message(&comment, &NO_FAULTS).expect("comment");
+    assert_eq!(follows(&chats, "user-bob"), vec!["post-1"]);
+
+    // So does someone who only reacts.
+    chats
+        .set_reaction(
+            &SetReaction {
+                workspace_id: WS.to_owned(),
+                thread_id: "post-1".to_owned(),
+                message_id: "post-msg".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "user-cy".to_owned(),
+                replication_author_id: Some("user-cy".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Cy".to_owned(),
+                state: ChatReactionState::Added,
+                now_ms: 40,
+                request_id: "react-1".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("react");
+    assert_eq!(follows(&chats, "user-cy"), vec!["post-1"]);
+
+    // An agent's reply follows nobody; a local-only author has no feed owner.
+    let mut agent = send_msg("post-1", "agent-msg", None, "On it.", 50);
+    agent.author_kind = ChatActorKind::Agent;
+    agent.author_user_id = Some("user-ada".to_owned());
+    chats.send_message(&agent, &NO_FAULTS).expect("agent reply");
+    let mut local = send_msg("post-1", "local-msg", None, "offline", 60);
+    local.author_user_id = None;
+    chats.send_message(&local, &NO_FAULTS).expect("local reply");
+    assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
+
+    // An unfollow the person chose stands: commenting again does not re-follow.
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "user-bob".to_owned(),
+                replication_owner_user_id: Some("user-bob".to_owned()),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "post-1".to_owned(),
+                state: FollowState::Unfollowed,
+                now_ms: 70,
+            },
+            &NO_FAULTS,
+        )
+        .expect("unfollow");
+    let mut again = send_msg("post-1", "comment-2", None, "Still here", 80);
+    again.author_user_id = Some("user-bob".to_owned());
+    chats
+        .send_message(&again, &NO_FAULTS)
+        .expect("comment again");
+    assert!(follows(&chats, "user-bob").is_empty());
+
+    // The follow rides the wire so the person's other devices agree.
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journaled follows");
+    assert_eq!(journaled, 4, "three implicit follows and one unfollow");
 }
 
 #[test]
@@ -463,6 +969,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
                 thread_id: "thread-revision".to_owned(),
                 message_id: "message-opening".to_owned(),
                 resolved_by_message_id: "message-reply".to_owned(),
+                chosen_option: None,
                 now_ms: 50,
                 request_id: "decision-revision".to_owned(),
             },
@@ -983,7 +1490,9 @@ fn follow_lww_last_write_wins_and_lists_active() {
         .expect("f3");
     assert_eq!(active.state, FollowState::Following);
     assert!(active.origin_id.starts_with("origin_"));
-    assert_eq!(active.origin_seq, 3);
+    // The poster's implicit follow journaled first, so the three explicit
+    // writes sit one sequence later.
+    assert_eq!(active.origin_seq, 4);
 }
 
 #[test]
@@ -1084,7 +1593,9 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
             mapped.collect()
         })
         .expect("follow replication rows");
-    assert_eq!(rows.len(), 2);
+    // The poster's implicit follow is row 0; the two explicit writes follow.
+    assert_eq!(rows.len(), 3);
+    let rows = &rows[1..];
     assert_eq!(rows[1].0, rows[0].0 + 1);
     assert_eq!(rows[0].2, 0);
     assert_eq!(rows[1].2, 0);
@@ -1153,7 +1664,9 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
             })
             .expect("follow op count")
     };
-    assert_eq!(follow_ops(&store), 0);
+    // One: the poster's implicit follow of t1. The signed-out follow above
+    // journaled nothing.
+    assert_eq!(follow_ops(&store), 1);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let mismatch = chats
@@ -1171,7 +1684,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .unwrap_err();
     assert_eq!(mismatch.code(), "invalid-follow-target");
-    assert_eq!(follow_ops(&store), 0);
+    assert_eq!(follow_ops(&store), 1);
 
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1188,7 +1701,8 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
             &NO_FAULTS,
         )
         .expect("verified follow");
-    assert_eq!(follow_ops(&store), 1);
+    // The poster's implicit follow plus this one.
+    assert_eq!(follow_ops(&store), 2);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let head = chats
@@ -1310,6 +1824,8 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "name": "general",
             "slug": "general",
             "kind": "channel",
+            "type": "posts",
+            "purpose": "",
             "createdAtMs": 10,
             "wireId": GENERAL_CHANNEL_WIRE_ID,
         })
@@ -1321,6 +1837,7 @@ fn core_chat_creates_journal_exact_relay_payloads() {
             "threadId": "thread-1",
             "title": "Launch",
             "createdAtMs": 20,
+            "lane": "posts",
             "channelSlug": "general",
             "channelWireId": GENERAL_CHANNEL_WIRE_ID,
         })
@@ -1504,9 +2021,10 @@ fn authored_reply_exports_structure_without_exporting_local_parent() {
                 .collect()
         })
         .expect("exported ops");
+    // Sequence 3 is the replier's implicit follow, which this query leaves out.
     assert_eq!(
         ops.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 4, 5]
     );
     assert_eq!(
         ops.iter()
@@ -1525,6 +2043,7 @@ fn authored_reply_exports_structure_without_exporting_local_parent() {
             "threadId": "local-thread",
             "title": "Local thread",
             "createdAtMs": 20,
+            "lane": "posts",
             "channelSlug": "general",
             "channelWireId": GENERAL_CHANNEL_WIRE_ID,
         })

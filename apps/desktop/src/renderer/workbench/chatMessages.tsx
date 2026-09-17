@@ -539,6 +539,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // When provided, each message gets a reaction row (pills + quick-pick).
   reactionControls?: ChatReactionControls;
+  renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
   flashMessageId?: string | null;
   onMessageElement?: (messageId: string, element: HTMLLIElement | null) => void;
 }) {
@@ -651,6 +652,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                         onOpenPath={props.onOpenPath}
                       />
                     </p>
+                    {props.renderMessageFooter?.(message)}
                     {props.reactionControls ? (
                       <MessageReactions
                         testIdPrefix={props.testIdPrefix}

@@ -111,41 +111,101 @@ function AgentBadge(props: { testIdPrefix: string }) {
   );
 }
 
-function DecisionStatus(props: {
+// A poll's choices, stacked. Picking one is the answer. An answered poll
+// keeps its choices and marks the one taken.
+export function PollOptions(props: {
   decision: ChatDecisionRecord;
-  onResolve?: () => void;
+  onChoose?: (option: string) => void;
   testIdPrefix: string;
 }) {
+  const options = props.decision.options ?? [];
+  if (options.length === 0) return null;
+  const chosen = props.decision.chosenOption;
+  return (
+    <ol
+      data-testid={`${props.testIdPrefix}-poll-options`}
+      className="m-0 mt-2 flex list-none flex-col gap-1 p-0"
+    >
+      {options.map((option) => {
+        const taken = chosen === option;
+        return (
+          <li key={option}>
+            <button
+              type="button"
+              data-testid={`${props.testIdPrefix}-poll-option`}
+              data-chosen={taken ? "true" : "false"}
+              disabled={!props.onChoose}
+              aria-pressed={taken}
+              onClick={() => props.onChoose?.(option)}
+              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
+                taken
+                  ? "border-success/50 bg-success/10 text-ink"
+                  : "border-line text-ink enabled:hover:bg-panel-2 disabled:opacity-70"
+              }`}
+            >
+              <span
+                aria-hidden
+                className={`grid size-3.5 shrink-0 place-items-center rounded-full border ${
+                  taken ? "border-success bg-success text-bg" : "border-line"
+                }`}
+              >
+                {taken ? <CircleCheck size={10} strokeWidth={3} /> : null}
+              </span>
+              <span className="min-w-0 flex-1 truncate">{option}</span>
+            </button>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export function DecisionStatus(props: {
+  decision: ChatDecisionRecord;
+  onResolve?: (option?: string) => void;
+  testIdPrefix: string;
+}) {
+  const hasOptions = (props.decision.options?.length ?? 0) > 0;
   if (props.decision.state === "resolved") {
     return (
-      <span
-        data-testid={`${props.testIdPrefix}-decision-resolved`}
-        className="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
-      >
-        <CircleCheck size={11} strokeWidth={2} aria-hidden />
-        Answered
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span
+          data-testid={`${props.testIdPrefix}-decision-resolved`}
+          className="inline-flex w-fit items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
+        >
+          <CircleCheck size={11} strokeWidth={2} aria-hidden />
+          Answered
+        </span>
+        <PollOptions decision={props.decision} testIdPrefix={props.testIdPrefix} />
       </span>
     );
   }
   return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <span
-        data-testid={`${props.testIdPrefix}-decision-open`}
-        className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
-      >
-        <CircleHelp size={11} strokeWidth={2} aria-hidden />
-        Poll open
-      </span>
-      {props.onResolve ? (
-        <button
-          type="button"
-          data-testid={`${props.testIdPrefix}-decision-resolve`}
-          onClick={props.onResolve}
-          className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
+    <span className="flex min-w-0 flex-1 flex-col">
+      <span className="inline-flex flex-wrap items-center gap-1.5">
+        <span
+          data-testid={`${props.testIdPrefix}-decision-open`}
+          className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
         >
-          Answer
-        </button>
-      ) : null}
+          <CircleHelp size={11} strokeWidth={2} aria-hidden />
+          Poll open
+        </span>
+        {props.onResolve && !hasOptions ? (
+          <button
+            type="button"
+            data-testid={`${props.testIdPrefix}-decision-resolve`}
+            onClick={() => props.onResolve?.()}
+            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
+          >
+            Answer
+          </button>
+        ) : null}
+      </span>
+      <PollOptions
+        decision={props.decision}
+        testIdPrefix={props.testIdPrefix}
+        {...(props.onResolve ? { onChoose: props.onResolve } : {})}
+      />
     </span>
   );
 }
@@ -406,7 +466,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     mode: "live" | "snapshot";
   }) => Promise<void>;
   beginReply: (message: ChatMessageRecord) => void;
-  beginResolve: (message: ChatMessageRecord) => void;
+  beginResolve: (message: ChatMessageRecord, option?: string) => void;
   scrollToMessage: (messageId: string) => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onNavCommand?: (nav: ChatsNav) => void;
@@ -593,7 +653,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 decision={commentDecision}
                 onResolve={
                   !threadLocked && commentDecision.state === "open"
-                    ? () => beginResolve(comment)
+                    ? (option) => beginResolve(comment, option)
                     : undefined
                 }
                 testIdPrefix="chats-comment"
@@ -774,7 +834,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               decision={openingDecision}
               onResolve={
                 !threadLocked && openingDecision.state === "open"
-                  ? () => beginResolve(openingMessage)
+                  ? (option) => beginResolve(openingMessage, option)
                   : undefined
               }
               testIdPrefix="chats-message"
