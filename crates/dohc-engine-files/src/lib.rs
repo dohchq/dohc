@@ -10,7 +10,7 @@
 //! The calibration point is **cancellation + bounds**:
 //!
 //! - **Cooperative cancellation between bounded units.** Every scan checks the
-//!   [`CancellationToken`] between directory entries and between hash batches,
+//!   [`CancellationToken`] between directory entries and between hash submissions,
 //!   and a single large file's stream loop checks it between buffer reads —
 //!   never mid-durable-step. A cancelled reconcile commits nothing: the
 //!   generation, manifest, and dirty flag are untouched, so the next reconcile

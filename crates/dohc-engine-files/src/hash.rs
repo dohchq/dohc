@@ -5,14 +5,14 @@
 //!   `read_buffer_bytes`; a file is streamed through it, never slurped whole.
 //!   Total hashing memory is `read_buffer_bytes * workers`.
 //! - **Bounded concurrency.** The pool has a fixed number of worker threads
-//!   created once at construction; work is fed in batches of at most `workers`,
+//!   created once at construction; at most `workers` jobs remain outstanding,
 //!   so in-flight hashes never exceed the pool size. There is no
 //!   `thread::spawn`-per-file (the banned unbounded-spawn shape). A
 //!   [`PoolGauge`] records the observed peak concurrency so a test can *assert*
 //!   the cap, not merely trust it.
 //!
-//! Cancellation is cooperative and lands between bounded units: the batch loop
-//! checks the token before each batch, and a single large file's stream loop
+//! Cancellation is cooperative and lands between bounded units: the coordinator
+//! checks the token before each submission, and a single large file's stream loop
 //! checks it between buffer reads (never mid-durable-step; a content hash has
 //! no durable step to tear).
 
@@ -72,7 +72,7 @@ pub enum HashOutcome {
     /// [`FilesError::ScanIo`].
     Io { kind: std::io::ErrorKind },
     /// The hash job panicked (contained by the worker's `catch_unwind`, so the
-    /// worker survives and the batch still yields a result instead of wedging).
+    /// worker survives and the run still yields a result instead of wedging).
     /// The scan surfaces this as a fail-closed [`FilesError::PoolUnavailable`].
     Panicked,
 }
@@ -83,7 +83,7 @@ pub enum HashRun {
     /// Every input hashed (or was individually classified Vanished/Io);
     /// `outcomes[i]` corresponds to `inputs[i]`.
     Completed { outcomes: Vec<HashOutcome> },
-    /// The run stopped at a between-batch cancellation boundary; no listing is
+    /// The run stopped before submitting another hash job; no listing is
     /// produced.
     Cancelled,
 }
@@ -174,8 +174,8 @@ impl HashPool {
             max_file_bytes,
         };
         // Bounded queues: the job channel holds at most `workers` queued jobs,
-        // matching the batch size; the result channel likewise. Neither can
-        // grow unbounded.
+        // matching the outstanding-work cap; the result channel likewise.
+        // Neither can grow unbounded.
         let (job_tx, job_rx) = sync_channel::<Job>(workers);
         let (result_tx, result_rx) = sync_channel::<Indexed>(workers);
         let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
@@ -215,7 +215,7 @@ impl HashPool {
     }
 
     /// Hash every input, at most `workers` at a time, cancellable between
-    /// batches. `outcomes[i]` corresponds to `inputs[i]`.
+    /// submissions. `outcomes[i]` corresponds to `inputs[i]`.
     pub fn hash_batched(
         &self,
         inputs: &[HashInput],
@@ -255,15 +255,18 @@ impl HashPool {
         };
         let mut slots: Vec<Option<HashOutcome>> = (0..inputs.len()).map(|_| None).collect();
 
-        for batch in inputs.chunks(self.workers) {
-            // Cancellation point: between batches (a bounded unit), before any
-            // of this batch's jobs are submitted.
-            if token.is_cancelled() {
-                return Ok(HashRun::Cancelled);
-            }
-            // Submit ≤ workers jobs (channel capacity == workers, so these
-            // never block beyond a worker picking one up).
-            for input in batch {
+        let mut next = 0;
+        let mut outstanding = 0;
+        let mut cancelled = false;
+        let mut panicked = false;
+
+        loop {
+            while !cancelled && !panicked && outstanding < self.workers && next < inputs.len() {
+                if token.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
+                let input = &inputs[next];
                 job_tx
                     .send(Job {
                         index: input.index,
@@ -277,27 +280,33 @@ impl HashPool {
                     .map_err(|_| FilesError::PoolUnavailable {
                         reason: "hash pool job channel closed",
                     })?;
+                next += 1;
+                outstanding += 1;
             }
-            // Drain exactly this batch's results before submitting the next —
-            // this is what bounds in-flight work to `workers`.
-            for _ in 0..batch.len() {
-                let indexed = self
-                    .result_rx
-                    .recv()
-                    .map_err(|_| FilesError::PoolUnavailable {
-                        reason: "hash pool result channel closed",
-                    })?;
-                // A contained worker panic fails the whole run closed, in
-                // bounded time — never a hang.
-                if indexed.outcome == HashOutcome::Panicked {
-                    return Err(FilesError::PoolUnavailable {
-                        reason: "a hash worker panicked",
-                    });
-                }
-                if let Some(slot) = slots.get_mut(indexed.index) {
-                    *slot = Some(indexed.outcome);
-                }
+            if outstanding == 0 {
+                break;
             }
+            let indexed = self
+                .result_rx
+                .recv()
+                .map_err(|_| FilesError::PoolUnavailable {
+                    reason: "hash pool result channel closed",
+                })?;
+            outstanding -= 1;
+            // Drain submitted jobs before returning so this pool can be reused.
+            if indexed.outcome == HashOutcome::Panicked {
+                panicked = true;
+            } else if let Some(slot) = slots.get_mut(indexed.index) {
+                *slot = Some(indexed.outcome);
+            }
+        }
+        if panicked {
+            return Err(FilesError::PoolUnavailable {
+                reason: "a hash worker panicked",
+            });
+        }
+        if cancelled {
+            return Ok(HashRun::Cancelled);
         }
 
         // Every slot must be filled — a missing one is an internal accounting
@@ -348,10 +357,10 @@ fn worker_main(
             }
         };
         gauge.enter();
-        // Contain a panicking hash so a poisoned job never wedges the batch's
+        // Contain a panicking hash so a poisoned job never wedges the coordinator's
         // result drain (`recv` would otherwise block forever waiting on a
         // result the dead worker can't produce). The worker survives and the
-        // batch surfaces a typed, fail-closed outcome.
+        // run surfaces a typed, fail-closed outcome.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             hash_one(&job, &mut buffer, config.max_file_bytes)
         }))
@@ -567,5 +576,178 @@ mod tests {
             "under-cap file still hashed"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::*;
+    use std::sync::mpsc::{TryRecvError, channel};
+    use std::time::Duration;
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+    type RunResult = (Result<HashRun, FilesError>, HashPool);
+
+    // Real coordinator, controlled worker replies. Dropping either test-side
+    // channel releases a blocked coordinator even if an assertion fails.
+    fn controlled_pool(workers: usize) -> (HashPool, Receiver<Job>, SyncSender<Indexed>) {
+        let (job_tx, job_rx) = sync_channel(workers);
+        let (result_tx, result_rx) = sync_channel(workers);
+        let pool = HashPool {
+            workers,
+            job_tx: Some(job_tx),
+            result_rx,
+            handles: Vec::new(),
+            gauge: Arc::new(PoolGauge::default()),
+        };
+        (pool, job_rx, result_tx)
+    }
+
+    fn inputs(count: usize) -> Vec<HashInput> {
+        (0..count)
+            .map(|index| HashInput {
+                index,
+                abs: PathBuf::from(format!("file-{index}")),
+            })
+            .collect()
+    }
+
+    fn start(pool: HashPool, count: usize, token: CancellationToken) -> Receiver<RunResult> {
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            let result = pool.hash_batched(&inputs(count), &token);
+            let _ = done_tx.send((result, pool));
+        });
+        done_rx
+    }
+
+    fn hashed(value: &str) -> HashOutcome {
+        HashOutcome::Hashed {
+            sha256: value.to_owned(),
+            bytes: 1,
+            stable_mtime_ms: 0,
+        }
+    }
+
+    fn reply(sender: &SyncSender<Indexed>, job: Job, outcome: HashOutcome) {
+        sender
+            .try_send(Indexed {
+                index: job.index,
+                outcome,
+            })
+            .expect("bounded reply queue must have room");
+    }
+
+    fn completed(result: Result<HashRun, FilesError>) -> Vec<HashOutcome> {
+        match result.expect("hash run") {
+            HashRun::Completed { outcomes } => outcomes,
+            HashRun::Cancelled => panic!("unexpected cancellation"),
+        }
+    }
+
+    #[test]
+    fn completed_slot_refills_before_the_slowest_job_and_preserves_order() {
+        let (pool, jobs, replies) = controlled_pool(2);
+        let done = start(pool, 4, CancellationToken::new());
+        let first = jobs.recv_timeout(DEADLINE).expect("first job");
+        let second = jobs.recv_timeout(DEADLINE).expect("second job");
+        assert_eq!((first.index, second.index), (0, 1));
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+
+        reply(&replies, second, hashed("second"));
+        let third = jobs
+            .recv_timeout(DEADLINE)
+            .expect("refill while first is held");
+        assert_eq!(third.index, 2);
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+        reply(&replies, third, hashed("third"));
+        let fourth = jobs.recv_timeout(DEADLINE).expect("second refill");
+        assert_eq!(fourth.index, 3);
+        reply(&replies, fourth, hashed("fourth"));
+        reply(&replies, first, hashed("first"));
+
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("run completes");
+        assert_eq!(
+            completed(result),
+            vec![
+                hashed("first"),
+                hashed("second"),
+                hashed("third"),
+                hashed("fourth")
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellation_drains_outstanding_results_before_pool_reuse() {
+        let (pool, jobs, replies) = controlled_pool(2);
+        let token = CancellationToken::new();
+        let done = start(pool, 4, token.clone());
+        let first = jobs.recv_timeout(DEADLINE).expect("first job");
+        let second = jobs.recv_timeout(DEADLINE).expect("second job");
+        token.cancel();
+        reply(&replies, second, HashOutcome::Cancelled);
+        reply(&replies, first, hashed("old"));
+
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("cancelled run drains");
+        assert!(matches!(result, Ok(HashRun::Cancelled)));
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+        let done = start(pool, 1, CancellationToken::new());
+        let fresh = jobs.recv_timeout(DEADLINE).expect("reuse job");
+        reply(&replies, fresh, hashed("new"));
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("reused run completes");
+        assert_eq!(completed(result), vec![hashed("new")]);
+    }
+
+    #[test]
+    fn panic_drains_an_earlier_held_result_before_pool_reuse() {
+        let (pool, jobs, replies) = controlled_pool(2);
+        let done = start(pool, 4, CancellationToken::new());
+        let held = jobs.recv_timeout(DEADLINE).expect("held job");
+        let panicking = jobs.recv_timeout(DEADLINE).expect("panicking job");
+        // FIFO delivery guarantees the coordinator observes the panic before
+        // the held job's result, independent of thread scheduling.
+        reply(&replies, panicking, HashOutcome::Panicked);
+        reply(&replies, held, hashed("old"));
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("panic run drains");
+        assert!(matches!(result, Err(FilesError::PoolUnavailable { .. })));
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+
+        let done = start(pool, 1, CancellationToken::new());
+        let fresh = jobs.recv_timeout(DEADLINE).expect("reuse job");
+        reply(&replies, fresh, hashed("new"));
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("reused run completes");
+        assert_eq!(completed(result), vec![hashed("new")]);
+    }
+
+    #[test]
+    fn empty_and_precancelled_runs_preserve_submission_semantics() {
+        let (pool, jobs, _replies) = controlled_pool(2);
+        let token = CancellationToken::new();
+        token.cancel();
+        let done = start(pool, 0, token.clone());
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("cancelled empty run");
+        assert!(completed(result).is_empty());
+        let done = start(pool, 0, CancellationToken::new());
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("empty run");
+        assert!(completed(result).is_empty());
+        let done = start(pool, 1, token);
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("precancelled run");
+        assert!(matches!(result, Ok(HashRun::Cancelled)));
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn cancellation_after_the_last_submission_keeps_completed_outcomes() {
+        let (pool, jobs, replies) = controlled_pool(2);
+        let token = CancellationToken::new();
+        let done = start(pool, 2, token.clone());
+        let first = jobs.recv_timeout(DEADLINE).expect("first job");
+        let second = jobs.recv_timeout(DEADLINE).expect("second job");
+        token.cancel();
+        reply(&replies, second, HashOutcome::Cancelled);
+        reply(&replies, first, HashOutcome::Cancelled);
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("final jobs drain");
+        assert_eq!(completed(result), vec![HashOutcome::Cancelled; 2]);
     }
 }
