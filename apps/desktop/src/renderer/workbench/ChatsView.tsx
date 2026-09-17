@@ -2543,7 +2543,12 @@ export function ChatsView(props: {
   // lane per group, on the nav and after activity; a handful of calls.
   const [laneAgents, setLaneAgents] = useState<LaneAgent[]>([]);
   const laneAgentSeq = useRef(0);
-  const laneAgentCache = useRef(new Map<string, { updatedAtMs: number; agents: LaneAgent[] }>());
+  // What a lane said, by group, keyed on the lane's updated time. Message
+  // facts only; the channel and the share are attached when the list is
+  // assembled, so a renamed group or a re-issued share shows as it is now.
+  const laneAgentCache = useRef(
+    new Map<string, { updatedAtMs: number; spoke: Array<{ id: string; label: string; atMs: number }> }>(),
+  );
   // The joined chat groups, as one string, so the read runs when that set
   // changes and not on every overview or share refresh.
   const joinedChatGroups = useMemo(() => {
@@ -2574,21 +2579,28 @@ export function ChatsView(props: {
         )[0];
         if (!lane) return [];
         const cached = laneAgentCache.current.get(channel.id);
-        if (cached && cached.updatedAtMs === lane.updatedAtMs) return cached.agents;
-        const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
+        let spoke = cached && cached.updatedAtMs === lane.updatedAtMs ? cached.spoke : undefined;
+        if (!spoke) {
+          const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
+          spoke = page.messages
+            .filter((message) => message.authorKind === "agent")
+            .map((message) => ({
+              id: message.authorUserId ?? message.authorDisplayName,
+              label: chatAuthorLabel(message),
+              atMs: message.createdAtMs,
+            }));
+          // An obsolete read must not seed the cache for a later hit.
+          if (isCurrent()) laneAgentCache.current.set(channel.id, { updatedAtMs: lane.updatedAtMs, spoke });
+        }
         const joined = joinedByWire.get(channel.wireId ?? "");
         const owner = joined?.granterEmail ?? "someone else";
-        const agents = page.messages
-          .filter((message) => message.authorKind === "agent")
-          .map((message) => ({
-            key: `${joined?.shareId ?? channel.id}\u0000${message.authorUserId ?? message.authorDisplayName}`,
-            label: chatAuthorLabel(message),
-            owner,
-            channel,
-            atMs: message.createdAtMs,
-          }));
-        laneAgentCache.current.set(channel.id, { updatedAtMs: lane.updatedAtMs, agents });
-        return agents;
+        return spoke.map((who) => ({
+          key: `${joined?.shareId ?? channel.id}\u0000${who.id}`,
+          label: who.label,
+          owner,
+          channel,
+          atMs: who.atMs,
+        }));
       }),
     )
       .then((found) => {
