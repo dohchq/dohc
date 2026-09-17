@@ -1,4 +1,4 @@
-import { formatChatTime } from "../time";
+import { formatChatDay, formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
@@ -364,6 +364,19 @@ describe("chat authorship display", () => {
 });
 
 describe("formatChatTime", () => {
+  it("includes the year only for day labels outside the current year", () => {
+    const now = new Date(2026, 8, 17).getTime();
+    for (const year of [2025, 2026, 2027]) {
+      const day = new Date(year, 2, 4);
+      expect(formatChatDay(day.getTime(), now)).toBe(day.toLocaleDateString(undefined, {
+        weekday: "long", month: "long", day: "numeric",
+        ...(year !== 2026 ? { year: "numeric" as const } : {}),
+      }));
+    }
+    expect(formatChatDay(now, now)).toBe("Today");
+    expect(formatChatDay(new Date(2026, 8, 16).getTime(), now)).toBe("Yesterday");
+  });
+
   // The cached Intl.DateTimeFormat must format exactly like the
   // toLocaleString call it replaced — same ambient locale, same options.
   it("matches the ambient-locale toLocaleString output exactly", () => {

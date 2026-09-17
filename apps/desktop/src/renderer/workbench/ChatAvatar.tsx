@@ -11,10 +11,16 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, comment: 12, strip: 10 } as const;
+const segmenter = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : undefined;
 
 function initial(name: string): string {
   const trimmed = name.trim();
-  return trimmed ? trimmed[0]!.toUpperCase() : "?";
+  const first = segmenter
+    ? segmenter.segment(trimmed)[Symbol.iterator]().next().value?.segment
+    : Array.from(trimmed)[0];
+  return first?.toUpperCase() ?? "?";
 }
 
 export function ChatAvatar(props: {

@@ -7,6 +7,9 @@ const chatTimeFormat = new Intl.DateTimeFormat(undefined, {
 
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" });
+const dayWithYearFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "long", month: "long", day: "numeric", year: "numeric",
+});
 
 // Time of day only, for a message under a divider that already names the day.
 export function formatClock(createdAtMs: number): string {
@@ -21,7 +24,7 @@ export function formatChatDay(createdAtMs: number, now = Date.now()): string {
   const days = Math.round((startOf(today) - startOf(day)) / 86_400_000);
   if (days === 0) return "Today";
   if (days === 1) return "Yesterday";
-  return dayFormat.format(day);
+  return (day.getFullYear() === today.getFullYear() ? dayFormat : dayWithYearFormat).format(day);
 }
 
 export function sameChatDay(a: number, b: number): boolean {
