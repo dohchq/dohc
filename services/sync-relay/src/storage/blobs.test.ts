@@ -61,12 +61,13 @@ it.each(cases)("matches existing SQL retention for %s", async (_name, payload, h
 it("does not join payloads across log rows or cross workspace boundaries", async () => {
   const f = await fixture();
   f.put(hash);
+  f.put(orphan);
   f.put(hash, 1, "other");
   append(f.db, JSON.stringify(hash.slice(0, 32)), 0);
   append(f.db, JSON.stringify(hash.slice(32)), 1);
   append(f.db, JSON.stringify(hash), 0, "other");
   expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 }))
-    .toEqual({ removed: 1, removedSha256s: [hash] });
+    .toEqual({ removed: 2, removedSha256s: [hash, orphan] });
   expect(f.storage.getBlob("other", hash)).not.toBeNull();
 });
 
@@ -209,4 +210,49 @@ it("finishes discovery while a writer appends a full page at each yield", async 
   } finally {
     clearImmediate(handle);
   }
+});
+
+it("retains a late root across payload pieces using the locked bulk scan", async () => {
+  const f = await fixture();
+  const secondOrphan = "e".repeat(64);
+  for (const sha of [hash, secondOrphan, orphan]) f.put(sha);
+  const external = inspectDatabase(storagePath(f.storage), {foreignKeys: true});
+  const context = f.storage as StorageContext;
+  const originalTx = context.tx.bind(context);
+  vi.spyOn(context, "tx").mockImplementationOnce(run => {
+    append(external, JSON.stringify({value: "z".repeat(32_740) + hash.toUpperCase()}));
+    return originalTx(run);
+  });
+  expect(await f.storage.collectUnreferencedBlobs("w", {nowMs: 1_000}))
+    .toEqual({removed: 2, removedSha256s: [secondOrphan, orphan]});
+  expect(f.storage.getBlob("w", hash)).not.toBeNull();
+});
+
+it("does not delete after a partial locked log scan fails", async () => {
+  const f = await fixture();
+  for (const sha of [hash, orphan]) f.put(sha);
+  for (let index = 0; index < 96; index++) append(f.db, "{}", index);
+  const context = f.storage as StorageContext;
+  const originalTx = context.tx.bind(context);
+  let inWriter = false;
+  let reads = 0;
+  vi.spyOn(context, "tx").mockImplementation(run => originalTx(() => {
+    inWriter = true;
+    try { return run(); } finally { inWriter = false; }
+  }));
+  const prepare = f.db.prepare.bind(f.db);
+  vi.spyOn(f.db, "prepare").mockImplementation(sql => {
+    const statement = prepare(sql);
+    if (inWriter && sql.includes("substr(payload_json")) {
+      const all = statement.all.bind(statement);
+      vi.spyOn(statement, "all").mockImplementation((...args) => {
+        if (++reads === 2) throw new Error("injected scan failure");
+        return all(...args);
+      });
+    }
+    return statement;
+  });
+  await expect(f.storage.collectUnreferencedBlobs("w", {nowMs: 1_000})).rejects.toThrow("injected scan failure");
+  expect(reads).toBe(2);
+  for (const sha of [hash, orphan]) expect(f.storage.getBlob("w", sha)).not.toBeNull();
 });
