@@ -723,10 +723,15 @@ describe("shared channels (MU-C4)", () => {
       ops: [{ ...decision("msg-a-1", { options: ["Friday"], chosenOption: " Friday " }), originSeq: 4 }],
     })));
     expect(padded.status).toBe(403);
-    // A null is an absent field, as the engine reads it.
-    const bare = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+    // The engine reads null choices as absent, and refuses a null pick.
+    const nullPick = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
       originId: "origin-member-a",
       ops: [{ ...decision("msg-a-1", { options: null, chosenOption: null }), originSeq: 4 }],
+    })));
+    expect(nullPick.status).toBe(403);
+    const bare = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: null }), originSeq: 4 }],
     })));
     expect(bare.status).toBe(200);
     const noChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({

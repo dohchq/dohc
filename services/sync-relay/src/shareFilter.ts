@@ -1224,9 +1224,11 @@ function trimLikeEngine(value: string): string {
 function decisionPollFieldsValid(payload: unknown): boolean {
   const record = asRecord(payload);
   if (!record) return false;
-  // The engine reads a null as an absent field.
+  // The engine reads a null options field as absent, and refuses a null
+  // pick: its pick deserializer takes a string or nothing.
   const options = record.options ?? undefined;
-  const chosen = record.chosenOption ?? undefined;
+  const chosen = record.chosenOption;
+  if (chosen === null) return false;
   const normalized: string[] = [];
   if (options !== undefined) {
     if (!Array.isArray(options) || options.length > MAX_POLL_OPTIONS) return false;
