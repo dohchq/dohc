@@ -68,6 +68,7 @@ async function harness() {
   const notify = vi.fn();
   const acknowledge = vi.fn();
   const unmount = vi.fn<() => Promise<{ folderLeft?: true }>>(async () => ({}));
+  const push = vi.fn(async () => undefined);
   const mount = vi.fn(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
@@ -92,7 +93,7 @@ async function harness() {
       return await relayListing() as Result;
     },
     listWorkspaces: () => [workspace, other], setWorkspaceSharedChannels: write,
-    relayClientForWorkspace: () => ({ pullSharedChannel: async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }) }),
+    relayClientForWorkspace: () => ({ pullSharedChannel: async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }), push }),
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
@@ -102,7 +103,7 @@ async function harness() {
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, unmount, store, relayCalls,
+    mount, unmount, push, store, relayCalls,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -222,6 +223,9 @@ describe("registered shared-channel handlers", () => {
       { recipientEmail: "ana@example.test", channelWireId: "wire-team", paths: ["team"], access: "read-only" },
       { recipientEmail: "ana@example.test", channelWireId: "wire-bare" },
     ]);
+    // The group's channel must already be on the relay, so the share pushes
+    // first; a chat-only share leaves that to the next sync pass.
+    expect(h.push).toHaveBeenCalledOnce();
   });
 
   it("joining a group joins its channel and then mounts its folder", async () => {

@@ -66,7 +66,7 @@ export function registerSharedChannelsIpcHandlers<
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel">;
+  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel"> & { push(): Promise<unknown> };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   normalizeServerUrl(url: string): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
@@ -145,6 +145,19 @@ export function registerSharedChannelsIpcHandlers<
         const { credentials, credentialGeneration } =
           await remoteForWorkspace(workspace);
         operation.assertCurrent();
+        // A group is a grant on a channel the relay already knows. The
+        // channel's create op may still be waiting for the next sync pass,
+        // so push it now rather than let the relay refuse a channel it has
+        // not seen.
+        if (channel.folderPath && credentials.relayUrl) {
+          await relayClientForWorkspace({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            attachmentId: operation.workspace.attachmentId,
+            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+          }).push();
+          operation.assertCurrent();
+        }
         const created = await awaitCredentialGeneration({
           capturedGeneration: credentialGeneration,
           currentGeneration: () => currentCredentialGeneration(),

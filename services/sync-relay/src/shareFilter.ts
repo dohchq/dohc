@@ -232,12 +232,22 @@ export function validateGroupShareSelector(
   // later be created as a direct message and carry the folder grant with it.
   // A stored selector is re-read without a resolver; the read filter's own
   // kind gate covers it then.
-  if (chat && chat.channelKind(channel.selector.channelWireId) !== "channel") {
-    return {
-      ok: false,
-      code: RELAY_ERRORS.invalid_channel.code,
-      message: "a group shares a channel the workspace already has",
-    };
+  if (chat) {
+    const kind = chat.channelKind(channel.selector.channelWireId);
+    if (kind === undefined) {
+      return {
+        ok: false,
+        code: RELAY_ERRORS.invalid_channel.code,
+        message: "The relay has not received this channel yet. Try again after it syncs.",
+      };
+    }
+    if (kind !== "channel") {
+      return {
+        ok: false,
+        code: RELAY_ERRORS.invalid_channel.code,
+        message: "A direct message has no folder to share.",
+      };
+    }
   }
   const files = validateShareSelector({ paths: input.paths, versionId: null });
   if (!files.ok) return files;
