@@ -1,6 +1,48 @@
 import { type StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
+import { BLOB_LOG_TEXT_CHUNK, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
+
+const DIRECT_SQL_INVENTORY_LIMIT = 16;
+
+async function excludeLogReferencedBlobs(
+  storage: StorageContext,
+  workspaceId: string,
+  remaining: Set<string>,
+): Promise<string[]> {
+  if (remaining.size === 0) return [];
+  if (remaining.size <= DIRECT_SQL_INVENTORY_LIMIT) {
+    // A few LIKE probes avoid copying a large raw payload into JavaScript.
+    const reference = storage.db.prepare(`SELECT 1 FROM sync_relay_log
+      WHERE workspace_id = ? AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
+    for (const sha of remaining) {
+      if (reference.get(workspaceId, sha) !== undefined) remaining.delete(sha);
+    }
+    return Array.from(remaining);
+  }
+  let canonicalRemaining = 0;
+  for (const sha of remaining) {
+    if (isCanonicalBlobSha(sha)) canonicalRemaining++;
+  }
+  if (canonicalRemaining === 0) return Array.from(remaining);
+  // Bound this read-only pass; later roots remain covered by locked deletion.
+  const throughSeq = currentBlobLogSequence(storage.db, workspaceId);
+  let pieces = 0;
+  let characters = 0;
+  for (const payload of blobLogPayloadChunks(storage.db, workspaceId, throughSeq)) {
+    canonicalRemaining -= removeBlobLogReferences(remaining, payload);
+    if (canonicalRemaining === 0) break;
+    characters += payload.length;
+    if (++pieces >= 32 || characters >= BLOB_LOG_TEXT_CHUNK) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      pieces = 0;
+      characters = 0;
+    }
+  }
+  // Noncanonical storage identifiers retain the original SQL LIKE behavior,
+  // including wildcard characters, through the unchanged locked delete check.
+  return Array.from(remaining);
+}
 
 export function putBlob(storage: StorageContext, input: {
     workspaceId: string;
@@ -54,20 +96,14 @@ export async function collectUnreferencedBlobs(
     // one has them in the log, and a declined one never will.
     // Immutable publications retain their manifest and bundle pins after withdrawal.
     const cutoff = options.nowMs - storage.options.blobGraceMs;
-    // Phase 1 (read only, no write lock): candidate shas that are unreferenced
-    // and aged past the grace window.
-    const candidates = storage.db
+    // Read aged candidates without a write lock, then scan log roots once.
+    const agedCandidates = new Set<string>();
+    const agedRows = storage.db
       .prepare(
         `SELECT b.sha256
          FROM sync_relay_blobs b
          WHERE b.workspace_id = ?
            AND b.created_at_ms <= ?
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_log l
-             WHERE l.workspace_id = b.workspace_id
-               AND l.payload_json LIKE '%' || b.sha256 || '%'
-           )
            AND NOT EXISTS (
              SELECT 1
              FROM sync_relay_share_proposal_ops o
@@ -82,13 +118,13 @@ export async function collectUnreferencedBlobs(
            )
          ORDER BY b.sha256`,
       )
-      .all(workspaceId, cutoff)
-      .map((row) => String(row.sha256));
-    // Delete in bounded chunks, each in its own short transaction, and
-    // yield the event loop between chunks so a large sweep never monopolizes it
-    // (CodeRabbit: keep GC off the single-threaded request path). The delete
-    // RE-CHECKS unreferenced + aged so a blob newly referenced (or replaced)
-    // between phases is left alone.
+      .iterate(workspaceId, cutoff);
+    for (const row of agedRows) agedCandidates.add(String(row.sha256));
+    const smallInventory = agedCandidates.size <= DIRECT_SQL_INVENTORY_LIMIT;
+    const candidates = await excludeLogReferencedBlobs(storage, workspaceId, agedCandidates);
+    if (candidates.length === 0) return { removed: 0, removedSha256s: [] };
+    // Discovery never grants deletion authority. Each transaction reads current
+    // log roots before deletion and keeps proposal, publication, and age checks.
     const removedSha256s: string[] = [];
     const deleteStmt = storage.db.prepare(
       `DELETE FROM sync_relay_blobs
@@ -110,12 +146,37 @@ export async function collectUnreferencedBlobs(
            WHERE p.workspace_id = sync_relay_blobs.workspace_id AND p.sha256 = sync_relay_blobs.sha256
          )`,
     );
+    const deleteScannedStmt = !smallInventory && candidates.length > 1 ? storage.db.prepare(
+      `DELETE FROM sync_relay_blobs
+       WHERE workspace_id = ? AND sha256 = ? AND created_at_ms <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM sync_relay_share_proposal_ops o
+           JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
+           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM sync_relay_app_publication_blobs p
+           WHERE p.workspace_id = sync_relay_blobs.workspace_id AND p.sha256 = sync_relay_blobs.sha256
+         )`,
+    ) : null;
     const CHUNK = 200;
     for (let start = 0; start < candidates.length; start += CHUNK) {
       const chunk = candidates.slice(start, start + CHUNK);
       storage.tx(() => {
+        const unreferenced = new Set(chunk.filter(isCanonicalBlobSha));
+        // One canonical candidate already needs only one SQL scan.
+        const bulk = deleteScannedStmt !== null && unreferenced.size > 1;
+        if (bulk) {
+          const throughSeq = currentBlobLogSequence(storage.db, workspaceId);
+          for (const payload of blobLogPayloadChunks(storage.db, workspaceId, throughSeq)) {
+            removeBlobLogReferences(unreferenced, payload);
+            if (unreferenced.size === 0) break;
+          }
+        }
         for (const sha256 of chunk) {
-          const result = deleteStmt.run(
+          const scanned = bulk && isCanonicalBlobSha(sha256);
+          if (scanned && !unreferenced.has(sha256)) continue;
+          const result = scanned ? deleteScannedStmt!.run(workspaceId, sha256, cutoff, workspaceId, sha256) : deleteStmt.run(
             workspaceId,
             sha256,
             cutoff,
