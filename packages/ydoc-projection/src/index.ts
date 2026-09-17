@@ -17,4 +17,4 @@ export {
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
 export { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
-export { backtickFence } from "./markdown-fence.js";
+export { codeBlockFence } from "./markdown-fence.js";

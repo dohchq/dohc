@@ -37,23 +37,6 @@ const fixtureSets = [
       "stateVectorB64",
       "updates",
     ],
-    oracleFailurePrefix: "richdocProjection-",
-    // Fixture cases the LIVE TypeScript oracle can no longer produce. Each
-    // entry is a RECORDED DEFECT, not an exemption: the committed fixture still
-    // asserts an expectation the oracle now throws on, so the Rust parity test
-    // for that case is validating against frozen output nothing can regenerate.
-    //
-    // Listing a case here keeps the guard active for every OTHER fixture
-    // instead of letting one broken construct blind the whole check. The list
-    // is self-expiring: if a listed case starts generating again, this check
-    // FAILS and tells you to remove it, so the allowlist cannot quietly outlive
-    // the defect it documents.
-    knownOracleFailures: new Map([
-      [
-        "code-language-backtick",
-        "yDocToMarkdown throws 'could not restore a fenced code block serialization sentinel' for a codeBlock whose language info string contains a backtick (language: 'lang`tick'). rewriteCodeBlockFences matches the opening fence with /(`{3,})([^`]*)$/, which cannot match an info string containing a backtick.",
-      ],
-    ]),
   },
   {
     dir: "crates/dohc-engine-sync/tests/fixtures",
@@ -63,8 +46,6 @@ const fixtureSets = [
     // is byte-stable. Nothing here may be excluded from the drift signal: this
     // is a cross-process security contract with a deliberate Rust twin.
     volatileFields: [],
-    oracleFailurePrefix: "",
-    knownOracleFailures: new Map(),
   },
   {
     dir: "crates/dohc-engine-files/tests/fixtures",
@@ -75,8 +56,6 @@ const fixtureSets = [
     // whole output is byte-stable. Same cross-process security contract, same
     // deliberate Rust twin (`search_policy.rs`), same rule: nothing excluded.
     volatileFields: [],
-    oracleFailurePrefix: "",
-    knownOracleFailures: new Map(),
   },
   {
     dir: "crates/dohc-engine-domain/tests/fixtures",
@@ -85,8 +64,6 @@ const fixtureSets = [
     // Collection schema, Field value, and Record id outcomes are deterministic.
     // Every byte remains part of the TypeScript-to-Rust drift signal.
     volatileFields: [],
-    oracleFailurePrefix: "",
-    knownOracleFailures: new Map(),
   },
 ];
 
@@ -165,8 +142,6 @@ function checkFixtureSet({
   oracle,
   dependencyOverrideEnv,
   volatileFields,
-  oracleFailurePrefix,
-  knownOracleFailures,
 }) {
   const fixturesDir = join(repoRoot, dir);
   const generator = join(fixturesDir, "gen-fixtures.mjs");
@@ -179,7 +154,6 @@ function checkFixtureSet({
       env: {
         ...process.env,
         DOHC_FIXTURE_OUT: tempDir,
-        DOHC_FIXTURE_ALLOW_ORACLE_FAILURES: [...knownOracleFailures.keys()].join(","),
       },
       encoding: "utf8",
     });
@@ -212,34 +186,8 @@ function checkFixtureSet({
       if (generated.stdout) process.stdout.write(generated.stdout);
       if (generated.stderr) process.stderr.write(generated.stderr);
 
-      // Report the recorded oracle failures every run -- loudly, so a known
-      // defect stays visible instead of decaying into background noise -- and
-      // fail if a listed case has started generating again, which means the
-      // entry is stale and must be removed.
-      const observedFailures = new Set(
-        [...generatorOutput.matchAll(/^ORACLE_FAILURE (\S+):/gm)].map((m) => m[1]),
-      );
-      const staleAllowlist = [...knownOracleFailures.keys()].filter(
-        (name) => !observedFailures.has(name),
-      );
-      for (const name of observedFailures) {
-        console.error(
-          `KNOWN ORACLE FAILURE: ${oracleFailurePrefix}${name} -- the committed fixture asserts an expectation the live oracle can no longer produce.`,
-        );
-        console.error(`  ${knownOracleFailures.get(name)}`);
-      }
-
-      const excluded = new Set(
-        [...knownOracleFailures.keys()].map(
-          (name) => `${oracleFailurePrefix}${name}.json`,
-        ),
-      );
-      const committedNames = fixtureNames(fixturesDir).filter(
-        (name) => !excluded.has(name),
-      );
-      const generatedNames = fixtureNames(tempDir).filter(
-        (name) => !excluded.has(name),
-      );
+      const committedNames = fixtureNames(fixturesDir);
+      const generatedNames = fixtureNames(tempDir);
       const committedSet = new Set(committedNames);
       const generatedSet = new Set(generatedNames);
       const missing = committedNames.filter((name) => !generatedSet.has(name));
@@ -253,21 +201,13 @@ function checkFixtureSet({
         );
       });
 
-      if (staleAllowlist.length > 0) {
-        console.error(
-          "stale known-oracle-failure allowlist: these cases generate cleanly again and must be removed from knownOracleFailures, and their fixtures regenerated:",
-        );
-        for (const name of staleAllowlist) console.error(`  - ${name}`);
-      } else if (
+      if (
         differing.length === 0 &&
         missing.length === 0 &&
         unexpectedlyNew.length === 0
       ) {
         console.log(
-          `${dir}: ${committedNames.length} deterministic fixture payloads match byte-for-byte` +
-            (observedFailures.size > 0
-              ? ` (${observedFailures.size} recorded oracle failure(s) excluded and reported above)`
-              : ""),
+          `${dir}: ${committedNames.length} deterministic fixture payloads match byte-for-byte`,
         );
         exitCode = 0;
       } else {

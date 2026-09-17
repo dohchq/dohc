@@ -258,8 +258,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     ]);
     expect(reply.stderr).toBe("");
     expect(reply.stdout).toContain("replied");
-    // `replied <threadId> <messageId>`. Read the rendered field rather than a
-    // prefix: the daemon's message ids carry no `message_`/`msg_` prefix.
+    // `replied <threadId> <messageId>` carries the CLI message handle.
     const cliMessageId = reply.stdout.match(/^replied\s+\S+\s+(\S+)/mu)?.[1];
     expect(cliMessageId).toBeTruthy();
     if (!cliMessageId) throw new Error("CLI reply did not return a message id");

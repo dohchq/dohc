@@ -36,7 +36,7 @@ import {
   escapeHighlightMarkdown,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
-import { backtickFence } from './markdown-fence.js'
+import { backtickFence, codeBlockFence } from './markdown-fence.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
 
 const PLAIN_TEXT_FIELD = 'plainText'
@@ -604,9 +604,9 @@ export function serializeRichdocBody(root: JSONContent): string {
       }
     }
 
-    if (node.type === 'codeBlock' && node.content?.length) {
+    if (node.type === 'codeBlock') {
       const token = reserveToken('CODE_BLOCK')
-      codeBlocks.set(token, textContent(node.content))
+      codeBlocks.set(token, textContent(node.content ?? []))
       return { ...node, content: [{ type: 'text', text: token }] }
     }
 
@@ -1114,7 +1114,7 @@ function rewriteCodeBlockFences(
 
     const opening = output.pop()
     const closing = lines[index + 1]
-    const openingFence = opening && /(`{3,})([^`]*)$/.exec(opening)
+    const openingFence = opening && /(`{3})(.*)$/.exec(opening)
     const closingFence = closing && /(`{3,})([ \t]*)$/.exec(closing)
     if (!opening || !openingFence || !closing || !closingFence || !tokenMatch) {
       throw new Error('could not restore a fenced code block serialization sentinel')
@@ -1127,12 +1127,14 @@ function rewriteCodeBlockFences(
     const contentPrefix = listContinuationPrefix ?? serializedContentPrefix
     const closingPrefix = listContinuationPrefix ?? serializedClosingPrefix
     const language = openingFence[2]
-    const fence = backtickFence(content, 3)
+    const fence = codeBlockFence(content, language)
+    const info = language.startsWith(fence[0]) ? ` ${language}` : language
+    const blankPrefix = /^\s*$/.test(contentPrefix) ? contentPrefix : contentPrefix.trimEnd()
     const contentLines = content.split('\n').map(line =>
-      line.length === 0 ? contentPrefix.trimEnd() : `${contentPrefix}${line}`,
+      line.length === 0 ? blankPrefix : `${contentPrefix}${line}`,
     )
     output.push(
-      `${openingPrefix}${fence}${language}`,
+      `${openingPrefix}${fence}${info}`,
       ...contentLines,
       `${closingPrefix}${fence}${closingFence[2]}`,
     )

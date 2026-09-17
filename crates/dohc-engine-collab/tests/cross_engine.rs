@@ -205,7 +205,7 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         cases += 1;
     }
     assert_eq!(
-        cases, 26,
+        cases, 29,
         "expected every live-oracle richdoc projection fixture"
     );
 }

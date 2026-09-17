@@ -544,9 +544,9 @@ const momentResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
 ]);
 
-const rawChannelIdSchema = z.string().regex(/^channel_/u);
-const rawThreadIdSchema = z.string().regex(/^thread_/u);
-const rawMessageIdSchema = z.string().regex(/^message_/u);
+const rawChannelIdSchema = z.string().regex(/^channel-/u);
+const rawThreadIdSchema = z.string().regex(/^thread-/u);
+const rawMessageIdSchema = z.string().regex(/^message-/u);
 const rawChatThreadSchema = z
   .object({
     id: rawThreadIdSchema,
