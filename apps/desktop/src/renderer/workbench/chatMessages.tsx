@@ -569,7 +569,10 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
               !newDay &&
               previous !== undefined &&
               previous.authorKind === message.authorKind &&
-              previous.authorDisplayName === message.authorDisplayName &&
+              (previous.authorUserId && message.authorUserId
+                ? previous.authorUserId === message.authorUserId
+                : !previous.authorUserId && !message.authorUserId &&
+                  previous.authorDisplayName === message.authorDisplayName) &&
               message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
             const isAgent = message.authorKind === "agent";
             const time = formatChatTime(message.createdAtMs);
