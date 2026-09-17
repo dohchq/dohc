@@ -58,8 +58,24 @@ export function useWorkspaceListing(workspaceId: string) {
           return result.cached === true;
         }
         committedFilesRequest.current = request;
-        setFiles(result.files);
-        setFolders(result.folders ?? []);
+        // IPC returns new arrays even when revalidation found no change.
+        // Keep the indexes and explorer tree; freshness still commits below.
+        setFiles((current) =>
+          current.length === result.files.length &&
+          current.every((file, index) => {
+            const next = result.files[index];
+            return file.path === next.path && file.kind === next.kind && file.icon === next.icon;
+          })
+            ? current
+            : result.files,
+        );
+        const nextFolders = result.folders ?? [];
+        setFolders((current) =>
+          current.length === nextFolders.length &&
+          current.every((folder, index) => folder === nextFolders[index])
+            ? current
+            : nextFolders,
+        );
         setFilesRevalidated(result.cached !== true);
         setFileListingCommit({
           request,
