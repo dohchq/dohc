@@ -10,6 +10,187 @@ import { parseOptions, createEvidenceDirectory, benchmarkEnvironment } from './p
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
+import { createRequire } from 'node:module';
+import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+
+function readinessPage(t) {
+  const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM(`<div data-testid="workspace-shell" data-ready="true">
+    <button data-testid="workspace-switcher">workspace-0</button>
+    <div data-testid="workspace-workbench">
+      <section data-editor-group-id="primary" data-active="true">
+        <div role="tab" aria-selected="true" data-testid="tab-small.md">small.md</div>
+        <div data-testid="view-markdown"><div class="tiptap" contenteditable="true">Workspace 0 small</div></div>
+      </section>
+    </div>
+  </div>`, { pretendToBeVisual: true, runScripts: 'outside-only' });
+  t.after(() => dom.window.close());
+  const w = dom.window;
+  let now = 10, id = 0;
+  const frames = new Map(), timers = new Map();
+  w.performance.now = () => now;
+  w.requestAnimationFrame = callback => { frames.set(++id, callback); return id; };
+  w.cancelAnimationFrame = key => frames.delete(key);
+  w.setTimeout = (callback, ms) => { timers.set(++id, { callback, at: now + ms }); return id; };
+  w.clearTimeout = key => timers.delete(key);
+  // jsdom has no layout. All DOM ancestry, selection and computed-style
+  // checks are real; this supplies the visible fixture's viewport geometry.
+  w.HTMLElement.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400 });
+  const step = () => {
+    now += 50;
+    for (const [key, timer] of [...timers]) if (timer.at <= now) { timers.delete(key); timer.callback(); }
+  };
+  const frame = () => {
+    now += 16;
+    const pending = [...frames.values()]; frames.clear();
+    for (const callback of pending) callback(now);
+  };
+  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
+  return { document: w.document, observe, step, frame, frames, timers };
+}
+
+test('startup observer records an already-ready document without inferring earlier readiness', async t => {
+  const p = readinessPage(t);
+  const result = p.observe();
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, true);
+  assert.equal(observed.observerInstalledMs, 10);
+  assert.equal(observed.predicateMatchedMs, 10);
+  assert.equal(observed.secondAnimationFrameMs, 42);
+  assert.ok(Number.isFinite(observed.timeOrigin));
+  assert.equal(p.timers.size + p.frames.size, 0);
+});
+
+test('startup observer installed before the body exists waits for the editable document', async t => {
+  const p = readinessPage(t);
+  const body = p.document.body;
+  body.remove();
+  assert.equal(p.document.body, null);
+  const result = p.observe();
+  assert.equal(p.frames.size, 0);
+  p.document.documentElement.append(body);
+  p.step(); p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, false);
+  assert.equal(observed.observerInstalledMs, 10);
+  assert.equal(observed.predicateMatchedMs, 60);
+  assert.equal(observed.secondAnimationFrameMs, 92);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+const notReadyCases = {
+  'wrong workspace': d => { const node = d.querySelector('[data-testid="workspace-switcher"]'); node.textContent = 'workspace-1'; return () => { node.textContent = 'workspace-0'; }; },
+  'wrong selected tab': d => { const node = d.querySelector('[role="tab"]'); node.setAttribute('data-testid', 'tab-large.md'); return () => node.setAttribute('data-testid', 'tab-small.md'); },
+  'wrong document body': d => { const node = d.querySelector('.tiptap'); node.textContent = 'Workspace 1 small'; return () => { node.textContent = 'Workspace 0 small'; }; },
+  'inactive editor group': d => { const node = d.querySelector('[data-editor-group-id]'); node.removeAttribute('data-active'); return () => node.setAttribute('data-active', 'true'); },
+  'unselected tab': d => { const node = d.querySelector('[role="tab"]'); node.setAttribute('aria-selected', 'false'); return () => node.setAttribute('aria-selected', 'true'); },
+  'pending workspace': d => { const node = d.querySelector('[data-testid="workspace-shell"]'); node.setAttribute('data-ready', 'false'); return () => node.setAttribute('data-ready', 'true'); },
+  'hidden preserved editor': d => { const node = d.querySelector('[data-testid="view-markdown"]'); node.hidden = true; return () => { node.hidden = false; }; },
+  'inert workbench': d => { const node = d.querySelector('[data-testid="workspace-workbench"]'); node.setAttribute('inert', ''); return () => node.removeAttribute('inert'); },
+  'CSS-hidden pane': d => { const node = d.querySelector('[data-testid="view-markdown"]'); node.style.display = 'none'; return () => { node.style.display = ''; }; },
+  'read-only editor': d => { const node = d.querySelector('.tiptap'); node.setAttribute('contenteditable', 'false'); return () => node.setAttribute('contenteditable', 'true'); },
+  'zero-sized editor': d => { const node = d.querySelector('.tiptap'); node.getBoundingClientRect = () => ({ width: 0, height: 0 }); return () => { delete node.getBoundingClientRect; }; },
+};
+for (const [name, prepare] of Object.entries(notReadyCases)) test(`startup observer waits for ${name} to become usable`, async t => {
+  const p = readinessPage(t);
+  const restore = prepare(p.document);
+  const result = p.observe();
+  assert.equal(p.frames.size, 0);
+  restore(); p.step(); p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, false);
+  assert.equal(observed.observerInstalledMs, 10);
+  assert.equal(observed.predicateMatchedMs, 60);
+  assert.equal(observed.secondAnimationFrameMs, 92);
+});
+
+test('startup observer restarts its frame check when the bound editor is replaced', async t => {
+  const p = readinessPage(t);
+  const result = p.observe();
+  p.frame();
+  const editor = p.document.querySelector('.tiptap');
+  editor.replaceWith(editor.cloneNode(true));
+  p.frame(); p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.predicateMatchedMs, 42);
+  assert.equal(observed.secondAnimationFrameMs, 74);
+});
+
+const fixtureWorkspaces = [0, 1].map(index => ({ workspaceId: `perf4-package-${index}`, rootPath: `C:/fixture/workspace-${index}` }));
+
+test('full restart after odd switches opens registry workspace 0 despite workspace 1 recency', async t => {
+  const p = readinessPage(t);
+  const registry = { version: 1, workspaces: fixtureWorkspaces.map((workspace, index) => ({ ...workspace, lastOpenedAt: 100 + index })) };
+  const result = p.observe(startupTargetFromRegistry(registry, fixtureWorkspaces));
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, true);
+  assert.equal(observed.workspaceName, 'workspace-0');
+  assert.equal(observed.path, 'small.md');
+});
+
+test('restart records a different known workspace only when the persisted registry selects it', async t => {
+  const p = readinessPage(t);
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
+  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
+  const result = p.observe(startupTargetFromRegistry({ version: 1, workspaces: [...fixtureWorkspaces].reverse() }, fixtureWorkspaces));
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, true);
+  assert.equal(observed.workspaceName, 'workspace-1');
+  assert.equal(observed.path, 'small.md');
+});
+
+test('startup target refuses unknown workspace identities and roots', () => {
+  for (const selected of [{ workspaceId: 'unknown', rootPath: 'C:/fixture/workspace-0' }, { ...fixtureWorkspaces[0], rootPath: 'C:/other' }]) {
+    assert.throws(() => startupTargetFromRegistry({ version: 1, workspaces: [selected] }, fixtureWorkspaces), /known fixture workspace/);
+  }
+});
+
+test('startup observer cannot combine the active selection with content in another group', async t => {
+  const p = readinessPage(t);
+  const group = p.document.querySelector('[data-editor-group-id]');
+  const inactiveGroup = group.cloneNode(true);
+  inactiveGroup.removeAttribute('data-active');
+  inactiveGroup.setAttribute('data-editor-group-id', 'other');
+  group.after(inactiveGroup);
+  const activeEditor = group.querySelector('.tiptap');
+  activeEditor.textContent = 'Workspace 1 small';
+  const result = p.observe();
+  assert.equal(p.frames.size, 0);
+  activeEditor.textContent = 'Workspace 0 small';
+  p.step(); p.frame(); p.frame();
+  assert.equal((await result).alreadyReady, false);
+});
+
+for (const frameNumber of [1, 2]) test(`startup observer rejects a DOM error in animation frame ${frameNumber}`, async t => {
+  const p = readinessPage(t);
+  const result = p.observe();
+  if (frameNumber === 2) p.frame();
+  p.document.querySelector('.tiptap').getBoundingClientRect = () => { throw Error('fixture DOM failure'); };
+  const rejected = assert.rejects(result, /fixture DOM failure/);
+  p.frame();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('startup observer times out and clears scheduled work when no editable document appears', async t => {
+  const p = readinessPage(t);
+  p.document.querySelector('.tiptap').remove();
+  const rejected = assert.rejects(p.observe(), /Expected visible editable document/);
+  for (let n = 0; n < 20; n++) p.step();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('startup observer propagates the editing refusal', async t => {
+  const p = readinessPage(t);
+  p.document.body.innerText = 'dohc could not open this document for editing.';
+  await assert.rejects(p.observe(), /Actual packaged app refused document editing/);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
 
 const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
 test('release environment excludes inherited dohc integration and Node controls', () => {
@@ -230,8 +411,9 @@ test('cancellation during helper readiness waits for cleanup before returning', 
 });
 
 test('summary keeps absent timing samples missing and labels diagnostic measurements', async () => {
+  const rendererReadiness = { timeOrigin: 1005, observerInstalledMs: 12, alreadyReady: true, predicateMatchedMs: 12, secondAnimationFrameMs: 28 };
   const summary = await summarize({ label: 'baseline', status: 'failed', settings: { profileRenderer: true }, limits: ['16ms floor'], runs: [{
-    index: 1, freshStartup: { startedAt: 1000, editablePaintObservedMs: 50, windowControlObservedMs: 4, renderer: { timeOrigin: 1005, paints: [{ name: 'first-paint', startTime: 8 }] } },
+    index: 1, freshStartup: { startedAt: 1000, editablePaintObservedMs: 50, windowControlObservedMs: 4, rendererReadiness, renderer: { timeOrigin: 1005, paints: [{ name: 'first-paint', startTime: 8 }] } },
     typing: [{ name: 'small.md', supported: true, samples: [{ inputToNextPaintMs: null }, {}, { inputToNextPaintMs: 16 }], longTasks: [] }],
     switches: [{ phasesMs: { files: 3 } }, { phasesMs: {} }],
   }] }, async () => '[desktop] launch marks (ms since process start): ready 12');
@@ -244,5 +426,7 @@ test('summary keeps absent timing samples missing and labels diagnostic measurem
   assert.equal(summary.nativeSwitchPhasesMs.files.count, 1);
   assert.equal(summary.startupEvidence[0].nativeMarksMsSinceModuleEvaluation.ready, 12);
   assert.equal(summary.startupEvidence[0].rendererPaintsMsSinceHarnessSpawn[0].ms, 13);
+  assert.deepEqual(summary.startupEvidence[0].rendererReadiness, rendererReadiness);
+  assert.equal(summary.freshEditableObservedMs.p50, 50);
   assert.deepEqual(summary.limits, ['16ms floor']);
 });

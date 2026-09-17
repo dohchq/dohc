@@ -23,7 +23,7 @@ export async function summarize(data, readLog = async () => '') {
       startupEvidence.push({ run: run.index, phase, nativeMarksMsSinceModuleEvaluation: nativeMarks,
         rendererPaintsMsSinceHarnessSpawn: startup.renderer?.paints?.map(p => ({ name: p.name, ms: startup.renderer.timeOrigin + p.startTime - startup.startedAt })) ?? [],
         observedEditableMs: startup.editablePaintObservedMs, windowControlObservedMs: startup.windowControlObservedMs,
-        launchStages: startup.launchStages, v8MainLogs: startup.v8MainLogs });
+        launchStages: startup.launchStages, rendererReadiness: startup.rendererReadiness, v8MainLogs: startup.v8MainLogs });
     }
   }
   const summary = {
