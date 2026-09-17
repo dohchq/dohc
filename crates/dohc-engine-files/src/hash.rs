@@ -725,12 +725,15 @@ mod scheduler_tests {
         let (pool, jobs, _replies) = controlled_pool(2);
         let token = CancellationToken::new();
         token.cancel();
-        assert!(completed(pool.hash_batched(&[], &token)).is_empty());
-        assert!(completed(pool.hash_batched(&[], &CancellationToken::new())).is_empty());
-        assert!(matches!(
-            pool.hash_batched(&inputs(1), &token),
-            Ok(HashRun::Cancelled)
-        ));
+        let done = start(pool, 0, token.clone());
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("cancelled empty run");
+        assert!(completed(result).is_empty());
+        let done = start(pool, 0, CancellationToken::new());
+        let (result, pool) = done.recv_timeout(DEADLINE).expect("empty run");
+        assert!(completed(result).is_empty());
+        let done = start(pool, 1, token);
+        let (result, _pool) = done.recv_timeout(DEADLINE).expect("precancelled run");
+        assert!(matches!(result, Ok(HashRun::Cancelled)));
         assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
     }
 
