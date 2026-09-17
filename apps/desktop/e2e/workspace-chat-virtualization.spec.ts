@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
-import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -16,6 +16,7 @@ import {
   seedWorkspaceRegistry,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
+  type TempWorkspace,
 } from "./helpers/workspace";
 
 const messageCount = 300;
@@ -49,11 +50,10 @@ async function wheelFromEnd(list: Locator, distance: number): Promise<number> {
   return list.evaluate((node) => node.scrollTop);
 }
 
-async function sendThroughIpc(page: Page, workspaceId: string, threadId: string, body: string): Promise<string> {
-  return page.evaluate(async (payload) => {
-    const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
-    return (await api.sendChatMessage(payload)).message.id;
-  }, { workspaceId, threadId, body });
+async function sendIncomingReply(workspace: TempWorkspace, threadId: string, body: string): Promise<void> {
+  const result = await runDohcCli(workspace, ["chat", "reply", threadId, "--as-agent", body]);
+  expect(result.stderr).toBe("");
+  expect(result.stdout).toContain("replied");
 }
 
 async function expectWindowed(root: Locator, prefix: string, lastBody: string): Promise<Locator> {
@@ -85,6 +85,7 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
+    await waitForCliEndpoint(temp.homeDir);
     const panel = await openChats(page);
 
     await panel.getByTestId("chats-channel").filter({ hasText: "Empty chat" }).click();
@@ -102,19 +103,20 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
 
     const historyTop = await wheelFromEnd(list, 60);
     const historyAnchor = lane.getByTestId("chats-lane-message").filter({ hasText: `Lane message ${messageCount - 2}` });
-    await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming while reading history");
+    await sendIncomingReply(temp, seeded.threadId, "Incoming while reading history");
     await expect(historyAnchor).toHaveAttribute("aria-setsize", String(messageCount + 1));
     await expect.poll(() => distanceFromEnd(list)).toBeGreaterThan(60);
     expect(await list.evaluate((node) => node.scrollTop)).toBeCloseTo(historyTop, 0);
 
-    let followingMessage = "";
+    let followingBody = "";
     for (const distance of [20, 40]) {
       await wheelFromEnd(list, distance);
-      followingMessage = await sendThroughIpc(page, workspaceId, seeded.threadId, `Incoming while following from ${distance}px`);
-      await expect(lane.locator(`[data-message-id="${followingMessage}"]`)).toBeInViewport();
+      followingBody = `Incoming while following from ${distance}px`;
+      await sendIncomingReply(temp, seeded.threadId, followingBody);
+      await expect(lane.getByTestId("chats-lane-message").filter({ hasText: followingBody })).toBeInViewport();
       await expect.poll(() => distanceFromEnd(list)).toBeLessThanOrEqual(1);
     }
-    const lastRow = lane.locator(`[data-message-id="${followingMessage}"]`);
+    const lastRow = lane.getByTestId("chats-lane-message").filter({ hasText: followingBody });
 
     await lastRow.hover();
     const trigger = lastRow.getByTestId("chats-lane-add-reaction");
@@ -139,7 +141,7 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await expect(trigger).toBeFocused();
     await expect(lastRow).toBeAttached();
     await expect(lastRow).not.toBeInViewport();
-    await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming after keyboard history navigation");
+    await sendIncomingReply(temp, seeded.threadId, "Incoming after keyboard history navigation");
     await expect(firstRow).toHaveAttribute("aria-setsize", String(messageCount + 4));
     await expect(firstRow).toBeInViewport({ ratio: 1 });
     await expect.poll(() => firstRow.evaluate((node, top) =>
