@@ -16,6 +16,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+import { Marked, type marked } from "marked";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
@@ -260,9 +261,6 @@ const COLLAB_STARTER_KIT = StarterKit.configure({
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
-const MARKDOWN_EXTENSION = Markdown.configure({
-  indentation: { style: "space", size: 2 },
-});
 const TRAILING_NODE_EXTENSION = SafeTrailingNode.configure({
   node: "paragraph",
   notAfter: ["paragraph"],
@@ -303,8 +301,6 @@ const STATIC_EDITOR_EXTENSIONS = [
   DohcTaskItem,
   FenceWideningCodeBlock,
   TABLE_KIT_EXTENSION,
-  MARKDOWN_EXTENSION,
-  findReplaceExtension,
 ];
 
 function BubbleButton(props: {
@@ -633,6 +629,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         return [
           isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
           ...STATIC_EDITOR_EXTENSIONS,
+          // MarkdownManager registers custom tokenizers on its marked
+          // instance. Give each editor a private instance so opening and
+          // closing documents cannot grow the process-wide marked registry.
+          Markdown.configure({
+            indentation: { style: "space", size: 2 },
+            marked: new Marked() as unknown as typeof marked,
+          }),
+          findReplaceExtension,
           ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
           ...(isCollab
             ? [
