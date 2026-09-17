@@ -221,7 +221,9 @@ export type GroupSelectorValidation =
 // own validator; the folder is one path, live, never a version.
 export function validateGroupShareSelector(
   input: { channelWireId?: unknown; paths?: unknown },
-  chat?: Pick<ChatShareThreadResolver, "channelKind">,
+  chat?: Pick<ChatShareThreadResolver, "channelKind"> & {
+    channelFolderPath?(wireId: string): string | null | undefined;
+  },
 ): GroupSelectorValidation {
   const channel = validateChatChannelShareSelector({ channelWireId: input.channelWireId }, chat);
   if (!channel.ok) return channel;
@@ -244,6 +246,14 @@ export function validateGroupShareSelector(
       ok: false,
       code: RELAY_ERRORS.empty_selector.code,
       message: "a group share names its folder",
+    };
+  }
+  if (chat && (files.selector.paths.length !== 1 ||
+    files.selector.paths[0] !== chat.channelFolderPath?.(channel.selector.channelWireId))) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_path.code,
+      message: "a group shares exactly its channel folder",
     };
   }
   return {

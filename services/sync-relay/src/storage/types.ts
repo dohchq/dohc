@@ -920,6 +920,10 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): "channel" | "dm" | "agent" | null | undefined;
+  findChannelCreateFolderPath(
+    workspaceId: string,
+    channelWireId: string,
+  ): string | null | undefined;
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason
   // the channel binding uses it: a later forged re-create must not re-bind an

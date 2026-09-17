@@ -55,6 +55,7 @@ export function createShareGrantRoutes(
     | "createLinkGrant"
     | "createShare"
     | "findChannelCreateKind"
+    | "findChannelCreateFolderPath"
   >,
   nowMs: () => number,
   newShareId: () => string,
@@ -530,7 +531,10 @@ export function createShareGrantRoutes(
           }
           const groupValidation = validateGroupShareSelector(
             { channelWireId: input.channelWireId, paths: input.paths },
-            { channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId) },
+            {
+              channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
+              channelFolderPath: (wireId) => storage.findChannelCreateFolderPath(route.workspaceId, wireId),
+            },
           );
           if (!groupValidation.ok) {
             throw relayError(groupValidation.code, groupValidation.message);

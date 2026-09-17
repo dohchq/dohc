@@ -869,6 +869,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return objectIndexStorage.findChannelCreateKind(this, workspaceId, channelWireId);
   }
 
+  findChannelCreateFolderPath(
+    workspaceId: string,
+    channelWireId: string,
+  ): string | null | undefined {
+    return objectIndexStorage.findChannelCreateFolderPath(this, workspaceId, channelWireId);
+  }
+
   findThreadCreateFileBinding(
     workspaceId: string,
     threadId: string,

@@ -172,6 +172,20 @@ async function fetchSharePage(
 }
 
 describe("a group share is one grant for the channel and its folder", () => {
+  it("refuses paths outside the channel folder and accepts its exact folder", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    for (const paths of [["private"], ["team", "private"], ["team/child"]]) {
+      const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({
+        recipientUserId: MEMBER_A, channelWireId: SHARED_WIRE, paths,
+      })));
+      expect(response.status).toBe(400);
+      expect(await json(response)).toMatchObject({ code: "invalid_path" });
+    }
+    await createGroupShare(h, MEMBER_A);
+  });
+
   it("serves the channel's chat and the folder's files, and nothing else", async () => {
     const storage = await testStorage();
     const h = handler(storage);

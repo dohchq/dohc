@@ -199,6 +199,41 @@ export function findChannelCreateKind(
     return undefined;
   }
 
+export function findChannelCreateFolderPath(
+    storage: StorageContext,
+    workspaceId: string,
+    channelWireId: string,
+  ): string | null | undefined {
+    if (!channelWireId) return undefined;
+    // Canonical payload JSON sorts keys, so this exact fragment is a useful
+    // pre-filter. Escaping LIKE metacharacters prevents a hostile wire id from
+    // widening the scan; parsed exact equality below remains authoritative.
+    const needle = `"wireId":${JSON.stringify(channelWireId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    const rows = storage.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.channel.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
+    for (const row of rows) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asRecord(payload);
+      if (!record || record.wireId !== channelWireId) continue;
+      return typeof record.folderPath === "string" ? record.folderPath : null;
+    }
+    return undefined;
+  }
+
 export function findThreadCreateFileBinding(
     storage: StorageContext,
     workspaceId: string,
