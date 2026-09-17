@@ -1650,24 +1650,29 @@ function sizeAppendStrips(table: HTMLElement): void {
   const rect = table.getBoundingClientRect();
   const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col");
   const colCell = colStrip?.parentElement;
-  if (colStrip && colCell) {
-    colStrip.style.top = `${rect.top - colCell.getBoundingClientRect().top}px`;
-    colStrip.style.height = `${rect.height}px`;
-  }
+  const colTop = colCell?.getBoundingClientRect().top;
   const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row");
   const rowCell = rowStrip?.parentElement;
-  if (rowStrip && rowCell) {
-    rowStrip.style.left = `${rect.left - rowCell.getBoundingClientRect().left}px`;
+  const rowLeft = rowCell?.getBoundingClientRect().left;
+  const handles = Array.from(
+    table.querySelectorAll<HTMLElement>(".dohc-table-row-resize"),
+    (handle) => ({ handle, left: handle.parentElement?.getBoundingClientRect().left }),
+  );
+
+  // Read every anchor before changing styles to avoid a layout per row.
+  if (colStrip && colTop !== undefined) {
+    colStrip.style.top = `${rect.top - colTop}px`;
+    colStrip.style.height = `${rect.height}px`;
+  }
+  if (rowStrip && rowLeft !== undefined) {
+    rowStrip.style.left = `${rect.left - rowLeft}px`;
     rowStrip.style.width = `${rect.width}px`;
   }
-  table
-    .querySelectorAll<HTMLElement>(".dohc-table-row-resize")
-    .forEach((handle) => {
-      const anchorCell = handle.parentElement;
-      if (!anchorCell) return;
-      handle.style.left = `${rect.left - anchorCell.getBoundingClientRect().left}px`;
-      handle.style.width = `${rect.width}px`;
-    });
+  for (const { handle, left } of handles) {
+    if (left === undefined) continue;
+    handle.style.left = `${rect.left - left}px`;
+    handle.style.width = `${rect.width}px`;
+  }
 }
 
 // The CSS fallback only spans the anchor corner cell, so size every append
