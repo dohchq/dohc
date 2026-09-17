@@ -11,7 +11,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
-import { observeStartupReadiness } from './startup-readiness.mjs';
+import { observeStartupReadiness, startupTargetAfterSwitches } from './startup-readiness.mjs';
 
 function readinessPage(t) {
   const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
@@ -46,7 +46,7 @@ function readinessPage(t) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback(now);
   };
-  const observe = () => w.eval(`(${observeStartupReadiness.toString()})`)({ workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small', timeoutMs: 1000 });
+  const observe = (target = startupTargetAfterSwitches()) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
   return { document: w.document, observe, step, frame, frames, timers };
 }
 
@@ -99,6 +99,31 @@ test('startup observer restarts its frame check when the bound editor is replace
   const observed = await result;
   assert.equal(observed.predicateMatchedMs, 42);
   assert.equal(observed.secondAnimationFrameMs, 74);
+});
+
+test('full restart after an odd switch count observes workspace 1 without another switch', async t => {
+  const p = readinessPage(t);
+  const priorSwitches = [{ to: 1 }, { to: 0 }, { to: 1 }];
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
+  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
+  const result = p.observe(startupTargetAfterSwitches(priorSwitches));
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, true);
+  assert.equal(observed.workspaceName, 'workspace-1');
+  assert.equal(observed.path, 'small.md');
+  assert.deepEqual(startupTargetAfterSwitches(priorSwitches.slice(0, 2)), startupTargetAfterSwitches());
+});
+
+for (const frameNumber of [1, 2]) test(`startup observer rejects a DOM error in animation frame ${frameNumber}`, async t => {
+  const p = readinessPage(t);
+  const result = p.observe();
+  if (frameNumber === 2) p.frame();
+  p.document.querySelector('.tiptap').getBoundingClientRect = () => { throw Error('fixture DOM failure'); };
+  const rejected = assert.rejects(result, /fixture DOM failure/);
+  p.frame();
+  await rejected;
+  assert.equal(p.frames.size + p.timers.size, 0);
 });
 
 test('startup observer times out and clears scheduled work when no editable document appears', async t => {

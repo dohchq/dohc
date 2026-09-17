@@ -1,7 +1,7 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
-import { observeStartupReadiness } from './startup-readiness.mjs';
+import { observeStartupReadiness, startupTargetAfterSwitches } from './startup-readiness.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
@@ -137,7 +137,7 @@ async function fixture(runDir) {
   await json(join(runDir, 'fixture.json'), fixtureHashes);
   return { profile, workspaces, fixtureHashes };
 }
-async function launch(runDir, fixture, phase) {
+async function launch(runDir, fixture, phase, priorSwitches = []) {
   const logPath = join(runDir, `${phase}.log`);
   const v8LogDir = join(runDir, `${phase}-v8`);
   const profileArgs = [];
@@ -176,7 +176,7 @@ async function launch(runDir, fixture, phase) {
   const page = await waitUntil(async () => browser.contexts().flatMap(c => c.pages()).find(p => p.url().includes('index.html')));
   active.page = page;
   launchStages.pageObservedMs = performance.now() - started;
-  const readiness = page.evaluate(observeStartupReadiness, { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' });
+  const readiness = page.evaluate(observeStartupReadiness, startupTargetAfterSwitches(priorSwitches));
   // Window ownership verification and renderer observation run concurrently.
   // The launch failure path owns shutdown if either rejects.
   void readiness.catch(() => {});
@@ -455,7 +455,7 @@ async function idle(instance, state) {
     await fresh.page.screenshot({ path: join(runDir, 'completed.png') });
     await json(join(output, 'result.json'), receipt);
     await shutdown(runDir, fresh);
-    const restart = await launch(runDir, f, 'restart');
+    const restart = await launch(runDir, f, 'restart', data.switches);
     data.restartStartup = restart.startup;
     data.restartHasSavedInput = await verifyRestartInput({
       isEditedWorkspaceSelected: async () => (await restart.page.getByTestId('workspace-switcher').textContent())?.trim() === 'workspace-0',

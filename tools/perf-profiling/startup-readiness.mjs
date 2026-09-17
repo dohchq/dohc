@@ -41,16 +41,23 @@ export function observeStartupReadiness({ workspaceName, path, content, timeoutM
         alreadyReady ??= Boolean(editor);
         if (!editor) { poll = setTimeout(check, 50); return; }
         const predicateMatchedMs = performance.now();
-        frame = requestAnimationFrame(() => {
-          if (surface() !== editor) { check(); return; }
+        const afterFrame = remaining => {
           frame = requestAnimationFrame(() => {
-            if (surface() !== editor) { check(); return; }
-            finish(null, { timeOrigin: performance.timeOrigin, observerInstalledMs: installedMs, alreadyReady,
-              predicateMatchedMs, secondAnimationFrameMs: performance.now(), workspaceName, path });
+            try {
+              if (surface() !== editor) { check(); return; }
+              if (remaining > 1) { afterFrame(remaining - 1); return; }
+              finish(null, { timeOrigin: performance.timeOrigin, observerInstalledMs: installedMs, alreadyReady,
+                predicateMatchedMs, secondAnimationFrameMs: performance.now(), workspaceName, path });
+            } catch (error) { finish(error); }
           });
-        });
+        };
+        afterFrame(2);
       } catch (error) { finish(error); }
     };
     check();
   });
+}
+export function startupTargetAfterSwitches(switches = []) {
+  const index = switches.at(-1)?.to ?? 0;
+  return { workspaceName: `workspace-${index}`, path: 'small.md', content: `Workspace ${index} small` };
 }
