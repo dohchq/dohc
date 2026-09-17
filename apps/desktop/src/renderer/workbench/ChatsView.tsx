@@ -1,3 +1,4 @@
+import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
 import { ChatAvatar } from "./ChatAvatar";
@@ -3349,8 +3350,12 @@ export function ChatsView(props: {
           onBack={goBack}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className={`px-3 pb-12 pt-3 sm:px-4 ${pageColumn}`}>
+        <PostFeedList
+          key={`${workspaceId}:home`}
+          items={personalFeed}
+          itemKey={(item) => item.message.id}
+          columnClassName={pageColumn}
+          header={<>
             {personalFeed.length === 0 && !personalFeedLoading ? (
               <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
                 <p className="m-0">Nothing new yet</p>
@@ -3364,8 +3369,23 @@ export function ChatsView(props: {
                 </button>
               </div>
             ) : null}
-            <ul className="m-0 flex list-none flex-col gap-3 p-0">
-              {personalFeed.map((item) => {
+          </>}
+          footer={<>
+            {personalFeedLoading ? (
+              <p className="py-5 text-center text-[11px] text-subtle">Loading…</p>
+            ) : null}
+            {personalFeedNextCursor && !personalFeedLoading ? (
+              <button
+                type="button"
+                data-testid="chats-feed-more"
+                onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
+                className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-line/40 hover:text-ink"
+              >
+                Load older
+              </button>
+            ) : null}
+          </>}
+          renderItem={(item) => {
                 const fileThread = item.channel
                   ? null
                   : overview.fileThreads.find((thread) => thread.id === item.thread.id) ?? {
@@ -3468,7 +3488,7 @@ export function ChatsView(props: {
                   </span>
                 );
                 return (
-                  <li
+                  <div
                     key={item.message.id}
                     data-testid="chats-feed-item"
                     data-author-kind={item.message.authorKind}
@@ -3561,25 +3581,11 @@ export function ChatsView(props: {
                         }
                       />
                     </div>
-                  </li>
+                  </div>
                 );
-              })}
-            </ul>
-            {personalFeedLoading ? (
-              <p className="py-5 text-center text-[11px] text-subtle">Loading…</p>
-            ) : null}
-            {personalFeedNextCursor && !personalFeedLoading ? (
-              <button
-                type="button"
-                data-testid="chats-feed-more"
-                onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
-                className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-line/40 hover:text-ink"
-              >
-                Load older
-              </button>
-            ) : null}
-          </div>
-        </div>
+
+          }}
+        />
       </div>
     );
   }
@@ -4260,11 +4266,15 @@ export function ChatsView(props: {
             revision={props.threadRevision ?? 0}
           />
         ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div
-            data-testid="chats-feed-column"
-            className="mx-auto w-full max-w-[640px] px-3 pb-16 sm:px-4"
-          >
+        <PostFeedList
+          key={`${workspaceId}:${nav.channel.id}`}
+          testId="chats-feed-column"
+          items={threadsLoading ? [] : channelThreads}
+          itemKey={(thread) => thread.id}
+          columnClassName="mx-auto w-full max-w-[640px]"
+          bottomPadding={64}
+          topPadding={0}
+          header={<>
             {!channelLocked ? (
               <div className="mb-4 mt-4">
                 <MentionComposer
@@ -4288,9 +4298,10 @@ export function ChatsView(props: {
                 />
               </div>
             ) : null}
-            {threadsLoading ? (
+          </>}
+          empty={threadsLoading ? (
               <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-            ) : channelThreads.length === 0 ? (
+            ) : (
               <div
                 data-testid="chats-channel-empty"
                 className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
@@ -4298,9 +4309,8 @@ export function ChatsView(props: {
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
                 <span className="text-[13px] text-subtle">No posts yet</span>
               </div>
-            ) : (
-              <ul className="m-0 flex list-none flex-col gap-3 p-0">
-                {channelThreads.map((thread) => {
+            )}
+          renderItem={(thread) => {
                   const post = feedPosts[thread.id] ?? {
                     openingMessage: null,
                     reactions: [],
@@ -4340,11 +4350,9 @@ export function ChatsView(props: {
                       }
                     />
                   );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
+
+          }}
+        />
         )}
         {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
