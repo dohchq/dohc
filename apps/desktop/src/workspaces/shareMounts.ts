@@ -80,7 +80,7 @@ function mountLabelFor(
   name: string | null,
   existingLabels: readonly string[],
 ): string {
-  const localPart = (name ?? "").split("@")[0] ?? "";
+  const localPart = name ?? "";
   let base =
     localPart
       .toLowerCase()
@@ -146,7 +146,7 @@ export function allocateShareMountLabel<Mount>(input: {
   // A group's folder is labeled by its channel name, not its granter.
   labelHint?: string;
 }): string {
-  return mountLabelFor(input.labelHint ?? input.granterEmail, [
+  return mountLabelFor(input.labelHint ?? input.granterEmail?.split("@")[0] ?? null, [
     ...reservedShareMountLabels(input.storedMounts),
     ...input.onDiskNames,
   ]);

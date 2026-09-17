@@ -251,6 +251,9 @@ describe("mount labels", () => {
         labelHint: "Launch Team",
       }),
     ).toBe("launch-team (2)");
+    expect(allocateShareMountLabel({
+      storedMounts: [], onDiskNames: [], granterEmail: "alex@example.com", labelHint: "platform@eu",
+    })).toBe("platform-eu");
   });
 
   it("reserves every string label held by damaged registry records", () => {
