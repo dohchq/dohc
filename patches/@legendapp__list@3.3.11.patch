@@ -1,5 +1,5 @@
 diff --git a/react.js b/react.js
-index 874465090398bbfb1b079e82dd175490020eaabf..b4e2f9a645c021a114e0d6ebe899d8b67f6c038d 100644
+index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a03c72d3d 100644
 --- a/react.js
 +++ b/react.js
 @@ -721,7 +721,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
@@ -65,8 +65,16 @@ index 874465090398bbfb1b079e82dd175490020eaabf..b4e2f9a645c021a114e0d6ebe899d8b6
        unsubscribe();
        clearTimeout(timeoutId);
      };
+@@ -7670,6 +7683,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+     scrollToIndex: (params) => {
+       return runScrollWithPromise(
+         () => {
++          state.mvcpAnchorLock = void 0;
+           scrollToIndex(ctx, params);
+           return true;
+         },
 diff --git a/react.mjs b/react.mjs
-index d9a4414a9295c694f9c2b71cf75268a422f897e4..464c507c59b73169be57ec2b9d9ca2c050dd068a 100644
+index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace02d2557f 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -700,7 +700,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
@@ -132,3 +140,11 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..464c507c59b73169be57ec2b9d9ca2c0
        unsubscribe();
        clearTimeout(timeoutId);
      };
+@@ -7649,6 +7662,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+     scrollToIndex: (params) => {
+       return runScrollWithPromise(
+         () => {
++          state.mvcpAnchorLock = void 0;
+           scrollToIndex(ctx, params);
+           return true;
+         },
