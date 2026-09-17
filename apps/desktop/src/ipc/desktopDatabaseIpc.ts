@@ -102,6 +102,7 @@ export function registerDesktopDatabaseIpcHandlers<
             sourcePath: input.sourceRelativePath,
             databasePath: input.databaseRelativePath,
             tableName: input.tableName,
+            signal: operation.signal,
           }),
         );
       },

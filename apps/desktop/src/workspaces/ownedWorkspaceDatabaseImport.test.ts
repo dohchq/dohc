@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ImportDataInput } from "@dohc/sqlite-worker";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShareMountRecord } from "./registryStore";
 import {
   createShareViewFiles,
@@ -11,29 +11,13 @@ import {
 } from "./shareViewFiles";
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import { importOwnedWorkspaceDatabase } from "./ownedWorkspaceDatabaseImport";
-import { readDatabaseSnapshot } from "./workspaceDatabase";
+import { readDatabaseSnapshot, workspaceDatabaseWorker } from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
 const SOURCE_PATH = "shared-with-me/alice/data.csv";
-const importDataInputs = vi.hoisted(() => [] as ImportDataInput[]);
-
-vi.mock("@dohc/sqlite-worker", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@dohc/sqlite-worker")>();
-  return {
-    ...actual,
-    createSqliteEngine: async () => {
-      const engine = await actual.createSqliteEngine();
-      return {
-        ...engine,
-        importData: async (input: ImportDataInput) => {
-          importDataInputs.push(input);
-          return engine.importData(input);
-        },
-      };
-    },
-  };
-});
+const importDataInputs: ImportDataInput[] = [];
+const runImport = workspaceDatabaseWorker.importData.bind(workspaceDatabaseWorker);
 
 function mount(): ShareMountRecord {
   return {
@@ -100,7 +84,13 @@ function ownerFiles(input: {
 describe("owned database import", () => {
   beforeEach(() => {
     importDataInputs.length = 0;
+    vi.spyOn(workspaceDatabaseWorker, "importData").mockImplementation((input, signal) => {
+      importDataInputs.push(input);
+      return runImport(input, signal);
+    });
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it("refuses leftover projection bytes after the mount registry becomes empty", async () => {
     const rootPath = await createTestScratch("dohc-owned-db-tombstone-");

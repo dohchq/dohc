@@ -10,6 +10,7 @@ export async function importOwnedWorkspaceDatabase(input: {
   sourcePath: string;
   databasePath: string;
   tableName: string;
+  signal?: AbortSignal;
 }): Promise<{ path: string; tableName: string; rowCount: number }> {
   const source = await createOwnedWorkspaceFileReader({
     workspace: input.workspace,
@@ -20,5 +21,6 @@ export async function importOwnedWorkspaceDatabase(input: {
     { path: source.path, body: source.bytes.toString("utf8") },
     input.databasePath,
     input.tableName,
+    { signal: input.signal },
   );
 }

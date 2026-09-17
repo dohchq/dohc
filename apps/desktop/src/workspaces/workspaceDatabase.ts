@@ -241,26 +241,22 @@ export async function importToDatabase(
   source: { path: string; body: string },
   databaseRelativePath: string,
   tableName: string,
+  options: { worker?: WorkspaceDatabaseWorkerOwner; signal?: AbortSignal } = {},
 ): Promise<{ path: string; tableName: string; rowCount: number }> {
   const mediaType = mediaTypeForPath(source.path) ?? "text/plain";
 
-  // Dynamic import keeps the engine (and node:sqlite) off the launch path.
-  const { createSqliteEngine } = await import("@dohc/sqlite-worker");
-  const engine = await createSqliteEngine();
-  const result = await engine.importData({
+  const result = await (options.worker ?? workspaceDatabaseWorker).importData({
     name: basename(source.path),
     mediaType,
     body: source.body,
     tableName,
-  });
-  if (!result.ok) {
-    throw new Error(`Import failed (${result.code}): ${result.message}`);
-  }
+  }, options.signal);
+  if (options.signal?.aborted) throw new Error("Database import was cancelled.");
 
   const path = await writeWorkspaceBytes(
     rootPath,
     databaseRelativePath,
-    Buffer.from(result.bytesBase64, "base64"),
+    Buffer.from(result.bytes.buffer, result.bytes.byteOffset, result.bytes.byteLength),
   );
   return { path, tableName: result.tableName, rowCount: result.rowCount };
 }
