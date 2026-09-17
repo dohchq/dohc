@@ -25,6 +25,7 @@ files:
   - dist/**
   # Main bundles the Effect runtime; CLI and plugin tools own their dependencies.
   - "!node_modules/effect/**"
+  - "!node_modules/electron-updater/**"
 asar: true
 # A direct electron-builder invocation must not be able to silently omit the
 # engine sidecar. The hook throws before packaging if staging did not happen.

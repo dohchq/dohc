@@ -73,10 +73,11 @@ export default defineConfig(({ mode }) => {
       // Workspace packages ship raw TS — they must be bundled, not
       // externalized, or Node ESM fails on their extensionless imports.
       // Bundle Effect's schema runtime to remove unused code and separate
-      // module loads at startup. Other npm dependencies stay external.
+      // module loads at startup. Bundle the updater's dynamic import for the
+      // same reason, while preserving when update initialization runs.
       plugins: [
         externalizeDepsPlugin({
-          exclude: [...mainBundledWorkspaceDeps, "effect"],
+          exclude: [...mainBundledWorkspaceDeps, "effect", "electron-updater"],
         }),
       ],
       build: {
