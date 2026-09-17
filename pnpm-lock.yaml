@@ -67,9 +67,6 @@ importers:
       '@dohc/cli':
         specifier: workspace:*
         version: link:../../packages/cli
-      '@dohc/collection-views':
-        specifier: workspace:*
-        version: link:../../packages/collection-views
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../../packages/live-session-contract
@@ -191,6 +188,9 @@ importers:
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand
+      '@dohc/collection-views':
+        specifier: workspace:*
+        version: link:../../packages/collection-views
       '@dohc/excalidraw-scene':
         specifier: workspace:*
         version: link:../../packages/excalidraw-scene
