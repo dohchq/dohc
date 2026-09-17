@@ -22,6 +22,13 @@ function openJournalStorage(...args: Parameters<typeof openSyncRelayStorage>) {
   return storage
 }
 
+const calls = vi.hoisted(() => ({bindings: 0}));
+vi.mock('@dohc/live-session-contract/live-object-binding', async original => {
+  const actual = await original<typeof import('@dohc/live-session-contract/live-object-binding')>();
+  return {...actual, parseLiveObjectBinding: (...args: Parameters<typeof actual.parseLiveObjectBinding>) => {
+    calls.bindings++; return actual.parseLiveObjectBinding(...args);
+  }};
+});
 const policy = {
   maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
   maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
@@ -1056,3 +1063,67 @@ it('commits a journal update with continuity and replays without another mutatio
     expect(stamp()).toBe(committed)
   } finally { f.close() }
 })
+
+it.each([1, 100])('bounds repeated binding validation for %s selector paths while preserving a long journal cut', pathCount => {
+  const f = registered();
+  try {
+    const paths = ['docs', ...Array.from({length: pathCount - 1}, (_, index) => `other/${String(index).padStart(3, '0')}`)];
+    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths, versionId: null}));
+    for (let i = 0; i < 40; i++) expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + i, 'value-' + i), 'delivery-' + i)).result.kind).toBe('accepted');
+    calls.bindings = 0;
+    const cut = f.storage.readLiveUpdateJournalCut({document: f.input.evidence.document});
+    expect(cut.kind).toBe('cut');
+    if (cut.kind !== 'cut') throw new Error('missing cut');
+    expect(cut.cut.suffix).toHaveLength(40);
+    const firstBinding = cut.cut.suffix[0]!.metadata.accepted.binding;
+    const secondBinding = cut.cut.suffix[1]!.metadata.accepted.binding;
+    expect(firstBinding).toEqual(secondBinding);
+    expect(firstBinding).not.toBe(secondBinding);
+    expect(firstBinding.selectorPaths).not.toBe(secondBinding.selectorPaths);
+    const reconstructed = new Y.Doc();
+    try {
+      Y.applyUpdate(reconstructed, cut.cut.checkpoint.bytes);
+      for (const row of cut.cut.suffix) Y.applyUpdate(reconstructed, row.bytes);
+      expect(reconstructed.getMap('frontmatter').toJSON()).toEqual(f.doc.getMap('frontmatter').toJSON());
+    } finally {reconstructed.destroy();}
+    expect(calls.bindings).toBeLessThanOrEqual(3);
+  } finally {f.close();}
+});
+
+it.each([
+  ['current_path', 'docs/b.md', 'currentPath', 'docs/b.md'],
+  ['selector_paths_json', '["docs/a.md"]', 'selectorPaths', ['docs/a.md']],
+  ['restore_fence_generation', 1, 'restoreFenceGeneration', 1],
+] as const)('reads changed %s from another connection without reusing the previous binding', (column, value, field, expected) => {
+  const f = registered();
+  try {
+    for (let index = 0; index < 3; index++) {
+      expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + index), 'delivery-' + index)).result.kind).toBe('accepted');
+    }
+    const before = f.storage.readLiveUpdateJournalCut({document: f.input.evidence.document});
+    expect(before.kind).toBe('cut');
+    f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=2`).run(value);
+    const after = f.storage.readLiveUpdateJournalCut({document: f.input.evidence.document});
+    expect(after.kind).toBe('cut');
+    if (before.kind !== 'cut' || after.kind !== 'cut') throw new Error('missing cut');
+    expect(after.cut.suffix[1]!.metadata.accepted.binding[field]).toEqual(expected);
+    expect(after.cut.suffix[0]).toEqual(before.cut.suffix[0]);
+    expect(after.cut.suffix[2]).toEqual(before.cut.suffix[2]);
+    expect(after.cut.suffix[0]!.metadata.accepted.binding).not.toBe(after.cut.suffix[2]!.metadata.accepted.binding);
+  } finally {f.close();}
+});
+
+it.each(['[oops', '["docs","docs"]', '[ "docs" ]'])('rejects changed malformed suffix selectors %s after a successful read', selectors => {
+  const f = registered();
+  try {
+    for (let index = 0; index < 3; index++) {
+      expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('field-' + index), 'delivery-' + index)).result.kind).toBe('accepted');
+    }
+    const next = f.capture(f.update('next'), 'next');
+    f.raw.prepare('UPDATE sync_relay_live_update_journal SET selector_paths_json=? WHERE journal_cursor=2').run(selectors);
+    const before = f.journalRows();
+    expect(() => f.storage.readLiveUpdateJournalCut({document: f.input.evidence.document})).toThrow();
+    expect(() => f.storage.commitLiveUpdateJournal(next)).toThrow();
+    expect(f.journalRows()).toEqual(before);
+  } finally {f.close();}
+});
