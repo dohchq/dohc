@@ -18,7 +18,7 @@ function forwardedHeaders(headers) {
 export async function openNetworkProxy(targetUrl) {
   const target = new URL(targetUrl);
   let settings = { latencyMs: 0, bytesPerSecond: 0, failBlobAt: 0 };
-  let availableAt = 0;
+  let bandwidthTail = Promise.resolve();
   let counters;
   const sockets = new Set();
   const requests = new Set();
@@ -26,7 +26,26 @@ export async function openNetworkProxy(targetUrl) {
   const controller = new AbortController();
   const reset = () => {
     counters = { requests: 0, blobGets: 0, bytes: 0, failures: 0 };
-    availableAt = performance.now();
+  };
+  const waitForBandwidth = async (bytes, signal) => {
+    signal.throwIfAborted();
+    const previous = bandwidthTail;
+    let release;
+    const finished = new Promise((resolve) => { release = resolve; });
+    // A canceled queued turn must still keep its predecessor ahead of successors.
+    bandwidthTail = previous.then(() => finished);
+    let abort;
+    const interrupted = new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      await Promise.race([previous, interrupted]);
+      await delay(bytes * 1000 / settings.bytesPerSecond, undefined, { signal });
+    } finally {
+      signal.removeEventListener("abort", abort);
+      release();
+    }
   };
   reset();
   const server = createServer((incoming, outgoing) => {
@@ -53,8 +72,7 @@ export async function openNetworkProxy(targetUrl) {
           outgoing.writeHead(response.statusCode ?? 502, forwardedHeaders(response.headers));
           for await (const chunk of response) {
             if (settings.bytesPerSecond) {
-              availableAt = Math.max(availableAt, performance.now()) + chunk.length * 1000 / settings.bytesPerSecond;
-              await delay(Math.max(0, availableAt - performance.now()), undefined, { signal });
+              await waitForBandwidth(chunk.length, signal);
             }
             if (outgoing.destroyed) break;
             counters.bytes += chunk.length;

@@ -131,3 +131,68 @@ for (const settings of [{ latencyMs: 60_000 }, { bytesPerSecond: 1 }]) {
     } finally { downstream.destroy(); }
   });
 }
+
+test("canceling a response releases its unused bandwidth", async (t) => {
+  const proxy = await fixture(t, (request, response) => response.end(Buffer.alloc(request.url === "/large" ? 1024 : 1)));
+  proxy.configure({ bytesPerSecond: 100 });
+  const downstream = get(proxy.baseUrl + "/large");
+  downstream.on("error", () => {});
+  t.after(() => downstream.destroy());
+  const timeout = AbortSignal.timeout(2_000);
+  while (proxy.pendingResponses() === 0) await setImmediate(undefined, { signal: timeout });
+  const closed = new Promise((resolve) => downstream.once("close", resolve));
+  downstream.destroy();
+  await closed;
+  const response = await fetch(proxy.baseUrl + "/small", { signal: timeout });
+  assert.equal((await response.arrayBuffer()).byteLength, 1);
+  assert.equal(proxy.snapshot().bytes, 1);
+});
+
+test("concurrent responses share the bandwidth budget", async (t) => {
+  const proxy = await fixture(t, (_, response) => response.end(Buffer.alloc(100)));
+  proxy.configure({ bytesPerSecond: 200 });
+  const started = performance.now();
+  await Promise.all([1, 2].map(async () => {
+    const response = await fetch(proxy.baseUrl, { signal: AbortSignal.timeout(5_000) });
+    assert.equal((await response.arrayBuffer()).byteLength, 100);
+  }));
+  assert.ok(performance.now() - started >= 950, "200 bytes must consume the shared 200-byte/second budget");
+  assert.equal(proxy.snapshot().bytes, 200);
+});
+
+test("canceling a queued response settles before the active turn", async (t) => {
+  const proxy = await fixture(t, (_, response) => response.end(Buffer.alloc(1024)));
+  proxy.configure({ bytesPerSecond: 1 });
+  const timeout = AbortSignal.timeout(2_000);
+  const first = get(proxy.baseUrl);
+  first.on("error", () => {});
+  t.after(() => first.destroy());
+  while (proxy.pendingResponses() !== 1) await setImmediate(undefined, { signal: timeout });
+  const second = get(proxy.baseUrl);
+  second.on("error", () => {});
+  t.after(() => second.destroy());
+  while (proxy.pendingResponses() !== 2) await setImmediate(undefined, { signal: timeout });
+  second.destroy();
+  while (proxy.pendingResponses() !== 1) await setImmediate(undefined, { signal: timeout });
+  assert.equal(proxy.snapshot().bytes, 0);
+});
+
+test("a canceled queued turn does not let its successor bypass active bandwidth", async (t) => {
+  const proxy = await fixture(t, (request, response) => response.end(Buffer.alloc(request.url === "/cancel" ? 1024 : 100)));
+  proxy.configure({ bytesPerSecond: 200 });
+  const timeout = AbortSignal.timeout(5_000);
+  const started = performance.now();
+  const first = fetch(proxy.baseUrl, { signal: timeout }).then((response) => response.arrayBuffer());
+  while (proxy.pendingResponses() !== 1) await setImmediate(undefined, { signal: timeout });
+  const canceled = get(proxy.baseUrl + "/cancel");
+  canceled.on("error", () => {});
+  t.after(() => canceled.destroy());
+  while (proxy.pendingResponses() !== 2) await setImmediate(undefined, { signal: timeout });
+  canceled.destroy();
+  while (proxy.pendingResponses() !== 1) await setImmediate(undefined, { signal: timeout });
+  const last = fetch(proxy.baseUrl, { signal: timeout }).then((response) => response.arrayBuffer());
+  const bodies = await Promise.all([first, last]);
+  assert.deepEqual(bodies.map((body) => body.byteLength), [100, 100]);
+  assert.ok(performance.now() - started >= 950, "the successor must consume bandwidth after the active response");
+  assert.equal(proxy.snapshot().bytes, 200);
+});
