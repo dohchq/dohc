@@ -1010,6 +1010,22 @@ it('treats malformed retained selectors as fatal in cut, replay and recovery', (
   } finally { f.close() }
 })
 
+it('rejects a negative retained receipt time in cut, replay and recovery', () => {
+  const f = registered()
+  try {
+    const input = f.capture(f.update())
+    expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
+    f.raw.exec('PRAGMA ignore_check_constraints=ON')
+    f.raw.prepare('UPDATE sync_relay_live_update_journal SET received_at_ms=?').run(-1)
+    const before = f.journalRows()
+    const error = new TypeError('receivedAtMs must be a non-negative safe integer.')
+    expect(() => f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document })).toThrow(error)
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow(error)
+    expect(() => f.storage.readCommittedLiveUpdate({ host, document: f.input.evidence.document, journalCursor: 1 })).toThrow(error)
+    expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
 it('preserves first authorship through the maximum portable clock', () => {
   const f = registered()
   try {
