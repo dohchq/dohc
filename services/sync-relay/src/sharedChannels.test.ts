@@ -700,14 +700,31 @@ describe("shared channels (MU-C4)", () => {
     })));
     expect(badChoice.status).toBe(403);
     expect((await json(badChoice)).code).toBe("share_op_rejected");
+    // The engine refuses a line break inside a choice, and trims with
+    // Rust's whitespace set, which leaves U+FEFF alone.
+    const lineBreak = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday\nMonday", "Sunday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(lineBreak.status).toBe(403);
+    const carriage = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday\rMonday", "Sunday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(carriage.status).toBe(403);
+    const bom = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["\uFEFFFriday", "Monday"], chosenOption: "Monday" }), originSeq: 3 }],
+    })));
+    expect(bom.status).toBe(200);
     const noChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
       originId: "origin-member-a",
-      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 3 }],
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 4 }],
     })));
     expect(noChoice.status).toBe(403);
     const goodChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
       originId: "origin-member-a",
-      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 3 }],
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 4 }],
     })));
     expect(goodChoice.status).toBe(200);
   });

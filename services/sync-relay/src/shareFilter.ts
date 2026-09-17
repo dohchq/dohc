@@ -1214,27 +1214,35 @@ export function filterOpForShare(
 // replica, so it is refused here instead.
 const MAX_POLL_OPTIONS = 12;
 const MAX_POLL_OPTION_UNITS = 200;
+// Rust's `str::trim` strips Unicode White_Space; JavaScript's `trim` also
+// strips U+FEFF, which is not White_Space. The relay trims the way the
+// engine does, or a legitimate resolve could be refused here.
+const EDGE_WHITE_SPACE = /^\p{White_Space}+|\p{White_Space}+$/gu;
+function trimLikeEngine(value: string): string {
+  return value.replace(EDGE_WHITE_SPACE, "");
+}
 function decisionPollFieldsValid(payload: unknown): boolean {
   const record = asRecord(payload);
   if (!record) return false;
   const options = record.options;
   const chosen = record.chosenOption;
+  const normalized: string[] = [];
   if (options !== undefined) {
     if (!Array.isArray(options) || options.length > MAX_POLL_OPTIONS) return false;
-    const seen = new Set<string>();
     for (const option of options) {
       if (typeof option !== "string") return false;
-      const trimmed = option.trim();
-      if (trimmed.length === 0 || trimmed !== option || option.length > MAX_POLL_OPTION_UNITS) return false;
-      if (seen.has(option)) return false;
-      seen.add(option);
+      const trimmed = trimLikeEngine(option);
+      if (trimmed.length === 0 || trimmed.length > MAX_POLL_OPTION_UNITS || /[\r\n]/u.test(trimmed)) {
+        return false;
+      }
+      if (normalized.includes(trimmed)) return false;
+      normalized.push(trimmed);
     }
   }
-  const hasOptions = Array.isArray(options) && options.length > 0;
   if (chosen !== undefined) {
-    if (typeof chosen !== "string" || record.state !== "resolved" || !hasOptions) return false;
-    if (!(options as string[]).includes(chosen)) return false;
-  } else if (record.state === "resolved" && hasOptions) {
+    if (typeof chosen !== "string" || record.state !== "resolved" || normalized.length === 0) return false;
+    if (!normalized.includes(trimLikeEngine(chosen))) return false;
+  } else if (record.state === "resolved" && normalized.length > 0) {
     return false;
   }
   return true;
