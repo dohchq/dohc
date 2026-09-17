@@ -72,10 +72,11 @@ export default defineConfig(({ mode }) => {
     main: {
       // Workspace packages ship raw TS — they must be bundled, not
       // externalized, or Node ESM fails on their extensionless imports.
-      // chokidar and other real npm deps stay external (loaded from node_modules).
+      // Bundle Effect's schema runtime to remove unused code and separate
+      // module loads at startup. Other npm dependencies stay external.
       plugins: [
         externalizeDepsPlugin({
-          exclude: mainBundledWorkspaceDeps,
+          exclude: [...mainBundledWorkspaceDeps, "effect"],
         }),
       ],
       build: {
