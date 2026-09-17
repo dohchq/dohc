@@ -52,6 +52,7 @@ vi.mock("./collab/useEngineDoc", () => ({
 // test can tell whether the menu read the editor or the stale prop.
 const LIVE_BODY = "# Live engine body\n";
 vi.mock("./editor/MarkdownEditor", () => ({
+  preloadCollaborationExtensions: async () => {},
   MarkdownEditor: forwardRef<{ focus: () => void; getMarkdown: () => string }>(
     function MarkdownEditorStub(_props, ref) {
       useImperativeHandle(ref, () => ({
