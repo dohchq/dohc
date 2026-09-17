@@ -63,6 +63,23 @@ test('startup observer records an already-ready document without inferring earli
   assert.equal(p.timers.size + p.frames.size, 0);
 });
 
+test('startup observer installed before the body exists waits for the editable document', async t => {
+  const p = readinessPage(t);
+  const body = p.document.body;
+  body.remove();
+  assert.equal(p.document.body, null);
+  const result = p.observe();
+  assert.equal(p.frames.size, 0);
+  p.document.documentElement.append(body);
+  p.step(); p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, false);
+  assert.equal(observed.observerInstalledMs, 10);
+  assert.equal(observed.predicateMatchedMs, 60);
+  assert.equal(observed.secondAnimationFrameMs, 92);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
 const notReadyCases = {
   'wrong workspace': d => { const node = d.querySelector('[data-testid="workspace-switcher"]'); node.textContent = 'workspace-1'; return () => { node.textContent = 'workspace-0'; }; },
   'wrong selected tab': d => { const node = d.querySelector('[role="tab"]'); node.setAttribute('data-testid', 'tab-large.md'); return () => node.setAttribute('data-testid', 'tab-small.md'); },

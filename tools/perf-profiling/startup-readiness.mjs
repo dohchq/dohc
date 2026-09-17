@@ -34,7 +34,7 @@ export function observeStartupReadiness({ workspaceName, path, content, timeoutM
     const check = () => {
       if (finished) return;
       try {
-        if (document.body.innerText?.includes('dohc could not open this document for editing.')) {
+        if (document.body?.innerText?.includes('dohc could not open this document for editing.')) {
           throw Error('Actual packaged app refused document editing: dohc could not open this document for editing.');
         }
         const editor = surface();
