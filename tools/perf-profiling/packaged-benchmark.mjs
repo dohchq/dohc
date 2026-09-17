@@ -1,6 +1,7 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
+import { observeStartupReadiness } from './startup-readiness.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
@@ -44,6 +45,7 @@ Object.assign(receipt, {
   windowControllerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-window-state.ps1')),
   windowClientSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'window-controller.mjs')),
   lifecycleSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process.mjs')),
+  startupReadinessSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'startup-readiness.mjs')),
   optionsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-benchmark-options.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
@@ -53,6 +55,7 @@ Object.assign(receipt, {
   limits: [
     'Fresh profile/process is not cold OS filesystem cache. Restart reuses the same profile and workspace.',
     'Startup/switch/open wall times include CDP/Playwright detection and scheduling; readiness is observed DOM plus two animation frames, not an instrumented compositor presentation.',
+    'Startup renderer timestamps record observer installation, the expected visible non-inert editor predicate, and a second animation-frame callback. Already-ready samples are left-censored; no earlier readiness time is inferred and no overhead is subtracted.',
     'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
     'Keyboard uses trusted Chromium CDP input; physical keyboard/OS delivery before Chromium is not measured. EventTiming measures presentation opportunity, not photons.',
     'Idle measures a small local workspace without cloud, sync peers or plugins. Minimized is the background condition; it does not model every occlusion/power mode.',
@@ -148,6 +151,7 @@ async function launch(runDir, fixture, phase) {
   const startedAt = Date.now();
   cancellation.signal.throwIfAborted();
   const child = spawn(binary, [`--user-data-dir=${fixture.profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--enable-logging', ...profileArgs], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+  const launchStages = { spawnReturnedObservedMs: performance.now() - started };
   let logs = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { logs += chunk; });
   const exit = observeExit(child);
@@ -155,7 +159,7 @@ async function launch(runDir, fixture, phase) {
   let spawnError;
   child.on('error', error => { spawnError = error; logs += `\nSPAWN ERROR: ${error.stack}`; });
   await json(join(runDir, `${phase}-instance.json`), { binary, asarSha256: receipt.asarSha256, engineBinary, engineSha256: receipt.engineSha256, engineCommit: receipt.engineCommit, pid: child.pid, startedAt, profile: fixture.profile, workspaces: fixture.workspaces, feedUrl, profileArgs });
-  const launchStages = { spawnedObservedMs: performance.now() - started };
+  launchStages.spawnedObservedMs = performance.now() - started;
   const port = await waitUntil(async () => {
     if (spawnError) throw spawnError;
     if (child.exitCode !== null || child.signalCode !== null) throw Error(`Package exited ${child.exitCode}/${child.signalCode}: ${logs}`);
@@ -171,14 +175,19 @@ async function launch(runDir, fixture, phase) {
   launchStages.cdpAttachedObservedMs = performance.now() - started;
   const page = await waitUntil(async () => browser.contexts().flatMap(c => c.pages()).find(p => p.url().includes('index.html')));
   active.page = page;
+  launchStages.pageObservedMs = performance.now() - started;
+  const readiness = page.evaluate(observeStartupReadiness, { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' });
+  // Window ownership verification and renderer observation run concurrently.
+  // The launch failure path owns shutdown if either rejects.
+  void readiness.catch(() => {});
   const windowControlStart = performance.now();
   const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: cancellation.signal });
   const windowControlObservedMs = performance.now() - windowControlStart;
   if (!windowState.visible || windowState.minimized) throw Error('Fresh release window is not visible; startup sample invalid');
   launchStages.visibleWindowVerifiedObservedMs = performance.now() - started;
-  await ready(page);
+  const rendererReadiness = await readiness;
   const startup = { phase, startedAt, editablePaintObservedMs: performance.now() - started, pid: child.pid,
-    windowState, windowControlObservedMs, launchStages,
+    windowState, windowControlObservedMs, launchStages, rendererReadiness,
     renderer: await page.evaluate(() => ({ timeOrigin: performance.timeOrigin, now: performance.now(), paints: performance.getEntriesByType('paint').map(e => e.toJSON()), visibility: document.visibilityState, testBridge: typeof window.dohcDesktopTest, testMarks: typeof window.dohcDesktopMarks })) };
   if (startup.renderer.testBridge !== 'undefined') throw Error('Unexpected test bridge in release package');
   await json(join(runDir, `${phase}-startup.json`), startup);
