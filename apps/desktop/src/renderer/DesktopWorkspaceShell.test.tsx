@@ -132,6 +132,7 @@ import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
+import * as markdownView from "./MarkdownView";
 import { deferred } from "../testing/deferred";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
@@ -963,6 +964,52 @@ describe("workspace manager route", () => {
 });
 
 describe("workspace switch performance timeline", () => {
+  it("does not preload a restored path from a retired workspace response", async () => {
+    const preload = vi.spyOn(markdownView, "preloadCollaborativeMarkdownEditor").mockResolvedValue();
+    const first = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(first.promise);
+    bridge.getWorkspaceUiState
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(storedStateWithTabs(["b.md"], "b.md"));
+    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
+    try {
+      const view = renderShell(bridge, WORKSPACE, workspaces);
+      view.rerender(<DesktopWorkspaceShell
+        workspace={OTHER_WORKSPACE}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />);
+      await screen.findByTestId("tab-b.md");
+      expect(preload).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        first.resolve(storedStateWithTabs(["a.md"], "a.md"));
+        await first.promise;
+      });
+      expect(preload).toHaveBeenCalledTimes(1);
+    } finally {
+      preload.mockRestore();
+    }
+  });
+
+  it.each(["a.md", "a.MARKDOWN", "a.txt"])("preloads a restored Markdown editor before reading %s", async (path) => {
+    const preload = vi.spyOn(markdownView, "preloadCollaborativeMarkdownEditor").mockResolvedValue();
+    const content = deferred<{ text: string; truncated: false; contentHash: string }>();
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([path], path)));
+    bridge.readWorkspaceText = vi.fn(() => content.promise);
+    try {
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
+      expect(preload).toHaveBeenCalledTimes(path === "a.txt" ? 0 : 1);
+    } finally {
+      await act(async () => {
+        content.resolve({ text: "Restored", truncated: false, contentHash: "a".repeat(64) });
+        await content.promise;
+      });
+      preload.mockRestore();
+    }
+  });
+
   it("reuses the bootstrap agent-status read for initial history", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);

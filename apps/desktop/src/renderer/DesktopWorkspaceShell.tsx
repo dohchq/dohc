@@ -108,6 +108,7 @@ import {
   FileInspector,
 } from "./FileInspector";
 import {
+  preloadCollaborativeMarkdownEditor,
   preloadMarkdownEditor,
   type HeadingTarget,
   type ScrollTarget,
@@ -1078,6 +1079,9 @@ export function DesktopWorkspaceShell(props: {
               groupId: restoredGroup.id,
               path: restoredGroup.activeTab,
             };
+            if (/\.(md|markdown)$/i.test(restoredGroup.activeTab)) {
+              void preloadCollaborativeMarkdownEditor();
+            }
           }
           // Order matters: wbRef first, THEN setWb, THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit

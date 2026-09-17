@@ -105,17 +105,32 @@ type MarkdownEditorComponent = ForwardRefExoticComponent<
   MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
 >;
 
-let markdownEditorPromise: Promise<{ default: MarkdownEditorComponent }> | null = null;
+type LoadedMarkdownEditor = {
+  default: MarkdownEditorComponent;
+  preloadCollaborationExtensions: () => Promise<void>;
+};
+let markdownEditorPromise: Promise<LoadedMarkdownEditor> | null = null;
 
-function loadMarkdownEditor(): Promise<{ default: MarkdownEditorComponent }> {
+function loadMarkdownEditor(): Promise<LoadedMarkdownEditor> {
   markdownEditorPromise ??= import("./editor/MarkdownEditor").then((mod) => ({
     default: mod.MarkdownEditor as MarkdownEditorComponent,
+    preloadCollaborationExtensions: mod.preloadCollaborationExtensions,
   }));
   return markdownEditorPromise;
 }
 
 export function preloadMarkdownEditor(): void {
   void loadMarkdownEditor();
+}
+
+export async function preloadCollaborativeMarkdownEditor(): Promise<void> {
+  try {
+    const editor = await loadMarkdownEditor();
+    await editor.preloadCollaborationExtensions();
+  } catch {
+    // Preloading owns no surface. The cached rejection reaches its boundary
+    // when the document mounts through the ordinary editor loader.
+  }
 }
 
 const LazyMarkdownEditor = lazy(loadMarkdownEditor) as unknown as LazyExoticComponent<

@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { EditorErrorBoundary } from "./EditorErrorBoundary";
 import { markdownToYDoc } from "./import-export";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { preloadCollaborativeMarkdownEditor } from "../MarkdownView";
 
 const collaborationModule = vi.hoisted(() => ({ loads: 0 }));
 
@@ -49,6 +50,9 @@ describe("MarkdownEditor collaboration loader", () => {
     const ydoc = markdownToYDoc("Recovered");
 
     try {
+      await preloadCollaborativeMarkdownEditor();
+      expect(collaborationModule.loads).toBe(1);
+      expect(screen.queryByTestId("markdown-editor")).toBeNull();
       render(
         <StrictMode>
           <CollaborationEditor ydoc={ydoc} />
