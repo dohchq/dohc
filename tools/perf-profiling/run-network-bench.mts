@@ -178,7 +178,9 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     }
     row.cleanup = cleanup.map((result) => result.status === "fulfilled" ? "fulfilled" : String(result.reason));
     await save();
-    for (const result of cleanup) if (result.status === "rejected") throw result.reason;
+    if (row.status === "pass") {
+      for (const result of cleanup) if (result.status === "rejected") throw result.reason;
+    }
   }
 }
 

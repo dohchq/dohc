@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { createServer, get } from "node:http";
+import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { openNetworkProxy } from "./network-proxy.mjs";
 
@@ -62,3 +63,24 @@ test("close cancels a response still waiting for the bandwidth budget", async ()
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+for (const settings of [{ latencyMs: 60_000 }, { bytesPerSecond: 1 }]) {
+  test(`downstream close cancels a pending shaped response ${JSON.stringify(settings)}`, async (t) => {
+    const proxy = await fixture(t, (_, response) => response.end(Buffer.alloc(1024)));
+    proxy.configure(settings);
+    const downstream = get(proxy.baseUrl);
+    downstream.on("error", () => {});
+    const timeout = AbortSignal.timeout(2_000);
+    try {
+      while (proxy.pendingResponses() === 0) await setImmediate(undefined, { signal: timeout });
+      const closed = new Promise((resolve) => downstream.once("close", resolve));
+      downstream.destroy();
+      await closed;
+      await Promise.race([
+        proxy.waitForResponses(),
+        once(timeout, "abort").then(() => { throw new Error("Disconnected response did not settle"); }),
+      ]);
+      assert.equal(proxy.pendingResponses(), 0);
+    } finally { downstream.destroy(); }
+  });
+}
