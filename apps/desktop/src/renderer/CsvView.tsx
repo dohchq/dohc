@@ -195,7 +195,11 @@ export function CsvView({
   const rowsRef = useRef(rows);
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const tableDraftIdentity = useRef({ text: draft.draft, delimiter });
+  const tableDraftIdentity = useRef<{
+    text: string;
+    delimiter: "," | "\t";
+    rowOffsets?: number[];
+  }>({ text: draft.draft, delimiter });
 
   useEffect(() => {
     if (raw) return;
@@ -238,9 +242,31 @@ export function CsvView({
   }, []);
 
   const setRows = useCallback(
-    (nextRows: string[][]) => {
-      const nextDraft = delimitedTextCodec.serialize(nextRows, delimiter);
-      tableDraftIdentity.current = { text: nextDraft, delimiter };
+    (nextRows: string[][], changedRowIndex?: number) => {
+      const previous = tableDraftIdentity.current;
+      let rowOffsets = previous.rowOffsets;
+      let nextDraft: string;
+      if (
+        changedRowIndex !== undefined &&
+        previous.delimiter === delimiter &&
+        rowOffsets &&
+        changedRowIndex + 1 < rowOffsets.length &&
+        nextRows.length === rowsRef.current.length
+      ) {
+        const start = rowOffsets[changedRowIndex]!;
+        const end = rowOffsets[changedRowIndex + 1]! -
+          (changedRowIndex < nextRows.length - 1 ? 1 : 0);
+        const row = stringifyDelimitedRow(nextRows[changedRowIndex]!, delimiter);
+        nextDraft = [previous.text.slice(0, start), row, previous.text.slice(end)].join("");
+        const delta = row.length - (end - start);
+        for (let index = changedRowIndex + 1; index < rowOffsets.length; index++) {
+          rowOffsets[index]! += delta;
+        }
+      } else {
+        rowOffsets = [];
+        nextDraft = delimitedTextCodec.serialize(nextRows, delimiter, rowOffsets);
+      }
+      tableDraftIdentity.current = { text: nextDraft, delimiter, rowOffsets };
       rowsRef.current = nextRows;
       setRowsState(nextRows);
       draftRef.current.setDraft(nextDraft);
@@ -256,7 +282,7 @@ export function CsvView({
       while (nextRow.length <= cellIndex) nextRow.push("");
       nextRow[cellIndex] = value;
       nextRows[rowIndex] = nextRow;
-      setRows(nextRows);
+      setRows(nextRows, rowIndex);
     },
     [setRows],
   );
@@ -545,19 +571,34 @@ function parseDelimitedRows(text: string, delimiter: "," | "\t"): string[][] {
   return rows;
 }
 
-function stringifyDelimitedRows(rows: string[][], delimiter: "," | "\t"): string {
-  return rows
-    .map((row) =>
-      row
-        .map((cell) =>
-          (cell === "" && row.length === 1) ||
-          cell.includes(delimiter) ||
-          /["\r\n]/.test(cell)
-            ? `"${cell.replace(/"/g, '""')}"`
-            : cell,
-        )
-        .join(delimiter),
+function stringifyDelimitedRow(row: string[], delimiter: "," | "\t"): string {
+  return row
+    .map((cell) =>
+      (cell === "" && row.length === 1) ||
+      cell.includes(delimiter) ||
+      /["\r\n]/.test(cell)
+        ? `"${cell.replace(/"/g, '""')}"`
+        : cell,
     )
+    .join(delimiter);
+}
+
+function stringifyDelimitedRows(
+  rows: string[][],
+  delimiter: "," | "\t",
+  rowOffsets?: number[],
+): string {
+  let position = 0;
+  return rows
+    .map((row, index) => {
+      const serialized = stringifyDelimitedRow(row, delimiter);
+      if (rowOffsets && index <= MAX_CSV_PREVIEW_ROWS) {
+        rowOffsets[index] = position;
+        position += serialized.length + (index < rows.length - 1 ? 1 : 0);
+        rowOffsets[index + 1] = position;
+      }
+      return serialized;
+    })
     .join("\n");
 }
 
