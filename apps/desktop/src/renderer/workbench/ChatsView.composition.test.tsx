@@ -121,6 +121,9 @@ describe("ChatsView My agent", () => {
     expect(runnerProgram("codex exec --sandbox read-only")).toBe("codex");
     expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent.exe");
     expect(runnerProgram("python3 /home/me/bot.py")).toBe("python3 bot.py");
+    expect(runnerProgram('"C:\\Program Files\\nodejs\\node.exe" "C:\\Agent Scripts\\bot.mjs"')).toBe("node.exe bot.mjs");
+    expect(runnerProgram("'/opt/my agent/run.sh' --fast")).toBe("run.sh");
+    expect(runnerProgram("")).toBe("");
   });
 
   it("lists other people's agents from joined channels, read-only, under who shared them", async () => {

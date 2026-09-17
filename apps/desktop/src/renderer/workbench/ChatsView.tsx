@@ -326,17 +326,21 @@ function NavRow(props: {
 // The strip names the program a runner command starts, not its whole
 // command line: a quoted path to a script is a path, and the strip is a
 // sentence. The full command sits in the title.
+// An agent seen in a joined group's chat lane: who, under whom, and the
+// group to open.
+type LaneAgent = { key: string; label: string; owner: string; channel: ChatChannelRecord; atMs: number };
+
 export function runnerProgram(command: string): string {
-  const trimmed = command.trim();
-  const first = trimmed.startsWith('"')
-    ? trimmed.slice(1, trimmed.indexOf('"', 1) > 0 ? trimmed.indexOf('"', 1) : undefined)
-    : trimmed.split(/\s+/u)[0] ?? trimmed;
-  const program = first.split(/[\\/]/u).pop() ?? first;
-  // `node "…/agent.mjs"` names the script, which is what the person wrote.
-  const rest = trimmed.slice(trimmed.indexOf(first) + first.length).trim();
-  const script = rest.match(/^"([^"]+)"|^(\S+)/u);
-  const scriptName = script ? (script[1] ?? script[2] ?? "").split(/[\\/]/u).pop() : undefined;
-  return scriptName && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(scriptName) ? `${program} ${scriptName}` : program;
+  const tokens: string[] = [];
+  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/gu;
+  for (const match of command.trim().matchAll(pattern)) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+    if (tokens.length === 2) break;
+  }
+  const basename = (token: string): string => token.split(/[\\/]/u).pop() ?? token;
+  const program = tokens[0] ? basename(tokens[0]) : "";
+  const script = tokens[1] ? basename(tokens[1]) : "";
+  return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
 
 export function ChatsView(props: {
@@ -2537,35 +2541,44 @@ export function ChatsView(props: {
   // Agents that speak only in a group's chat lane never enter Home, so the
   // Agents list also reads each joined group's chat lane. One page of the
   // lane per group, on the nav and after activity; a handful of calls.
-  const [laneAgents, setLaneAgents] = useState<
-    Array<{ key: string; label: string; owner: string; channel: ChatChannelRecord; atMs: number }>
-  >([]);
-  useEffect(() => {
-    if (overview.status !== "ready" || nav.level !== "channels") return;
-    const token = liveToken.current;
-    const groups = overview.channels.filter(
+  const [laneAgents, setLaneAgents] = useState<LaneAgent[]>([]);
+  const laneAgentSeq = useRef(0);
+  const laneAgentCache = useRef(new Map<string, { updatedAtMs: number; agents: LaneAgent[] }>());
+  // The joined chat groups, as one string, so the read runs when that set
+  // changes and not on every overview or share refresh.
+  const joinedChatGroups = useMemo(() => {
+    if (overview.status !== "ready") return [];
+    return overview.channels.filter(
       (channel) =>
         typeof channel.wireId === "string" &&
         (channel.type === "chat" || channel.type === "both") &&
         joinedByWire.get(channel.wireId),
     );
-    if (groups.length === 0) {
+  }, [joinedByWire, overview]);
+  const joinedChatGroupsKey = joinedChatGroups.map((channel) => channel.id).join("\u0000");
+  useEffect(() => {
+    if (nav.level !== "channels") return;
+    const token = liveToken.current;
+    const seq = ++laneAgentSeq.current;
+    const isCurrent = () => token === liveToken.current && seq === laneAgentSeq.current;
+    if (joinedChatGroups.length === 0) {
       setLaneAgents([]);
       return;
     }
     void Promise.all(
-      groups.map(async (channel) => {
-        const listed = await bridge().listChannelThreads({
-          workspaceId,
-          channelId: channel.id,
-          lane: "chat",
-        });
-        const lane = listed.threads[0];
+      joinedChatGroups.map(async (channel): Promise<LaneAgent[]> => {
+        const listed = await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane: "chat" });
+        // The lane the group shows is its oldest chat thread, as ChatLane reads it.
+        const lane = [...listed.threads].sort(
+          (left, right) => left.createdAtMs - right.createdAtMs || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+        )[0];
         if (!lane) return [];
+        const cached = laneAgentCache.current.get(channel.id);
+        if (cached && cached.updatedAtMs === lane.updatedAtMs) return cached.agents;
         const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
         const joined = joinedByWire.get(channel.wireId ?? "");
         const owner = joined?.granterEmail ?? "someone else";
-        return page.messages
+        const agents = page.messages
           .filter((message) => message.authorKind === "agent")
           .map((message) => ({
             key: `${joined?.shareId ?? channel.id}\u0000${message.authorUserId ?? message.authorDisplayName}`,
@@ -2574,20 +2587,24 @@ export function ChatsView(props: {
             channel,
             atMs: message.createdAtMs,
           }));
+        laneAgentCache.current.set(channel.id, { updatedAtMs: lane.updatedAtMs, agents });
+        return agents;
       }),
     )
       .then((found) => {
-        if (token !== liveToken.current) return;
+        if (!isCurrent()) return;
         setLaneAgents(found.flat());
       })
       .catch(() => {
         // The lane read is a convenience for the list; Home's items still
         // name every agent that posts. A failed read leaves the list as is.
       });
-  }, [joinedByWire, nav.level, overview, props.threadRevision, workspaceId]);
+    // The group list itself is read through its key, so a new overview
+    // object with the same groups does not start another read.
+  }, [joinedChatGroupsKey, joinedByWire, nav.level, props.threadRevision, workspaceId]);
 
   const otherAgents = useMemo(() => {
-    const seen = new Map<string, { key: string; label: string; owner: string; atMs: number; open: () => void }>();
+    const seen = new Map<string, { key: string; label: string; owner: string; atMs: number; fromFeed: boolean; open: () => void }>();
     for (const item of personalFeed) {
       if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
       const joined = joinedByWire.get(item.channel.wireId);
@@ -2602,6 +2619,7 @@ export function ChatsView(props: {
           label: chatAuthorLabel(item.message),
           owner,
           atMs: item.message.createdAtMs,
+          fromFeed: true,
           open: () =>
             openConversation({
               level: "thread",
@@ -2614,12 +2632,13 @@ export function ChatsView(props: {
     }
     for (const agent of laneAgents) {
       const known = seen.get(agent.key);
-      if (known && known.atMs >= agent.atMs) continue;
+      if (known && (known.fromFeed || known.atMs >= agent.atMs)) continue;
       seen.set(agent.key, {
         key: agent.key,
         label: agent.label,
         owner: agent.owner,
         atMs: agent.atMs,
+        fromFeed: false,
         open: () => openConversation({ level: "channel", channel: agent.channel }),
       });
     }
