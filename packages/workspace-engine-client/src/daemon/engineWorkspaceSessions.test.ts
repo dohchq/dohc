@@ -94,6 +94,34 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it.each(["no opt-in", "no budget", "deadline", "terminal", "other overload"] as const)(
+    "does not replay an operation for initial capture without safe admission: %s",
+    async (scenario) => {
+      const workspace = await tempWorkspace();
+      const client = new MockClient("initial-capture");
+      const sleep = vi.fn(async () => undefined);
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
+      const refusal = new DaemonRefusalError({
+        code: scenario === "deadline" ? "DEADLINE_EXCEEDED" : "OVERLOADED",
+        message: scenario === "other overload" ? "Engine queue is full." : "Workspace is still updating. Try again.",
+        retry: scenario === "terminal" ? "no" : "afterBackoff",
+      }, undefined);
+      const operation = vi.fn(async () => { throw refusal; });
+      const run = () => sessions.run(workspace, operation, {
+        retryTransportErrors: true,
+        retryInitialCapture: scenario !== "no opt-in",
+      });
+      try {
+        await expect(scenario === "no budget" ? run() : sessions.withRetryBudget(6_000, run))
+          .rejects.toBe(refusal);
+        expect(operation).toHaveBeenCalledTimes(1);
+        expect(sleep).not.toHaveBeenCalled();
+      } finally {
+        await sessions.closeAll();
+      }
+    },
+  );
+
   it("retires retained binding checks across a same-client retry even if the native handle is reused", async () => {
     const workspace = await tempWorkspace(), client = new MockClient("same-handle");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });

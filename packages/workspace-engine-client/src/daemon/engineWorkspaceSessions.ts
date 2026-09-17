@@ -80,6 +80,11 @@ export interface EngineWorkspaceRunOptions {
    * first attempt before applying another write.
    */
   retryTransportErrors?: boolean;
+  /**
+   * Wait for initial capture inside an existing retry budget. Enable only
+   * for a read whose initial-capture refusal occurs before any side effect.
+   */
+  retryInitialCapture?: boolean;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -412,7 +417,8 @@ export class EngineWorkspaceSessions {
         : 2;
       let rebindStarted = false;
       let lastError: unknown;
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let initialCaptureAttempts = 0;
+      for (let attempt = 1; attempt <= maxAttempts;) {
         const binding = await this.openForRun(
           workspace,
           entry,
@@ -455,22 +461,32 @@ export class EngineWorkspaceSessions {
           // retryable because retryable mutations carry idempotency keys, and
           // this wrapper cannot know whether the operation it was handed does.
           const retryAfterBackoff = isEngineStoreBusyRefusal(error);
+          const retryAfterInitialCapture =
+            options.retryInitialCapture === true &&
+            this.activeBudget() !== undefined &&
+            error instanceof DaemonRefusalError &&
+            error.disposition === "afterBackoff" &&
+            isWorkspaceUpdatingRefusal(error);
           const retryable =
-            retryAfterReconnect || retryAfterTransport || retryAfterBackoff;
+            retryAfterReconnect || retryAfterTransport || retryAfterBackoff ||
+            retryAfterInitialCapture;
           this.noteBudgetAttempt(error);
           // A failure this ladder will not retry never reaches the gates: a
           // permission refusal is not a timeout however long we waited.
           if (!retryable) throw error;
-          rebindStarted = true;
+          if (!retryAfterInitialCapture) rebindStarted = true;
           lastError = error;
+          // Capture progresses on the existing binding. Its read retries use
+          // the caller's time budget without consuming transport attempts.
           const next = await this.settleAttempt({
             workspaceId: workspace.workspaceId,
-            attempt,
-            lastAttempt: attempt >= maxAttempts,
-            backoff: retryAfterTransport || retryAfterBackoff,
+            attempt: retryAfterInitialCapture ? ++initialCaptureAttempts : attempt,
+            lastAttempt: !retryAfterInitialCapture && attempt >= maxAttempts,
+            backoff: retryAfterTransport || retryAfterBackoff || retryAfterInitialCapture,
             cause: error,
           });
           if (next === "stop") throw error;
+          if (!retryAfterInitialCapture) attempt += 1;
         }
       }
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
