@@ -396,10 +396,24 @@ export function MessageReactions(props: {
 
   useLayoutEffect(() => {
     if (!pickerOpen) return;
+    let scrollViewport = triggerRef.current?.parentElement ?? null;
+    while (scrollViewport && !/^(auto|scroll)$/.test(getComputedStyle(scrollViewport).overflowY)) {
+      scrollViewport = scrollViewport.parentElement;
+    }
     const position = () => {
       const trigger = triggerRef.current?.getBoundingClientRect();
       const picker = pickerRef.current?.getBoundingClientRect();
       if (!trigger || !picker) return;
+      const viewport = scrollViewport?.getBoundingClientRect();
+      const top = Math.max(0, viewport?.top ?? 0);
+      const bottom = Math.min(window.innerHeight, viewport?.bottom ?? window.innerHeight);
+      if (trigger.bottom <= top || trigger.top >= bottom) {
+        if (pickerRef.current?.contains(document.activeElement)) {
+          triggerRef.current?.focus({ preventScroll: true });
+        }
+        setPickerOpen(false);
+        return;
+      }
       setPickerPosition({
         left: Math.max(4, Math.min(trigger.right - picker.width, window.innerWidth - picker.width - 4)),
         top: Math.max(4, Math.min(trigger.top >= picker.height + 4 ? trigger.top - picker.height - 4 : trigger.bottom + 4, window.innerHeight - picker.height - 4)),

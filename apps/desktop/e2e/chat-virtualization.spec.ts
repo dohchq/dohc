@@ -48,6 +48,23 @@ test.describe("chat list virtualization", () => {
   });
 
   for (const theme of ["light", "dark"]) {
+    test(`dismisses the reaction picker when its message scrolls away in ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width: 420, height: 400 });
+      await page.goto(server.resolvedUrls!.local[0]);
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(() => window.chatListFixture.jump("m-200"));
+      const trigger = page.locator('[data-message-id="m-200"]').getByRole("button", { name: "Add reaction" });
+      await trigger.click();
+      const picker = page.getByTestId("fixture-chat-reaction-picker");
+      await expect(picker).toBeVisible();
+      await page.getByRole("list").hover();
+      await page.mouse.wheel(0, -100_000);
+      await expect(page.locator('[data-message-id="m-0"]')).toBeInViewport();
+      await expect(picker).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+      await expect(trigger).not.toBeInViewport();
+    });
+
     test(`follows resize and growth but preserves Home history in ${theme}`, async ({ page }) => {
       for (const key of environmentKeys) expect(process.env[key]).toBe(environment[key]);
       await page.setViewportSize({ width: 650, height: 800 });
