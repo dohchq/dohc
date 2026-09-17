@@ -532,6 +532,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   loading: boolean;
   emptyLabel: string;
   endRef: RefObject<HTMLDivElement | null>;
+  scrollRef?: RefObject<HTMLDivElement | null>;
+  onScroll?: () => void;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
   // File-reference tokens become navigation buttons when the host can open
@@ -554,7 +556,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     }
   }
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+    <div ref={props.scrollRef} onScroll={props.onScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       {props.loading ? (
         <p className="m-0 text-center text-[11px] text-subtle">Loading...</p>
       ) : props.messages.length === 0 ? (
