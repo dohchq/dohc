@@ -94,7 +94,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     if (settings.interrupt) {
       const interruptedStart = performance.now();
       let failure: unknown;
-      try { await pullAll(reader); } catch (error) { failure = error; }
+      try { await reader.pull(); } catch (error) { failure = error; }
       assert(failure, "The injected 503 must fail the initial pull");
       row.interrupted = { ms: performance.now() - interruptedStart, requests: proxy.snapshot(), error: String(failure) };
       assert.equal(row.interrupted.requests.failures, 1);
@@ -103,7 +103,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       reader = await open(roots[1], workspaceId, connection, false);
     }
     const started = performance.now();
-    row.pull = await pullAll(reader);
+    row.pull = await reader.pull();
     row.catchUpMs = performance.now() - started;
     row.requests = proxy.snapshot();
     for (const [path, text] of expected) assert.equal(await readFile(join(roots[1], path), "utf8"), text, path);
@@ -113,7 +113,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     assert.equal(row.idlePull.fetched, 0);
     await reader.close(); reader = undefined;
     reader = await open(roots[1], workspaceId, connection, false);
-    row.restartPull = await pullAll(reader);
+    row.restartPull = await reader.pull();
     assert.equal(row.restartPull.fetched, 0);
     for (const [path, text] of expected) {
       assert.equal(await readFile(join(roots[1], path), "utf8"), text, path);
@@ -126,7 +126,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     await writer.store.writeTextFile({ workspaceId, versionId: "main", path, text: edited, metadata: { origin: "api" } });
     await pushAll(writer.relay);
     const resumedAt = performance.now();
-    row.resumedPull = await pullAll(reader);
+    row.resumedPull = await reader.pull();
     row.resumedEditMs = performance.now() - resumedAt;
     assert.equal(await readFile(join(roots[1], path), "utf8"), edited);
     row.fixtureSha256 = sha256([...expected].map(([path, text]) => path + "\0" + sha256(text)).join("\n"));
@@ -153,18 +153,6 @@ async function pushAll(relay: { push(): Promise<any> }) {
     total += last.pushed;
   } while (last.pushed > 0);
   return { ...last, pushed: total };
-}
-
-async function pullAll(reader: { pull(): Promise<any> }) {
-  let total = 0;
-  let last: any = null;
-  let applied = 0;
-  do {
-    last = await reader.pull();
-    total += last.fetched;
-    applied += last.applied;
-  } while (last.fetched > 0);
-  return { ...last, fetched: total, applied };
 }
 
 try {
