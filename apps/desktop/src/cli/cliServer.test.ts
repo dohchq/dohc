@@ -2010,6 +2010,29 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("lists chat-only and mixed groups and posts into a chat-only lane", async () => {
+    if (!store) throw new Error("Store is not available");
+    const chat = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Chat group", kind: "channel", type: "chat", purpose: "Plan the launch" });
+    await post({ actor: "human", channel: chat.slug, title: "Hello", body: "In chat" });
+    const chatThreads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" });
+    expect(chatThreads).toHaveLength(1);
+    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(0);
+    const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", channel: chat.slug });
+    expect(listed.channel.purpose).toBe("Plan the launch");
+    expect(listed.threads).toHaveLength(1);
+    const both = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Mixed group", kind: "channel", type: "both" });
+    for (const lane of ["posts", "chat"] as const) {
+      await store.startChannelThread({ workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Ice" }, body: lane });
+    }
+    const mixed = await invoke("threads", { cwd: workspaceRoot, actor: "human", channel: both.slug });
+    expect(mixed.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
+    const full = await invoke("channelsFull", { cwd: workspaceRoot, actor: "human" });
+    expect(full.ok).toBe(true);
+    if (!full.ok) throw new Error(full.reason);
+    expect(full.channels.find(channel => channel.id === chat.id)?.threads).toHaveLength(1);
+    expect(full.channels.find(channel => channel.id === both.id)?.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
+  });
+
   it("rejects post for DM streams while allowing agent-channel task posts", async () => {
     if (!store) throw new Error("Store is not available");
     const dm = await store.createChannel({

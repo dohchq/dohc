@@ -344,7 +344,16 @@ function channelForCli(channel: ChatChannelSummary): CliChannel {
     name: channel.kind === "agent" ? "my-agent" : channel.name,
     slug: channel.slug,
     kind: channel.kind,
+    ...(channel.purpose ? { purpose: channel.purpose } : {}),
   };
+}
+
+async function listCliChannelThreads(context: CliWorkspaceContext, channel: ChatChannelSummary) {
+  const lanes = channel.type === "both" ? ["posts", "chat"] as const : [channel.type === "chat" ? "chat" : "posts"] as const;
+  const pages = await Promise.all(lanes.map(lane => context.store.listChannelThreads({
+    workspaceId: context.workspaceId, channelId: channel.id, lane,
+  })));
+  return pages.flat();
 }
 
 const FILES_CHANNEL: CliChannel = {
@@ -1702,20 +1711,19 @@ async function dispatch(
         }
         const withThreads = [];
         for (const channel of fullChannels) {
-          const threads = await context.store.listChannelThreads({
-            workspaceId: context.workspaceId,
-            channelId: channel.id,
-          });
+          const threads = await listCliChannelThreads(context, channel);
           withThreads.push({
             id: channel.id,
             name: channel.name,
             slug: channel.slug,
             kind: channel.kind,
-            threadCount: channel.threadCount,
+            threadCount: threads.length,
+            ...(channel.purpose ? { purpose: channel.purpose } : {}),
             threads: threads.map((entry) => ({
               id: entry.thread.id,
               title: entry.thread.title,
               messageCount: entry.messageCount,
+              ...(channel.type === "both" ? { lane: entry.thread.lane } : {}),
               updatedAtMs: entry.thread.updatedAtMs,
             })),
           });
@@ -1754,6 +1762,7 @@ async function dispatch(
         const started = await context.store.startChannelThread({
           workspaceId: context.workspaceId,
           channelId: channel.id,
+          ...(channel.type === "chat" ? { lane: "chat" as const } : {}),
           ...(request.args.title !== undefined
             ? { title: request.args.title }
             : {}),
@@ -1987,10 +1996,7 @@ async function dispatch(
 
     case "threads": {
       const channel = resolveChannel(request.args.channel, channels);
-      const summaries = await context.store.listChannelThreads({
-        workspaceId: context.workspaceId,
-        channelId: channel.engine.id,
-      });
+      const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
             (await context.store.listAgentUnreadThreads(context.workspaceId)).map(
@@ -2002,6 +2008,7 @@ async function dispatch(
         channel: channel.cli,
         threads: summaries.map((summary) => ({
           id: cliThreadId(summary.thread.id),
+          ...(channel.engine.type === "both" ? { lane: summary.thread.lane } : {}),
           title: summary.thread.title,
           commentCount: Math.max(0, summary.messageCount - 1),
           openDecisionCount: summary.openDecisionCount,
@@ -2176,6 +2183,7 @@ async function dispatch(
       const started = await context.store.startChannelThread({
         workspaceId: context.workspaceId,
         channelId: channel.engine.id,
+        ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
         author: authorForActor(identity, request.args.actor),
         ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),

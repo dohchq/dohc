@@ -231,3 +231,13 @@ describe("collection result schemas", () => {
     ).toThrow();
   });
 });
+
+
+it("preserves a group's purpose and each thread's lane", () => {
+  const channel = { id: "c:team", name: "Team", slug: "team", kind: "channel", purpose: "Plan the launch" };
+  expect(parseCliResult("channels", { channels: [channel] })).toEqual({ channels: [channel] });
+  const threads = ["posts", "chat"].map((lane, index) => ({
+    id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
+  }));
+  expect(parseCliResult("threads", { channel, threads })).toEqual({ channel, threads });
+});
