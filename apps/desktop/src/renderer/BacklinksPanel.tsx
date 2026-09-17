@@ -234,7 +234,11 @@ export function BacklinksPanel(props: {
           {linkedTotal > 0 ? (
           <ul className="dohc-backlinks__list">
             {sources.map((source) => (
-              <li key={source.sourcePath} className="dohc-backlinks__source">
+              <li
+                key={source.sourcePath}
+                className="dohc-backlinks__source [content-visibility:auto] [overflow-clip-margin:12px]"
+                style={{ containIntrinsicSize: `auto ${24 + source.snippets.length * 24}px` }}
+              >
                 <button
                   type="button"
                   className="dohc-backlinks__source-link"

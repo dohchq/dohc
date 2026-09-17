@@ -1902,7 +1902,7 @@ export function VersionComparePage(props: {
                 key={file.path}
                 data-testid="version-compare-file"
                 data-compare-path={file.path}
-                className="overflow-hidden rounded-lg border border-line bg-bg"
+                className="overflow-hidden rounded-lg border border-line bg-bg [contain-intrinsic-size:auto_250px] [content-visibility:auto]"
               >
                 <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
                   {file.protected ? (
