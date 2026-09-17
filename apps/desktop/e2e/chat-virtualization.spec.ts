@@ -149,4 +149,28 @@ test.describe("chat list virtualization", () => {
     await page.keyboard.press("Shift+Tab");
     await expect(link(200)).toBeFocused();
   });
+
+  test("keeps the reading anchor when older messages arrive or change order", async ({ page }) => {
+    await page.setViewportSize({ width: 650, height: 800 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto(server.resolvedUrls!.local[0]);
+    await expect(page.locator('[data-message-id="m-499"]')).toBeInViewport();
+    await page.evaluate(() => window.chatListFixture.jump("m-200"));
+    const anchor = page.locator('[data-message-id="m-200"]');
+    await expect(anchor).toBeInViewport({ ratio: 1 });
+    const top = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+    await page.evaluate(() => window.chatListFixture.prepend());
+    await expect(anchor).toHaveAttribute("aria-setsize", "520");
+    await expect(anchor).toHaveAttribute("aria-posinset", "221");
+    await expect.poll(() => anchor.evaluate((node, previousTop) =>
+      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+
+    // Moving an existing row from below the viewport into older history must
+    // preserve the reading position too, without dropping data preservation.
+    await page.evaluate(() => window.chatListFixture.reorder());
+    await expect(anchor).toHaveAttribute("aria-posinset", "222");
+    await expect.poll(() => anchor.evaluate((node, previousTop) =>
+      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+    await expect(anchor).toBeInViewport({ ratio: 1 });
+  });
 });

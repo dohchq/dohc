@@ -9,6 +9,8 @@ declare global {
     chatListFixture: {
       append(): void;
       grow(id: string): void;
+      prepend(): void;
+      reorder(): void;
       jump(id: string): boolean;
       end(): void;
     };
@@ -38,6 +40,16 @@ function ChatFixture() {
     grow: (id) => setMessages((current) => current.map((item) => item.id === id
       ? { ...item, body: item.body + "\nExpanded content. ".repeat(40) }
       : item)),
+    prepend: () => setMessages((current) => [
+      ...Array.from({ length: 20 }, (_, index) => message(index - 20)),
+      ...current,
+    ]),
+    reorder: () => setMessages((current) => {
+      const moved = current.find((item) => item.id === "m-400")!;
+      const remaining = current.filter((item) => item.id !== moved.id);
+      const before = remaining.findIndex((item) => item.id === "m-100");
+      return [...remaining.slice(0, before), moved, ...remaining.slice(before)];
+    }),
     jump: (id) => listRef.current?.scrollToMessage(id) ?? false,
     end: () => listRef.current?.scrollToEnd(),
   };
