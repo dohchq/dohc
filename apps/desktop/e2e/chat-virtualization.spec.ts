@@ -3,6 +3,7 @@ import tailwind from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { build, preview, type PreviewServer } from "vite";
 import { createTestScratch, removeTestScratch } from "../src/workspaces/testTemp";
+import type {} from "./fixtures/chat-list/api";
 
 function gap(list: Locator): Promise<number> {
   return list.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);

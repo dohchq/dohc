@@ -2,20 +2,8 @@ import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ChatMessageRecord } from "../../../src/ipc/bridgeContract";
 import { ChatMessageList, type ChatMessageListHandle } from "../../../src/renderer/workbench/chatMessages";
+import type {} from "./api";
 import "./styles.css";
-
-declare global {
-  interface Window {
-    chatListFixture: {
-      append(): void;
-      grow(id: string): void;
-      prepend(): void;
-      reorder(): void;
-      jump(id: string): boolean;
-      end(): void;
-    };
-  }
-}
 
 const sparse = new URLSearchParams(location.search).has("sparse");
 function message(index: number): ChatMessageRecord {
