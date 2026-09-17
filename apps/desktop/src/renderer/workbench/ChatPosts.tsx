@@ -1,4 +1,4 @@
-import { Bookmark, Copy, FileText } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
 import { memo, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -13,25 +13,14 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
 import { bridge } from "../bridge";
 import { formatChatTime } from "../time";
+import { ChatAvatar } from "./ChatAvatar";
 import {
   MentionText,
   MessageReactions,
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { UnreadPill } from "./ChatsControls";
 import type { ChatsNav } from "./ChatsView";
-
-type FeedOpeningMessage = Omit<
-  NonNullable<ChannelThreadRecord["openingMessage"]>,
-  "reactions"
->;
-
-export interface FeedPostData {
-  openingMessage: FeedOpeningMessage | null;
-  reactions: ChatReactionRecord[];
-  viewerAuthorId: string;
-}
 
 interface ThreadCommentNode {
   message: ChatMessageRecord;
@@ -82,6 +71,35 @@ function pathBasename(pathHint: string | undefined): string {
   return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
 }
 
+// The dispatcher writes a failure as the agent, so the thread has a record.
+// It reads as a notice from dohc, never as something the agent said.
+function isRunnerFailure(body: string): boolean {
+  return body.startsWith("⚠ Agent run failed");
+}
+
+// What the agent ran, under its reply: the chip that opens the details,
+// with the outcome in a word.
+function RunLine(props: { run: ChatRunRecord }) {
+  const running = props.run.endedAtMs === undefined;
+  const failed = !running && props.run.exitCode !== 0;
+  return (
+    <div
+      data-testid="chats-run-line"
+      data-state={running ? "running" : failed ? "failed" : "done"}
+      className="mt-1 flex items-center gap-2 px-2 text-[11px] text-subtle"
+    >
+      <span
+        aria-hidden
+        className={`size-1.5 rounded-full ${
+          running ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
+        }`}
+      />
+      <span>{running ? "Running" : failed ? "Failed" : "Done"}</span>
+      <RunChip run={props.run} />
+    </div>
+  );
+}
+
 function AgentBadge(props: { testIdPrefix: string }) {
   return (
     <span
@@ -102,9 +120,10 @@ function DecisionStatus(props: {
     return (
       <span
         data-testid={`${props.testIdPrefix}-decision-resolved`}
-        className="rounded-md border border-success/40 bg-success/10 px-1.5 py-0.5 font-mono text-[10px] text-success"
+        className="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
       >
-        resolved
+        <CircleCheck size={11} strokeWidth={2} aria-hidden />
+        Answered
       </span>
     );
   }
@@ -112,18 +131,19 @@ function DecisionStatus(props: {
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <span
         data-testid={`${props.testIdPrefix}-decision-open`}
-        className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
+        className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
       >
-        needs decision
+        <CircleHelp size={11} strokeWidth={2} aria-hidden />
+        Poll open
       </span>
       {props.onResolve ? (
         <button
           type="button"
           data-testid={`${props.testIdPrefix}-decision-resolve`}
           onClick={props.onResolve}
-          className="rounded px-1 py-0.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+          className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
         >
-          Resolve
+          Answer
         </button>
       ) : null}
     </span>
@@ -284,135 +304,6 @@ function RunChip(props: { run: ChatRunRecord }) {
   );
 }
 
-// A derived title repeats the body's first line; the card already shows it
-// in serif, so the excerpt starts after it.
-function postExcerpt(title: string, body: string): string {
-  const newline = body.indexOf("\n");
-  const firstLine = (newline === -1 ? body : body.slice(0, newline)).trim();
-  if (firstLine !== title.trim()) return body;
-  return newline === -1 ? "" : body.slice(newline + 1).trim();
-}
-
-export function PostCard(props: {
-  thread: ChannelThreadRecord;
-  data: FeedPostData;
-  reactionControls: ChatReactionControls;
-  onOpen: () => void;
-  bookmark?: ChatBookmarkRecord;
-  bookmarkBusy?: boolean;
-  onToggleBookmark?: (mode: "live" | "snapshot") => void;
-  onOpenBookmark?: () => void;
-}) {
-  const message = props.data.openingMessage;
-  const isAgent = message?.authorKind === "agent";
-  const time = formatChatTime(message?.createdAtMs ?? props.thread.createdAtMs);
-  const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const excerpt = message ? postExcerpt(props.thread.title, message.bodySnippet) : "";
-  return (
-    <li
-      data-testid="chats-post-card"
-      data-thread-id={props.thread.id}
-      data-author-kind={message?.authorKind ?? "unknown"}
-      role="button"
-      tabIndex={0}
-      onClick={props.onOpen}
-      onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          props.onOpen();
-        }
-      }}
-      style={
-        isAgent
-          ? { borderLeftColor: "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))" }
-          : undefined
-      }
-      className={`group cursor-pointer rounded-xl border border-line bg-panel px-4 py-3 text-left transition-[border-color,transform] hover:-translate-y-px hover:border-muted/50 dohc-focus-visible ${
-        isAgent ? "border-l-2" : ""
-      }`}
-    >
-      {/* Compatibility target retained for existing navigation/e2e drivers;
-          the card itself is the new semantic button. */}
-      <div data-testid="chats-thread" data-thread-id={props.thread.id}>
-        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-          <span
-            data-testid="chats-post-author"
-            className={`text-[13px] font-medium ${isAgent ? "text-agent" : "text-ink"}`}
-          >
-            {message ? chatAuthorLabel(message) : "Unknown author"}
-          </span>
-          {isAgent ? <AgentBadge testIdPrefix="chats-post" /> : null}
-          <time
-            data-testid="chats-post-time"
-            dateTime={time.iso}
-            title={time.iso}
-            className="font-mono text-[10px] text-subtle"
-          >
-            {time.label}
-          </time>
-          <span className="ml-auto">
-            <UnreadPill count={props.thread.unreadCount} testId="chats-thread-unread" />
-          </span>
-        </span>
-        <span
-          data-testid="chats-post-title"
-          className="mt-1.5 block text-balance font-serif text-[17px] font-semibold leading-snug text-ink"
-        >
-          {props.thread.title}
-        </span>
-        {excerpt ? (
-          <span
-            data-testid="chats-post-excerpt"
-            className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[13px] text-muted"
-          >
-            {excerpt}
-          </span>
-        ) : null}
-      </div>
-      <div
-        data-testid="chats-post-footer"
-        className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5"
-      >
-        {message ? (
-          <MessageReactions
-            testIdPrefix="chats-post"
-            messageId={message.id}
-            records={props.data.reactions.filter((reaction) => reaction.messageId === message.id)}
-            controls={props.reactionControls}
-            flush
-          />
-        ) : null}
-        {(props.thread.openDecisionCount ?? 0) > 0 ? (
-          <span
-            data-testid="chats-post-decision-open"
-            className="rounded-md border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning"
-          >
-            needs decision
-          </span>
-        ) : null}
-        <span className="min-w-2 flex-1" />
-        {props.onToggleBookmark || (props.bookmark && props.onOpenBookmark) ? (
-          <BookmarkAction
-            active={Boolean(props.bookmark)}
-            busy={props.bookmarkBusy}
-            destinationPath={props.bookmark?.destinationPath}
-            onToggle={props.onToggleBookmark}
-            onOpen={props.onOpenBookmark}
-            testId="chats-post-bookmark"
-          />
-        ) : null}
-        <span
-          data-testid="chats-post-comment-count"
-          className="font-mono text-[11px] text-subtle"
-        >
-          {commentCount} {commentCount === 1 ? "comment" : "comments"}
-        </span>
-      </div>
-    </li>
-  );
-}
-
 export function BookmarkAction(props: {
   active: boolean;
   busy?: boolean;
@@ -561,6 +452,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
+  const openingIsAgent = openingMessage.authorKind === "agent";
+  const openingIsPlain =
+    openingMessage.body.trim() === nav.thread.title.trim();
+  const commentCount = messages.length - 1;
+
+  // A comment: avatar column, then a bubble that holds the name and body,
+  // then the quiet action row, then any replies as a nested list. The DOM
+  // shape is what the e2e helpers walk: the bubble is the item's direct
+  // child, the action row is a direct div, replies are a sibling ol.
   const renderThreadComment = (
     node: ThreadCommentNode,
     depth: number,
@@ -571,6 +471,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
     const isAgent = comment.authorKind === "agent";
+    const isSystem = isAgent && isRunnerFailure(comment.body);
     const replyCount = node.replies.length;
     const commentBookmark = bookmarkFor("message", comment.id);
     const commentBookmarkKey = `message:${comment.id}`;
@@ -583,12 +484,29 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-parent-message-id={comment.parentMessageId}
         data-thread-depth={depth}
         data-author-kind={comment.authorKind}
-        className={`group flex min-w-0 flex-col transition-shadow ${
+        className={`group relative flex min-w-0 flex-col pl-9 transition-shadow ${
           flashMessageId === comment.id
             ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
         }`}
       >
+        <span className="absolute left-0 top-0">
+          {isSystem ? (
+            <span
+              role="img"
+              aria-label="Run failed"
+              className="grid size-7 place-items-center rounded-full border border-warning/40 bg-bg text-warning"
+            >
+              <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
+            </span>
+          ) : (
+            <ChatAvatar
+              name={comment.authorDisplayName}
+              kind={comment.authorKind}
+              size="comment"
+            />
+          )}
+        </span>
         {parent ? (
           <button
             type="button"
@@ -602,7 +520,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
@@ -617,21 +535,34 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 }
               : undefined
           }
-          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
-            isAgent ? "border-l-2" : ""
+          data-system={isSystem ? "true" : undefined}
+          className={`w-fit max-w-[92%] rounded-2xl border px-3.5 py-2 ${
+            isSystem
+              ? "border-dashed border-warning/40 bg-warning/5"
+              : isAgent
+                ? "border-l-2 border-line bg-bg"
+                : "border-line bg-bg"
           }`}
         >
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-baseline gap-1.5">
             <span
               data-testid="chats-message-author"
-              data-author-kind={comment.authorKind}
+              data-author-kind={isSystem ? "system" : comment.authorKind}
               className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
+                isAgent && !isSystem ? "text-agent" : "text-ink"
               }`}
             >
-              {chatAuthorLabel(comment)}
+              {isSystem ? "dohc" : chatAuthorLabel(comment)}
             </span>
-            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            <time
+              data-testid="chats-message-time"
+              dateTime={commentTime.iso}
+              title={commentTime.iso}
+              className="text-[11px] text-subtle"
+            >
+              {commentTime.label}
+            </time>
           </div>
           <p
             data-testid="chats-message-body"
@@ -670,7 +601,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </div>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
+        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 text-[11px] text-subtle">
           <MessageReactions
             testIdPrefix="chats"
             messageId={comment.id}
@@ -683,7 +614,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               type="button"
               data-testid="chats-comment-reply"
               onClick={() => beginReply(comment)}
-              className="rounded hover:text-ink dohc-focus-visible"
+              className="rounded font-medium hover:text-ink dohc-focus-visible"
             >
               Reply
             </button>
@@ -717,21 +648,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {replyCount} {replyCount === 1 ? "reply" : "replies"}
             </span>
           ) : null}
-          {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={commentTime.iso}
-            title={commentTime.iso}
-          >
-            {commentTime.label}
-          </time>
         </div>
+        {runRecords[comment.id] ? <RunLine run={runRecords[comment.id]} /> : null}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
             aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-            className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
-              depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
+            className={`relative mt-3 list-none space-y-3 p-0 ${
+              depth < 3 ? "" : "-ml-9"
             }`}
           >
             {node.replies.map((reply) =>
@@ -749,7 +673,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-testid="chats-message"
         data-message-id={openingMessage.id}
         data-author-kind={openingMessage.authorKind}
-        className={`group pt-5 transition-shadow ${
+        className={`group pt-4 transition-shadow ${
           flashMessageId === openingMessage.id
             ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
@@ -757,43 +681,63 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       >
         <p
           data-testid="chats-thread-eyebrow"
-          className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
+          className="sr-only"
         >
           {nav.channel.kind === "agent"
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
+        <div className="flex items-center gap-2.5">
+          <ChatAvatar
+            name={openingMessage.authorDisplayName}
+            kind={openingMessage.authorKind}
+          />
+          <div className="flex min-w-0 flex-1 flex-col leading-tight">
+            <span className="flex items-center gap-1.5">
+              <span
+                data-testid="chats-message-author"
+                data-author-kind={openingMessage.authorKind}
+                className={`truncate text-[14px] font-semibold ${
+                  openingIsAgent ? "text-agent" : "text-ink"
+                }`}
+              >
+                {chatAuthorLabel(openingMessage)}
+              </span>
+              {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" /> : null}
+            </span>
+            <span className="flex items-center gap-1.5 text-[12px] text-subtle">
+              <span className="truncate font-mono text-[11px]">
+                {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
+              </span>
+              <span aria-hidden>·</span>
+              <time
+                data-testid="chats-message-time"
+                dateTime={openingTime.iso}
+                title={openingTime.iso}
+                className="shrink-0"
+              >
+                {openingTime.label}
+              </time>
+            </span>
+          </div>
+        </div>
         <h1
           data-testid="chats-thread-post-title"
-          className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
+          className={
+            openingIsPlain
+              ? "sr-only"
+              : "mb-0 mt-3 whitespace-pre-wrap break-words text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink"
+          }
         >
           {nav.thread.title}
         </h1>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span
-            data-testid="chats-message-author"
-            data-author-kind={openingMessage.authorKind}
-            className={`text-[13px] font-medium ${
-              openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
-            }`}
-          >
-            {chatAuthorLabel(openingMessage)}
-          </span>
-          {openingMessage.authorKind === "agent" ? (
-            <AgentBadge testIdPrefix="chats-message" />
-          ) : null}
-          <time
-            data-testid="chats-message-time"
-            dateTime={openingTime.iso}
-            title={openingTime.iso}
-            className="font-mono text-[10px] text-subtle"
-          >
-            {openingTime.label}
-          </time>
-        </div>
+        {/* A plain post is its body; the title above repeats it for the
+            heading only. */}
         <p
           data-testid="chats-message-body"
-          className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
+          className={`mb-0 select-text cursor-text whitespace-pre-wrap break-words text-ink ${
+            openingIsPlain ? "mt-3 text-[15px] leading-relaxed" : "mt-2 text-[14px] leading-relaxed"
+          }`}
         >
           <MentionText
             body={openingMessage.body}
@@ -868,15 +812,16 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
 
       <div
         data-testid="chats-comments-divider"
-        className="mb-1 mt-5 flex items-center gap-2"
+        className="mb-1 mt-5 flex items-center gap-2 border-t border-line pt-3"
       >
-        <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
-          Comments
+        <span className="text-[12px] text-subtle">
+          {commentCount === 0
+            ? "No comments yet"
+            : `${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}
         </span>
-        <span aria-hidden className="h-px flex-1 bg-line" />
       </div>
 
-      <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
+      <ol data-testid="chats-comments" className="m-0 list-none space-y-4 p-0 pt-2">
         {commentTree.map((node) => renderThreadComment(node, 0, null))}
       </ol>
       <div ref={messagesEndRef} />

@@ -46,9 +46,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // Straight into the thread; the snippet is the display title; the
     // signed-out desktop's human author displays as "You".
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
-    await expect(
-      page.getByTestId("chats-panel").getByTestId("chats-channel"),
-    ).toContainText("1 chat");
     await expect(page.getByTestId("chats-thread-title")).toHaveText(
       "Let's plan the launch this week.",
     );
@@ -70,6 +67,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
       "Let's plan the launch this week.",
     );
     await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
+    await page.getByTestId("chats-channel-back").click();
+    await expect(page.getByTestId("chats-channel")).toHaveAttribute("data-thread-count", "1");
 
     // Park the Chats panel closed so the post-relaunch Chats click is a
     // reveal (the panel's visibility persists in ui-state, and collapsing
@@ -114,15 +113,13 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // it closed. Reveal it only when it is not already showing — what this
     // test pins is chat-data durability, not panel-visibility persistence.
     const panel = page.getByTestId("chats-panel");
-    // The workbench restores an open Chats tab too, so the editor can render a
-    // second chats surface with its own channel list. Read the navigator from
-    // the panel and the conversation from the editor.
-    const view = page.locator("main");
+    // The panel owns chat: every conversation below renders inside it.
+    const view = panel;
     if (!(await panel.isVisible())) {
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
-    await expect(panel.getByTestId("chats-channel")).toContainText("2 chats");
+    await expect(panel.getByTestId("chats-channel")).toHaveAttribute("data-thread-count", "2");
     await panel.getByTestId("chats-channel").click();
     // Two threads exist now (the agent seeded one between sessions), so pick
     // the composer-created one by its snippet title.
@@ -169,7 +166,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
 
 // Slack-style navigation: the panel remains an overview while selections open
 // and switch a first-class Chats editor tab.
-test("the persistent chats navigator opens conversations in the editor", async () => {
+test("the panel owns chat, and a Chats tab picks up where the panel is", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -186,58 +183,62 @@ test("the persistent chats navigator opens conversations in the editor", async (
     await explorerRow(page, "notes.md").click();
     await expect(page.getByTestId("tab-notes.md")).toBeVisible();
 
-    // The panel remains the navigator; selecting a channel opens the editor.
+    // Selecting a channel opens it inside the panel. No tab opens.
     await page.getByTestId("titlebar-chats-sidebar").click();
     const panel = page.getByTestId("chats-panel");
     await expect(panel).toBeVisible();
-    const channelButton = panel.getByTestId("chats-channel");
-    await channelButton.click();
+    await panel.getByTestId("chats-channel").click();
+    const panelChannelView = panel.locator(
+      '[data-testid="chats-channel-view"][data-variant="panel"]',
+    );
+    await expect(panelChannelView).toBeVisible();
     const chatsTab = page.getByTestId("tab-dohc://chats");
-    await expect(chatsTab).toBeVisible();
-    await expect(chatsTab).toHaveAttribute("data-active", "true");
-    await expect(panel).toBeVisible();
-    await expect(channelButton).toHaveAttribute("data-active", "true");
-    await expect(page.getByTestId("chats-panel-deferred")).toHaveCount(0);
+    await expect(chatsTab).toHaveCount(0);
 
-    const newThreadComposer = page.getByTestId("chats-new-thread-composer");
+    const newThreadComposer = panel.getByTestId("chats-new-thread-composer");
     await newThreadComposer.fill("Expand me into a tab.");
     await newThreadComposer.press("Enter");
+    const panelThreadView = panel.locator(
+      '[data-testid="chats-thread-view"][data-variant="panel"]',
+    );
+    await expect(panelThreadView).toBeVisible();
+
+    // Expand hands the conversation to a tab at the same place. The panel
+    // goes back to being the navigator while that tab is live.
+    await page.getByTestId("chats-open-tab").click();
+    await expect(chatsTab).toBeVisible();
+    await expect(chatsTab).toHaveAttribute("data-active", "true");
     const pageThreadView = page.locator(
       '[data-testid="chats-thread-view"][data-variant="page"]',
     );
     await expect(pageThreadView).toBeVisible();
-
-    // The editor owns the composer and draft. The navigator has no duplicate
-    // conversation/composer surface.
-    await page.getByTestId("chats-composer").fill("draft in flight");
     await expect(
       pageThreadView.getByTestId("chats-thread-post-title"),
     ).toHaveText("Expand me into a tab.");
-    await expect(page.getByTestId("chats-open-tab")).toHaveCount(0);
+    await expect(panelThreadView).toHaveCount(0);
     await expect(page.getByTestId("chats-composer")).toHaveCount(1);
+    await page.getByTestId("chats-composer").fill("draft in flight");
 
-    // Switching editor tabs never changes the panel back into a conversation.
-    // Reopening Chats restores the editor's conversation and draft.
+    // Switching to another editor tab gives chat back to the panel, with
+    // the same conversation and the unsent draft. Coming back to the Chats
+    // tab hands them to the page again.
     await page.getByTestId("tab-notes.md").click();
-    await expect(
-      panel.locator('[data-testid="chats-view"][data-variant="panel"]'),
-    ).toBeVisible();
-    await expect(page.getByTestId("chats-open-tab")).toBeVisible();
-    await expect(page.getByTestId("chats-composer")).toHaveCount(0);
+    await expect(panelThreadView).toBeVisible();
+    await expect(panel.getByTestId("chats-composer")).toHaveValue("draft in flight");
     await chatsTab.click();
     await expect(pageThreadView).toBeVisible();
-    await expect(page.getByTestId("chats-composer")).toHaveValue("draft in flight");
-    await expect(panel).toBeVisible();
+    await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue(
+      "draft in flight",
+    );
+    await expect(panelThreadView).toHaveCount(0);
 
-    // Closing the editor leaves the persistent navigator intact. Selecting
-    // the channel again recreates the Chats tab at that channel.
+    // Closing the tab leaves the panel at the conversation.
     await chatsTab.getByRole("button", { name: "Close Chats" }).click();
     await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
-    await expect(panel).toBeVisible();
-    await channelButton.click();
+    await expect(panelThreadView).toBeVisible();
     await expect(
-      page.locator('[data-testid="chats-channel-view"][data-variant="page"]'),
-    ).toBeVisible();
+      panelThreadView.getByTestId("chats-thread-post-title"),
+    ).toHaveText("Expand me into a tab.");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

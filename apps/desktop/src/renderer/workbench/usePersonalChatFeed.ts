@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { ChatFeedItemRecord } from "../../ipc/bridgeContract";
+import type { ChatFeedItemRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 
@@ -33,6 +33,30 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
   const invalidate = useCallback(() => {
     feedRefreshSeq.current += 1;
   }, []);
+
+  // A reaction listing answered for one message: only that item's rows for
+  // that message change, so two Home items in one thread never erase each
+  // other's answer.
+  const setMessageReactions = useCallback(
+    (messageId: string, reactions: ChatReactionRecord[], viewerAuthorId: string) => {
+      const mine = reactions.filter((reaction) => reaction.messageId === messageId);
+      setPersonalFeed((current) =>
+        current.map((item) =>
+          item.message.id === messageId
+            ? {
+                ...item,
+                viewerAuthorId,
+                reactions: [
+                  ...item.reactions.filter((reaction) => reaction.messageId !== messageId),
+                  ...mine,
+                ],
+              }
+            : item,
+        ),
+      );
+    },
+    [],
+  );
 
   const loadPersonalFeed = useCallback(
     async (cursor?: string) => {
@@ -80,5 +104,6 @@ export function usePersonalChatFeed({ workspaceId, liveToken, onError }: {
     prepareOpen,
     clearRows,
     invalidate,
+    setMessageReactions,
   };
 }

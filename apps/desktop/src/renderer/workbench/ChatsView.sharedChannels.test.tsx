@@ -623,7 +623,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
     await userEvent.click(screen.getByTestId("chats-channel"));
     const shareButton = await screen.findByTestId("chats-share-channel");
-    expect(shareButton.textContent).toContain("Shared · 1");
+    expect(shareButton.textContent).toContain("Members · 1");
     await userEvent.click(shareButton);
 
     // The member list shows who has it, and Remove revokes their grant.

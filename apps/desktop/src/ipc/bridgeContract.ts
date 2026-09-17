@@ -1437,6 +1437,7 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   authorKind: z.enum(["human", "agent"]),
   authorDisplayName: z.string().min(1).max(200),
+  authorUserId: z.string().min(1).max(256).optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
@@ -1883,6 +1884,10 @@ export const ChatFeedItemRecord = z.object({
   parentMessage: ChatMessageRecord.optional(),
   openingMessage: ChatMessageRecord.optional(),
   reactions: z.array(ChatReactionRecord),
+  // Who the viewer is in this item's thread: the grant's account in a joined
+  // channel, the owner elsewhere. The reactions are normalized to it, the
+  // way listChatReactions does. Optional for older fixtures.
+  viewerAuthorId: OPAQUE_ID.optional(),
   matchedBy: z.array(CHAT_FOLLOW_TARGET_KIND).max(4),
 });
 export type ChatFeedItemRecord = z.infer<typeof ChatFeedItemRecord>;

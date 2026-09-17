@@ -6,7 +6,6 @@ import type { ChatChannelRecord } from "../../ipc/bridgeContract";
 import {
   ChatsView,
   channel,
-  fileThread,
   bridgeMock,
   shareListing,
   emitCloudSessionChanged,
@@ -31,7 +30,8 @@ describe("ChatsView channels", () => {
     const badges = screen.getAllByTestId("chats-channel-unread");
     expect(badges).toHaveLength(1);
     expect(badges[0].textContent).toBe("2");
-    expect(screen.getByText("3 chats")).toBeTruthy();
+    const rows = screen.getAllByTestId("chats-channel");
+    expect(rows.map((row) => row.dataset.threadCount)).toEqual(["0", "3"]);
   });
 
   it("creates a channel inline and opens it", async () => {
@@ -95,23 +95,6 @@ describe("ChatsView channels", () => {
     expect(bridgeMock.listChatChannelShares.mock.calls.length).toBe(sharesReadsBefore);
     expect(bridgeMock.listJoinedSharedChannels.mock.calls.length).toBe(joinedReadsBefore);
   });
-
-  it("lists file-linked Chats under Files and cross-links to the rail", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel()],
-      fileThreads: [fileThread],
-    });
-    const user = userEvent.setup();
-    const { onOpenFileChat } = renderView();
-
-    const row = await screen.findByTestId("chats-file-chat");
-    expect(row.textContent).toContain("Naming discussion");
-    expect(row.textContent).toContain("notes/topic.md");
-    await user.click(row);
-    expect(onOpenFileChat).toHaveBeenCalledWith(fileThread);
-    // Read-only cross-link: clicking never loads messages here.
-    expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
-  });
 });
 
 // Journey 3: the navigator kept an unread badge more than 30s after
@@ -149,9 +132,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     const view = render(navigator(0, 0));
-    expect((await screen.findByTestId("chats-channel")).textContent).toContain(
-      "0 chats",
-    );
+    expect((await screen.findByTestId("chats-channel")).dataset.threadCount).toBe("0");
 
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ threadCount: 1 })],
@@ -160,7 +141,7 @@ describe("ChatsView panel navigator unread badges", () => {
     view.rerender(navigator(0, 1));
 
     await waitFor(() => {
-      expect(screen.getByTestId("chats-channel").textContent).toContain("1 chat");
+      expect(screen.getByTestId("chats-channel").dataset.threadCount).toBe("1");
     });
   });
 

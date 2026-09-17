@@ -42,7 +42,7 @@ describe("ChatsView direct messages", () => {
     );
 
     renderView(vi.fn(), vi.fn(), { variant: "page", onNavCommand });
-    expect(await screen.findByText("Direct message requests")).toBeTruthy();
+    expect(await screen.findByText("Message requests")).toBeTruthy();
     expect(screen.getByText("Wants to message you")).toBeTruthy();
     await user.click(screen.getByTestId("chats-dm-request-accept"));
 

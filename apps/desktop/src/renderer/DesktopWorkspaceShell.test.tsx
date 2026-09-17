@@ -14868,7 +14868,7 @@ describe("chats panel (right side)", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 
-  it("keeps the navigator open and switches the editor between channels", async () => {
+  it("opens a channel inside the panel and switches between channels there", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listChatChannels.mockResolvedValue({
       channels: [
@@ -14901,23 +14901,24 @@ describe("chats panel (right side)", () => {
     await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     const panel = await screen.findByTestId("chats-panel");
     const channelButtons = within(panel).getAllByTestId("chats-channel");
+    expect(channelButtons).toHaveLength(2);
     await user.click(channelButtons[0]!);
 
-    const channelView = await screen.findByTestId("chats-channel-view");
-    expect(channelView.dataset.variant).toBe("page");
-    expect(channelButtons).toHaveLength(2);
-    await waitFor(() => expect(channelButtons[0]?.dataset.active).toBe("true"));
+    // The panel owns chat: the channel renders in the panel, no tab opens.
+    const channelView = await within(panel).findByTestId("chats-channel-view");
+    expect(channelView.dataset.variant).toBe("panel");
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-1",
     });
 
-    await user.click(channelButtons[1]!);
+    await user.click(within(panel).getByTestId("chats-channel-back"));
+    await user.click((await within(panel).findAllByTestId("chats-channel"))[1]!);
     await waitFor(() => {
-      expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
+      expect(within(panel).getByTestId("chats-channel-title").textContent).toBe("random");
     });
-    expect(screen.getByTestId("chats-panel")).toBeTruthy();
-    expect(channelButtons[1]?.dataset.active).toBe("true");
+    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-2",
@@ -16362,7 +16363,7 @@ describe("workbench render cost", () => {
     }
   });
 
-  it("clears the suspended navigator's DM unread pill when the page read lands", async () => {
+  it("clears the DM unread pill when the panel's own read lands", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -16402,25 +16403,23 @@ describe("workbench render cost", () => {
       expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe(
         "1",
       );
-      // The panel hands the conversation to a Chats page. That page becomes
-      // the only poller while the panel stays mounted and suspended.
+      // The panel owns the conversation: it opens in place and performs the
+      // read itself. No Chats tab opens.
       await user.click(screen.getByTestId("chats-dm-item"));
       await screen.findByTestId("chats-dm-view");
       await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
-      expect(screen.getByTestId("chats-dm-unread").textContent).toBe("1");
+      expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
 
       await act(async () => {
         markRead.resolve();
         await markRead.promise;
       });
+      await user.click(await screen.findByTestId("chats-dm-back"));
       await waitFor(() =>
         expect(screen.queryByTestId("chats-dm-unread")).toBeNull(),
       );
       expect(screen.getByTestId("chats-view")).toBeTruthy();
-      expect(screen.getByTestId("chats-dm-view")).toBeTruthy();
-      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe(
-        "true",
-      );
+      expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
     } finally {
       vi.useRealTimers();
     }

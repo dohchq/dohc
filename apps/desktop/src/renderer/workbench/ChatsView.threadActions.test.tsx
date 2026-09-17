@@ -8,6 +8,7 @@ import {
   thread,
   message,
   bridgeMock,
+  mentionRoster,
   renderView,
 } from "./ChatsView.testHarness";
 
@@ -48,7 +49,7 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
     await user.click(screen.getByTestId("chats-message-decision-resolve"));
     expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
-      "Resolving decision — your reply records it",
+      "Answering the poll",
     );
     expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
       "Replying to You",
@@ -179,6 +180,26 @@ describe("ChatsView decisions", () => {
 
     expect(reconciliation.wasOpen).toBe(false);
     expect(reconciliation.decisions).toEqual([resolved]);
+  });
+});
+
+describe("ChatsView plain posts", () => {
+  it("renders a short post's mention as a chip in the visible body", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ title: "Ask @agent to check the exports" })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ body: "Ask @agent to check the exports" })],
+    });
+    renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-thread"));
+
+    const body = await screen.findByTestId("chats-message-body");
+    expect(body.className).toContain("select-text");
+    expect(body.className).not.toContain("sr-only");
+    expect(body.querySelector("[data-mention-kind]")).not.toBeNull();
+    expect(screen.getByTestId("chats-thread-post-title").className).toContain("sr-only");
   });
 });
 

@@ -1,4 +1,6 @@
-import { PostCard, BookmarkAction, ThreadMessages, type FeedPostData } from "./ChatPosts";
+import { BookmarkAction, ThreadMessages } from "./ChatPosts";
+import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import { ChatAvatar } from "./ChatAvatar";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import {
   AgentPresenceHint,
@@ -34,11 +36,12 @@ import { ipcErrorMessage } from "../ipcError";
 import {
   AtSign,
   Bot,
-  FileText,
   Hash,
+  House,
+  MessageSquare,
   MessagesSquare,
   Plus,
-  Rss,
+  SmilePlus,
   Square,
   Users,
   X,
@@ -244,7 +247,7 @@ function samePollData(a: unknown, b: unknown): boolean {
 
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
-  feedPosts: Record<string, FeedPostData>;
+  feedPosts: Record<string, PostData>;
 }
 
 const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
@@ -271,6 +274,46 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
   return (
     failure?.kind === "over-limit" &&
     failure.lanes.some((entry) => entry.lane === "granted")
+  );
+}
+
+// One row of the chat nav: an icon, a name, and what is waiting on the right.
+// The active row is the one the panel currently shows.
+function NavRow(props: {
+  testId: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  active?: boolean;
+  muted?: boolean;
+  labelTestId?: string;
+  trailing?: React.ReactNode;
+  data?: Record<`data-${string}`, string>;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      data-active={props.active ? "true" : "false"}
+      aria-current={props.active ? "page" : undefined}
+      onClick={props.onClick}
+      {...props.data}
+      className={`mx-2 flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 hover:bg-panel-2 dohc-focus-visible ${
+        props.active ? "bg-panel-2" : ""
+      } ${props.className ?? ""}`}
+    >
+      {props.icon}
+      <span
+        data-testid={props.labelTestId}
+        className={`min-w-0 flex-1 truncate text-[13px] ${
+          props.active ? "font-medium text-ink" : props.muted ? "text-muted" : "text-ink"
+        }`}
+      >
+        {props.label}
+      </span>
+      {props.trailing}
+    </button>
   );
 }
 
@@ -374,7 +417,7 @@ export function ChatsView(props: {
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
-  const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
+  const [feedPosts, setFeedPosts] = useState<Record<string, PostData>>({});
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
   const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
   // Bookmark list reads and mutations are independent request streams. A
@@ -384,8 +427,6 @@ export function ChatsView(props: {
   const bookmarkListGeneration = useRef(0);
   const bookmarkMutationGeneration = useRef(0);
   const bookmarkMutationByKey = useRef(new Map<string, number>());
-  const [followedUi, setFollowedUi] = useState<Set<string>>(() => new Set());
-  const followRequest = useRef(0);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -477,6 +518,7 @@ export function ChatsView(props: {
     prepareOpen,
     clearRows,
     invalidate,
+    setMessageReactions,
   } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
@@ -1005,26 +1047,6 @@ export function ChatsView(props: {
     }
   }, [workspaceId]);
 
-  const refreshFollows = useCallback(async () => {
-    const request = ++followRequest.current;
-    const desktopBridge = bridge();
-    if (typeof desktopBridge.listChatFollows !== "function") return;
-    try {
-      const result = await desktopBridge.listChatFollows({ workspaceId });
-      if (request !== followRequest.current) return;
-      setFollowedUi(
-        new Set(
-          result.follows
-            .filter((follow) => follow.state === "following")
-            .map((follow) => `${follow.targetKind}:${follow.targetId}`),
-        ),
-      );
-    } catch {
-      // Feed follows are additive; a transient sync failure must not make
-      // channels or messages unavailable.
-    }
-  }, [workspaceId]);
-
   // DM sync: refresh received requests, push the member's local ops, pull the
   // peers' ops, and refresh the established DM list. Best-effort —
   // offline keeps the current list and the next pass retries. A late response
@@ -1135,12 +1157,10 @@ export function ChatsView(props: {
     setDmDraft("");
     setBookmarks([]);
     setBookmarkBusy(new Set());
-    setFollowedUi(new Set());
     setOverview({ status: "loading" });
     void refreshOverview();
     void refreshDms();
     void refreshBookmarks();
-    void refreshFollows();
     return () => {
       liveToken.current += 1;
       invalidate();
@@ -1148,9 +1168,8 @@ export function ChatsView(props: {
       bookmarkListGeneration.current += 1;
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
-      followRequest.current += 1;
     };
-  }, [invalidate, refreshBookmarks, refreshDms, refreshFollows, refreshOverview, resetForWorkspace]);
+  }, [invalidate, refreshBookmarks, refreshDms, refreshOverview, resetForWorkspace]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -1632,7 +1651,6 @@ export function ChatsView(props: {
   // sequence, the navigation token, or both the token and a per-surface
   // request sequence, so a slow refresh cannot repaint a newer one.
   const refreshForActivity = useCallback(() => {
-      void refreshFollows();
       if (nav.level === "channels") {
         // The roll-up unread badge lives on this list, so a write to a chat
         // the user does not have open is only visible here.
@@ -1736,7 +1754,6 @@ export function ChatsView(props: {
     loadThreadSnapshot,
     nav,
     refreshOpenDm,
-    refreshFollows,
     refreshChannelBadges,
     refreshDms,
   ]);
@@ -1978,6 +1995,39 @@ export function ChatsView(props: {
     [nav, props.onError, viewerAuthorId, workspaceId],
   );
 
+  // Like from Home. The viewer id may still be unknown here (it arrives with
+  // the first reaction listing), so the write goes first and the listing that
+  // answers it repaints the item and names the viewer.
+  const toggleHomeReaction = useCallback(
+    (threadId: string, messageId: string, liked: boolean) => {
+      if (nav.level !== "feed") return;
+      const token = liveToken.current;
+      const cellKey = `${messageId}\u0000${LIKE_EMOJI}`;
+      const seq = (reactionSeq.current.get(cellKey) ?? 0) + 1;
+      reactionSeq.current.set(cellKey, seq);
+      const isCurrent = () =>
+        token === liveToken.current && reactionSeq.current.get(cellKey) === seq;
+      void bridge()
+        .setChatReaction({
+          workspaceId,
+          threadId,
+          messageId,
+          emoji: LIKE_EMOJI,
+          state: liked ? "removed" : "added",
+        })
+        .then(() => bridge().listChatReactions({ workspaceId, threadId }))
+        .then((result) => {
+          if (!isCurrent()) return;
+          setMessageReactions(messageId, result.reactions, result.viewerAuthorId);
+        })
+        .catch((error) => {
+          if (!isCurrent()) return;
+          props.onError(ipcErrorMessage(error, "Could not update that reaction."));
+        });
+    },
+    [nav.level, props.onError, setMessageReactions, workspaceId],
+  );
+
   const toggleFeedReaction = useCallback(
     (
       threadId: string,
@@ -2091,73 +2141,6 @@ export function ChatsView(props: {
   useEffect(() => {
     if (nav.level === "feed") void loadPersonalFeed();
   }, [loadPersonalFeed, nav.level]);
-
-  const toggleFeedFollow = useCallback(
-    async (
-      key: string,
-      target:
-        | { kind: "thread"; threadId: string }
-        | { kind: "author"; threadId: string; messageId: string },
-    ) => {
-      const following = followedUi.has(key);
-      const token = liveToken.current;
-      // A follow write supersedes every older list read or write in this
-      // workspace. The same generation guards both success and failure so a
-      // stale completion cannot repaint state or surface an obsolete error.
-      const request = ++followRequest.current;
-      try {
-        const result = await bridge().setChatFollow({
-          workspaceId,
-          target,
-          state: following ? "unfollowed" : "following",
-        });
-        if (token !== liveToken.current || request !== followRequest.current) return;
-        setFollowedUi((current) => {
-          const next = new Set(current);
-          const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
-          if (result.follow.state === "following") next.add(durableKey);
-          else next.delete(durableKey);
-          // The optimistic key is normally the durable key. Deleting it too
-          // also repairs any older message-scoped UI key without a reload.
-          if (durableKey !== key) next.delete(key);
-          return next;
-        });
-      } catch (error) {
-        if (token !== liveToken.current || request !== followRequest.current) return;
-        props.onError(ipcErrorMessage(error, "Could not update that follow."));
-      }
-    },
-    [followedUi, props.onError, workspaceId],
-  );
-
-  const toggleChannelFollow = useCallback(
-    async (channel: ChatChannelRecord) => {
-      if (!channel.wireId) return;
-      const key = `channel:${channel.wireId}`;
-      const following = followedUi.has(key);
-      const token = liveToken.current;
-      const request = ++followRequest.current;
-      try {
-        const result = await bridge().setChatFollow({
-          workspaceId,
-          target: { kind: "channel", channelId: channel.id },
-          state: following ? "unfollowed" : "following",
-        });
-        if (token !== liveToken.current || request !== followRequest.current) return;
-        setFollowedUi((current) => {
-          const next = new Set(current);
-          const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
-          if (result.follow.state === "following") next.add(durableKey);
-          else next.delete(durableKey);
-          return next;
-        });
-      } catch (error) {
-        if (token !== liveToken.current || request !== followRequest.current) return;
-        props.onError(ipcErrorMessage(error, "Could not update that channel follow."));
-      }
-    },
-    [followedUi, props.onError, workspaceId],
-  );
 
   const openConversation = useCallback(
     (
@@ -3183,28 +3166,28 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <BackHeader
-          label="Feed"
+          label="Home"
           testId="chats-feed"
           onBack={goBack}
-          icon={<Rss size={12} aria-hidden className="shrink-0 text-subtle" />}
+          icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className={`px-3 pb-12 pt-3 sm:px-4 ${pageColumn}`}>
             {personalFeed.length === 0 && !personalFeedLoading ? (
-              <div className="rounded-xl border border-line bg-panel px-5 py-8 text-center">
-                <Rss size={18} aria-hidden className="mx-auto mb-2 text-subtle" />
-                <p className="m-0 text-[13px] font-medium text-ink">You’re caught up</p>
-                <p className="mx-auto mb-0 mt-1 max-w-sm text-[11px] leading-5 text-subtle">
-                  Follow people, agents, channels, or individual threads. New updates will collect here.
-                </p>
+              <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
+                <p className="m-0">Nothing new yet</p>
+                <button
+                  type="button"
+                  data-testid="chats-feed-empty-groups"
+                  onClick={goBack}
+                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  Open Groups
+                </button>
               </div>
             ) : null}
-            <div className="flex flex-col gap-3">
+            <ul className="m-0 flex list-none flex-col gap-3 p-0">
               {personalFeed.map((item) => {
-                const authorKey = item.authorFollowTarget
-                  ? `${item.authorFollowTarget.targetKind}:${item.authorFollowTarget.targetId}`
-                  : null;
-                const threadKey = `thread:${item.thread.id}`;
                 const fileThread = item.channel
                   ? null
                   : overview.fileThreads.find((thread) => thread.id === item.thread.id) ?? {
@@ -3215,124 +3198,181 @@ export function ChatsView(props: {
                   item.channel?.kind === "dm"
                     ? dms.find((dm) => dm.channelId === item.channel?.id)
                     : undefined;
-                const bookmark = bookmarkFor("message", item.message.id);
-                const bookmarkKey = `message:${item.message.id}`;
+                const isComment = item.openingMessage
+                  ? item.openingMessage.id !== item.message.id
+                  : item.message.parentMessageId !== undefined;
+                const bookmarkTarget = isComment
+                  ? { kind: "message" as const, threadId: item.thread.id, messageId: item.message.id }
+                  : { kind: "thread" as const, threadId: item.thread.id };
+                const bookmarkId = isComment ? item.message.id : item.thread.id;
+                const bookmark = bookmarkFor(bookmarkTarget.kind, bookmarkId);
+                const bookmarkKey = `${bookmarkTarget.kind}:${bookmarkId}`;
+                // Same authority as the channel view: an unresolved or
+                // unanswered share listing fails closed, so Home never offers
+                // a write the channel would refuse.
+                const locked = item.channel
+                  ? channelIsLocked({
+                      ...item.channel,
+                      wireId: item.channel.wireId,
+                      createdAtMs: 0,
+                      updatedAtMs: 0,
+                      threadCount: 0,
+                      unreadCount: 0,
+                    })
+                  : false;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
+                const isAgent = item.message.authorKind === "agent";
+                const time = formatChatTime(item.message.createdAtMs);
+                const itemReactions = item.reactions.filter(
+                  (reaction) => reaction.messageId === item.message.id,
+                );
+                const byEmoji = new Map<string, number>();
+                for (const reaction of itemReactions) {
+                  byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
+                }
+                const itemViewer = item.viewerAuthorId ?? "";
+                const liked =
+                  itemViewer !== "" &&
+                  itemReactions.some(
+                    (reaction) =>
+                      reaction.emoji === LIKE_EMOJI && reaction.authorId === itemViewer,
+                  );
+                const where = item.channel
+                  ? item.channel.kind === "dm"
+                    ? feedDm?.peerLabel ?? item.channel.name
+                    : item.channel.kind === "agent"
+                      ? "Agent"
+                      : `#${item.channel.name}`
+                  : fileThread?.path
+                    ? basenameOf(fileThread.path)
+                    : item.thread.title;
+                const open = () => {
+                  if (!item.channel) {
+                    props.onOpenFileChat(fileThread!, item.message.id);
+                    return;
+                  }
+                  if (feedDm) {
+                    openConversation({
+                      level: "dm",
+                      dm: feedDm,
+                      focusMessageId: item.message.id,
+                    });
+                    return;
+                  }
+                  openConversation({
+                    level: "thread",
+                    channel: {
+                      ...item.channel,
+                      wireId: item.channel.wireId,
+                      createdAtMs: 0,
+                      updatedAtMs: 0,
+                      threadCount: 0,
+                      unreadCount: 0,
+                    },
+                    thread: {
+                      ...item.thread,
+                      channelId: item.channel.id,
+                      messageCount: 0,
+                      lastReadSequence: 0,
+                      unreadCount: 0,
+                    },
+                    focusMessageId: item.message.id,
+                  });
+                };
+                const body = (
+                  <span className="mt-2 block whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink">
+                    <MentionText
+                      body={item.message.body}
+                      candidates={mentionCandidates}
+                      attachments={item.message.attachments}
+                      onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
+                    />
+                  </span>
+                );
                 return (
-                  <article
+                  <li
                     key={item.message.id}
                     data-testid="chats-feed-item"
-                    className="rounded-xl border border-line bg-panel px-4 py-3"
+                    data-author-kind={item.message.authorKind}
+                    className="group @container rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5"
                   >
-                    <div className="flex items-start gap-2">
-                      <div className="min-w-0 flex-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!item.channel) {
-                              props.onOpenFileChat(fileThread!, item.message.id);
-                              return;
-                            }
-                            if (feedDm) {
-                              openConversation({
-                                level: "dm",
-                                dm: feedDm,
-                                focusMessageId: item.message.id,
-                              });
-                              return;
-                            }
-                            openConversation({
-                              level: "thread",
-                              channel: {
-                                ...item.channel,
-                                wireId: item.channel.wireId,
-                                createdAtMs: 0,
-                                updatedAtMs: 0,
-                                threadCount: 0,
-                                unreadCount: 0,
-                              },
-                              thread: {
-                                ...item.thread,
-                                channelId: item.channel.id,
-                                messageCount: 0,
-                                lastReadSequence: 0,
-                                unreadCount: 0,
-                              },
-                              focusMessageId: item.message.id,
-                            });
-                          }}
-                          className="block w-full text-left"
-                        >
-                          <span className="block text-[10px] text-subtle">
-                            {item.channel ? `#${item.channel.name} · ` : ""}
-                            {formatChatTime(item.message.createdAtMs).label}
-                          </span>
-                          <span className="mt-0.5 block text-[12px] font-medium text-ink">
+                    <button
+                      type="button"
+                      onClick={open}
+                      className="block w-full cursor-pointer text-left dohc-focus-visible"
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <ChatAvatar
+                          name={item.message.authorDisplayName}
+                          kind={isAgent ? "agent" : "human"}
+                        />
+                        <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                          <span
+                            className={`truncate text-[14px] font-semibold ${
+                              isAgent ? "text-agent" : "text-ink"
+                            }`}
+                          >
                             {chatAuthorLabel(item.message)}
                           </span>
-                          {!hasFileMentions ? (
-                            <span className="mt-1 block whitespace-pre-wrap text-[13px] leading-5 text-ink">
-                              <MentionText
-                                body={item.message.body}
-                                candidates={mentionCandidates}
-                                attachments={item.message.attachments}
-                              />
-                            </span>
-                          ) : null}
-                        </button>
-                        {hasFileMentions ? (
-                          <span className="mt-1 block whitespace-pre-wrap text-[13px] leading-5 text-ink">
-                            <MentionText
-                              body={item.message.body}
-                              candidates={mentionCandidates}
-                              attachments={item.message.attachments}
-                              onOpenPath={props.onOpenPath}
-                            />
+                          <span className="flex items-center gap-1.5 text-[12px] text-subtle">
+                            <span className="truncate font-mono text-[11px]">{where}</span>
+                            <span aria-hidden>·</span>
+                            <time dateTime={time.iso} title={time.iso} className="shrink-0">
+                              {time.label}
+                            </time>
                           </span>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line/60 pt-2">
-                      {authorKey ? (
-                        <button
-                          type="button"
-                          data-testid="chats-feed-follow-author"
-                          onClick={() =>
-                            void toggleFeedFollow(authorKey, {
-                              kind: "author",
-                              threadId: item.thread.id,
-                              messageId: item.message.id,
-                            })
-                          }
-                          className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
-                        >
-                          {followedUi.has(authorKey) ? "Following author" : "Follow author"}
-                        </button>
+                        </span>
+                      </span>
+                      {isComment ? (
+                        <span className="mt-2.5 flex items-center gap-1.5 text-[12px] text-muted">
+                          <MessageSquare size={12} aria-hidden className="shrink-0" />
+                          <span className="truncate">{item.thread.title}</span>
+                        </span>
                       ) : null}
-                      <button
-                        type="button"
-                        data-testid="chats-feed-follow-thread"
-                        onClick={() =>
-                          void toggleFeedFollow(threadKey, {
-                            kind: "thread",
-                            threadId: item.thread.id,
-                          })
-                        }
-                        className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
+                      {hasFileMentions ? null : body}
+                    </button>
+                    {hasFileMentions ? body : null}
+                    {byEmoji.size > 0 ? (
+                      <div
+                        data-testid="chats-feed-item-footer"
+                        className="mt-2.5 flex items-center gap-1.5 py-1.5 text-[12px] text-subtle"
                       >
-                        {followedUi.has(threadKey) ? "Following thread" : "Follow thread"}
-                      </button>
-                      <BookmarkAction
-                        active={Boolean(bookmark)}
+                        {[...byEmoji.entries()].map(([emoji, count]) => (
+                          <span
+                            key={emoji}
+                            data-testid="chats-feed-reaction-pill"
+                            data-emoji={emoji}
+                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted"
+                          >
+                            <span aria-hidden>{emoji}</span>
+                            <span className="tabular-nums">{count}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="block h-2.5" />
+                    )}
+                    <div className="flex items-stretch border-t border-line">
+                      <ActionButton
+                        testId="chats-feed-like"
+                        label="Like"
+                        disabled={locked}
+                        icon={<SmilePlus size={15} strokeWidth={1.9} aria-hidden />}
+                        active={liked}
+                        onClick={() => toggleHomeReaction(item.thread.id, item.message.id, liked)}
+                      />
+                      <ActionButton
+                        label={isComment ? "Reply" : "Comment"}
+                        icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
+                        onClick={open}
+                      />
+                      <SaveAsFileActions
+                        testIdPrefix="chats-feed-bookmark"
+                        bookmark={bookmark}
                         busy={bookmarkBusy.has(bookmarkKey)}
-                        destinationPath={bookmark?.destinationPath}
                         onToggle={(mode) =>
                           void toggleBookmark({
-                            target: {
-                              kind: "message",
-                              threadId: item.thread.id,
-                              messageId: item.message.id,
-                            },
+                            target: bookmarkTarget,
                             mode,
                           })
                         }
@@ -3341,18 +3381,14 @@ export function ChatsView(props: {
                             ? () => props.onOpenPath?.(bookmark.destinationPath)
                             : undefined
                         }
-                        testId="chats-feed-bookmark"
                       />
-                      <span className="ml-auto text-[9px] uppercase tracking-wide text-subtle">
-                        {item.matchedBy.join(" · ")}
-                      </span>
                     </div>
-                  </article>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
             {personalFeedLoading ? (
-              <p className="py-5 text-center text-[11px] text-subtle">Loading updates…</p>
+              <p className="py-5 text-center text-[11px] text-subtle">Loading…</p>
             ) : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
               <button
@@ -3361,7 +3397,7 @@ export function ChatsView(props: {
                 onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
                 className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-line/40 hover:text-ink"
               >
-                Load older updates
+                Load older
               </button>
             ) : null}
           </div>
@@ -3683,9 +3719,7 @@ export function ChatsView(props: {
                 data-testid="chats-resolving-mode"
                 className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
               >
-                <span className="min-w-0 flex-1">
-                  Resolving decision — your reply records it ·
-                </span>
+                <span className="min-w-0 flex-1">Answering the poll</span>
                 <button
                   type="button"
                   data-testid="chats-resolving-cancel"
@@ -3815,12 +3849,27 @@ export function ChatsView(props: {
               <button
                 type="button"
                 data-testid="chats-share-channel"
-                title="Share this channel"
+                title={channelGrants.length > 0 ? "Members" : "Add members"}
+                aria-expanded={sharePanelOpen}
                 onClick={() => setSharePanelOpen((open) => !open)}
-                className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                className="flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
               >
-                <Users size={11} aria-hidden />
-                {channelGrants.length > 0 ? `Shared · ${channelGrants.length}` : "Share"}
+                {channelGrants.length > 0 ? (
+                  <span className="flex items-center -space-x-1.5">
+                    {channelGrants.slice(0, 3).map((grant) => (
+                      <ChatAvatar
+                        key={grant.shareId}
+                        name={grant.recipientEmail ?? "?"}
+                        kind="human"
+                        size="strip"
+                        className="ring-2 ring-panel"
+                      />
+                    ))}
+                  </span>
+                ) : (
+                  <Users size={13} aria-hidden />
+                )}
+                {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
               </button>
             ) : undefined
           }
@@ -3875,7 +3924,7 @@ export function ChatsView(props: {
             data-testid="chats-joined-banner"
             className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
           >
-            <Users size={11} aria-hidden className="shrink-0 text-subtle" />
+            <ChatAvatar name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
               {joinedChannelLabel(channelJoined)}
             </span>
@@ -3911,19 +3960,20 @@ export function ChatsView(props: {
                   <li
                     key={grant.shareId}
                     data-testid="chats-share-member"
-                    className="flex items-center gap-1.5 py-0.5"
+                    className="flex h-7 items-center gap-2"
                   >
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                    <ChatAvatar name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
                     ) : null}
                     <button
                       type="button"
                       data-testid="chats-share-revoke"
                       onClick={() => void revokeShare(grant.shareId)}
-                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible"
                     >
                       Remove
                     </button>
@@ -3939,7 +3989,7 @@ export function ChatsView(props: {
               }}
             >
               <label className="sr-only" htmlFor="chats-share-email">
-                Share with email
+                Add a member by email
               </label>
               <input
                 id="chats-share-email"
@@ -3948,7 +3998,7 @@ export function ChatsView(props: {
                 value={shareEmail}
                 disabled={shareGrantsBlocked}
                 maxLength={320}
-                placeholder="teammate@example.com"
+                placeholder="Add by email"
                 onChange={(event) => setShareEmail(event.target.value)}
                 className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
               />
@@ -3969,13 +4019,9 @@ export function ChatsView(props: {
                 }
                 className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
-                Share
+                Add
               </button>
             </form>
-            <p className="mb-0 mt-1 text-[10px] leading-4 text-subtle">
-              They see this whole channel and can post in it{shareReadOnly ? " (view only)" : ""}.
-              You can remove anyone later.
-            </p>
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -3991,10 +4037,11 @@ export function ChatsView(props: {
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
+                  authorName={collaboration?.displayName || "You"}
                   placeholder={
                     nav.channel.kind === "agent"
                       ? "Message your agent…"
-                      : `Start a post in #${nav.channel.name}…`
+                      : `What's happening in #${nav.channel.name}?`
                   }
                   sendLabel="Start post"
                   candidates={mentionCandidates}
@@ -4013,14 +4060,7 @@ export function ChatsView(props: {
                 className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-xs text-muted">Nothing here yet.</span>
-                <span className="text-[11px] text-subtle">
-                  {channelLocked
-                    ? "There are no posts to read."
-                    : nav.channel.kind === "agent"
-                      ? "Ask for a change, a summary, or a plan — your agent replies here."
-                      : "Start a post above."}
-                </span>
+                <span className="text-[13px] text-subtle">No posts yet</span>
               </div>
             ) : (
               <ul className="m-0 flex list-none flex-col gap-3 p-0">
@@ -4086,6 +4126,9 @@ export function ChatsView(props: {
       : null;
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
+  const agentLabel = props.agentSetup?.preferredName
+    ? agentDisplayLabel(props.agentSetup.preferredName)
+    : "Your agent";
 
   return (
     <div
@@ -4096,185 +4139,136 @@ export function ChatsView(props: {
     >
       <div className={`min-h-0 flex-1 overflow-y-auto ${pageColumn}`}>
         <AddressedToMe notifications={props.addressedToMe ?? []} />
-        <section className="border-b border-line" aria-label="Feed">
-          <button
-            type="button"
-            data-testid="chats-feed-link"
-            data-active={props.selectedNav?.level === "feed" ? "true" : "false"}
-            aria-current={props.selectedNav?.level === "feed" ? "page" : undefined}
+        <nav aria-label="Chat" className="flex flex-col pb-3">
+          <NavRow
+            testId="chats-feed-link"
+            active={props.selectedNav?.level === "feed"}
             onClick={() => openConversation({ level: "feed" })}
-            className={`flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-              props.selectedNav?.level === "feed" ? "bg-panel-2" : ""
-            }`}
-          >
-            <Rss size={13} aria-hidden className="shrink-0 text-accent" />
-            <span className="min-w-0 flex-1">
-              <span className="block text-[12px] font-medium text-ink">Feed</span>
-              <span className="block text-[10px] text-subtle">Updates from what you follow</span>
-            </span>
-          </button>
-        </section>
-        {agentChannel ? (
-          <section data-testid="chats-my-agent-section" aria-label="My agent">
-            <SectionLabel as="p" className="mb-0 mt-3 px-3">
-              My agent
-            </SectionLabel>
-            <button
-              type="button"
-              data-testid="chats-my-agent"
-              data-channel-id={agentChannel.id}
-              data-active={selectedChannelId === agentChannel.id ? "true" : "false"}
-              aria-current={selectedChannelId === agentChannel.id ? "page" : undefined}
-              onClick={() =>
-                openConversation({ level: "channel", channel: agentChannel })
-              }
-              className={`flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-                selectedChannelId === agentChannel.id ? "bg-panel-2" : ""
-              }`}
-            >
-              <span
-                data-testid="chats-my-agent-glyph"
-                aria-hidden
-                className="shrink-0 font-mono text-[13px] text-agent"
-              >
-                ◈
-              </span>
-              <span
-                data-testid="chats-my-agent-name"
-                className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
-              >
-                My agent
-              </span>
-              <AgentPresenceHint
-                activity={agentSummaryActivity}
-                testId="chats-my-agent-presence"
-              />
-              <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
-            </button>
-          </section>
-        ) : null}
-        <SectionLabel as="p"
-          data-testid="chats-channels-heading"
-          className="mb-0 mt-3 px-3"
-        >
-          Channels
-        </SectionLabel>
-        <ul className="m-0 list-none p-0">
-          {overview.channels
-            .filter((channel) => channel.kind === "channel")
-            .map((channel) => {
-            const joined = joinedFor(channel);
-            const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
-            const sharedLabel = joined
-              ? joinedChannelLabel(joined)
-              : grants.length > 0
-                ? `Shared with ${grants.length}`
-                : null;
-            return (
-              <li key={channel.id} className="flex items-stretch border-b border-line">
-                <button
-                  type="button"
-                  data-testid="chats-channel"
-                  data-channel-id={channel.id}
-                  data-channel-slug={channel.slug}
-                  data-active={selectedChannelId === channel.id ? "true" : "false"}
-                  aria-current={selectedChannelId === channel.id ? "page" : undefined}
-                  onClick={() =>
-                    openConversation({ level: "channel", channel })
-                  }
-                  className={`flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-                    selectedChannelId === channel.id ? "bg-panel-2" : ""
-                  }`}
-                >
-                  <Hash size={13} aria-hidden className="shrink-0 text-subtle" />
-                  <span className="min-w-0 flex-1">
-                    <span
-                      data-testid="chats-channel-name"
-                      className="block truncate text-[12px] font-medium text-ink"
+            icon={<House size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
+            label="Home"
+            className="mt-2"
+          />
+          <SectionLabel as="p" data-testid="chats-channels-heading" className="mb-1 mt-4 px-4">
+            Groups
+          </SectionLabel>
+          <ul className="m-0 list-none p-0">
+            {overview.channels
+              .filter((channel) => channel.kind === "channel")
+              .map((channel) => {
+                const joined = joinedFor(channel);
+                const grants = channel.wireId ? grantedByWire.get(channel.wireId) ?? [] : [];
+                const sharedLabel = joined
+                  ? joinedChannelLabel(joined)
+                  : grants.length > 0
+                    ? `Shared with ${grants.length}`
+                    : null;
+                return (
+                  <li key={channel.id}>
+                    <NavRow
+                      testId="chats-channel"
+                      data={{
+                        "data-channel-id": channel.id,
+                        "data-channel-slug": channel.slug,
+                        "data-thread-count": String(channel.threadCount),
+                      }}
+                      active={selectedChannelId === channel.id}
+                      onClick={() => openConversation({ level: "channel", channel })}
+                      icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
+                      label={channel.name}
+                      labelTestId="chats-channel-name"
+                      trailing={
+                        <>
+                          {sharedLabel ? (
+                            <span
+                              data-testid="chats-channel-shared"
+                              title={sharedLabel}
+                              className="grid shrink-0 place-items-center text-subtle"
+                            >
+                              <Users size={12} aria-hidden />
+                              <span className="sr-only">{sharedLabel}</span>
+                            </span>
+                          ) : null}
+                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
+                        </>
+                      }
+                    />
+                  </li>
+                );
+              })}
+          </ul>
+          {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
+            <div data-testid="chats-shared-with-you">
+              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+                Shared with you
+              </SectionLabel>
+              {/* The section stays even with nothing to list. Hiding it on an
+                  unreadable listing was the whole of #618: the invitations
+                  vanished with no copy anywhere saying dohc could not read
+                  them. */}
+              {shareReadFailure ? (
+                <ShareReadFailureNotice
+                  testId="chats-shares-unreadable"
+                  failure={shareReadFailure}
+                  stale={receivedNotJoined.length > 0}
+                  onRetry={() => void refreshShares()}
+                />
+              ) : null}
+              <ul className="m-0 list-none p-0">
+                {receivedNotJoined.map((row) => (
+                  <li key={row.shareId} className="mx-2 flex h-8 items-center gap-2 px-2">
+                    <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                      {row.granterEmail ?? "A teammate"}
+                    </span>
+                    {row.access === "read-only" ? (
+                      <span className="shrink-0 font-mono text-[10px] text-subtle">read-only</span>
+                    ) : null}
+                    <button
+                      type="button"
+                      data-testid="chats-join-shared"
+                      disabled={joiningShareId !== null}
+                      onClick={() => void joinShared(row.shareId)}
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
                     >
-                      {channel.name}
-                    </span>
-                    <span className="block truncate text-[10px] text-subtle">
-                      {channel.threadCount === 1
-                        ? "1 chat"
-                        : `${channel.threadCount} chats`}
-                      {sharedLabel ? (
-                        <span data-testid="chats-channel-shared"> · {sharedLabel}</span>
-                      ) : null}
-                    </span>
-                  </span>
-                  {sharedLabel ? (
-                    <Users size={11} aria-hidden className="shrink-0 text-subtle" />
-                  ) : null}
-                  <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
-                </button>
-                {channel.wireId ? (
-                  <button
-                    type="button"
-                    data-testid="chats-channel-follow"
-                    data-channel-id={channel.id}
-                    aria-pressed={followedUi.has(`channel:${channel.wireId}`)}
-                    aria-label={`${
-                      followedUi.has(`channel:${channel.wireId}`) ? "Unfollow" : "Follow"
-                    } #${channel.name}`}
-                    title={`${
-                      followedUi.has(`channel:${channel.wireId}`) ? "Unfollow" : "Follow"
-                    } #${channel.name}`}
-                    onClick={() => void toggleChannelFollow(channel)}
-                    className={`grid w-9 shrink-0 place-items-center transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-                      followedUi.has(`channel:${channel.wireId}`)
-                        ? "text-accent"
-                        : "text-subtle"
-                    }`}
-                  >
-                    <Rss size={12} aria-hidden />
-                  </button>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-        {dmAvailable || dms.length > 0 ? (
-          <div data-testid="chats-dms-section">
-            <SectionLabel as="p" className="mb-0 mt-3 px-3">
-              Direct messages
-            </SectionLabel>
-            <ul className="m-0 list-none p-0">
-              {dms.map((dm) => (
-                <li key={dm.channelId} className="border-b border-line">
-                  <button
-                    type="button"
-                    data-testid="chats-dm-item"
-                    data-channel-id={dm.channelId}
-                    data-active={selectedDmId === dm.channelId ? "true" : "false"}
-                    aria-current={selectedDmId === dm.channelId ? "page" : undefined}
-                    onClick={() => openConversation({ level: "dm", dm })}
-                    className={`flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
-                      selectedDmId === dm.channelId ? "bg-panel-2" : ""
-                    }`}
-                  >
-                    <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
-                    <span className="min-w-0 flex-1">
-                      <span
-                        data-testid="chats-dm-name"
-                        className="block truncate text-[12px] font-medium text-ink"
-                      >
-                        {dm.peerLabel}
-                      </span>
-                      <span className="block text-[10px] text-subtle">
-                        {dm.connected ? "Direct message" : "Ended"}
-                      </span>
-                    </span>
-                    <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {dmAvailable ? (
-              <div className="px-3 py-1.5">
-                <button
-                  type="button"
-                  data-testid="chats-new-dm"
+                      {joiningShareId === row.shareId ? "Joining…" : "Join"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {dmAvailable || dms.length > 0 ? (
+            <div data-testid="chats-dms-section">
+              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+                People
+              </SectionLabel>
+              <ul className="m-0 list-none p-0">
+                {dms.map((dm) => (
+                  <li key={dm.channelId}>
+                    <NavRow
+                      testId="chats-dm-item"
+                      data={{ "data-channel-id": dm.channelId }}
+                      active={selectedDmId === dm.channelId}
+                      onClick={() => openConversation({ level: "dm", dm })}
+                      icon={<ChatAvatar name={dm.peerLabel} kind="human" size="strip" />}
+                      label={dm.peerLabel}
+                      labelTestId="chats-dm-name"
+                      muted={!dm.connected}
+                      trailing={
+                        <>
+                          {dm.connected ? null : (
+                            <span className="shrink-0 font-mono text-[10px] text-subtle">ended</span>
+                          )}
+                          <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
+                        </>
+                      }
+                    />
+                  </li>
+                ))}
+              </ul>
+              {dmAvailable ? (
+                <NavRow
+                  testId="chats-new-dm"
                   onClick={() => {
                     // Always start compose from a clean slate — never inherit a
                     // recipient/draft left over from a previous compose.
@@ -4286,157 +4280,99 @@ export function ChatsView(props: {
                     props.onNavCommand?.({ level: "dm-new" });
                     setNav({ level: "dm-new" });
                   }}
-                  className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-                >
-                  <Plus size={12} aria-hidden />
-                  New message
-                </button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {dmAcceptedElsewhere ? (
-          <div
-            data-testid="chats-dm-accepted-elsewhere"
-            className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted"
-          >
-            <span className="min-w-0 flex-1 truncate">
-              {dmAcceptedElsewhere.granterEmail
-                ? `Added your conversation with ${dmAcceptedElsewhere.granterEmail} to ${dmAcceptedElsewhere.workspaceLabel}.`
-                : `Added this conversation to ${dmAcceptedElsewhere.workspaceLabel}.`}
-            </span>
-            <button
-              type="button"
-              data-testid="chats-dm-accepted-elsewhere-dismiss"
-              aria-label="Dismiss notice"
-              onClick={() => setDmAcceptedElsewhere(null)}
-              className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50 hover:text-ink"
-            >
-              <X size={12} aria-hidden />
-            </button>
-          </div>
-        ) : null}
-        {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
-          <div data-testid="chats-dm-requests-section">
-            <SectionLabel as="p" className="mb-0 mt-3 px-3">
-              Direct message requests
-            </SectionLabel>
-            <ul className="m-0 list-none p-0">
-              {pendingDmRequests.map((request) => (
-                <DmRequestListItem
-                  key={request.shareId}
-                  request={request}
-                  state="pending"
-                  busy={dmRequestBusy !== null}
-                  onAccept={() => setAcceptingDmRequest(request)}
-                  onDecline={() => void setDmRequestDeclined(request, true)}
+                  icon={<Plus size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
+                  label="New message"
+                  muted
                 />
-              ))}
-            </ul>
-            {declinedDmRequests.length > 0 ? (
-              <div className="border-t border-line/60 bg-panel-2/40">
-                <SectionLabel as="p" className="m-0 px-3 pb-1 pt-2">
-                  Declined
-                </SectionLabel>
-                <ul className="m-0 list-none p-0">
-                  {declinedDmRequests.map((request) => (
-                    <DmRequestListItem
-                      key={request.shareId}
-                      request={request}
-                      state="declined"
-                      busy={dmRequestBusy !== null}
-                      onRequestAgain={() =>
-                        void setDmRequestDeclined(request, false)
-                      }
+              ) : null}
+            </div>
+          ) : null}
+          {dmAcceptedElsewhere ? (
+            <div
+              data-testid="chats-dm-accepted-elsewhere"
+              className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted"
+            >
+              <span className="min-w-0 flex-1 truncate">
+                {dmAcceptedElsewhere.granterEmail
+                  ? `Added your conversation with ${dmAcceptedElsewhere.granterEmail} to ${dmAcceptedElsewhere.workspaceLabel}.`
+                  : `Added this conversation to ${dmAcceptedElsewhere.workspaceLabel}.`}
+              </span>
+              <button
+                type="button"
+                data-testid="chats-dm-accepted-elsewhere-dismiss"
+                aria-label="Dismiss notice"
+                onClick={() => setDmAcceptedElsewhere(null)}
+                className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50 hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
+            <div data-testid="chats-dm-requests-section">
+              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+                Message requests
+              </SectionLabel>
+              <ul className="m-0 list-none p-0">
+                {pendingDmRequests.map((request) => (
+                  <DmRequestListItem
+                    key={request.shareId}
+                    request={request}
+                    state="pending"
+                    busy={dmRequestBusy !== null}
+                    onAccept={() => setAcceptingDmRequest(request)}
+                    onDecline={() => void setDmRequestDeclined(request, true)}
+                  />
+                ))}
+              </ul>
+              {declinedDmRequests.length > 0 ? (
+                <div className="border-t border-line/60 bg-panel-2/40">
+                  <SectionLabel as="p" className="m-0 px-4 pb-1 pt-2">
+                    Declined
+                  </SectionLabel>
+                  <ul className="m-0 list-none p-0">
+                    {declinedDmRequests.map((request) => (
+                      <DmRequestListItem
+                        key={request.shareId}
+                        request={request}
+                        state="declined"
+                        busy={dmRequestBusy !== null}
+                        onRequestAgain={() =>
+                          void setDmRequestDeclined(request, false)
+                        }
+                      />
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {agentChannel ? (
+            <section data-testid="chats-my-agent-section" aria-label="Agents">
+              <SectionLabel as="p" className="mb-1 mt-4 px-4">
+                Agents
+              </SectionLabel>
+              <NavRow
+                testId="chats-my-agent"
+                data={{ "data-channel-id": agentChannel.id }}
+                active={selectedChannelId === agentChannel.id}
+                onClick={() => openConversation({ level: "channel", channel: agentChannel })}
+                icon={<ChatAvatar name={agentLabel} kind="agent" size="strip" />}
+                label={agentLabel}
+                labelTestId="chats-my-agent-name"
+                trailing={
+                  <>
+                    <AgentPresenceHint
+                      activity={agentSummaryActivity}
+                      testId="chats-my-agent-presence"
                     />
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {receivedNotJoined.length > 0 || shareReadFailure !== null ? (
-          <div data-testid="chats-shared-with-you">
-            <SectionLabel as="p" className="mb-0 mt-3 px-3">
-              Shared with you
-            </SectionLabel>
-            {/* The section stays even with nothing to list. Hiding it on an
-                unreadable listing was the whole of #618: the invitations
-                vanished with no copy anywhere saying dohc could not read
-                them. */}
-            {shareReadFailure ? (
-              <ShareReadFailureNotice
-                testId="chats-shares-unreadable"
-                failure={shareReadFailure}
-                stale={receivedNotJoined.length > 0}
-                onRetry={() => void refreshShares()}
+                    <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
+                  </>
+                }
               />
-            ) : null}
-            <ul className="m-0 list-none p-0">
-              {receivedNotJoined.map((row) => (
-                <li key={row.shareId} className="border-b border-line">
-                  <div className="flex items-center gap-1.5 px-3 py-2">
-                    <Users size={13} aria-hidden className="shrink-0 text-subtle" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-medium text-ink">
-                        A channel from {row.granterEmail ?? "a teammate"}
-                      </span>
-                      <span className="block text-[10px] text-subtle">
-                        {row.access === "read-only"
-                          ? "You can read it"
-                          : "You can read and post"}
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      data-testid="chats-join-shared"
-                      disabled={joiningShareId !== null}
-                      onClick={() => void joinShared(row.shareId)}
-                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-50"
-                    >
-                      {joiningShareId === row.shareId ? "Joining…" : "Join"}
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-        {overview.fileThreads.length > 0 ? (
-          <div data-testid="chats-files-section">
-            <SectionLabel as="p" className="mb-0 mt-3 px-3">
-              Files
-            </SectionLabel>
-            <ul className="m-0 list-none p-0">
-              {overview.fileThreads.map((thread) => (
-                <li key={thread.id} className="border-b border-line">
-                  <button
-                    type="button"
-                    data-testid="chats-file-chat"
-                    data-thread-id={thread.id}
-                    title={
-                      thread.path
-                        ? `Open in the Chats panel (${thread.path})`
-                        : "Open in the Chats panel"
-                    }
-                    onClick={() => props.onOpenFileChat(thread)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
-                  >
-                    <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-medium text-ink">
-                        {thread.title}
-                      </span>
-                      <span className="block truncate text-[10px] text-subtle">
-                        {thread.path ?? "File no longer tracked"}
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
+            </section>
+          ) : null}
+        </nav>
       </div>
       <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
         {creatingChannel === null ? (
@@ -4447,7 +4383,7 @@ export function ChatsView(props: {
             className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
           >
             <Plus size={12} aria-hidden />
-            New channel
+            New group
           </button>
         ) : (
           <form
@@ -4457,7 +4393,7 @@ export function ChatsView(props: {
             }}
           >
             <label className="sr-only" htmlFor="chats-new-channel-name">
-              Channel name
+              Group name
             </label>
             <input
               id="chats-new-channel-name"
@@ -4465,7 +4401,7 @@ export function ChatsView(props: {
               autoFocus
               value={creatingChannel}
               maxLength={80}
-              placeholder="Channel name"
+              placeholder="Group name"
               onChange={(event) => setCreatingChannel(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
@@ -4475,9 +4411,6 @@ export function ChatsView(props: {
               }}
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
             />
-            <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
-              Press Enter to create the channel.
-            </p>
           </form>
         )}
       </div>

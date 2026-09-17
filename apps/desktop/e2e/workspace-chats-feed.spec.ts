@@ -168,11 +168,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await page.getByTestId("chats-new-channel-name").press("Enter");
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
-    // Creating a channel opens it inside the panel. Hand the conversation to
-    // the editor and collapse the navigator, so this spec asserts on one
-    // surface — panel/editor duplication is workspace-chats.spec.ts's subject.
-    await page.getByTestId("chats-channel-back").click();
-    await page.getByTestId("chats-channel").filter({ hasText: channelName }).click();
+    // Creating a channel opens it inside the panel. Expand hands the
+    // conversation to the editor; collapse the navigator so this spec asserts
+    // on one surface — panel/editor handoff is workspace-chats.spec.ts's subject.
+    await page.getByTestId("chats-open-tab").click();
     await expect(view.getByTestId("chats-channel-view")).toBeVisible();
     await page.getByTestId("chats-panel-collapse").click();
     await expect(page.getByTestId("chats-panel")).toHaveCount(0);
@@ -188,7 +187,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const card = postCard(view, postTitle);
     await expect(card).toBeVisible();
     await expect(card.getByTestId("chats-post-title")).toHaveText(postTitle);
-    await expect(card.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
     await expect(card.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
     const threadId = await card.getAttribute("data-thread-id");
     expect(threadId).toBeTruthy();
@@ -280,7 +278,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(agentBubble).toHaveClass(/border-l-2/);
     await expect(agentBubble).toHaveAttribute("style", /--dohc-agent/);
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
-      "needs decision",
+      "Poll open",
     );
 
     // The feed summary reflects the same open decision, and reopening keeps
@@ -288,20 +286,20 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveText(
-      "needs decision",
+      "Poll open",
     );
     await decisionCard.click();
     await expect(agentComment).toBeVisible();
 
     await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
     await expect(view.getByTestId("chats-resolving-mode")).toContainText(
-      "Resolving decision — your reply records it",
+      "Answering the poll",
     );
     await composer.fill(resolutionBody);
     await composer.press("Enter");
     await expect(
       ownBubble(agentComment).getByTestId("chats-comment-decision-resolved"),
-    ).toHaveText("resolved");
+    ).toHaveText("Answered");
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
 
     const show = await runDohcCli(temp, ["chat", "show", threadId, "--peek"]);
@@ -340,7 +338,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const persistedCard = postCard(view, postTitle);
     await expect(persistedCard).toBeVisible();
     await expect(persistedCard.getByTestId("chats-post-title")).toHaveText(postTitle);
-    await expect(persistedCard.getByTestId("chats-post-title")).toHaveClass(/font-serif/);
     await expect(persistedCard.getByTestId("chats-post-excerpt")).toHaveText(postExcerpt);
     await expect(persistedCard.getByTestId("chats-post-comment-count")).toHaveText(
       "5 comments",
@@ -376,7 +373,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       .toHaveClass(/border-l-2/);
     await expect(
       ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
-    ).toHaveText("resolved");
+    ).toHaveText("Answered");
     await expect(view.getByTestId("chats-comment-decision-open")).toHaveCount(0);
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
   } finally {
@@ -420,6 +417,7 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     await expect(panel).toBeVisible();
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();
+    await page.getByTestId("chats-open-tab").click();
     await expect(channelView).toBeVisible();
     await expect(channelView.getByTestId("chats-thread")).toHaveCount(0);
 

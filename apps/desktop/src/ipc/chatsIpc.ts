@@ -106,6 +106,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     threadId: message.threadId,
     authorKind: message.author.kind,
     authorDisplayName: message.author.displayName,
+    ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
       : {}),
@@ -833,11 +834,31 @@ export function registerChatsIpcHandlers<
           ] as const),
       ),
     );
+    // The viewer, per thread: a joined shared channel writes under the
+    // grant's account, the workspace's own threads under the owner. Each
+    // item carries its thread's viewer and its reactions normalized to it,
+    // as listChatReactions does, so a Like made before sign-in still reads
+    // as the viewer's.
+    const localFallbackAuthorId = localReactorFallbackId();
+    const viewerByThread = new Map(
+      await Promise.all(
+        [...new Set(page.items.map((item) => item.thread.id))].map(async (threadId) => [
+          threadId,
+          await chatViewerAuthorId({
+            localFallbackAuthorId,
+            resolveReplicationAuthorId: async () =>
+              (await chatRelayIdentityFor(workspace.workspaceId, { threadId }, store))
+                .authorUserId,
+          }).catch(() => localFallbackAuthorId),
+        ] as const),
+      ),
+    );
     return ListPersonalChatFeedResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       items: page.items.map((item) => ({
         message: chatMessageForIpc(item.message),
         thread: chatThreadForIpc(item.thread),
+        viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
         ...(item.message.authorUserId
           ? {
               authorFollowTarget: {
@@ -866,7 +887,10 @@ export function registerChatsIpcHandlers<
         ...(item.openingMessage
           ? { openingMessage: chatMessageForIpc(item.openingMessage) }
           : {}),
-        reactions: item.reactions.map(chatReactionForIpc),
+        reactions: reactionsForViewer(item.reactions.map(chatReactionForIpc), {
+          viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
+          localFallbackAuthorId,
+        }),
         matchedBy: item.matchedBy,
       })),
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),

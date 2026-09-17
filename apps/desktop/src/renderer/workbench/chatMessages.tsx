@@ -1,4 +1,5 @@
-import { formatChatTime } from "../time";
+import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
+import { ChatAvatar } from "./ChatAvatar";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import { FileText, SmilePlus, Send } from "lucide-react";
@@ -351,6 +352,9 @@ export function MessageReactions(props: {
   records: readonly ChatReactionRecord[];
   controls: ChatReactionControls;
   flush?: boolean;
+  // In the chat lane an empty row floats over the message's corner, so a
+  // run of short lines keeps its rhythm until someone reacts.
+  overlayWhenEmpty?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -416,7 +420,11 @@ export function MessageReactions(props: {
       // Channel feed cards are themselves clickable. Keep reaction gestures
       // local so a pill or quick-pick never also opens the post underneath it.
       onClick={(event) => event.stopPropagation()}
-      className={`relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`}
+      className={
+        props.overlayWhenEmpty && byEmoji.length === 0
+          ? "absolute right-0 top-0 flex items-center"
+          : `relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`
+      }
     >
       {byEmoji.map((group) => (
         <button
@@ -470,7 +478,9 @@ export function MessageReactions(props: {
           role="group"
           data-testid={`${props.testIdPrefix}-reaction-picker`}
           aria-label="Choose a reaction"
-          className="dohc-popover dohc-pop-in absolute bottom-full left-0 z-10 mb-1 flex gap-0.5 rounded-lg border border-line bg-panel p-1"
+          className={`dohc-popover dohc-pop-in absolute bottom-full z-10 mb-1 flex gap-0.5 rounded-lg border border-line bg-panel p-1 ${
+            props.overlayWhenEmpty && byEmoji.length === 0 ? "right-0" : "left-0"
+          }`}
         >
           {choices.map((emoji) => {
             const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
@@ -506,6 +516,16 @@ export function MessageReactions(props: {
 // renders this list, so without the boundary every keystroke re-scanned the
 // whole conversation. Callers keep every prop referentially stable across
 // unrelated renders (drafts, typing indicators) for the memo to hold.
+const GROUP_WINDOW_MS = 5 * 60_000;
+
+// The chat lane. Messages from one author within five minutes read as one
+// run: the avatar and name once, then bare lines. A divider names each day.
+// The time sits in the gutter and shows on hover. Memoized because each body
+// re-runs the file-token and mention scans on every render: the hosts keep
+// composer drafts in the same component that renders this list, so without
+// the boundary every keystroke re-scanned the whole conversation. Callers
+// keep every prop referentially stable across unrelated renders (drafts,
+// typing indicators) for the memo to hold.
 export const ChatMessageList = memo(function ChatMessageList(props: {
   testIdPrefix: string;
   messages: ChatMessageRecord[];
@@ -541,57 +561,107 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           {props.emptyLabel}
         </p>
       ) : (
-        <ul className="m-0 flex list-none flex-col gap-2 p-0">
-          {props.messages.map((message) => {
+        <ul className="m-0 flex list-none flex-col p-0">
+          {props.messages.map((message, at) => {
+            const previous = at > 0 ? props.messages[at - 1] : undefined;
+            const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
+            const continues =
+              !newDay &&
+              previous !== undefined &&
+              previous.authorKind === message.authorKind &&
+              (previous.authorUserId && message.authorUserId
+                ? previous.authorUserId === message.authorUserId
+                : !previous.authorUserId && !message.authorUserId &&
+                  previous.authorDisplayName === message.authorDisplayName) &&
+              message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
+            const isAgent = message.authorKind === "agent";
             const time = formatChatTime(message.createdAtMs);
+            const reactions = reactionsByMessage.get(message.id) ?? [];
             return (
               <li
                 key={message.id}
                 ref={(element) => props.onMessageElement?.(message.id, element)}
                 data-testid={`${props.testIdPrefix}-message`}
                 data-message-id={message.id}
-                className={`group transition-shadow ${
+                data-continues={continues ? "true" : "false"}
+                className={`group relative flex flex-col transition-shadow ${
+                  continues ? "mt-0.5" : "mt-3"
+                } ${
                   props.flashMessageId === message.id
-                    ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                    ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
                     : ""
                 }`}
               >
-                <span className="flex items-baseline gap-1.5">
+                {newDay ? (
                   <span
-                    data-testid={`${props.testIdPrefix}-message-author`}
-                    data-author-kind={message.authorKind}
-                    className="shrink-0 text-[11px] font-semibold text-ink"
+                    data-testid={`${props.testIdPrefix}-day`}
+                    className="mb-3 flex items-center gap-2 text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
                   >
-                    {chatAuthorLabel(message)}
+                    {formatChatDay(message.createdAtMs)}
                   </span>
-                  <time
-                    dateTime={time.iso}
-                    title={time.iso}
-                    className="shrink-0 text-[10px] text-subtle"
-                  >
-                    {time.label}
-                  </time>
-                </span>
-                <p
-                  data-testid={`${props.testIdPrefix}-message-body`}
-                  className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
-                >
-                  <MentionText
-                    body={message.body}
-                    candidates={candidates}
-                    attachments={message.attachments}
-                    testId={`${props.testIdPrefix}-message-body`}
-                    onOpenPath={props.onOpenPath}
-                  />
-                </p>
-                {props.reactionControls ? (
-                  <MessageReactions
-                    testIdPrefix={props.testIdPrefix}
-                    messageId={message.id}
-                    records={reactionsByMessage.get(message.id) ?? []}
-                    controls={props.reactionControls}
-                  />
                 ) : null}
+                <div className="flex gap-2.5">
+                  <span className="flex h-5 w-9 shrink-0 items-start justify-end">
+                    {continues ? (
+                      <time
+                        dateTime={time.iso}
+                        title={time.iso}
+                        className="block w-full whitespace-nowrap text-right font-mono text-[9px] leading-5 text-subtle opacity-0 group-hover:opacity-100"
+                      >
+                        {formatClock(message.createdAtMs)}
+                      </time>
+                    ) : (
+                      <ChatAvatar
+                        name={message.authorDisplayName}
+                        kind={isAgent ? "agent" : "human"}
+                        size="comment"
+                      />
+                    )}
+                  </span>
+                  <div className="relative min-w-0 flex-1 pr-6">
+                    {!continues ? (
+                      <span className="flex items-baseline gap-1.5">
+                        <span
+                          data-testid={`${props.testIdPrefix}-message-author`}
+                          data-author-kind={message.authorKind}
+                          className={`shrink-0 text-[13px] font-semibold ${
+                            isAgent ? "text-agent" : "text-ink"
+                          }`}
+                        >
+                          {chatAuthorLabel(message)}
+                        </span>
+                        <time
+                          dateTime={time.iso}
+                          title={time.iso}
+                          className="shrink-0 text-[11px] text-subtle"
+                        >
+                          {formatClock(message.createdAtMs)}
+                        </time>
+                      </span>
+                    ) : null}
+                    <p
+                      data-testid={`${props.testIdPrefix}-message-body`}
+                      className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-5 text-ink"
+                    >
+                      <MentionText
+                        body={message.body}
+                        candidates={candidates}
+                        attachments={message.attachments}
+                        testId={`${props.testIdPrefix}-message-body`}
+                        onOpenPath={props.onOpenPath}
+                      />
+                    </p>
+                    {props.reactionControls ? (
+                      <MessageReactions
+                        testIdPrefix={props.testIdPrefix}
+                        messageId={message.id}
+                        records={reactions}
+                        controls={props.reactionControls}
+                        overlayWhenEmpty
+                      />
+                    ) : null}
+                  </div>
+                </div>
               </li>
             );
           })}
