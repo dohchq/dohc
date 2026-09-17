@@ -45,9 +45,10 @@ pub use durable::{
     record_base_coordinate_in_tx, record_local_update, record_update_in_tx,
     replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
     rewrite_bare_marker_content_kind, settle, validate_remote_update, AppendOutcome,
-    BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CompactOutcome,
-    LineageClaimStatus, LineageGuard, LocalAppend, Marker, MarkerCreation, OriginationBase,
-    PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
+    BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CloseProjection,
+    CompactOutcome, LineageClaimStatus, LineageGuard, LocalAppend, Marker, MarkerCreation,
+    OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome,
+    SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};

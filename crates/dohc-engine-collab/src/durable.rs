@@ -2277,6 +2277,15 @@ pub fn settle(
     })
 }
 
+/// Projection and optional seed-source bytes verified by the filesystem-owning caller.
+pub struct CloseProjection {
+    pub sha256: String,
+    /// Present only when the current object head and physical artifact both
+    /// match this pristine lineage's imported source. This is not the
+    /// normalized projection digest and must not become `last_settled_sha`.
+    pub materialized_seed_source_sha256: Option<String>,
+}
+
 /// Close a session: regime-dependent. Replicated (or persist-closed-state)
 /// compacts and keeps the lineage durable; local-only prunes every CRDT row to
 /// the bare marker (the workspace file is the artifact). A caller that uses a
@@ -2286,7 +2295,7 @@ pub fn close_session(
     store: &mut EngineStore,
     key: &DocKey,
     persist_closed_state: bool,
-    authoritative_projection_sha256: Option<&str>,
+    authoritative_projection: Option<&CloseProjection>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
@@ -2306,8 +2315,8 @@ pub fn close_session(
     // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
     if marker.head_update_seq > 0 {
-        let content_sha = match authoritative_projection_sha256 {
-            Some(content_sha) => content_sha.to_owned(),
+        let content_sha = match authoritative_projection {
+            Some(projection) => projection.sha256.clone(),
             None if marker.content_kind == ContentKind::Scene => {
                 return Err(CollabError::UnsettledClose);
             }
@@ -2344,7 +2353,12 @@ pub fn close_session(
             // moment for it) still holds, so the prune discards a cache of
             // the file, not content.
             let seed_source = seed_only_lineage_source(conn, key)?;
-            Ok(seed_source.is_some() && seed_source == captured_head_sha(conn, key)?)
+            Ok(seed_source.is_some()
+                && (seed_source == captured_head_sha(conn, key)?
+                    || seed_source.as_deref()
+                        == authoritative_projection.and_then(|projection| {
+                            projection.materialized_seed_source_sha256.as_deref()
+                        })))
         })?;
         if !covered {
             return Err(CollabError::UnsettledClose);
