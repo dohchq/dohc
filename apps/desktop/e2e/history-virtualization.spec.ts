@@ -51,6 +51,18 @@ test.describe("history virtualization", () => {
     if (output) await removeTestScratch(output);
   });
 
+  test("uses the latest open callback for an already mounted moment", async ({ page }) => {
+    await page.goto(server.resolvedUrls!.local[0]);
+    const moment = page.locator('[data-moment-id="moment-3"]');
+    await moment.click();
+    await expect(page.getByLabel("Opened moment")).toHaveText("moment-3");
+    const originalElement = await moment.elementHandle();
+    await page.getByRole("button", { name: "Replace open callback" }).click();
+    expect(await moment.evaluate((element, original) => element === original, originalElement)).toBe(true);
+    await moment.click();
+    await expect(page.getByLabel("Opened moment")).toHaveText("1:moment-3");
+  });
+
   for (const theme of ["light", "dark"]) {
     test(`keeps expansion, sticky days, and keyboard order in ${theme}`, async ({ page }) => {
       for (const key of buildEnvironmentKeys) {

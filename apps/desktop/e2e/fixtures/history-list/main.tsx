@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
@@ -22,15 +22,22 @@ function HistoryFixture() {
   const [moments, setMoments] = useState(initialMoments);
   const [hasMore, setHasMore] = useState(true);
   const [opened, setOpened] = useState("");
+  const [callbackGeneration, setCallbackGeneration] = useState(0);
+  const onOpenMoment = useCallback((momentId: string) => {
+    setOpened(callbackGeneration === 0 ? momentId : `${callbackGeneration}:${momentId}`);
+  }, [callbackGeneration]);
   return (
     <main className="flex h-screen flex-col bg-panel text-ink">
       <output aria-label="Opened moment">{opened}</output>
+      <button type="button" onClick={() => setCallbackGeneration((current) => current + 1)}>
+        Replace open callback
+      </button>
       <EngineHistoryView
         moments={moments}
         hasMore={hasMore}
         loadingMore={false}
         protectedTruncated
-        onOpenMoment={setOpened}
+        onOpenMoment={onOpenMoment}
         onLoadMore={() => {
           setMoments((current) => [...current, {
             ...initialMoments[initialMoments.length - 1],

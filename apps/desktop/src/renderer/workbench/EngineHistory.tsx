@@ -359,8 +359,8 @@ export function EngineHistoryView(props: {
   const headerItemCount = props.protectedTruncated ? 1 : 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount }),
-    [expandedGroups, headerItemCount, listItemCount],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment],
   );
 
   // A known page with no moments. The caller renders this view only when it
