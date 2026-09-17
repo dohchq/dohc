@@ -52,4 +52,5 @@ overrides:
   prosemirror-view: "1.42.2"
 
 patchedDependencies:
+  '@legendapp/list@3.3.11': patches/@legendapp__list@3.3.11.patch
   prosemirror-view@1.42.2: patches/prosemirror-view@1.42.2.patch
