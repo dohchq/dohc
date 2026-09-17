@@ -36,10 +36,15 @@ async function distanceFromEnd(list: Locator): Promise<number> {
   return list.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
 }
 
-async function setDistanceFromEnd(list: Locator, distance: number): Promise<number> {
-  await list.evaluate((node, value) => {
-    node.scrollTop = node.scrollHeight - node.clientHeight - value;
-  }, distance);
+async function wheelToEnd(list: Locator): Promise<void> {
+  await list.hover();
+  await list.page().mouse.wheel(0, await list.evaluate((node) => node.scrollHeight));
+  await expect.poll(() => distanceFromEnd(list)).toBeLessThanOrEqual(1);
+}
+
+async function wheelFromEnd(list: Locator, distance: number): Promise<number> {
+  await wheelToEnd(list);
+  await list.page().mouse.wheel(0, -distance);
   await expect.poll(() => distanceFromEnd(list)).toBeCloseTo(distance, 0);
   return list.evaluate((node) => node.scrollTop);
 }
@@ -95,24 +100,28 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await expect(lane.locator(`[data-message-id="${seeded.firstMessageId}"]`)).toHaveCount(0);
     await expect(lane.getByText("First message in the empty chat", { exact: true })).toHaveCount(0);
 
-    const historyTop = await setDistanceFromEnd(list, 60);
+    const historyTop = await wheelFromEnd(list, 60);
     const historyMessage = await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming while reading history");
     await expect(lane.locator(`[data-message-id="${historyMessage}"]`)).toBeAttached();
     await expect.poll(() => distanceFromEnd(list)).toBeGreaterThan(60);
     expect(await list.evaluate((node) => node.scrollTop)).toBeCloseTo(historyTop, 0);
 
-    await setDistanceFromEnd(list, 40);
-    const followingMessage = await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming while following");
+    let followingMessage = "";
+    for (const distance of [20, 40]) {
+      await wheelFromEnd(list, distance);
+      followingMessage = await sendThroughIpc(page, workspaceId, seeded.threadId, `Incoming while following from ${distance}px`);
+      await expect(lane.locator(`[data-message-id="${followingMessage}"]`)).toBeInViewport();
+      await expect.poll(() => distanceFromEnd(list)).toBeLessThanOrEqual(1);
+    }
     const lastRow = lane.locator(`[data-message-id="${followingMessage}"]`);
-    await expect(lastRow).toBeInViewport();
-    await expect.poll(() => distanceFromEnd(list)).toBeLessThanOrEqual(1);
 
     await lastRow.hover();
     const trigger = lastRow.getByTestId("chats-lane-add-reaction");
     await trigger.click();
     const picker = page.getByTestId("chats-lane-reaction-picker");
     await expect(picker).toBeVisible();
-    await expect(lastRow.getByTestId("chats-lane-reaction-picker")).toHaveCount(0);
+    await expect(picker).toHaveAttribute("popover", "manual");
+    await expect(lastRow.locator('[data-testid="chats-lane-reaction-picker"]:popover-open')).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(picker).toHaveCount(0);
     await expect(trigger).toBeFocused();
@@ -121,12 +130,19 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await page.getByTestId("chats-lane-reaction-choice").filter({ hasText: "🎉" }).click();
     await expect(lastRow.getByTestId("chats-lane-reaction-pill")).toHaveAttribute("data-mine", "true");
     await expect(trigger).toBeFocused();
-    // A native scroll event moves the viewport without moving keyboard focus.
-    await list.evaluate((node) => { node.scrollTop = 0; });
-    await expect(lane.locator(`[data-message-id="${seeded.firstMessageId}"]`)).toBeInViewport();
+    // Home scrolls history while the reaction trigger keeps keyboard focus.
+    await page.keyboard.press("Home");
+    const firstRow = lane.locator(`[data-message-id="${seeded.firstMessageId}"]`);
+    await expect(firstRow).toBeInViewport();
+    await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeLessThanOrEqual(1);
     await expect(trigger).toBeFocused();
     await expect(lastRow).toBeAttached();
     await expect(lastRow).not.toBeInViewport();
+    await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming after keyboard history navigation");
+    await expect(firstRow).toHaveAttribute("aria-setsize", String(messageCount + 4));
+    await expect(firstRow).toBeInViewport();
+    expect(await list.evaluate((node) => node.scrollTop)).toBeLessThanOrEqual(1);
+    await expect(trigger).toBeFocused();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
