@@ -181,6 +181,61 @@ describe("DatabaseStudioView", () => {
     expect(await screen.findByText("Quarter close")).toBeTruthy();
   });
 
+  it("commits the cell draft on blur and discards it on Escape", async () => {
+    const user = userEvent.setup();
+    renderStudio();
+    await screen.findByText("Food");
+    await user.click(screen.getByTestId("db-cell-category-txn_001"));
+    await user.clear(screen.getByTestId("db-cell-input"));
+    await user.type(screen.getByTestId("db-cell-input"), "Groceries");
+    await user.tab();
+    await waitFor(() =>
+      expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          edit: expect.objectContaining({ payload: { category: "Groceries" } }),
+        }),
+      ),
+    );
+    await screen.findByText("Groceries");
+    bridgeMock.applyDatabaseEdit.mockClear();
+    await user.click(screen.getByTestId("db-cell-category-txn_002"));
+    expect((screen.getByTestId("db-cell-input") as HTMLInputElement).value).toBe(
+      "Transport",
+    );
+    await user.type(screen.getByTestId("db-cell-input"), " discarded");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("db-cell-input")).toBeNull();
+    expect(bridgeMock.applyDatabaseEdit).not.toHaveBeenCalled();
+    expect(screen.getByText("Transport")).toBeTruthy();
+  });
+
+  it("keeps the draft when a refresh temporarily removes the edited row", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" />,
+    );
+    await screen.findByText("Food");
+    await user.click(screen.getByTestId("db-cell-category-txn_001"));
+    fireEvent.change(screen.getByTestId("db-cell-input"), {
+      target: { value: "Uncommitted draft" },
+    });
+    await user.click(screen.getByTestId("db-cell-input"));
+    const missing = cloneSnapshot();
+    missing.tables[0]!.rows = missing.tables[0]!.rows.slice(1);
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(missing);
+    rerender(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} />,
+    );
+    await waitFor(() => expect(screen.queryByTestId("db-cell-input")).toBeNull());
+    rerender(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={2} />,
+    );
+    expect((await screen.findByTestId("db-cell-input") as HTMLInputElement).value).toBe(
+      "Uncommitted draft",
+    );
+    expect(bridgeMock.applyDatabaseEdit).not.toHaveBeenCalled();
+  });
+
   it("ignores an edit page after a refresh starts a newer load", async () => {
     const user = userEvent.setup();
     const oldEdit = deferred<DatabaseEditResult>();
