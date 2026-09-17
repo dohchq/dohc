@@ -25,6 +25,7 @@ files:
   - dist/**
   - "!**/*.tsbuildinfo"
   - "!node_modules/@dohc/*/src/**/*.test.ts"
+  - "!node_modules/@dohc/sync-relay/dist/**"
   # Main bundles the Effect runtime; CLI and plugin tools own their dependencies.
   - "!node_modules/effect/**"
   - "!node_modules/electron-updater/**"
