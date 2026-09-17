@@ -1,6 +1,6 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
-import { observeExit, closeOwnedPackage, benchmarkCancellation } from './packaged-process.mjs';
+import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
@@ -20,14 +20,21 @@ if (process.platform !== 'win32') throw Error('The packaged release benchmark re
 const root = resolve('.');
 const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles } = options;
 await createEvidenceDirectory(output);
-const require = createRequire(join(root, 'apps/desktop/package.json'));
-const { chromium } = require('playwright');
-const exec = promisify(execFile);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
+const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
+  startedAt: new Date().toISOString(), platform: process.platform, node: process.version,
+  settings: { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles }, runs: [], status: 'setup' };
+const feedRequests = [];
+let feed, active, windowController, helperStartup, workload;
+const cancellation = benchmarkCancellation();
+try {
+await json(join(output, 'result.json'), receipt);
+const require = createRequire(join(root, 'apps/desktop/package.json'));
+const exec = promisify(execFile);
 const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 const asar = join(dirname(binary), 'resources/app.asar');
 const engineBinary = join(dirname(binary), 'resources/workspace-engine/dohc-workspace-engine.exe');
-const receipt = {
+Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
   engineBinary, engineSha256: await sha256(engineBinary), engineCommit: options.engineCommit,
@@ -57,10 +64,10 @@ const receipt = {
     'Renderer CPU profiling is optional and diagnostic; profiled runs cannot serve as unprofiled performance comparisons.',
     'The local updater feed advertises version 0.0.0 and has no downloadable asset; update installation is never requested.',
   ],
-};
+});
+const { chromium } = require('playwright');
 await json(join(output, 'result.json'), receipt);
-const feedRequests = [];
-const feed = createServer((req, res) => {
+feed = createServer((req, res) => {
   feedRequests.push({ at: Date.now(), url: req.url });
   res.writeHead(200, { 'content-type': 'text/yaml' });
   res.end('version: 0.0.0\nfiles: []\npath: unavailable.exe\nsha512: AA==\nreleaseDate: 2020-01-01T00:00:00.000Z\n');
@@ -68,12 +75,7 @@ const feed = createServer((req, res) => {
 await new Promise((resolve, reject) => { feed.once('error', reject); feed.listen(0, '127.0.0.1', resolve); });
 const feedUrl = `http://127.0.0.1:${feed.address().port}`;
 const env = benchmarkEnvironment(process.env, feedUrl);
-let active;
-let windowController;
-let helperStartup;
-let workload;
 let profileOrdinal = 0;
-const cancellation = benchmarkCancellation();
 
 async function waitUntil(read, timeout = 60000) {
   const started = performance.now();
@@ -361,7 +363,6 @@ async function idle(instance, state) {
   return { state, windowState, domVisibility, elapsedMs, deltas, cpuPercentOneLogicalCore: 100 * deltas.cpuMs / elapsedMs, contextSwitches: null, hardwareWakeups: null, totals, samples, intervals };
 }
 
-try {
   await cancellation.run(() => (workload = (async () => {
   const helperStarted = performance.now();
   helperStartup = startWindowController({ signal: cancellation.signal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
@@ -447,9 +448,10 @@ try {
     await shutdown(runDir, fresh);
     const restart = await launch(runDir, f, 'restart');
     data.restartStartup = restart.startup;
-    data.restartHasSavedInput = await restart.page.locator('.tiptap[contenteditable="true"]').innerText().then(text => text.includes('x'.repeat(keystrokes)));
-    // Odd switch counts finish in workspace 1, whose content was never edited.
-    if (switches % 2 === 0 && !data.restartHasSavedInput) throw Error('Restart did not restore the saved input');
+    data.restartHasSavedInput = await verifyRestartInput({ switches,
+      selectEditedWorkspace: () => switchTo(restart.page, 0),
+      readEditedText: () => restart.page.locator('.tiptap[contenteditable="true"]').innerText(),
+      marker: 'x'.repeat(keystrokes) });
     await shutdown(runDir, restart);
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'complete', restartMs: data.restartStartup.editablePaintObservedMs }));
@@ -483,8 +485,8 @@ try {
     catch (cleanupError) { receipt.helperCleanupError = cleanupError.stack; receipt.status = 'failed'; if (!cancellation.signal.aborted) process.exitCode = 1; }
   }
   if (cancellation.signal.aborted) await workload?.catch(() => {});
-  feed.closeAllConnections();
-  await new Promise(resolve => feed.close(resolve));
+  feed?.closeAllConnections();
+  if (feed?.listening) await new Promise(resolve => feed.close(resolve));
   if (cancellation.signal.aborted) {
     receipt.status = 'failed';
     receipt.error ??= cancellation.signal.reason.stack;

@@ -14,5 +14,5 @@ $rows = @(Get-Process | ForEach-Object {
   freePhysicalBytes = [double]$os.FreePhysicalMemory * 1024
   totalPhysicalBytes = [double]$os.TotalVisibleMemorySize * 1024
   processes = $rows
-  limits = 'CPU percentage is the Windows formatted counter snapshot. Process CPU is lifetime CPU; compare PID plus creation time across snapshots for deltas. No process commands or user data are captured.'
+  limits = 'CPU percentage is the Windows formatted counter snapshot. Process CPU is lifetime CPU; compare PID plus creation time across snapshots for deltas. Rows with null createdAt cannot be used for process deltas. No process commands or user data are captured.'
 } | ConvertTo-Json -Depth 5 -Compress
