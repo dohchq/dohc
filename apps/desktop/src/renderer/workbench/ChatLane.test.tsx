@@ -6,6 +6,7 @@ import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 
 vi.mock("./chatFileMentions", { spy: true });
 
@@ -31,6 +32,18 @@ beforeEach(() => {
 });
 
 describe("ChatLane", () => {
+  it("loads the site demo conversation through its real bridge", async () => {
+    configureDemoDesktopBridge({
+      documents: [], folders: [], createFile: vi.fn(), createFolder: vi.fn(),
+      movePath: vi.fn(), deletePath: vi.fn(),
+    });
+    render(lane("channel-general", "marketing-demo"));
+    await screen.findByText("What needs attention next?");
+    expect(screen.getByText("Start with the launch plan. Once it is approved, save the checklist as a skill.")).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    await waitFor(() => expect(onThreadRead).toHaveBeenCalledOnce());
+  });
+
   it("does not render message bodies while typing a draft", async () => {
     render(lane());
     await screen.findByText("Old message");

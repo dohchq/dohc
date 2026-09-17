@@ -265,6 +265,7 @@ type DemoDesktopBridge = Pick<
   | "requestDmAgain"
   | "listChannelThreads"
   | "listChatMessages"
+  | "getChatThreadRevision"
   | "listChatReactions"
   | "listChatThreadDecisions"
   | "listChatThreadAttachments"
@@ -644,6 +645,9 @@ const demoBridge = {
       threads: [thread(payload.channelId, demoThreadBody(payload.channelId))],
       viewerAuthorId: "demo-user",
     };
+  },
+  async getChatThreadRevision() {
+    return { revision: 1 };
   },
   async listChatMessages(payload: { threadId: string }) {
     const channelId = payload.threadId.replace(/^thread-/, "");
