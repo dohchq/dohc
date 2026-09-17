@@ -36,6 +36,7 @@ import {
   EngineWorkspaceSessions,
   type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
+  type EngineWorkspaceRunOptions,
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
@@ -561,11 +562,12 @@ export function createCaptureLiveStores(
   // one must not answer for.
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
     return await sessions.run(
       workspace,
       async (binding) => await operation(adapterFor(binding)),
-      { retryTransportErrors: true },
+      { ...options, retryTransportErrors: true },
     );
   }
 
@@ -590,8 +592,9 @@ export function createCaptureLiveStores(
 
   async function runRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options?: EngineWorkspaceRunOptions,
   ): Promise<T> {
-    return await withDomainErrors(async () => await runRawRead(operation));
+    return await withDomainErrors(async () => await runRawRead(operation, options));
   }
 
   async function runMutation<T>(
@@ -784,7 +787,9 @@ export function createCaptureLiveStores(
     getMainVersion: (input: { workspaceId: string }) =>
       runRead(async (adapter) => await adapter.getMainVersion(input)),
     getActiveVersion: (input: { workspaceId: string }) =>
-      runRead(async (adapter) => await adapter.getActiveVersion(input)),
+      runRead(async (adapter) => await adapter.getActiveVersion(input), {
+        retryInitialCapture: true,
+      }),
     setActiveVersion: (input: { workspaceId: string; versionId: string }) =>
       runMutation(async (adapter) => await adapter.setActiveVersion(input)),
     createNamedVersion: (input: {

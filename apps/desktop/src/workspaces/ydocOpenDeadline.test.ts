@@ -73,7 +73,11 @@ function recordingSessions(): {
   return { sessions, runOptions };
 }
 
-function captureWith(root: string, sessions: EngineWorkspaceSessions) {
+function captureWith(
+  root: string,
+  sessions: EngineWorkspaceSessions,
+  onProviderOpen = () => {},
+) {
   const doc = new Y.Doc();
   doc.getText("plainText").insert(0, "seed");
   return createWorkspaceEngineCapture({
@@ -84,23 +88,107 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
     // same seam the drift/buffer fixtures use. head "present" keeps the open
     // off the absent-head disk checks — this file is about the chain hold,
     // not the admission rules.
-    openRustYDocProviderSession: async () => ({
-      doc,
-      initialUpdate: Y.encodeStateAsUpdate(doc),
-      contentKind: "plaintext" as const,
-      path: "note.md",
-      head: "present" as const,
-      lineage: "existing" as const,
-      applyLocalUpdate: async () => undefined,
-      settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
-      applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
-      close: async () => undefined,
-      evict: async () => undefined,
-    }),
+    openRustYDocProviderSession: async () => {
+      onProviderOpen();
+      return {
+        doc,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        contentKind: "plaintext" as const,
+        path: "note.md",
+        head: "present" as const,
+        lineage: "existing" as const,
+        applyLocalUpdate: async () => undefined,
+        settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
+        applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+        close: async () => undefined,
+        evict: async () => undefined,
+      };
+    },
   });
 }
 
 describe("the document open's capture-chain hold", () => {
+  it.each(["ready", "deadline", "shutdown"] as const)(
+    "waits for the initial capture before opening the provider: %s",
+    async (outcome) => {
+      const root = await createTestScratch("dohc-ydoc-initial-capture-");
+      await write(root, "note.md", "hello\n");
+      const loopback = new VersionedLoopbackEngine();
+      let importing = false;
+      let activeReads = 0;
+      let workspaceOpens = 0;
+      let providerOpens = 0;
+      let nowMs = 0;
+      const sleeps: number[] = [];
+      const client = {
+        close: () => undefined,
+        onEvent: () => () => undefined,
+        async sendRequest(request: Request): Promise<Response> {
+          if (request.method === "workspace.open") {
+            workspaceOpens += 1;
+            return { id: request.id, result: { workspace: WORKSPACE_ID } };
+          }
+          if (request.method === "workspace.close") {
+            return { id: request.id, result: { closed: true } };
+          }
+          if (importing && request.method === "versions.active") {
+            activeReads += 1;
+            throw new EngineRequestError(request.id, {
+              code: "OVERLOADED",
+              message: "Workspace is still updating. Try again.",
+              retry: "afterBackoff",
+            });
+          }
+          return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
+        },
+      };
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+        now: () => nowMs,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+          nowMs += delayMs;
+          // Initial capture can take more attempts than transport recovery.
+          if (outcome === "ready" && sleeps.length === 8) importing = false;
+          if (outcome === "shutdown") sessions.beginShutdown();
+        },
+      });
+      const engine = captureWith(root, sessions, () => { providerOpens += 1; });
+      engine.start();
+      await engine.flush();
+      const opensBefore = workspaceOpens;
+      importing = true;
+      try {
+        const opened = await engine.openYDocSession({
+          path: "note.md", onRemoteUpdate: () => undefined,
+        }).catch((error: unknown) => error);
+        if (outcome === "ready") {
+          expect(opened).not.toBeInstanceOf(Error);
+          expect(providerOpens).toBe(1);
+          expect(activeReads).toBe(8);
+        } else {
+          expect(opened).toBeInstanceOf(
+            outcome === "deadline" ? EngineWorkspaceRetryDeadlineError : DaemonRefusalError,
+          );
+          expect(isEngineWorkspaceOpenRefusedError(opened)).toBe(true);
+          expect(providerOpens).toBe(0);
+          if (outcome === "deadline") {
+            expect(nowMs).toBeGreaterThanOrEqual(YDOC_OPEN_RETRY_DEADLINE_MS);
+          } else {
+            expect(activeReads).toBe(1);
+          }
+        }
+        expect(sleeps.length).toBeGreaterThan(0);
+        expect(workspaceOpens).toBe(opensBefore);
+        importing = false;
+        // A finished or refused open must release the capture chain.
+        await engine.listMoments({ limit: 1 });
+      } finally {
+        importing = false;
+        await engine.stop();
+      }
+    },
+  );
+
   it("bounds the whole task, including the version read before the open", async () => {
     // The hazard the reviewer instrumented: the task reads the active
     // version first, through the store's own six-attempt transport ladder.
