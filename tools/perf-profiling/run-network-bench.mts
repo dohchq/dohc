@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { openLiveDaemonWorkspace } from "../../apps/desktop/e2e/helpers/daemonSeed.ts";
 import { spawnSyncRelay } from "../../apps/desktop/e2e/helpers/syncRelay.ts";
 import { createWorkspaceEngineCapture } from "../../apps/desktop/src/workspaces/workspaceEngineCapture.ts";
@@ -44,6 +45,15 @@ await save();
 
 async function open(rootPath: string, workspaceId: string, connection: { baseUrl: string; token: string }, bootstrap: boolean) {
   const workspace = await openLiveDaemonWorkspace({ rootPath, workspaceId }, { maxRestarts: 0 });
+  const requestFailures: Array<{ code?: string; method?: string; deadlineMs?: number }> = [];
+  const run = workspace.sessions.run.bind(workspace.sessions);
+  workspace.sessions.run = (target, operation, options) => run(target, async (binding) => {
+    try { return await operation(binding); }
+    catch (error: any) {
+      requestFailures.push({ code: error.code, method: error.method, deadlineMs: error.deadlineMs });
+      throw error;
+    }
+  }, options);
   const relay = workspace.relay.bind({ ...workspace.workspace, relay: connection });
   const capture = createWorkspaceEngineCapture({ ...workspace.workspace, rustEngineSessions: workspace.sessions, daemonOwnsCapture: true });
   try {
@@ -53,12 +63,23 @@ async function open(rootPath: string, workspaceId: string, connection: { baseUrl
         installDataKey: (key) => installWorkspaceDataKey(rootPath, key) });
     }
     return {
-      workspace, relay, capture,
+      workspace, relay, capture, requestFailures,
       store: createCaptureLiveStores(workspace.workspace, workspace.sessions).store,
       pull: () => capture.runRelaySync((materialize) => relay.pull(materialize)),
       async close() { try { await capture.stop(); } finally { await workspace.close(); } },
     };
-  } catch (error) { await capture.stop(); await workspace.close(); throw error; }
+  } catch (error) {
+    try { await capture.stop(); } finally { await workspace.close(); }
+    throw error;
+  }
+}
+
+function journalSnapshot(path: string, table: "replication_log" | "sync_relay_log") {
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    const rows = database.prepare(`SELECT origin_id, origin_seq, op_kind, payload_json FROM ${table} ORDER BY origin_id, origin_seq`).all();
+    return { count: rows.length, sha256: sha256(JSON.stringify(rows)) };
+  } finally { database.close(); }
 }
 
 async function runCase(settings: { name: string; latencyMs: number; bytesPerSecond: number; interrupt: boolean }) {
@@ -87,9 +108,13 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       await writer.store.writeTextFile({ workspaceId, versionId: "main", path, text, metadata: { origin: "api" } });
     }
     row.seedMs = performance.now() - seedStart;
+    row.sourceJournal = journalSnapshot(join(roots[0], ".dohc/engine/engine.db"), "replication_log");
     console.log(`[network-bench] ${settings.name}: seeded ${files} files; pushing relay pages`);
     row.push = await pushAll(writer.relay);
-    assert.equal(row.push.pushed, files);
+    row.writerRequestFailures = writer.requestFailures;
+    row.relayJournal = journalSnapshot(join(roots[2], "relay.sqlite"), "sync_relay_log");
+    assert.equal(row.sourceJournal.count, files + 1, "one journal row per file plus the bootstrap chat");
+    assert.deepEqual(row.relayJournal, row.sourceJournal, "relay must contain the exact source journal");
     reader = await open(roots[1], workspaceId, connection, true);
     proxy.configure({ latencyMs: settings.latencyMs, bytesPerSecond: settings.bytesPerSecond,
       failBlobAt: settings.interrupt ? Math.max(2, Math.floor(files / 2)) : 0 });
@@ -140,10 +165,13 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
   } catch (error) { row.status = "fail"; row.error = String(error); throw error; }
   finally {
     const cleanup = await Promise.allSettled([reader?.close(), writer?.close()]);
-    await proxy?.close();
-    await relay?.stop();
-    for (const root of roots) await removeTestScratch(root);
-    row.cleanup = cleanup.map((result) => result.status);
+    cleanup.push(...await Promise.allSettled([proxy?.close(), relay?.stop()]));
+    if (row.status === "pass" && cleanup.every((result) => result.status === "fulfilled")) {
+      cleanup.push(...await Promise.allSettled(roots.map((root) => removeTestScratch(root))));
+    } else {
+      row.retainedRoots = roots;
+    }
+    row.cleanup = cleanup.map((result) => result.status === "fulfilled" ? "fulfilled" : String(result.reason));
     await save();
     for (const result of cleanup) if (result.status === "rejected") throw result.reason;
   }
