@@ -86,17 +86,15 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       await writer.store.writeTextFile({ workspaceId, versionId: "main", path, text, metadata: { origin: "api" } });
     }
     row.seedMs = performance.now() - seedStart;
-    row.push = await writer.relay.push();
-    // The relay caps one push page. The reader follows the returned cursor
-    // until it has fetched every seeded file, so `pushed` need not equal files.
-    assert(row.push.pushed > 0);
+    row.push = await pushAll(writer.relay);
+    assert.equal(row.push.pushed, files);
     reader = await open(roots[1], workspaceId, connection, true);
     proxy.configure({ latencyMs: settings.latencyMs, bytesPerSecond: settings.bytesPerSecond,
       failBlobAt: settings.interrupt ? Math.max(2, Math.floor(files / 2)) : 0 });
     if (settings.interrupt) {
       const interruptedStart = performance.now();
       let failure: unknown;
-      try { await reader.pull(); } catch (error) { failure = error; }
+      try { await pullAll(reader); } catch (error) { failure = error; }
       assert(failure, "The injected 503 must fail the initial pull");
       row.interrupted = { ms: performance.now() - interruptedStart, requests: proxy.snapshot(), error: String(failure) };
       assert.equal(row.interrupted.requests.failures, 1);
@@ -105,7 +103,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       reader = await open(roots[1], workspaceId, connection, false);
     }
     const started = performance.now();
-    row.pull = await reader.pull();
+    row.pull = await pullAll(reader);
     row.catchUpMs = performance.now() - started;
     row.requests = proxy.snapshot();
     for (const [path, text] of expected) assert.equal(await readFile(join(roots[1], path), "utf8"), text, path);
@@ -115,7 +113,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     assert.equal(row.idlePull.fetched, 0);
     await reader.close(); reader = undefined;
     reader = await open(roots[1], workspaceId, connection, false);
-    row.restartPull = await reader.pull();
+    row.restartPull = await pullAll(reader);
     assert.equal(row.restartPull.fetched, 0);
     for (const [path, text] of expected) {
       assert.equal(await readFile(join(roots[1], path), "utf8"), text, path);
@@ -126,9 +124,9 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     const [path, initial] = expected.entries().next().value!;
     const edited = initial + "after reconnect\n";
     await writer.store.writeTextFile({ workspaceId, versionId: "main", path, text: edited, metadata: { origin: "api" } });
-    await writer.relay.push();
+    await pushAll(writer.relay);
     const resumedAt = performance.now();
-    row.resumedPull = await reader.pull();
+    row.resumedPull = await pullAll(reader);
     row.resumedEditMs = performance.now() - resumedAt;
     assert.equal(await readFile(join(roots[1], path), "utf8"), edited);
     row.fixtureSha256 = sha256([...expected].map(([path, text]) => path + "\0" + sha256(text)).join("\n"));
@@ -145,6 +143,28 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     await save();
     for (const result of cleanup) if (result.status === "rejected") throw result.reason;
   }
+}
+
+async function pushAll(relay: { push(): Promise<any> }) {
+  let total = 0;
+  let last: any = null;
+  do {
+    last = await relay.push();
+    total += last.pushed;
+  } while (last.pushed > 0);
+  return { ...last, pushed: total };
+}
+
+async function pullAll(reader: { pull(): Promise<any> }) {
+  let total = 0;
+  let last: any = null;
+  let applied = 0;
+  do {
+    last = await reader.pull();
+    total += last.fetched;
+    applied += last.applied;
+  } while (last.fetched > 0);
+  return { ...last, fetched: total, applied };
 }
 
 try {
