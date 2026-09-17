@@ -19,7 +19,7 @@ vi.mock("@tiptap/extension-collaboration", async (importOriginal) => {
 
 afterEach(cleanup);
 
-it("shares pending preloads and mounts a warmed live editor without a loading commit", async () => {
+it("shares preloads and preserves the pending and read-only editor handoff", async () => {
   const preloaded = preloadCollaborativeMarkdownEditor();
   const duplicate = preloadCollaborativeMarkdownEditor();
   await waitFor(() => expect(collaboration.loads).toBe(1));
@@ -54,8 +54,10 @@ it("shares pending preloads and mounts a warmed live editor without a loading co
     expect(document.querySelector(".tiptap")?.getAttribute("contenteditable")).toBe("true");
     pending.unmount();
     render(<Editor readOnly />);
-    expect(firstCommits.at(-1)).toEqual({ loading: false, editable: "false" });
-    expect(screen.getByTestId("markdown-editor").textContent).toContain("Restored content");
+    expect(firstCommits.at(-1)).toEqual({ loading: true, editable: null });
+    const restored = await screen.findByTestId("markdown-editor");
+    expect(restored.getAttribute("contenteditable")).toBe("false");
+    expect(restored.textContent).toContain("Restored content");
     expect(collaboration.loads).toBe(1);
   } finally {
     cleanup();

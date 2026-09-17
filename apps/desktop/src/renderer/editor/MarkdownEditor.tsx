@@ -201,21 +201,17 @@ type CollaborationExtensions = {
 };
 
 let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
-let loadedCollaborationExtensions: CollaborationExtensions | null = null;
 
 function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
   collaborationExtensionsPromise ??= Promise.all([
     import("@tiptap/extension-collaboration"),
     import("@tiptap/extension-collaboration-caret"),
     import("@tiptap/y-tiptap"),
-  ]).then(([collaboration, collaborationCaret, yTiptap]) => {
-    loadedCollaborationExtensions = {
-      Collaboration: collaboration.Collaboration,
-      CollaborationCaret: collaborationCaret.CollaborationCaret,
-      yTiptap,
-    };
-    return loadedCollaborationExtensions;
-  });
+  ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
+    Collaboration: collaboration.Collaboration,
+    CollaborationCaret: collaborationCaret.CollaborationCaret,
+    yTiptap,
+  }));
   return collaborationExtensionsPromise;
 }
 
@@ -1171,14 +1167,12 @@ const MarkdownEditorCollabLoader = forwardRef<
   MarkdownEditorHandle,
   MarkdownEditorProps
 >(function MarkdownEditorCollabLoader(props, ref) {
-  const [load, setLoad] = useState<CollaborationExtensionsLoad>(() =>
-    loadedCollaborationExtensions
-      ? { status: "ready", extensions: loadedCollaborationExtensions }
-      : { status: "loading" },
-  );
+  const [load, setLoad] = useState<CollaborationExtensionsLoad>({
+    status: "loading",
+  });
 
   useAsyncResponseEffect(
-    () => load.status === "loading" ? loadCollaborationExtensions() : null,
+    loadCollaborationExtensions,
     {
       onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
       onError: (error) =>
