@@ -182,3 +182,30 @@ it("retains a late-page root and a reference committed between deletion chunks",
   expect(f.storage.getBlob("w", hash)).not.toBeNull();
   expect(f.storage.getBlob("w", orphan)).not.toBeNull();
 });
+
+it("finishes discovery while a writer appends a full page at each yield", async () => {
+  const f = await fixture();
+  f.put(hash);
+  f.put(orphan);
+  for (let index = 0; index < 32; index++) append(f.db, "{}", index);
+  const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
+  let appendedPages = 0;
+  let handle: NodeJS.Immediate;
+  const appendPage = () => {
+    if (appendedPages === 4) return;
+    for (let index = 0; index < 32; index++) {
+      append(external, JSON.stringify({ value: hash }), 32 + appendedPages * 32 + index);
+    }
+    appendedPages++;
+    handle = setImmediate(appendPage);
+  };
+  handle = setImmediate(appendPage);
+  try {
+    expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 }))
+      .toEqual({ removed: 1, removedSha256s: [orphan] });
+    expect(appendedPages).toBe(1);
+    expect(f.storage.getBlob("w", hash)).not.toBeNull();
+  } finally {
+    clearImmediate(handle);
+  }
+});

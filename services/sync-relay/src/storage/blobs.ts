@@ -10,6 +10,10 @@ async function excludeLogReferencedBlobs(
   const unreferenced = new Set(candidates.filter((sha) => /^[a-f0-9]{64}$/.test(sha)));
   const referenced = new Set<string>();
   if (unreferenced.size === 0) return candidates;
+  // Bound this read-only pass; later roots remain covered by locked deletion.
+  const throughSeq = Number(storage.db.prepare(
+    "SELECT MAX(relay_seq) AS seq FROM sync_relay_log WHERE workspace_id = ?",
+  ).get(workspaceId)?.seq ?? 0);
 
   // Bound copied text even for a large payload. SQLite substr stops at
   // literal NUL, as LIKE does. Offsets count SQLite characters, not JS UTF-16.
@@ -17,7 +21,7 @@ async function excludeLogReferencedBlobs(
   const PAGE_ROWS = 32;
   const pageStmt = storage.db.prepare(
     `SELECT relay_seq, substr(payload_json, 1, ?) AS payload
-     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ?
+     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ? AND relay_seq <= ?
      ORDER BY relay_seq LIMIT ?`,
   );
   const continuationStmt = storage.db.prepare(
@@ -26,7 +30,7 @@ async function excludeLogReferencedBlobs(
   );
   let afterSeq = 0;
   while (unreferenced.size > 0) {
-    const page = pageStmt.all(TEXT_CHUNK, workspaceId, afterSeq, PAGE_ROWS);
+    const page = pageStmt.all(TEXT_CHUNK, workspaceId, afterSeq, throughSeq, PAGE_ROWS);
     if (page.length === 0) break;
     for (const row of page) {
       let payload = String(row.payload);
