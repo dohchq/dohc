@@ -279,10 +279,13 @@ export function CsvView({
       const nextRows = [...rowsRef.current];
       while (nextRows.length <= rowIndex) nextRows.push([]);
       const nextRow = [...nextRows[rowIndex]!];
+      // A sliced UTF-16 draft stays wide even after its last wide cell narrows.
+      const narrowed = /[^\u0000-\u00ff]/.test(nextRow[cellIndex] ?? "") &&
+        !/[^\u0000-\u00ff]/.test(value);
       while (nextRow.length <= cellIndex) nextRow.push("");
       nextRow[cellIndex] = value;
       nextRows[rowIndex] = nextRow;
-      setRows(nextRows, rowIndex);
+      setRows(nextRows, narrowed ? undefined : rowIndex);
     },
     [setRows],
   );

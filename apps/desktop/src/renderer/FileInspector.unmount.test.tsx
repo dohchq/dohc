@@ -4731,6 +4731,28 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("rebuilds the CSV draft when a cell returns to Latin-1 text", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "name,note\nAda,before\nGrace,later",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+    await screen.findByTestId("view-csv");
+    const cell = screen.getByLabelText("Row 1 column 2");
+    fireEvent.change(cell, { target: { value: "😀" } });
+    fireEvent.change(cell, { target: { value: "café" } });
+    fireEvent.change(screen.getByLabelText("Row 2 column 1"), { target: { value: "Second" } });
+    fireEvent.change(cell, { target: { value: "plain" } });
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/table.csv",
+      text: "name,note\nAda,plain\nSecond,later",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
   it("rebuilds CSV row offsets when another pane publishes a draft", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "name,note\nAda,before",
