@@ -67,7 +67,7 @@ while ([PackagedBenchmarkWindow]::IsIconic($window) -ne $minimized -or ![Package
   Start-Sleep -Milliseconds 20
 }
 }
-@{ pid = $AppProcessId; window = $window.ToInt64(); title = $title; class = 'Chrome_WidgetWin_1'; normalRect = $normalRect; state = $State; visible = [PackagedBenchmarkWindow]::IsWindowVisible($window); minimized = [PackagedBenchmarkWindow]::IsIconic($window); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } 
+@{ pid = $AppProcessId; window = $window.ToInt64(); title = $title; class = 'Chrome_WidgetWin_1'; normalRect = $normalRect; state = $State; visible = [PackagedBenchmarkWindow]::IsWindowVisible($window); minimized = [PackagedBenchmarkWindow]::IsIconic($window); at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 
 }
 [Console]::Out.WriteLine('{"ready":true}')
