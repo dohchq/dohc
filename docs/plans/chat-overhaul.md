@@ -49,7 +49,7 @@ Redraw chat on the existing engine contract. No engine change. No IPC change exc
 
 What it builds:
 
-1. A `Post` card: avatar, name, group and time, kind word, title or text, file cards, run line, poll options, social line, Like / Comment / Save as file, bubble comments, reply field on demand. Replaces `ChatPosts.tsx`'s `PostCard` and `ThreadMessages`.
+1. A `Post` card: avatar, name, group and time, kind word, title or text, file cards, run line, poll options, social line, Like / Comment / Save as file, bubble comments, reply field on demand. `PostCard.tsx` holds the card. `ChatPosts.tsx` holds `ThreadMessages` and `BookmarkAction`.
 2. A collapsed composer, "What's happening in #group?", that opens into title, body, Mention, File, Poll, Post. Replaces the always-open composer. Keeps `MentionComposer`'s autocomplete.
 3. A chat lane: messages grouped by author within five minutes, day dividers, hover timestamp, "Make a post" on hover. Replaces the current per-thread reply list for the quick lane.
 4. The nav: Home, Groups with two-level disclosure, Shared with you, People, Agents. No Files section. No agent lane. Replaces the root list in `ChatsView.tsx`.
@@ -62,12 +62,12 @@ What it maps to today, so nothing is invented:
 | New word | Engine object | Renderer source today |
 | --- | --- | --- |
 | Group | `ChatChannel` | `ChatsView.tsx` channel list |
-| Post | `ChatThread` and its opening message | `ChatPosts.tsx` `PostCard` |
-| Comment | `ChatMessage` with `parentMessageId` | `ThreadMessages` |
-| Chat lane | one thread per channel, flagged in phase 2; until then the channel's newest thread | `ThreadMessages` |
+| Post | `ChatThread` and its opening message | `PostCard.tsx` `PostCard` |
+| Comment | `ChatMessage` with `parentMessageId` | `ChatPosts.tsx` `ThreadMessages` |
+| Chat lane | one thread per channel, flagged in phase 2; until then the channel's newest thread | `ChatPosts.tsx` `ThreadMessages` |
 | Poll | thread with an open `ChatDecision` | decision resolve UI |
 | Home | `listPersonalChatFeed` flattened, newest first | `ChatsView.tsx` feed |
-| Save as file | `saveChatBookmark` | `BookmarkAction` |
+| Save as file | `saveChatBookmark` | `ChatPosts.tsx` `BookmarkAction` |
 | Members | share grants on the channel | `chats-share-panel` |
 
 What it settles first:
