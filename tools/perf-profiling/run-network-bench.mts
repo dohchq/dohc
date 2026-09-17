@@ -97,6 +97,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     proxy = await openNetworkProxy(relay.baseUrl);
     const connection = { baseUrl: proxy.baseUrl, token: `test:${workspaceId}` };
     writer = await open(roots[0], workspaceId, connection, false);
+    row.writerRequestFailures = writer.requestFailures;
     await writer.relay.claim();
     await writer.workspace.chats.ensureGeneralChannel({ workspaceId });
     await writer.relay.push();
@@ -111,7 +112,6 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
     row.sourceJournal = journalSnapshot(join(roots[0], ".dohc/engine/engine.db"), "replication_log");
     console.log(`[network-bench] ${settings.name}: seeded ${files} files; pushing relay pages`);
     row.push = await pushAll(writer.relay);
-    row.writerRequestFailures = writer.requestFailures;
     row.relayJournal = journalSnapshot(join(roots[2], "relay.sqlite"), "sync_relay_log");
     assert.equal(row.sourceJournal.count, files + 1, "one journal row per file plus the bootstrap chat");
     assert.deepEqual(row.relayJournal, row.sourceJournal, "relay must contain the exact source journal");
