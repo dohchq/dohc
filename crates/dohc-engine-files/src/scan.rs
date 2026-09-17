@@ -19,6 +19,7 @@ use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -363,7 +364,12 @@ impl Scanner {
             if token.is_cancelled() {
                 return Ok(EnumOutcome::Cancelled);
             }
-            let injected_read_dir = self.injected(&relative(root, &dir), ScanIoOperation::ReadDir);
+            // Normalize this parent once for its children without retaining
+            // another path string for every queued directory.
+            let dir_rel =
+                normalized_path(&dir.strip_prefix(root).unwrap_or(&dir).to_string_lossy())
+                    .into_owned();
+            let injected_read_dir = self.injected(&dir_rel, ScanIoOperation::ReadDir);
             let read_dir = match injected_read_dir {
                 Some(kind) if dir == root => {
                     return Err(FilesError::ScanIo {
@@ -373,7 +379,7 @@ impl Scanner {
                 }
                 Some(kind) => {
                     failed.push(FailedPath {
-                        path: relative(root, &dir),
+                        path: dir_rel,
                         kind,
                     });
                     self.check_file_bound(files.len(), skipped.len(), failed.len())?;
@@ -387,7 +393,7 @@ impl Scanner {
                     }
                     Err(err) => {
                         failed.push(FailedPath {
-                            path: relative(root, &dir),
+                            path: dir_rel,
                             kind: err.kind(),
                         });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
@@ -413,15 +419,23 @@ impl Scanner {
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(err) => {
                         failed.push(FailedPath {
-                            path: relative(root, &dir),
+                            path: dir_rel.clone(),
                             kind: err.kind(),
                         });
                         self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                         continue;
                     }
                 };
-                let path = entry.path();
-                let rel = relative(root, &path);
+                let name = entry.file_name();
+                let path = dir.join(&name);
+                let name = name.to_string_lossy();
+                let normalized_name = normalized_path(&name);
+                let mut rel = String::with_capacity(dir_rel.len() + 1 + normalized_name.len());
+                if !dir_rel.is_empty() {
+                    rel.push_str(&dir_rel);
+                    rel.push('/');
+                }
+                rel.push_str(&normalized_name);
                 let file_type = match self.injected(&rel, ScanIoOperation::FileType) {
                     Some(kind) => {
                         failed.push(FailedPath { path: rel, kind });
@@ -446,8 +460,6 @@ impl Scanner {
                 if file_type.is_symlink() {
                     continue;
                 }
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
                 if file_type.is_dir() {
                     if !floor::segment_is_ignored(&floor::normalize_segment(&name)) {
                         stack.push(path);
@@ -585,14 +597,108 @@ fn canonical_dir(root: &Path) -> Result<PathBuf, FilesError> {
     Ok(root.to_path_buf())
 }
 
-/// Workspace-relative, forward-slash path of `path` under `root`.
-fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+fn normalized_path(path: &str) -> Cow<'_, str> {
+    #[cfg(test)]
+    NORMALIZED_COMPONENTS
+        .with(|count| count.set(count.get() + Path::new(path).components().count()));
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(path)
+    }
 }
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+thread_local! {
+    static NORMALIZED_COMPONENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use dohc_test_scratch::ScratchDir;
+
+    #[test]
+    fn sibling_files_do_not_repeat_parent_path_normalization() {
+        let scratch = ScratchDir::new_named("deep-scan-components").unwrap();
+        let relative = "one/two/three/four/five/six/seven/eight/note.md";
+        let path = scratch.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "before").unwrap();
+        let scanner = Scanner::new(ScanBounds::default()).unwrap();
+        NORMALIZED_COMPONENTS.with(|count| count.set(0));
+        let ScanOutcome::Completed(listing) = scanner
+            .scan(scratch.path(), &CancellationToken::new())
+            .unwrap()
+        else {
+            panic!("scan cancelled");
+        };
+        assert_eq!(listing.files.len(), 1);
+        assert_eq!(listing.files[0].path, relative);
+        let normalized = NORMALIZED_COMPONENTS.with(|count| count.get());
+        std::fs::write(path.with_file_name("sibling.md"), "sibling").unwrap();
+        NORMALIZED_COMPONENTS.with(|count| count.set(0));
+        let ScanOutcome::Completed(changed) = scanner
+            .scan(scratch.path(), &CancellationToken::new())
+            .unwrap()
+        else {
+            panic!("scan cancelled");
+        };
+        assert_eq!(changed.files.len(), 2);
+        assert_eq!(listing.files[0], changed.files[0]);
+        let with_sibling = NORMALIZED_COMPONENTS.with(|count| count.get());
+        assert_eq!(
+            with_sibling - normalized,
+            1,
+            "a new sibling must normalize its own name without repeating its ancestors"
+        );
+    }
+
+    #[test]
+    fn scan_rebuilds_paths_after_external_directory_rename() {
+        let scratch = ScratchDir::new_named("scan-renamed-paths").unwrap();
+        for relative in ["old/深い/note.md", "sibling/note.md", "old/.dohc/hidden.md"] {
+            let path = scratch.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, relative).unwrap();
+        }
+        let scanner = Scanner::new(ScanBounds::default()).unwrap();
+        let token = CancellationToken::new();
+        let ScanOutcome::Completed(before) = scanner.scan(scratch.path(), &token).unwrap() else {
+            panic!("scan cancelled");
+        };
+        assert_eq!(before.files.len(), 2);
+        let prior = ScanManifest::from_entries(before.files.iter().map(|file| {
+            (
+                file.path.clone(),
+                crate::diff::ManifestEntry {
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                    mtime_ms: file.mtime_ms,
+                },
+            )
+        }));
+        std::fs::rename(scratch.path().join("old"), scratch.path().join("new")).unwrap();
+        std::fs::write(scratch.path().join("new/深い/note.md"), "external change").unwrap();
+        let ScanOutcome::Completed(after) = scanner
+            .scan_with_prior(scratch.path(), &prior, &token)
+            .unwrap()
+        else {
+            panic!("scan cancelled");
+        };
+        assert_eq!(
+            after
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["new/深い/note.md", "sibling/note.md"]
+        );
+        assert_ne!(before.files[0].sha256, after.files[0].sha256);
+        assert_eq!(before.files[1], after.files[1]);
+    }
 }
