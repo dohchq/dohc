@@ -1,7 +1,7 @@
 import { closeElectronApplication } from '../../scripts/verification/close-electron.mjs';
 
-export async function verifyRestartInput({ switches, selectEditedWorkspace, readEditedText, marker }) {
-  if (switches % 2 !== 0) await selectEditedWorkspace();
+export async function verifyRestartInput({ isEditedWorkspaceSelected, selectEditedWorkspace, readEditedText, marker }) {
+  if (!(await isEditedWorkspaceSelected())) await selectEditedWorkspace();
   if (!(await readEditedText()).includes(marker)) throw Error('Restart did not restore the saved input');
   return true;
 }

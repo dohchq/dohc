@@ -448,8 +448,9 @@ async function idle(instance, state) {
     await shutdown(runDir, fresh);
     const restart = await launch(runDir, f, 'restart');
     data.restartStartup = restart.startup;
-    data.restartHasSavedInput = await verifyRestartInput({ switches,
-      selectEditedWorkspace: () => switchTo(restart.page, 0),
+    data.restartHasSavedInput = await verifyRestartInput({
+      isEditedWorkspaceSelected: async () => (await restart.page.getByTestId('workspace-switcher').textContent())?.trim() === 'workspace-0',
+      selectEditedWorkspace: async () => { data.restartVerificationSwitch = await switchTo(restart.page, 0); },
       readEditedText: () => restart.page.locator('.tiptap[contenteditable="true"]').innerText(),
       marker: 'x'.repeat(keystrokes) });
     await shutdown(runDir, restart);

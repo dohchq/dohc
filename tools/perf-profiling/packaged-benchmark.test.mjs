@@ -63,12 +63,12 @@ test('missing package binary finalizes a CLI failure receipt', { skip: process.p
   assert.deepEqual(receipt.runs, []);
   assert.deepEqual(receipt.feedRequests, []);
 });
-for (const switches of [1, 2, 3, 4]) test(`restart verifies saved input after ${switches} switches`, async () => {
+for (const selected of [true, false]) test(`restart verifies saved input when edited workspace is ${selected ? 'already selected' : 'not selected'}`, async () => {
   const calls = [];
-  const config = { switches, marker: 'saved', selectEditedWorkspace: async () => { calls.push('select workspace 0'); },
+  const config = { isEditedWorkspaceSelected: async () => selected, marker: 'saved', selectEditedWorkspace: async () => { calls.push('select workspace 0'); },
     readEditedText: async () => { calls.push('read'); return 'saved'; } };
   assert.equal(await verifyRestartInput(config), true);
-  assert.deepEqual(calls, switches % 2 ? ['select workspace 0', 'read'] : ['read']);
+  assert.deepEqual(calls, selected ? ['read'] : ['select workspace 0', 'read']);
   await assert.rejects(verifyRestartInput({ ...config, readEditedText: async () => 'lost' }), /did not restore/);
 });
 
