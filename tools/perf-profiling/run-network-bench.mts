@@ -129,6 +129,11 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       proxy.configure({ latencyMs: settings.latencyMs, bytesPerSecond: settings.bytesPerSecond });
       reader = await open(roots[1], workspaceId, connection, false);
     }
+    if (process.platform === "win32") {
+      row.hostProcessesBeforeCatchUp = JSON.parse(execFileSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command",
+        "Get-Process | Select-Object ProcessName,Id,CPU,WorkingSet64 | ConvertTo-Json -Compress"],
+      { encoding: "utf8", windowsHide: true }));
+    }
     console.log(`[network-bench] ${settings.name}: catch-up timing starts`);
     const started = performance.now();
     row.pull = await reader.pull();
