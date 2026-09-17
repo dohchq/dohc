@@ -1,9 +1,27 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Fragment, type ReactNode } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { EngineHistoryView } from "./EngineHistory";
 import { VersionComparePage } from "./WorkspaceVersions";
+
+// This suite checks protected metadata, not viewport measurement. The real
+// virtualizer is covered by history-virtualization.spec.ts in Chromium.
+vi.mock("@legendapp/list/react", () => ({
+  LegendList: ({ data, renderItem, ListHeaderComponent }: {
+    data: unknown[];
+    renderItem: (props: { item: unknown; index: number }) => ReactNode;
+    ListHeaderComponent: ReactNode;
+  }) => (
+    <>
+      {ListHeaderComponent}
+      {data.map((item, index) => (
+        <Fragment key={index}>{renderItem({ item, index })}</Fragment>
+      ))}
+    </>
+  ),
+}));
 
 // Secret-backed file UI: protected history rows carry a lock and the
 // compare view shows "Protected file changed" — contents never render.

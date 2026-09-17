@@ -1,7 +1,8 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X } from "lucide-react";
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
 
@@ -233,10 +234,12 @@ function MomentRow(props: {
 
 function GroupRow(props: {
   group: EngineHistoryGroup;
+  expanded: boolean;
+  onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { group } = props;
-  const [expanded, setExpanded] = useState(false);
+  const { expanded } = props;
   const recordedAt = formatChatTime(group.recordedAtMs);
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
@@ -247,7 +250,7 @@ function GroupRow(props: {
         type="button"
         data-testid="engine-moment-group-toggle"
         aria-expanded={expanded}
-        onClick={() => setExpanded((current) => !current)}
+        onClick={props.onToggle}
         className="block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
       >
         <span className="flex min-w-0 items-start gap-2">
@@ -317,6 +320,8 @@ export function EngineHistoryView(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const normalizedQuery = query.trim().toLowerCase();
   const groups = useMemo(() => groupEngineMoments(props.moments), [props.moments]);
   const filteredGroups = useMemo(
@@ -328,6 +333,29 @@ export function EngineHistoryView(props: {
         : groups,
     [groups, normalizedQuery],
   );
+  const rows = useMemo(() => {
+    const result: Array<
+      | { key: string; day: ReturnType<typeof formatDay>; group?: never }
+      | { key: string; group: EngineHistoryGroup; day?: never }
+    > = [];
+    let previousDay: string | null = null;
+    for (const group of filteredGroups) {
+      const day = formatDay(group.recordedAtMs);
+      if (previousDay !== day.dateTime) result.push({ key: `day:${group.key}`, day });
+      result.push({ key: group.key, group });
+      previousDay = day.dateTime;
+    }
+    return result;
+  }, [filteredGroups]);
+  const stickyHeaderIndices = useMemo(
+    () => rows.flatMap((row, index) => (row.day ? [index] : [])),
+    [rows],
+  );
+  const focusedIndex = rows.findIndex((row) => row.key === focusedKey);
+  // Retain the adjacent groups too, so Tab can leave a row after it scrolls away.
+  const retainedKeys = focusedIndex < 0
+    ? []
+    : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
 
   // A known page with no moments. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
@@ -371,45 +399,68 @@ export function EngineHistoryView(props: {
           ) : null}
         </label>
       </div>
-      <ul
+      <LegendList
+        role="list"
         data-testid="engine-history-list"
-        className="m-0 min-h-0 flex-1 list-none overflow-y-auto overflow-x-hidden p-0"
-      >
-        {props.protectedTruncated ? (
-          <li className="border-b border-line px-3 py-2 text-[11px] text-muted">
+        className="m-0 min-h-0 flex-1 list-none p-0"
+        data={rows}
+        keyExtractor={(row) => row.key}
+        estimatedItemSize={56}
+        getItemType={(row) => (row.day ? "day" : "moment")}
+        stickyHeaderIndices={stickyHeaderIndices}
+        recycleItems={false}
+        alwaysRender={{ keys: retainedKeys }}
+        onFocusCapture={(event) =>
+          setFocusedKey(
+            (event.target as HTMLElement).closest<HTMLElement>("[data-history-key]")
+              ?.dataset.historyKey ?? null,
+          )
+        }
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
+        }}
+        extraData={expandedGroups}
+        ListHeaderComponent={props.protectedTruncated ? (
+          <li role="listitem" className="border-b border-line px-3 py-2 text-[11px] text-muted">
             Some protected activity in this range is not shown.
           </li>
         ) : null}
-        {filteredGroups.map((group, index) => {
-          const day = formatDay(group.recordedAtMs);
-          const previousDayKey =
-            index > 0 ? dayKey(filteredGroups[index - 1].recordedAtMs) : null;
-          const showDayHeading = previousDayKey !== day.dateTime;
-          return (
-            <Fragment key={group.key}>
-              {showDayHeading ? (
-                <li className="sticky top-0 z-[1] border-b border-line bg-panel-2 px-3 py-1">
-                  <time
-                    data-testid="engine-history-day-heading"
-                    dateTime={day.dateTime}
-                    className="dohc-section-label"
-                  >
-                    {day.label}
-                  </time>
-                </li>
-              ) : null}
-              <li data-testid="engine-moment" className="border-b border-line">
-                {group.moments.length > 1 ? (
-                  <GroupRow group={group} onOpenMoment={props.onOpenMoment} />
-                ) : (
-                  <MomentRow moment={group.moments[0]} onOpenMoment={props.onOpenMoment} />
-                )}
-              </li>
-            </Fragment>
-          );
-        })}
-        {props.hasMore ? (
-          <li className="border-b border-line">
+        renderItem={({ item }) => item.day ? (
+          <li role="listitem" className="border-b border-line bg-panel-2 px-3 py-1">
+            <time
+              data-testid="engine-history-day-heading"
+              dateTime={item.day.dateTime}
+              className="dohc-section-label"
+            >
+              {item.day.label}
+            </time>
+          </li>
+        ) : (
+          <li
+            role="listitem"
+            data-testid="engine-moment"
+            data-history-key={item.key}
+            className="border-b border-line"
+          >
+            {item.group.moments.length > 1 ? (
+              <GroupRow
+                group={item.group}
+                expanded={expandedGroups.has(item.key)}
+                onToggle={() => setExpandedGroups((current) => {
+                  const next = new Set(current);
+                  if (next.has(item.key)) next.delete(item.key);
+                  else next.add(item.key);
+                  return next;
+                })}
+                onOpenMoment={props.onOpenMoment}
+              />
+            ) : (
+              <MomentRow moment={item.group.moments[0]} onOpenMoment={props.onOpenMoment} />
+            )}
+          </li>
+        )}
+        ListFooterComponent={props.hasMore ? (
+          <li role="listitem" className="border-b border-line">
             <button
               type="button"
               data-testid="engine-history-load-more"
@@ -421,7 +472,7 @@ export function EngineHistoryView(props: {
             </button>
           </li>
         ) : null}
-      </ul>
+      />
     </>
   );
 }
