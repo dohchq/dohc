@@ -5,7 +5,6 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
-  cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
@@ -222,10 +221,10 @@ test("@two-client a group shares its channel and folder together, and both sides
       )
       .toBeGreaterThan(0);
   } finally {
-    await relay?.stop();
-    if (member) await cleanupDesktopWorkspace(member, memberTemp);
-    else await memberTemp.cleanup();
-    if (owner) await cleanupDesktopWorkspace(owner, ownerTemp);
-    else await ownerTemp.cleanup();
+    try { await member?.close(); } catch (error) { console.error("Member cleanup failed:", error); }
+    try { await owner?.close(); } catch (error) { console.error("Owner cleanup failed:", error); }
+    try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
+    try { await memberTemp.cleanup(); } catch (error) { console.error("Member workspace cleanup failed:", error); }
+    try { await ownerTemp.cleanup(); } catch (error) { console.error("Owner workspace cleanup failed:", error); }
   }
 });
