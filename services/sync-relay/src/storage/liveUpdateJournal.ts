@@ -61,12 +61,18 @@ function journalRanges(value: unknown): LiveUpdateStructRange[] {
   }
   return ranges;
 }
-function journalBinding(value: unknown): LiveObjectBinding {
+function journalBinding(value: unknown, previous?: LiveObjectBinding): LiveObjectBinding {
   const record = baselineRecord(value, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"]);
   const paths = journalArray(record.selectorPaths, LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, value => {
     if (typeof value !== "string") throw new TypeError("Invalid journal selector.");
     return value;
   });
+  if (previous && record.workspaceId === previous.workspaceId && record.mainVersionId === previous.mainVersionId &&
+    record.objectId === previous.objectId && record.lineageClaimId === previous.lineageClaimId &&
+    record.currentPath === previous.currentPath && Object.is(record.restoreFenceGeneration, previous.restoreFenceGeneration) &&
+    paths.length === previous.selectorPaths.length && paths.every((path, index) => path === previous.selectorPaths[index])) {
+    return { ...previous, selectorPaths: paths };
+  }
   return parseLiveObjectBinding({ ...record, selectorPaths: paths });
 }
 export function documentParams(document: LiveDocumentKey): [string, string, string, string] {
@@ -191,6 +197,56 @@ function copyJournalData(value: unknown): unknown {
     Object.defineProperty(result, key, { value: copyJournalData(descriptor.value), enumerable: true, configurable: true, writable: true });
   }
   return result;
+}
+function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
+  const outer = baselineRecord(value, ["authorityHistory", "document", "currentPath", "restoreFenceGeneration", "baseline",
+    "checkpoint", "suffix", "highWater", "suffixCount", "suffixBytes"]);
+  let previousBinding: LiveObjectBinding | undefined;
+  const suffix = journalArray(outer.suffix, 4094, value => {
+    const row = baselineRecord(value, ["cursor", "digest", "bytes", "metadata"]);
+    const metadata = baselineRecord(row.metadata, ["accepted", "firstSeen"]);
+    const accepted = baselineRecord(metadata.accepted, ["receipt", "binding", "authority", "receivedAtMs"]);
+    const receipt = parseLiveUpdateReceipt(baselineRecord(accepted.receipt, ["deliveryId", "updateDigest", "journalCursor", "acceptingHostEpoch"]));
+    const binding = journalBinding(accepted.binding, previousBinding);
+    const rawBinding = baselineRecord(accepted.binding, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"]);
+    journalIntegrity(binding.mainVersionId === "main" && binding.currentPath === rawBinding.currentPath &&
+      isDeepStrictEqual(binding.selectorPaths, rawBinding.selectorPaths));
+    previousBinding = binding;
+    const authority = parseServerDerivedLiveUpdateAuthority(baselineRecord(accepted.authority, ["principalKind", "principalId", "grantId", "grantGeneration"]));
+    const cursor = authorityInteger(row.cursor, 1), digest = parseLiveUpdateDigest(row.digest);
+    journalIntegrity(cursor === receipt.journalCursor && digest === receipt.updateDigest);
+    return { cursor, digest, bytes: journalBytes(row.bytes), metadata: {
+      accepted: { receipt, binding, authority, receivedAtMs: authorityInteger(accepted.receivedAtMs) },
+      firstSeen: journalRanges(metadata.firstSeen),
+    } };
+  });
+  return { ...copyJournalData({ ...outer, suffix: [] }) as LiveUpdateJournalCut, suffix };
+}
+
+function compareJournalSuffixRow(raw: Record<string, unknown>, expected: LiveUpdateJournalCut["suffix"][number],
+  provenance: readonly Record<string, unknown>[]): void {
+  const { receipt, binding, authority, receivedAtMs } = expected.metadata.accepted;
+  journalIntegrity(raw.journal_cursor === expected.cursor && raw.delivery_id === receipt.deliveryId &&
+    raw.update_digest === expected.digest && raw.accepting_host_epoch === receipt.acceptingHostEpoch &&
+    raw.workspace_id === binding.workspaceId && raw.main_version_id === binding.mainVersionId &&
+    raw.object_id === binding.objectId && raw.lineage_claim_id === binding.lineageClaimId &&
+    raw.current_path === binding.currentPath && raw.selector_paths_json === JSON.stringify(binding.selectorPaths) &&
+    Object.is(raw.restore_fence_generation, binding.restoreFenceGeneration) &&
+    raw.principal_kind === authority.principalKind && raw.principal_id === authority.principalId &&
+    raw.grant_id === authority.grantId && raw.grant_generation === authority.grantGeneration && Object.is(raw.received_at_ms, receivedAtMs) &&
+    raw.validation_checkpoint_sha256 === null && raw.validation_checkpoint_bytes === null && raw.restore_operation_id === null);
+  parseLiveUpdateIdentifier(raw.relay_database_namespace);
+  authorityInteger(raw.accepted_event_count, 1);
+  parseLiveUpdateDigest(raw.accepted_evidence_digest);
+  authorityInteger(raw.accepted_metadata_bytes, 1);
+  journalIntegrity(nodeTypes.isUint8Array(raw.update_bytes) && Buffer.compare(raw.update_bytes, expected.bytes) === 0);
+  journalIntegrity(provenance.length === expected.metadata.firstSeen.length);
+  for (let index = 0; index < provenance.length; index++) {
+    const row = provenance[index]!, range = expected.metadata.firstSeen[index]!;
+    journalIntegrity(row.workspace_id === binding.workspaceId && row.main_version_id === binding.mainVersionId &&
+      row.object_id === binding.objectId && row.lineage_claim_id === binding.lineageClaimId && row.journal_cursor === expected.cursor &&
+      Object.is(row.client_id, range.clientId) && Object.is(row.start_clock, range.startClock) && row.end_clock === range.endClock);
+  }
 }
 export function verifyJournalCut(cut: LiveUpdateJournalCut): void {
   for (const authority of cut.authorityHistory) journalDigest(authority.baselineBytes, authority.baselineDigest);
@@ -364,7 +420,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
     if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
-    const token = copyJournalData(outer.cutToken) as LiveUpdateJournalCut;
+    const token = snapshotJournalCut(outer.cutToken);
     verifyJournalCut(token);
     const updateBytes = journalBytes(outer.updateBytes), receivedAtMs = authorityInteger(outer.receivedAtMs);
     if (createHash("sha256").update(updateBytes).digest("hex") !== metadata.updateDigest) return { result: { kind: "refused", reason: "invalid-update" }, admitted: null };
@@ -408,7 +464,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           liveJournalCoverage(storage, document, stored.ranges);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
-        const read = liveJournalCut(storage, document);
+        const read = readJournalCut(storage, document, token);
         if (read.kind !== "cut") return refused({ kind: "refused", reason: read.reason });
         if (read.cut.highWater !== token.highWater) {
           journalIntegrity(read.cut.highWater !== null && (token.highWater === null || read.cut.highWater > token.highWater));
@@ -442,6 +498,11 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
   }
 
 export function liveJournalCut(storage: StorageContext, document: LiveDocumentKey):
+    | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
+    | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
+  return readJournalCut(storage, document);
+}
+function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expected?: LiveUpdateJournalCut):
     | { kind: "cut"; cut: LiveUpdateJournalCut; coverage: LiveUpdateStructRange[] }
     | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
     const history = journalAuthorityHistory(storage, document);
@@ -478,7 +539,16 @@ export function liveJournalCut(storage: StorageContext, document: LiveDocumentKe
     }
     let last = checkpoint.cursor ?? 0, suffixBytes = 0;
     let previousBinding: { raw: Record<string, unknown>; binding: LiveObjectBinding } | undefined;
-    const suffix = rawSuffix.map(raw => {
+    const matchingSuffix = expected?.highWater === highWater ? expected.suffix : undefined;
+    if (matchingSuffix) journalIntegrity(matchingSuffix.length === rawSuffix.length);
+    const suffix = rawSuffix.map((raw, index) => {
+      if (matchingSuffix) {
+        const entry = matchingSuffix[index]!;
+        compareJournalSuffixRow(raw, entry, provenance.get(entry.cursor) ?? []);
+        journalIntegrity(entry.cursor > last && entry.cursor <= (highWater ?? 0));
+        last = entry.cursor; suffixBytes += entry.bytes.byteLength;
+        return entry;
+      }
       // Reuse validation only for identical SQLite values within this read.
       const prior = previousBinding;
       const binding = prior && raw.workspace_id === prior.raw.workspace_id && raw.main_version_id === prior.raw.main_version_id &&

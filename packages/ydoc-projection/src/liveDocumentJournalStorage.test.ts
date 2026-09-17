@@ -306,6 +306,59 @@ it('refuses a changed immutable cut at the same high water', () => {
   } finally { f.close() }
 })
 
+it.each([
+  ['delivery_id', 'changed-delivery'], ['update_digest', 'a'.repeat(64)], ['accepting_host_epoch', 2],
+  ['current_path', 'docs/changed.md'], ['selector_paths_json', '["docs/changed.md"]'], ['restore_fence_generation', 2],
+  ['principal_kind', 'named'], ['principal_id', 'changed-principal'], ['grant_id', 'changed-grant'], ['grant_generation', 3],
+  ['received_at_ms', 99], ['update_bytes', new Uint8Array([0, 0])],
+  ['relay_database_namespace', ''], ['accepted_event_count', 0], ['accepted_evidence_digest', 'invalid'], ['accepted_metadata_bytes', 0],
+] as const)('checks retained suffix %s against the owned cut before appending', (field, value) => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), 'first')).result.kind).toBe('accepted')
+    const input = f.capture(f.update('next', 'value'), 'next')
+    f.raw.exec('PRAGMA ignore_check_constraints=ON')
+    f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${field}=? WHERE delivery_id='first'`).run(value)
+    const before = f.journalRows()
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow()
+    expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
+it.each(['client_id', 'start_clock', 'end_clock'] as const)('checks retained suffix provenance %s before appending', field => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), 'first')).result.kind).toBe('accepted')
+    const input = f.capture(f.update('next', 'value'), 'next')
+    f.raw.exec('PRAGMA ignore_check_constraints=ON')
+    f.raw.prepare(`UPDATE sync_relay_live_update_struct_provenance SET ${field}=${field}+1`).run()
+    const before = f.journalRows()
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow()
+    expect(f.journalRows()).toEqual(before)
+  } finally { f.close() }
+})
+
+it.each(['getter', 'proxy', 'symbol', 'non-enumerable', 'prototype-key', 'negative-zero'] as const)('rejects hostile suffix token %s without caller code or writes', kind => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), 'first')).result.kind).toBe('accepted')
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('second', 'value'), 'second')).result.kind).toBe('accepted')
+    const input = f.capture(f.update('next', 'value'), 'next'), before = f.journalRows()
+    const trap = vi.fn(() => { throw new Error('caller code invoked') })
+    const accepted = input.cutToken.suffix[1]!.metadata.accepted
+    if (kind === 'getter') Object.defineProperty(accepted, 'receivedAtMs', { enumerable: true, get: trap })
+    if (kind === 'proxy') Object.defineProperty(accepted, 'binding', { value: new Proxy(accepted.binding, { get: trap, ownKeys: trap, getPrototypeOf: trap }) })
+    if (kind === 'symbol') Object.defineProperty(accepted, Symbol('unexpected'), { enumerable: true, value: 1 })
+    if (kind === 'non-enumerable') Object.defineProperty(accepted, 'unexpected', { enumerable: false, value: 1 })
+    if (kind === 'prototype-key') Object.defineProperty(accepted, '__proto__', { enumerable: true, value: { unexpected: true } })
+    if (kind === 'negative-zero') Object.defineProperty(accepted.binding, 'restoreFenceGeneration', { value: -0 })
+    expect(() => f.storage.commitLiveUpdateJournal(input)).toThrow()
+    expect(trap).not.toHaveBeenCalled()
+    expect(f.journalRows()).toEqual(before)
+    expect(Object.getPrototypeOf(accepted)).toBe(Object.prototype)
+  } finally { f.close() }
+})
+
 it('retains document event ordinals across journal cursor gaps and delivery replay', () => {
   const f = registered()
   try {
