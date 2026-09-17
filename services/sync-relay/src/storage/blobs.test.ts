@@ -42,6 +42,7 @@ const cases: [string, string, string[]][] = [
   ["later chunk", JSON.stringify({ value: "z".repeat(80_000) + hash }), [hash]],
   ["astral character offsets", JSON.stringify({ value: "🧬".repeat(32_750) + hash }), [hash]],
   ["noncanonical identifier", JSON.stringify({ value: "prefix-MiXeD-pattern-suffix" }), ["mixed%pattern", "MIXED_pattern", "missing", hash.toUpperCase()]],
+  ["mixed canonical and SQL-only identifiers", JSON.stringify({ value: hash.toUpperCase() }), [hash, hash.toUpperCase(), "%", `${hash}\n`]],
 ];
 
 it.each(cases)("matches existing SQL retention for %s", async (_name, payload, hashes) => {
