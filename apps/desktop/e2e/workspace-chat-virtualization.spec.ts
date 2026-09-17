@@ -110,6 +110,14 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await lastRow.hover();
     const trigger = lastRow.getByTestId("chats-lane-add-reaction");
     await trigger.click();
+    const picker = page.getByTestId("chats-lane-reaction-picker");
+    await expect(picker).toBeVisible();
+    await expect(lastRow.getByTestId("chats-lane-reaction-picker")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await expect(lane).toBeVisible();
+    await trigger.click();
     await page.getByTestId("chats-lane-reaction-choice").filter({ hasText: "🎉" }).click();
     await expect(lastRow.getByTestId("chats-lane-reaction-pill")).toHaveAttribute("data-mine", "true");
     await expect(trigger).toBeFocused();
