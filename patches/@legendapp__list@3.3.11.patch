@@ -1,5 +1,5 @@
 diff --git a/react.js b/react.js
-index 874465090398bbfb1b079e82dd175490020eaabf..9a96d5169062a0fe232677be6bc8052630781197 100644
+index 874465090398bbfb1b079e82dd175490020eaabf..09b49382e61395bdb7c4c7e6525fbf0c5ef836e2 100644
 --- a/react.js
 +++ b/react.js
 @@ -5926,6 +5926,29 @@ function useDOMOrder(ref) {
@@ -27,8 +27,8 @@ index 874465090398bbfb1b079e82dd175490020eaabf..9a96d5169062a0fe232677be6bc80526
 +        reorder();
 +      }
 +    };
-+    const parent = ref.current;
-+    parent?.addEventListener("keydown", onKeyDown, true);
++    const ownerDocument = ref.current?.ownerDocument;
++    ownerDocument?.addEventListener("keydown", onKeyDown, true);
      const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
        const container = ref.current;
        const now = Date.now();
@@ -52,12 +52,12 @@ index 874465090398bbfb1b079e82dd175490020eaabf..9a96d5169062a0fe232677be6bc80526
        }, delay);
      });
      return () => {
-+      parent?.removeEventListener("keydown", onKeyDown, true);
++      ownerDocument?.removeEventListener("keydown", onKeyDown, true);
        unsubscribe();
        clearTimeout(timeoutId);
      };
 diff --git a/react.mjs b/react.mjs
-index d9a4414a9295c694f9c2b71cf75268a422f897e4..068c575a3765f944187820679e28b28bd56bea6f 100644
+index d9a4414a9295c694f9c2b71cf75268a422f897e4..8bfe9eb87947e9bcd80bcd8f7596791ec896ca23 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -5905,6 +5905,29 @@ function useDOMOrder(ref) {
@@ -85,8 +85,8 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..068c575a3765f944187820679e28b28b
 +        reorder();
 +      }
 +    };
-+    const parent = ref.current;
-+    parent?.addEventListener("keydown", onKeyDown, true);
++    const ownerDocument = ref.current?.ownerDocument;
++    ownerDocument?.addEventListener("keydown", onKeyDown, true);
      const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
        const container = ref.current;
        const now = Date.now();
@@ -110,7 +110,7 @@ index d9a4414a9295c694f9c2b71cf75268a422f897e4..068c575a3765f944187820679e28b28b
        }, delay);
      });
      return () => {
-+      parent?.removeEventListener("keydown", onKeyDown, true);
++      ownerDocument?.removeEventListener("keydown", onKeyDown, true);
        unsubscribe();
        clearTimeout(timeoutId);
      };
