@@ -19,6 +19,7 @@ use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -350,9 +351,7 @@ impl Scanner {
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
     fn enumerate(&self, root: &Path, token: &CancellationToken) -> Result<EnumOutcome, FilesError> {
-        // Carry the normalized parent path so descendants only convert their
-        // own names. The filesystem still receives the original PathBuf.
-        let mut stack = vec![(root.to_path_buf(), String::new())];
+        let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
         let mut failed: Vec<FailedPath> = Vec::new();
@@ -361,10 +360,15 @@ impl Scanner {
         // directory-heavy tree cannot grow the stack unbounded.
         let mut entries: usize = 0;
 
-        while let Some((dir, dir_rel)) = stack.pop() {
+        while let Some(dir) = stack.pop() {
             if token.is_cancelled() {
                 return Ok(EnumOutcome::Cancelled);
             }
+            // Normalize this parent once for its children without retaining
+            // another path string for every queued directory.
+            let dir_rel =
+                normalized_path(&dir.strip_prefix(root).unwrap_or(&dir).to_string_lossy())
+                    .into_owned();
             let injected_read_dir = self.injected(&dir_rel, ScanIoOperation::ReadDir);
             let read_dir = match injected_read_dir {
                 Some(kind) if dir == root => {
@@ -458,7 +462,7 @@ impl Scanner {
                 }
                 if file_type.is_dir() {
                     if !floor::segment_is_ignored(&floor::normalize_segment(&name)) {
-                        stack.push((path, rel));
+                        stack.push(path);
                     }
                     continue;
                 }
@@ -593,11 +597,15 @@ fn canonical_dir(root: &Path) -> Result<PathBuf, FilesError> {
     Ok(root.to_path_buf())
 }
 
-fn normalized_path(path: &str) -> String {
+fn normalized_path(path: &str) -> Cow<'_, str> {
     #[cfg(test)]
     NORMALIZED_COMPONENTS
         .with(|count| count.set(count.get() + Path::new(path).components().count()));
-    path.replace('\\', "/")
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(path)
+    }
 }
 
 fn display(path: &Path) -> String {
@@ -615,7 +623,7 @@ mod traversal_tests {
     use dohc_test_scratch::ScratchDir;
 
     #[test]
-    fn deep_scan_normalizes_each_component_once() {
+    fn sibling_files_do_not_repeat_parent_path_normalization() {
         let scratch = ScratchDir::new_named("deep-scan-components").unwrap();
         let relative = "one/two/three/four/five/six/seven/eight/note.md";
         let path = scratch.path().join(relative);
@@ -632,20 +640,22 @@ mod traversal_tests {
         assert_eq!(listing.files.len(), 1);
         assert_eq!(listing.files[0].path, relative);
         let normalized = NORMALIZED_COMPONENTS.with(|count| count.get());
-        assert_eq!(
-            normalized, 9,
-            "ancestor components must not be normalized again for each descendant"
-        );
-
-        std::fs::write(&path, "external edit").unwrap();
+        std::fs::write(path.with_file_name("sibling.md"), "sibling").unwrap();
+        NORMALIZED_COMPONENTS.with(|count| count.set(0));
         let ScanOutcome::Completed(changed) = scanner
             .scan(scratch.path(), &CancellationToken::new())
             .unwrap()
         else {
             panic!("scan cancelled");
         };
-        assert_ne!(listing.files[0].sha256, changed.files[0].sha256);
-        assert_eq!(changed.files[0].size, 13);
+        assert_eq!(changed.files.len(), 2);
+        assert_eq!(listing.files[0], changed.files[0]);
+        let with_sibling = NORMALIZED_COMPONENTS.with(|count| count.get());
+        assert_eq!(
+            with_sibling - normalized,
+            1,
+            "a new sibling must normalize its own name without repeating its ancestors"
+        );
     }
 
     #[test]
