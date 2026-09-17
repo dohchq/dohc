@@ -33,7 +33,7 @@ const moment = {
 };
 
 const thread = {
-  id: "thread_1",
+  id: "thread-1",
   title: "Agenda review",
   createdAtMs: 10,
   updatedAtMs: 20,
@@ -41,7 +41,7 @@ const thread = {
 };
 
 const message = {
-  id: "message_1",
+  id: "message-1",
   threadId: thread.id,
   authorKind: "agent" as const,
   authorDisplayName: "Ice's agent",
@@ -77,7 +77,7 @@ const results = {
     thread,
     messages: [message],
     projection: {
-      path: ".dohc/chats/thread_1.md",
+      path: ".dohc/chats/thread-1.md",
       readOnly: true,
       text: "# Agenda review\n",
     },
@@ -86,7 +86,7 @@ const results = {
     ok: true,
     channels: [
       {
-        id: "channel_1",
+        id: "channel-1",
         name: "General",
         slug: "general",
         kind: "channel" as const,
@@ -102,7 +102,7 @@ const results = {
   },
   startChannelChat: {
     ok: true,
-    channel: { id: "channel_1", name: "General", slug: "general" },
+    channel: { id: "channel-1", name: "General", slug: "general" },
     thread,
     message,
   },

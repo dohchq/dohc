@@ -67,18 +67,18 @@ describe("markdown renderers", () => {
   it("keeps engine-backed runner context byte-identical to CLI show output", () => {
     const runnerInput: ShowResult = {
       ...showResult,
-      thread: { ...showResult.thread, id: "thread_8f2k1c" },
+      thread: { ...showResult.thread, id: "thread-8f2k1c" },
       messages: showResult.messages.map((message) => ({
         ...message,
-        id: message.id.replace(/^msg_/u, "message_"),
+        id: message.id.replace(/^msg_/u, "message-"),
         ...(message.parentMessageId
-          ? { parentMessageId: message.parentMessageId.replace(/^msg_/u, "message_") }
+          ? { parentMessageId: message.parentMessageId.replace(/^msg_/u, "message-") }
           : {}),
       })),
     };
 
     expect(renderThreadMarkdown(runnerInput)).toBe(renderShowMarkdown(showResult));
-    expect(formatMessageHandle("message_123")).toBe("msg_123");
+    expect(formatMessageHandle("message-123")).toBe("msg_123");
     expect(formatMessageHandle("msg_123")).toBe("msg_123");
   });
 

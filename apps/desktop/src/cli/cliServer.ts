@@ -327,11 +327,11 @@ function shortenedEngineId(id: string, enginePrefix: string, cliPrefix: string):
 }
 
 function cliChannelId(id: string): string {
-  return shortenedEngineId(id, "channel_", "ch_");
+  return shortenedEngineId(id, "channel-", "ch_");
 }
 
 export function cliThreadId(id: string): string {
-  return shortenedEngineId(id, "thread_", "th_");
+  return shortenedEngineId(id, "thread-", "th_");
 }
 
 export function cliMessageId(id: string): string {

@@ -281,17 +281,17 @@ describe("CLI socket server", () => {
           request.method === CHATS_METHOD.channelEnsureAgent ||
           request.method === CHATS_METHOD.channelEnsureGeneral
         ) {
-          params.channelId = `channel_${++idCounters.channel}`;
+          params.channelId = `channel-${++idCounters.channel}`;
           params.nowMs = (storeNowMs += 1_000);
         } else if (request.method === CHATS_METHOD.threadCreate) {
-          params.threadId = `thread_${++idCounters.thread}`;
+          params.threadId = `thread-${++idCounters.thread}`;
           params.nowMs = (storeNowMs += 1_000);
         } else if (request.method === CHATS_METHOD.threadStart) {
-          params.threadId = `thread_${++idCounters.thread}`;
-          params.messageId = `message_${++idCounters.message}`;
+          params.threadId = `thread-${++idCounters.thread}`;
+          params.messageId = `message-${++idCounters.message}`;
           params.nowMs = (storeNowMs += 1_000);
         } else if (request.method === CHATS_METHOD.messageSend) {
-          params.messageId = `message_${++idCounters.message}`;
+          params.messageId = `message-${++idCounters.message}`;
           params.nowMs = (storeNowMs += 1_000);
         }
         return await loopback.sendRequest({
@@ -708,13 +708,13 @@ describe("CLI socket server", () => {
       }],
     });
 
-    expect(general.id).toMatch(/^channel_/u);
-    expect(linkedThread.id).toMatch(/^thread_/u);
-    expect(linkedMessage.id).toMatch(/^message_/u);
-    expect(started.channel.id).toMatch(/^channel_/u);
-    expect(started.thread.id).toMatch(/^thread_/u);
-    expect(started.message.id).toMatch(/^message_/u);
-    expect(replied.message.id).toMatch(/^message_/u);
+    expect(general.id).toMatch(/^channel-/u);
+    expect(linkedThread.id).toMatch(/^thread-/u);
+    expect(linkedMessage.id).toMatch(/^message-/u);
+    expect(started.channel.id).toMatch(/^channel-/u);
+    expect(started.thread.id).toMatch(/^thread-/u);
+    expect(started.message.id).toMatch(/^message-/u);
+    expect(replied.message.id).toMatch(/^message-/u);
 
     const persisted = await store.listMessages({
       workspaceId: WORKSPACE_ID,
@@ -2067,11 +2067,11 @@ describe("CLI socket server", () => {
   });
 
   it("links only agent-authored messages carrying a valid local run id", async () => {
-    await seedDispatchThread("thread_dispatch");
+    await seedDispatchThread("thread-dispatch");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_dispatch_trigger",
-      threadId: "thread_dispatch",
+      triggerMessageId: "message-dispatch_trigger",
+      threadId: "thread-dispatch",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2120,7 +2120,7 @@ describe("CLI socket server", () => {
     });
 
     const engineMessageId = (id: string) =>
-      id.startsWith("msg_") ? `message_${id.slice("msg_".length)}` : id;
+      id.startsWith("msg_") ? `message-${id.slice("msg_".length)}` : id;
     expect(
       await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId),
     ).toEqual([
@@ -2143,11 +2143,11 @@ describe("CLI socket server", () => {
   });
 
   it("retries transient run-message provenance failures until the link persists", async () => {
-    await seedDispatchThread("thread_retry");
+    await seedDispatchThread("thread-retry");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_retry_trigger",
-      threadId: "thread_retry",
+      triggerMessageId: "message-retry_trigger",
+      threadId: "thread-retry",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2175,7 +2175,7 @@ describe("CLI socket server", () => {
       body: "The message itself persists once.",
     });
 
-    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     expect(attempts).toBe(3);
     expect(result.warning).toBeUndefined();
     expect(
@@ -2185,11 +2185,11 @@ describe("CLI socket server", () => {
   });
 
   it("keeps retrying an exhausted provenance link until the posted reply is linked", async () => {
-    await seedDispatchThread("thread_recovery");
+    await seedDispatchThread("thread-recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_recovery_trigger",
-      threadId: "thread_recovery",
+      triggerMessageId: "message-recovery_trigger",
+      threadId: "thread-recovery",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2225,7 +2225,7 @@ describe("CLI socket server", () => {
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
     }
 
-    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     expect(result.warning).toContain("recovery will continue in the background");
     expect(attempts).toBe(4);
     expect(pending).toEqual([engineMessageId]);
@@ -2236,11 +2236,11 @@ describe("CLI socket server", () => {
   });
 
   it("persists pending provenance across shutdown without reporting it settled", async () => {
-    await seedDispatchThread("thread_restart_recovery");
+    await seedDispatchThread("thread-restart_recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_restart_recovery_trigger",
-      threadId: "thread_restart_recovery",
+      triggerMessageId: "message-restart_recovery_trigger",
+      threadId: "thread-restart_recovery",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -2269,7 +2269,7 @@ describe("CLI socket server", () => {
       title: "Persist provenance recovery",
       body: "Recover this link after a desktop restart.",
     });
-    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     await server?.close();
     server = null;
     disposeCliServerRuntime(serverOptions);
@@ -2325,19 +2325,19 @@ describe("CLI socket server", () => {
       title: "Existing message",
       body: "This message will receive restored provenance.",
     });
-    const engineMessageId = posted.messageId.replace(/^msg_/u, "message_");
-    await seedDispatchThread("thread_mixed_restore");
+    const engineMessageId = posted.messageId.replace(/^msg_/u, "message-");
+    await seedDispatchThread("thread-mixed_restore");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_mixed_restore_trigger",
-      threadId: "thread_mixed_restore",
+      triggerMessageId: "message-mixed_restore_trigger",
+      threadId: "thread-mixed_restore",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a run for mixed restore.");
     const unavailable = {
       workspaceId: "workspace-not-registered",
       runId: "run_deferred",
-      messageId: "message_deferred",
+      messageId: "message-deferred",
       attempt: 0,
       createdAtMs: SERVER_NOW_MS,
     };
@@ -2424,11 +2424,11 @@ describe("CLI socket server", () => {
 
     const runIds: string[] = [];
     for (const suffix of ["a", "b"]) {
-      await seedDispatchThread(`thread_bounded_${suffix}`);
+      await seedDispatchThread(`thread-bounded_${suffix}`);
       await dispatchStore.recordTrigger({
         workspaceId: WORKSPACE_ID,
-        triggerMessageId: `message_bounded_${suffix}`,
-        threadId: `thread_bounded_${suffix}`,
+        triggerMessageId: `message-bounded_${suffix}`,
+        threadId: `thread-bounded_${suffix}`,
       });
       const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
       if (!claim) throw new Error("Expected a bounded-queue run.");
@@ -2465,7 +2465,7 @@ describe("CLI socket server", () => {
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
     }
     expect(abandoned).toEqual([
-      first.messageId.replace(/^msg_/u, "message_"),
+      first.messageId.replace(/^msg_/u, "message-"),
     ]);
     await expect(
       stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
@@ -2473,11 +2473,11 @@ describe("CLI socket server", () => {
   });
 
   it("caps all foreground provenance work with one wall-clock budget", async () => {
-    await seedDispatchThread("thread_foreground_budget");
+    await seedDispatchThread("thread-foreground_budget");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_foreground_budget_trigger",
-      threadId: "thread_foreground_budget",
+      triggerMessageId: "message-foreground_budget_trigger",
+      threadId: "thread-foreground_budget",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
@@ -2515,11 +2515,11 @@ describe("CLI socket server", () => {
   });
 
   it("returns a visible warning when run-message provenance retries are exhausted", async () => {
-    await seedDispatchThread("thread_permanent");
+    await seedDispatchThread("thread-permanent");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_permanent_trigger",
-      threadId: "thread_permanent",
+      triggerMessageId: "message-permanent_trigger",
+      threadId: "thread-permanent",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2561,11 +2561,11 @@ describe("CLI socket server", () => {
   });
 
   it("gives up on the first permanently refused foreground provenance link", async () => {
-    await seedDispatchThread("thread_terminal_foreground");
+    await seedDispatchThread("thread-terminal_foreground");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_terminal_foreground_trigger",
-      threadId: "thread_terminal_foreground",
+      triggerMessageId: "message-terminal_foreground_trigger",
+      threadId: "thread-terminal_foreground",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2609,11 +2609,11 @@ describe("CLI socket server", () => {
   });
 
   it("settles a background provenance link on the first permanent refusal", async () => {
-    await seedDispatchThread("thread_terminal_recovery");
+    await seedDispatchThread("thread-terminal_recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_terminal_recovery_trigger",
-      threadId: "thread_terminal_recovery",
+      triggerMessageId: "message-terminal_recovery_trigger",
+      threadId: "thread-terminal_recovery",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2660,7 +2660,7 @@ describe("CLI socket server", () => {
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
     }
 
-    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     expect(settled).toEqual([engineMessageId]);
     expect(abandoned).toEqual([]);
     expect(attempts).toBe(4);
@@ -2670,11 +2670,11 @@ describe("CLI socket server", () => {
   });
 
   it("keeps retrying a terminal refusal the link taxonomy does not call permanent", async () => {
-    await seedDispatchThread("thread_terminal_transient");
+    await seedDispatchThread("thread-terminal_transient");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_terminal_transient_trigger",
-      threadId: "thread_terminal_transient",
+      triggerMessageId: "message-terminal_transient_trigger",
+      threadId: "thread-terminal_transient",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2711,7 +2711,7 @@ describe("CLI socket server", () => {
       body: "A retryable refusal must not be read as permanent.",
     });
 
-    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     expect(attempts).toBe(3);
     expect(result.warning).toBeUndefined();
     expect(
@@ -2721,11 +2721,11 @@ describe("CLI socket server", () => {
   });
 
   it("reads a permanent code only from a daemon refusal, not any Error", async () => {
-    await seedDispatchThread("thread_plain_error");
+    await seedDispatchThread("thread-plain_error");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_plain_error_trigger",
-      threadId: "thread_plain_error",
+      triggerMessageId: "message-plain_error_trigger",
+      threadId: "thread-plain_error",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",
@@ -2760,11 +2760,11 @@ describe("CLI socket server", () => {
   });
 
   it("forwards a deadline to every provenance RPC attempt", async () => {
-    await seedDispatchThread("thread_deadline");
+    await seedDispatchThread("thread-deadline");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
-      triggerMessageId: "message_deadline_trigger",
-      threadId: "thread_deadline",
+      triggerMessageId: "message-deadline_trigger",
+      threadId: "thread-deadline",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
       command: "claude -p",

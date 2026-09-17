@@ -3785,14 +3785,14 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
-        threadId: "thread_1",
+        threadId: "thread-1",
         body: "",
       }).success,
     ).toBe(false);
     expect(
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
-        threadId: "thread_1",
+        threadId: "thread-1",
         body: "x".repeat(65_537),
       }).success,
     ).toBe(false);
@@ -3801,8 +3801,8 @@ describe("engine history and linked Chats IPC contract", () => {
   it("round-trips a sent chat message with main-derived authorship", () => {
     const result = SendChatMessageResult.parse({
       message: {
-        id: "message_1",
-        threadId: "thread_1",
+        id: "message-1",
+        threadId: "thread-1",
         authorKind: "human",
         authorDisplayName: "You",
         body: "First message",
@@ -3815,8 +3815,8 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       SendChatMessageResult.parse({
         message: {
-          id: "message_2",
-          threadId: "thread_1",
+          id: "message-2",
+          threadId: "thread-1",
           authorKind: "agent",
           authorDisplayName: "agent-owner@example.com",
           body: "Agent reply",
@@ -3831,8 +3831,8 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   function setPayload(emoji: string) {
     return SetChatReactionPayload.safeParse({
       workspaceId: "ws-engine",
-      threadId: "thread_1",
-      messageId: "message_1",
+      threadId: "thread-1",
+      messageId: "message-1",
       emoji,
       state: "added",
     });
@@ -3867,8 +3867,8 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   it("applies the same validation to a ChatReactionRecord's emoji", () => {
     const base = {
       reactionId: "r1",
-      messageId: "message_1",
-      threadId: "thread_1",
+      messageId: "message-1",
+      threadId: "thread-1",
       authorId: "author-1",
       authorKind: "human" as const,
       authorDisplayName: "You",
@@ -3904,7 +3904,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
   function publishPayload(state: unknown) {
     return PresencePublishPayload.safeParse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
-      topic: "chat:thread_1",
+      topic: "chat:thread-1",
       clientId: "client-1",
       incarnationId,
       state,
@@ -3918,7 +3918,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
   it("accepts an absent state (a leave / heartbeat with no payload)", () => {
     const result = PresencePublishPayload.safeParse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
-      topic: "chat:thread_1",
+      topic: "chat:thread-1",
       clientId: "client-1",
       incarnationId,
       leave: true,
@@ -3928,7 +3928,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
 
   it("binds a share presence scope to its origin workspace", () => {
     const base = {
-      topic: "chat:thread_1",
+      topic: "chat:thread-1",
       clientId: "client-1",
       incarnationId,
       state: null,
@@ -3954,7 +3954,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
   it("requires preload's document identity only at the main request boundary", () => {
     const payload = PresencePublishPayload.parse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
-      topic: "chat:thread_1",
+      topic: "chat:thread-1",
       clientId: "client-1",
       incarnationId,
       state: null,

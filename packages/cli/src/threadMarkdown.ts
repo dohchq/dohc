@@ -14,11 +14,11 @@ function swapEnginePrefix(
 }
 
 export function formatMessageHandle(id: string): string {
-  return swapEnginePrefix(id, "message_", "msg_");
+  return swapEnginePrefix(id, "message-", "msg_");
 }
 
 function formatThreadHandle(id: string): string {
-  return swapEnginePrefix(id, "thread_", "th_");
+  return swapEnginePrefix(id, "thread-", "th_");
 }
 
 function attachmentLabel(

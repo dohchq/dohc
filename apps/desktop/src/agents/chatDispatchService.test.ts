@@ -310,25 +310,25 @@ async function fakeDispatchDaemon(
       case CHATS_METHOD.channelEnsureAgent:
       case CHATS_METHOD.channelEnsureGeneral:
         chatIds.channel += 1;
-        params.channelId = `channel_${chatIds.channel}`;
+        params.channelId = `channel-${chatIds.channel}`;
         params.nowMs = takeChatTimestamp();
         break;
       case CHATS_METHOD.threadStart:
         chatIds.thread += 1;
         chatIds.message += 1;
-        params.threadId = `thread_${chatIds.thread}`;
-        params.messageId = `message_${chatIds.message}`;
+        params.threadId = `thread-${chatIds.thread}`;
+        params.messageId = `message-${chatIds.message}`;
         params.nowMs = nextChatTimestamp ?? takeChatTimestamp();
         nextChatTimestamp = null;
         break;
       case CHATS_METHOD.threadCreate:
         chatIds.thread += 1;
-        params.threadId = `thread_${chatIds.thread}`;
+        params.threadId = `thread-${chatIds.thread}`;
         params.nowMs = takeChatTimestamp();
         break;
       case CHATS_METHOD.messageSend:
         chatIds.message += 1;
-        params.messageId = `message_${chatIds.message}`;
+        params.messageId = `message-${chatIds.message}`;
         params.nowMs = nextChatTimestamp ?? takeChatTimestamp();
         nextChatTimestamp = null;
         break;
