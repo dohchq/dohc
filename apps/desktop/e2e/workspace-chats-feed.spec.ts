@@ -123,7 +123,7 @@ async function addReaction(message: Locator, emoji: string): Promise<void> {
   await message.hover();
   const actions = ownActions(message);
   await actions.getByTestId("chats-add-reaction").click();
-  await actions
+  await message.page()
     .locator(
       `[data-testid="chats-reaction-choice"][data-emoji=${JSON.stringify(emoji)}]`,
     )
