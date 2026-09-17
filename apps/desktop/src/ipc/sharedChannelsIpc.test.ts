@@ -228,6 +228,17 @@ describe("registered shared-channel handlers", () => {
     expect(h.push).toHaveBeenCalledOnce();
   });
 
+  it("a session change during the pre-share push stops the share before the relay hears of it", async () => {
+    const h = await harness();
+    h.store.listChannels.mockResolvedValue([channel({ folderPath: "team" })]);
+    h.store.getChannelWireId.mockResolvedValue("wire-team");
+    h.push.mockImplementationOnce(async () => { h.rotateCredentials(); });
+    await expect(h.invoke(CHANNELS.shareChatChannel, {
+      workspaceId: "workspace", channelId: "chan", recipientEmail: "ana@example.test",
+    })).rejects.toThrow("session changed");
+    expect(h.relayCalls).toHaveLength(0);
+  });
+
   it("joining a group joins its channel and then mounts its folder", async () => {
     const h = await harness();
     const info = {

@@ -149,6 +149,13 @@ export function registerSharedChannelsIpcHandlers<
         // channel's create op may still be waiting for the next sync pass,
         // so push it now rather than let the relay refuse a channel it has
         // not seen.
+        // The push and the share belong to one session: a sign-out during
+        // the push must not let the old credentials mint the grant.
+        const { assertCurrent: assertCurrentShareSession } = credentialScopedOperation({
+          assertCurrent: operation.assertCurrent,
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => currentCredentialGeneration(),
+        });
         if (channel.folderPath && credentials.relayUrl) {
           await relayClientForWorkspace({
             workspaceId: workspace.workspaceId,
@@ -156,7 +163,7 @@ export function registerSharedChannelsIpcHandlers<
             attachmentId: operation.workspace.attachmentId,
             relay: { baseUrl: credentials.relayUrl, token: credentials.token },
           }).push();
-          operation.assertCurrent();
+          assertCurrentShareSession();
         }
         const created = await awaitCredentialGeneration({
           capturedGeneration: credentialGeneration,
