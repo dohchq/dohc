@@ -147,6 +147,11 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await expect.poll(() => firstRow.evaluate((node, top) =>
       Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
     await expect(trigger).toBeFocused();
+
+    await lane.getByTestId("chats-lane-composer").fill("My reply from history");
+    await lane.getByTestId("chats-lane-composer").press("Enter");
+    await expect(lane.getByTestId("chats-lane-message-body").filter({ hasText: "My reply from history" })).toBeInViewport();
+    await expect.poll(() => distanceFromEnd(list)).toBeLessThanOrEqual(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
