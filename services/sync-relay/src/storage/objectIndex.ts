@@ -165,7 +165,7 @@ export function findChannelCreateKind(
            AND payload_json LIKE ? ESCAPE '\\'
          ORDER BY relay_seq`,
       )
-      .all(workspaceId, `%${needle}%`);
+      .iterate(workspaceId, `%${needle}%`);
     for (const row of rows) {
       let payload: unknown;
       try {
@@ -219,7 +219,7 @@ export function findChannelCreateFolderPath(
            AND payload_json LIKE ? ESCAPE '\\'
          ORDER BY relay_seq`,
       )
-      .all(workspaceId, `%${needle}%`);
+      .iterate(workspaceId, `%${needle}%`);
     for (const row of rows) {
       let payload: unknown;
       try {
@@ -342,12 +342,13 @@ export function objectMoment(storage: StorageContext, input: {
 // relay order. LIKE pre-filter on the exact JSON fragment the canonical
 // (sorted-key, JSON.stringify-escaped) payload stores, wildcards escaped so
 // a hostile threadId cannot widen the match; the caller's JSON.parse
-// comparison makes the real decision.
+// comparison makes the real decision. Iterate so callers stop the scan at the
+// earliest exact create instead of reading the remaining history.
 export function threadCreateRows(
     storage: StorageContext,
     workspaceId: string,
     threadId: string,
-  ): Array<Record<string, unknown>> {
+  ): IterableIterator<Record<string, unknown>> {
     const needle = `"threadId":${JSON.stringify(threadId)}`
       .replaceAll("\\", "\\\\")
       .replaceAll("%", "\\%")
@@ -359,5 +360,5 @@ export function threadCreateRows(
            AND payload_json LIKE ? ESCAPE '\\'
          ORDER BY relay_seq`,
       )
-      .all(workspaceId, `%${needle}%`);
+      .iterate(workspaceId, `%${needle}%`);
   }
