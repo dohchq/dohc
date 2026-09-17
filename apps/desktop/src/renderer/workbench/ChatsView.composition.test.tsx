@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
@@ -13,6 +13,7 @@ import {
   message,
   bridgeMock,
   renderView,
+  navigatorView,
   mentionRoster,
 } from "./ChatsView.testHarness";
 
@@ -519,5 +520,58 @@ describe("ChatsView mentions", () => {
     expect(item.textContent).toContain("Which draft should I keep?");
     expect(item.tagName).toBe("DIV");
     expect(item.closest("button")).toBeNull();
+  });
+});
+
+
+describe("group details", () => {
+  it("shows the saved purpose under the group header", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ purpose: "Plan the launch" })], fileThreads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-channel-purpose")).textContent).toBe("Plan the launch");
+  });
+
+  it("resets group purpose and type after a workspace switch", async () => {
+    const view = render(navigatorView(0));
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: "Old purpose" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Chat" }));
+    view.rerender(navigatorView(0, { workspaceId: "workspace-b" }));
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("keeps agents distinct across shares with null emails and within one owner's share", async () => {
+    const channels = [channel({ id: "c1", wireId: "w1" }), channel({ id: "c2", wireId: "w2" })];
+    bridgeMock.listChatChannels.mockResolvedValue({ channels, fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: channels.map((channel, index) => ({
+      shareId: `share-${index}`, channelWireId: channel.wireId, granterEmail: null, access: "read-write", ended: false,
+    })) }));
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [
+      [0, "agent-a"], [0, "agent-b"], [1, "agent-a"],
+    ].map(([channelIndex, targetId], index) => ({
+      ...personalFeedItem("Update", `agent-message-${index}`),
+      message: message({ id: `agent-message-${index}`, authorKind: "agent", authorDisplayName: "Same name" }),
+      channel: channels[Number(channelIndex)], authorFollowTarget: { targetKind: "agent", targetId },
+    })), nextCursor: null });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-feed-link"));
+    await waitFor(() => expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalled());
+    fireEvent.click(await screen.findByTestId("chats-feed-back"));
+    await waitFor(() => expect(screen.getAllByTestId("chats-other-agent")).toHaveLength(3));
+    expect(screen.getByTestId("chats-other-agents").textContent).toContain("via someone else");
+  });
+
+  it("resets purpose and type when Escape cancels group creation", async () => {
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-new-channel"));
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: "Cancelled purpose" } });
+    fireEvent.click(screen.getByRole("radio", { name: "Chat" }));
+    fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Escape" });
+    fireEvent.click(screen.getByTestId("chats-new-channel"));
+    expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
   });
 });

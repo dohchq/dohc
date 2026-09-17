@@ -460,6 +460,13 @@ export function ChatsView(props: {
   const [newThreadBody, setNewThreadBody] = useState("");
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
+  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
+  const [newGroupPurpose, setNewGroupPurpose] = useState("");
+  const resetGroupForm = useCallback(() => {
+    setCreatingChannel(null);
+    setNewGroupType("posts");
+    setNewGroupPurpose("");
+  }, []);
   const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
   // is on (signed in + relay) or a DM already exists locally — a solo user
@@ -1139,7 +1146,7 @@ export function ChatsView(props: {
     setFlashMessageId(null);
     messageNodes.current.clear();
     setNewThreadBody("");
-    setCreatingChannel(null);
+    resetGroupForm();
     setChannelShares(null);
     setShareReadFailure(null);
     setSharesWorkspaceId(null);
@@ -1182,7 +1189,7 @@ export function ChatsView(props: {
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
     };
-  }, [invalidate, refreshBookmarks, refreshDms, refreshOverview, resetForWorkspace]);
+  }, [invalidate, refreshBookmarks, refreshDms, refreshOverview, resetForWorkspace, resetGroupForm]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -2512,16 +2519,16 @@ export function ChatsView(props: {
   // agents whose work the user has seen arrive. Read-only: nothing here runs
   // or configures them.
   const otherAgents = useMemo(() => {
-    const seen = new Map<string, { label: string; owner: string; latest: ChatFeedItemRecord }>();
+    const seen = new Map<string, { key: string; label: string; owner: string; latest: ChatFeedItemRecord }>();
     for (const item of personalFeed) {
       if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
       const joined = joinedByWire.get(item.channel.wireId);
       if (!joined) continue;
       const owner = joined.granterEmail ?? "someone else";
-      const key = `${owner}\u0000${item.message.authorDisplayName}`;
+      const key = `${joined.shareId}\u0000${item.authorFollowTarget?.targetId ?? item.message.authorDisplayName}`;
       const known = seen.get(key);
       if (!known || known.latest.message.createdAtMs < item.message.createdAtMs) {
-        seen.set(key, { label: chatAuthorLabel(item.message), owner, latest: item });
+        seen.set(key, { key, label: chatAuthorLabel(item.message), owner, latest: item });
       }
     }
     return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
@@ -2851,11 +2858,8 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
-  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
-  // Which lane a "both" group shows. A chat group is always its lane; a posts
-  // group has none.
+  // Which lane a "both" group shows.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
-  const [newGroupPurpose, setNewGroupPurpose] = useState("");
   const createChannel = useCallback(
     async (name: string) => {
       const trimmed = name.trim();
@@ -2870,9 +2874,7 @@ export function ChatsView(props: {
           ...(purpose ? { purpose } : {}),
         });
         if (token !== liveToken.current) return;
-        setCreatingChannel(null);
-        setNewGroupType("posts");
-        setNewGroupPurpose("");
+        resetGroupForm();
         setOverview((current) =>
           current.status === "ready"
             ? { ...current, channels: [...current.channels, result.channel] }
@@ -2894,7 +2896,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [newGroupPurpose, newGroupType, openChannel, props.onError, props.onNavCommand, workspaceId],
+    [newGroupPurpose, newGroupType, resetGroupForm, openChannel, props.onError, props.onNavCommand, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -3912,6 +3914,11 @@ export function ChatsView(props: {
             ) : undefined
           }
         />
+        {nav.channel.purpose?.trim() ? (
+          <p data-testid="chats-channel-purpose" className="m-0 truncate px-3 pb-2 text-[12px] text-muted">
+            {nav.channel.purpose}
+          </p>
+        ) : null}
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
@@ -4096,6 +4103,7 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
+            onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
           />
         ) : (
@@ -4459,7 +4467,7 @@ export function ChatsView(props: {
               {otherAgents.length > 0 ? (
                 <ul data-testid="chats-other-agents" className="m-0 list-none p-0">
                   {otherAgents.map((agent) => (
-                    <li key={`${agent.owner}:${agent.label}`}>
+                    <li key={agent.key}>
                       <NavRow
                         testId="chats-other-agent"
                         data={{ "data-owner": agent.owner }}
@@ -4567,7 +4575,7 @@ export function ChatsView(props: {
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   event.stopPropagation();
-                  setCreatingChannel(null);
+                  resetGroupForm();
                 }
               }}
               className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
@@ -4585,7 +4593,7 @@ export function ChatsView(props: {
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   event.stopPropagation();
-                  setCreatingChannel(null);
+                  resetGroupForm();
                 }
               }}
               className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
