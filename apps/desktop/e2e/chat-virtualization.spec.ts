@@ -68,13 +68,16 @@ test.describe("chat list virtualization", () => {
 
       await row("m-499").getByRole("button", { name: "Add reaction" }).focus();
       await page.keyboard.press("Home");
-      await expect(row("m-0")).toBeInViewport();
-      await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeLessThan(2);
+      await expect(row("m-0")).toBeInViewport({ ratio: 1 });
+      const firstRowTop = await row("m-0").evaluate((node) => node.getBoundingClientRect().top);
       await page.evaluate(() => window.chatListFixture.append());
       await expect(row("m-0")).toHaveAttribute("aria-setsize", "501");
+      await expect.poll(() => row("m-0").evaluate((node, top) =>
+        Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
       await page.setViewportSize({ width: 500, height: 600 });
-      await expect(row("m-0")).toBeInViewport();
-      await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeLessThan(2);
+      await expect(row("m-0")).toBeInViewport({ ratio: 1 });
+      await expect.poll(() => row("m-0").evaluate((node, top) =>
+        Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
 
       // A jump to the last item resumes following even after reading history.
       await page.evaluate(() => window.chatListFixture.jump("m-500"));

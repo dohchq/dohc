@@ -133,15 +133,16 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     // Home scrolls history while the reaction trigger keeps keyboard focus.
     await page.keyboard.press("Home");
     const firstRow = lane.locator(`[data-message-id="${seeded.firstMessageId}"]`);
-    await expect(firstRow).toBeInViewport();
-    await expect.poll(() => list.evaluate((node) => node.scrollTop)).toBeLessThanOrEqual(1);
+    await expect(firstRow).toBeInViewport({ ratio: 1 });
+    const firstRowTop = await firstRow.evaluate((node) => node.getBoundingClientRect().top);
     await expect(trigger).toBeFocused();
     await expect(lastRow).toBeAttached();
     await expect(lastRow).not.toBeInViewport();
     await sendThroughIpc(page, workspaceId, seeded.threadId, "Incoming after keyboard history navigation");
     await expect(firstRow).toHaveAttribute("aria-setsize", String(messageCount + 4));
-    await expect(firstRow).toBeInViewport();
-    expect(await list.evaluate((node) => node.scrollTop)).toBeLessThanOrEqual(1);
+    await expect(firstRow).toBeInViewport({ ratio: 1 });
+    await expect.poll(() => firstRow.evaluate((node, top) =>
+      Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
     await expect(trigger).toBeFocused();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
