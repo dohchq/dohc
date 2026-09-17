@@ -63,6 +63,10 @@ test.describe("chat list virtualization", () => {
       await expect(picker).toHaveCount(0);
       await expect(trigger).toBeFocused();
       await expect(trigger).not.toBeInViewport();
+      await page.keyboard.press("Enter");
+      await expect(picker).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+      await expect(trigger).not.toBeInViewport();
     });
 
     test(`follows resize and growth but preserves Home history in ${theme}`, async ({ page }) => {

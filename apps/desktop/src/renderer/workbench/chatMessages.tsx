@@ -403,7 +403,7 @@ export function MessageReactions(props: {
     const position = () => {
       const trigger = triggerRef.current?.getBoundingClientRect();
       const picker = pickerRef.current?.getBoundingClientRect();
-      if (!trigger || !picker) return;
+      if (!trigger || !picker) return false;
       const viewport = scrollViewport?.getBoundingClientRect();
       const top = Math.max(0, viewport?.top ?? 0);
       const bottom = Math.min(window.innerHeight, viewport?.bottom ?? window.innerHeight);
@@ -412,15 +412,16 @@ export function MessageReactions(props: {
           triggerRef.current?.focus({ preventScroll: true });
         }
         setPickerOpen(false);
-        return;
+        return false;
       }
       setPickerPosition({
         left: Math.max(4, Math.min(trigger.right - picker.width, window.innerWidth - picker.width - 4)),
         top: Math.max(4, Math.min(trigger.top >= picker.height + 4 ? trigger.top - picker.height - 4 : trigger.bottom + 4, window.innerHeight - picker.height - 4)),
       });
+      return true;
     };
     pickerRef.current?.showPopover?.();
-    position();
+    if (!position()) return;
     pickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
     window.addEventListener("resize", position);
     document.addEventListener("scroll", position, true);

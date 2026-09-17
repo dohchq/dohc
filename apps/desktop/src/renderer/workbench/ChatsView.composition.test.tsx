@@ -285,7 +285,9 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     );
     expect(await screen.findByTestId("chats-message-body")).toBeTruthy();
 
-    await user.click(screen.getByTestId("chats-add-reaction"));
+    const reactionTrigger = screen.getByTestId("chats-add-reaction");
+    vi.spyOn(reactionTrigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    await user.click(reactionTrigger);
     const thumbsUp = screen
       .getAllByTestId("chats-reaction-choice")
       .find((button) => button.getAttribute("data-emoji") === "👍");

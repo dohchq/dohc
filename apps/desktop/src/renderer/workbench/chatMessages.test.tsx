@@ -514,7 +514,9 @@ describe("message reactions (WS-MU-C2)", () => {
 
   it("adds a reaction from the quick-pick (reacting to an agent message)", () => {
     const { onToggle } = renderList([], "you@x");
-    fireEvent.click(screen.getByTestId("test-chat-add-reaction"));
+    const trigger = screen.getByTestId("test-chat-add-reaction");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    fireEvent.click(trigger);
     const picker = screen.getByTestId("test-chat-reaction-picker");
     const choice = within(picker)
       .getAllByTestId("test-chat-reaction-choice")
@@ -533,6 +535,7 @@ describe("message reactions (WS-MU-C2)", () => {
   it("closes the quick-pick on document-level Escape and returns focus to the trigger", () => {
     const { onToggle } = renderList([], "you@x");
     const trigger = screen.getByTestId("test-chat-add-reaction");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
     trigger.focus();
     fireEvent.click(trigger);
     // The picker is a lightweight quick-pick: role="group" + plain toggle
