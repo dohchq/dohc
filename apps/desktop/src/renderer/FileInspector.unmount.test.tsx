@@ -4659,6 +4659,129 @@ describe("markdown editor unmount flush", () => {
     ).toEqual(rows);
   });
 
+  it.each([",", "\t"] as const)("preserves the unseen tail while editing cached %s rows", async (delimiter) => {
+    const rows = [["name", "note"], ...Array.from({ length: 510 }, (_, index) => [
+      `row ${index}`,
+      index % 2 ? 'quoted "value", tab\t' : "line one\r\nline two 😀",
+    ])];
+    // First edit must still normalize the complete source, including CRLF and
+    // unnecessary quotes beyond the preview. Later edits retain that result.
+    const initial = delimitedTextCodec.serialize(rows, delimiter) + "\r\n";
+    const expectedRows = delimitedTextCodec.parse(initial, delimiter);
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: initial,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const path = `data/table.${delimiter === "," ? "csv" : "tsv"}`;
+    const view = render(<FileInspector workspaceId="ws-1" path={path} />);
+    await screen.findByTestId("view-csv");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    try {
+      for (const [rowIndex, value] of [[1, "first"], [0, '😀,"header"'], [500, 'last,"visible"'], [1, ""]] as const) {
+        const cell = screen.getByLabelText(rowIndex === 0 ? "Header column 1" : `Row ${rowIndex} column 1`);
+        fireEvent.change(cell, { target: { value } });
+        expectedRows[rowIndex]![0] = value;
+      }
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(serialize.mock.calls[0]![2]).toHaveLength(502);
+    } finally {
+      serialize.mockRestore();
+    }
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: path,
+      text: delimitedTextCodec.serialize(expectedRows, delimiter),
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
+  it("rebuilds CSV row offsets after structural and raw edits", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "name,note\nAda,before\nGrace,after",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+    await screen.findByTestId("view-csv");
+    const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    change("Row 1 column 1", "first");
+    change("Row 2 column 2", "cached");
+    fireEvent.click(screen.getByLabelText("Delete row 1"));
+    change("Row 1 column 2", "after delete");
+    fireEvent.click(screen.getByTestId("csv-add-column"));
+    change("Row 1 column 3", "added");
+    fireEvent.click(screen.getByLabelText("Delete column 1"));
+    change("Row 1 column 1", "remaining");
+    fireEvent.click(screen.getByTestId("csv-add-row"));
+    change("Row 2 column 1", "new row");
+    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe("note,column_3\nremaining,added\nnew row,");
+    fireEvent.change(screen.getByTestId("csv-raw-editor"), { target: { value: '"name",note\r\n"raw",before\r\n' } });
+    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    change("Row 1 column 1", "😀");
+    change("Row 1 column 2", 'after "raw"');
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/table.csv",
+      text: 'name,note\n😀,"after ""raw"""',
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
+  it("rebuilds the CSV draft when a cell returns to Latin-1 text", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "name,note\nAda,before\nGrace,later",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+    await screen.findByTestId("view-csv");
+    const cell = screen.getByLabelText("Row 1 column 2");
+    fireEvent.change(cell, { target: { value: "😀" } });
+    fireEvent.change(cell, { target: { value: "café" } });
+    fireEvent.change(screen.getByLabelText("Row 2 column 1"), { target: { value: "Second" } });
+    fireEvent.change(cell, { target: { value: "plain" } });
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/table.csv",
+      text: "name,note\nAda,plain\nSecond,later",
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
+  it("rebuilds CSV row offsets when another pane publishes a draft", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "name,note\nAda,before",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const view = render(<>
+      <FileInspector workspaceId="ws-1" path="data/table.csv" />
+      <FileInspector workspaceId="ws-1" path="data/table.csv" />
+    </>);
+    await waitFor(() => expect(screen.getAllByTestId("view-csv")).toHaveLength(2));
+    const change = (pane: number, label: string, value: string) => fireEvent.change(screen.getAllByLabelText(label)[pane]!, { target: { value } });
+    change(0, "Row 1 column 1", "first");
+    change(0, "Row 1 column 2", "cached");
+    await waitFor(() => expect((screen.getAllByLabelText("Row 1 column 2")[1] as HTMLInputElement).value).toBe("cached"));
+    change(1, "Header column 1", 'new,"header"');
+    change(1, "Row 1 column 1", "😀second");
+    await waitFor(() => expect((screen.getAllByLabelText("Row 1 column 1")[0] as HTMLInputElement).value).toBe("😀second"));
+    change(0, "Row 1 column 2", "last");
+    change(0, "Row 1 column 2", "final");
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/table.csv",
+      text: '"new,""header""",note\n😀second,final',
+      expectedContentHash: TEST_CONTENT_HASH,
+    });
+  });
+
   it("preserves CSV content while switching between raw and table modes", async () => {
     const initial = 'name,note\nAda,"one,two"';
     const edited = 'name,note\nGrace,"line one\nline two"';
