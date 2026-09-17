@@ -2,7 +2,7 @@
 
 Reader: whoever implements or reviews `feat/chat-engine`. The parent plan is `chat-overhaul.md`; this file settles its phase 2 items against the code as it is.
 
-**Status: implemented; in review.** The relay serves a group one half per request: the channel pull names the channel and gets its chat, the folder mount names nothing and gets its files. The two-desktop e2e is `apps/desktop/e2e/workspace-group-share.spec.ts`.
+**Status: merged in #1136.** The relay serves a group one half per request: the channel pull names the channel and gets its chat, the folder mount names nothing and gets its files. The two-desktop e2e is `apps/desktop/e2e/workspace-group-share.spec.ts`.
 
 ## What the maps found
 

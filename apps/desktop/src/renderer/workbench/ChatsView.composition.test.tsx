@@ -580,6 +580,28 @@ describe("group details", () => {
     expect(screen.getByTestId("chats-other-agents").textContent).toContain("via someone else");
   });
 
+  it("lists an agent that speaks only in a joined group's chat lane", async () => {
+    const group = channel({ id: "c-chat", wireId: "w-chat", type: "chat" });
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [group], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: [{
+      shareId: "share-chat", channelWireId: "w-chat", granterEmail: "owner@example.test", access: "read-write", ended: false,
+    }] }));
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [], nextCursor: null });
+    bridgeMock.listChannelThreads.mockImplementation(async (payload: { lane?: string }) =>
+      payload.lane === "chat"
+        ? { threads: [thread({ id: "lane", channelId: "c-chat", messageCount: 1 })] }
+        : { threads: [] },
+    );
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "m-lane", threadId: "lane", authorKind: "agent", authorDisplayName: "Owner's agent", authorUserId: "agent-owner" }),
+    ] });
+    renderView();
+    await waitFor(() => expect(screen.getAllByTestId("chats-other-agent")).toHaveLength(1));
+    expect(screen.getByTestId("chats-other-agents").textContent).toContain("via owner@example.test");
+    fireEvent.click(screen.getByTestId("chats-other-agent"));
+    expect(await screen.findByTestId("chats-channel-view")).toBeTruthy();
+  });
+
   it("resets purpose and type when Escape cancels group creation", async () => {
     renderView();
     fireEvent.click(await screen.findByTestId("chats-new-channel"));

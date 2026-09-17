@@ -2518,8 +2518,60 @@ export function ChatsView(props: {
   // the Home items already read, so it costs nothing and lists exactly the
   // agents whose work the user has seen arrive. Read-only: nothing here runs
   // or configures them.
+  // Agents that speak only in a group's chat lane never enter Home, so the
+  // Agents list also reads each joined group's chat lane. One page of the
+  // lane per group, on the nav and after activity; a handful of calls.
+  const [laneAgents, setLaneAgents] = useState<
+    Array<{ key: string; label: string; owner: string; channel: ChatChannelRecord; atMs: number }>
+  >([]);
+  useEffect(() => {
+    if (overview.status !== "ready" || nav.level !== "channels") return;
+    const token = liveToken.current;
+    const groups = overview.channels.filter(
+      (channel) =>
+        typeof channel.wireId === "string" &&
+        (channel.type === "chat" || channel.type === "both") &&
+        joinedByWire.get(channel.wireId),
+    );
+    if (groups.length === 0) {
+      setLaneAgents([]);
+      return;
+    }
+    void Promise.all(
+      groups.map(async (channel) => {
+        const listed = await bridge().listChannelThreads({
+          workspaceId,
+          channelId: channel.id,
+          lane: "chat",
+        });
+        const lane = listed.threads[0];
+        if (!lane) return [];
+        const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
+        const joined = joinedByWire.get(channel.wireId ?? "");
+        const owner = joined?.granterEmail ?? "someone else";
+        return page.messages
+          .filter((message) => message.authorKind === "agent")
+          .map((message) => ({
+            key: `${joined?.shareId ?? channel.id}\u0000${message.authorUserId ?? message.authorDisplayName}`,
+            label: chatAuthorLabel(message),
+            owner,
+            channel,
+            atMs: message.createdAtMs,
+          }));
+      }),
+    )
+      .then((found) => {
+        if (token !== liveToken.current) return;
+        setLaneAgents(found.flat());
+      })
+      .catch(() => {
+        // The lane read is a convenience for the list; Home's items still
+        // name every agent that posts. A failed read leaves the list as is.
+      });
+  }, [joinedByWire, nav.level, overview, props.threadRevision, workspaceId]);
+
   const otherAgents = useMemo(() => {
-    const seen = new Map<string, { key: string; label: string; owner: string; latest: ChatFeedItemRecord }>();
+    const seen = new Map<string, { key: string; label: string; owner: string; atMs: number; open: () => void }>();
     for (const item of personalFeed) {
       if (item.message.authorKind !== "agent" || !item.channel?.wireId) continue;
       const joined = joinedByWire.get(item.channel.wireId);
@@ -2527,12 +2579,36 @@ export function ChatsView(props: {
       const owner = joined.granterEmail ?? "someone else";
       const key = `${joined.shareId}\u0000${item.authorFollowTarget?.targetId ?? item.message.authorDisplayName}`;
       const known = seen.get(key);
-      if (!known || known.latest.message.createdAtMs < item.message.createdAtMs) {
-        seen.set(key, { key, label: chatAuthorLabel(item.message), owner, latest: item });
+      if (!known || known.atMs < item.message.createdAtMs) {
+        const channel = item.channel;
+        seen.set(key, {
+          key,
+          label: chatAuthorLabel(item.message),
+          owner,
+          atMs: item.message.createdAtMs,
+          open: () =>
+            openConversation({
+              level: "thread",
+              channel: { ...channel, wireId: channel.wireId, createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0 },
+              thread: { ...item.thread, channelId: channel.id, messageCount: 0, lastReadSequence: 0, unreadCount: 0 },
+              focusMessageId: item.message.id,
+            }),
+        });
       }
     }
+    for (const agent of laneAgents) {
+      const known = seen.get(agent.key);
+      if (known && known.atMs >= agent.atMs) continue;
+      seen.set(agent.key, {
+        key: agent.key,
+        label: agent.label,
+        owner: agent.owner,
+        atMs: agent.atMs,
+        open: () => openConversation({ level: "channel", channel: agent.channel }),
+      });
+    }
     return [...seen.values()].sort((left, right) => left.label.localeCompare(right.label));
-  }, [joinedByWire, personalFeed]);
+  }, [joinedByWire, laneAgents, openConversation, personalFeed]);
 
   // Cross-user co-presence for the open channel/thread turns on two decisions
   // per conversation — the SCOPE it lands in and the TOPIC both sides key on.
@@ -4498,29 +4574,7 @@ export function ChatsView(props: {
                         testId="chats-other-agent"
                         data={{ "data-owner": agent.owner }}
                         active={false}
-                        onClick={() => {
-                          const item = agent.latest;
-                          if (!item.channel) return;
-                          openConversation({
-                            level: "thread",
-                            channel: {
-                              ...item.channel,
-                              wireId: item.channel.wireId,
-                              createdAtMs: 0,
-                              updatedAtMs: 0,
-                              threadCount: 0,
-                              unreadCount: 0,
-                            },
-                            thread: {
-                              ...item.thread,
-                              channelId: item.channel.id,
-                              messageCount: 0,
-                              lastReadSequence: 0,
-                              unreadCount: 0,
-                            },
-                            focusMessageId: item.message.id,
-                          });
-                        }}
+                        onClick={agent.open}
                         icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
                         label={agent.label}
                         labelTestId="chats-other-agent-name"
