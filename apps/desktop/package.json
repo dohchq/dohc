@@ -84,6 +84,7 @@
     "@dohc/workspace-engine-client": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
+    "@legendapp/list": "3.3.11",
     "@tiptap/core": "^3.29.2",
     "@tiptap/extension-code-block": "^3.29.2",
     "@tiptap/extension-list": "3.29.2",
