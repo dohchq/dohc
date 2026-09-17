@@ -13,6 +13,7 @@ import { bootstrapJoinedWorkspace } from "../../apps/desktop/src/workspaces/work
 import { installWorkspaceDataKey } from "../../apps/desktop/src/workspaces/workspaceDataKey.ts";
 import { createTestScratch, removeTestScratch, cleanupSuiteTestScratch } from "../../apps/desktop/src/workspaces/testTemp.ts";
 import { openNetworkProxy } from "./network-proxy.mjs";
+import { preparedStatus, receiptPath } from "../../scripts/verification/build.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
@@ -23,13 +24,16 @@ const files = tiny ? 6 : 1000;
 const bytesPerFile = tiny ? 1024 : 8192;
 const engine = process.env.DOHC_TEST_ENGINE_BINARY;
 assert(engine, "Set DOHC_TEST_ENGINE_BINARY to a debug engine built from this checkout.");
+assert(preparedStatus("engine"), "Run node scripts/verification/build.mjs --engine-only for this checkout.");
+const build = JSON.parse(await readFile(receiptPath, "utf8")).engine;
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", windowsHide: true }).trim();
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+assert.equal(sha256(await readFile(engine)), build.artifact, "The selected engine must match this checkout's prepared engine.");
 await mkdir(output, { recursive: true });
 const report: any = {
   status: "running", startedAt: new Date().toISOString(),
   commit: git("rev-parse", "HEAD"), dirty: git("status", "--porcelain").length > 0,
-  engine: { path: resolve(engine), sha256: sha256(await readFile(engine)), mode: "debug" },
+  engine: { path: resolve(engine), sha256: sha256(await readFile(engine)), mode: "debug", build },
   platform: process.platform, node: process.version, files, bytesPerFile, tiny,
   transport: "real HTTP relay with SYNC_RELAY_TEST_AUTH; production TLS and authentication untested",
   shaping: "extra response latency and shared downstream bandwidth; not packet-level RTT or loss",
