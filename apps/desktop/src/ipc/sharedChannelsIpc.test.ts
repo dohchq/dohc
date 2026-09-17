@@ -188,7 +188,7 @@ describe("registered shared-channel handlers", () => {
     // the same way, and the leave still stands.
     h.unmount.mockResolvedValueOnce({ folderLeft: true });
     await expect(h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" }))
-      .rejects.toThrow("Left the group, but its folder could not be removed. Remove it under Settings");
+      .rejects.toThrow("Left the group. Its folder is still in shared-with-me/");
   });
 
   it("does not cache an invitation kind returned after the account changes", async () => {

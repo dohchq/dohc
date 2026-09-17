@@ -594,8 +594,10 @@ export function registerSharedChannelsIpcHandlers<
             throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
           }
           if (folderLeft) {
+            // The mount record is gone, so Settings offers nothing for it;
+            // the folder itself is what remains.
             throw new Error(
-              "Left the group, but its folder could not be removed. Remove it under Settings, Shared folders.",
+              "Left the group. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
             );
           }
         }
