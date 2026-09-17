@@ -1,3 +1,4 @@
+import "../../testing/legendListMock";
 import { formatChatDay, formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -7,6 +8,7 @@ import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeCont
 import {
   ChatComposer,
   ChatMessageList,
+  type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
   runReactionToggle,
@@ -102,7 +104,7 @@ describe("chat authorship display", () => {
         }]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
@@ -130,7 +132,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
@@ -154,7 +156,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         mentionCandidates={[]}
       />,
     );
@@ -185,7 +187,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -228,7 +230,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -272,7 +274,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -324,7 +326,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -408,7 +410,7 @@ describe("ChatMessageList memo boundary", () => {
         createdAtMs: 1_700_000_000_000,
       },
     ];
-    const endRef = createRef<HTMLDivElement>();
+    const endRef = createRef<ChatMessageListHandle>();
     function Host() {
       const [, setTick] = useState(0);
       return (
@@ -419,7 +421,7 @@ describe("ChatMessageList memo boundary", () => {
             messages={messages}
             loading={false}
             emptyLabel="No messages"
-            endRef={endRef}
+            listRef={endRef}
           />
         </>
       );
@@ -466,7 +468,7 @@ describe("message reactions (WS-MU-C2)", () => {
         messages={[message]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         reactionControls={{ reactions, viewerAuthorId, onToggle }}
       />,
     );
@@ -512,7 +514,9 @@ describe("message reactions (WS-MU-C2)", () => {
 
   it("adds a reaction from the quick-pick (reacting to an agent message)", () => {
     const { onToggle } = renderList([], "you@x");
-    fireEvent.click(screen.getByTestId("test-chat-add-reaction"));
+    const trigger = screen.getByTestId("test-chat-add-reaction");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    fireEvent.click(trigger);
     const picker = screen.getByTestId("test-chat-reaction-picker");
     const choice = within(picker)
       .getAllByTestId("test-chat-reaction-choice")
@@ -531,6 +535,7 @@ describe("message reactions (WS-MU-C2)", () => {
   it("closes the quick-pick on document-level Escape and returns focus to the trigger", () => {
     const { onToggle } = renderList([], "you@x");
     const trigger = screen.getByTestId("test-chat-add-reaction");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
     trigger.focus();
     fireEvent.click(trigger);
     // The picker is a lightweight quick-pick: role="group" + plain toggle
@@ -560,7 +565,7 @@ describe("message reactions (WS-MU-C2)", () => {
         messages={[message]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.queryByTestId("test-chat-message-reactions")).toBeNull();

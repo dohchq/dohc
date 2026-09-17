@@ -1,3 +1,4 @@
+import "../../testing/legendListMock";
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 import type {

@@ -167,10 +167,18 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     const chatStart = Date.now();
     await openFileChatsPanel(page);
     await page.getByTestId("linked-chat-open").click();
-    await expect(page.getByTestId("linked-chat-message")).toHaveCount(CHAT_MESSAGES);
+    await expect(
+      page.getByTestId("linked-chat-message-body").filter({
+        hasText: `Message ${CHAT_MESSAGES - 1} about doc zero.`,
+      }),
+    ).toBeInViewport();
+    await expect(
+      page.getByTestId("linked-chat-thread").locator('[role="list"][data-chat-virtualized="true"]'),
+    ).toBeVisible();
+    await expect.poll(() => page.getByTestId("linked-chat-message").count()).toBeLessThan(CHAT_MESSAGES);
     const chatOpenMs = Date.now() - chatStart;
     console.log(
-      `[perf] chats panel open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to all messages rendered`,
+      `[perf] chats panel open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to latest message visible`,
     );
 
     // --- The race: switch to B while A's heavy surfaces are (re)loading ---

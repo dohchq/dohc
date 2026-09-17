@@ -1,3 +1,4 @@
+import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { basenameOf } from "../path";
@@ -5,6 +6,10 @@ import { ipcErrorMessage } from "../ipcError";
 import { FileText, SmilePlus, Send } from "lucide-react";
 import {
   memo,
+  useCallback,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
   useEffect,
   useId,
   useRef,
@@ -359,6 +364,8 @@ export function MessageReactions(props: {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+  const [pickerPosition, setPickerPosition] = useState({ left: 0, top: 0 });
   const pickerId = useId();
   const choices = props.controls.emojiChoices ?? DEFAULT_REACTION_EMOJIS;
 
@@ -366,15 +373,14 @@ export function MessageReactions(props: {
   useEffect(() => {
     if (!pickerOpen) return;
     function onPointerDown(event: PointerEvent) {
-      if (!containerRef.current?.contains(event.target as Node)) setPickerOpen(false);
+      if (!containerRef.current?.contains(event.target as Node) && !pickerRef.current?.contains(event.target as Node)) setPickerOpen(false);
     }
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [pickerOpen]);
 
   // Dismiss on Escape at the DOCUMENT level (not just on the popup): a keyboard
-  // user who opened via Enter/Space keeps focus on the trigger, so an onKeyDown
-  // scoped to the popup would never fire. Return focus to the trigger on close
+  // user can return to the trigger while the popup is open. Return focus to the trigger on close
   // so the tab order is preserved. Mirrors the outside-pointerdown dismissal.
   useEffect(() => {
     if (!pickerOpen) return;
@@ -386,6 +392,43 @@ export function MessageReactions(props: {
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
+  }, [pickerOpen]);
+
+  useLayoutEffect(() => {
+    if (!pickerOpen) return;
+    let scrollViewport = triggerRef.current?.parentElement ?? null;
+    while (scrollViewport && !/^(auto|scroll)$/.test(getComputedStyle(scrollViewport).overflowY)) {
+      scrollViewport = scrollViewport.parentElement;
+    }
+    const position = () => {
+      const trigger = triggerRef.current?.getBoundingClientRect();
+      const picker = pickerRef.current?.getBoundingClientRect();
+      if (!trigger || !picker) return false;
+      const viewport = scrollViewport?.getBoundingClientRect();
+      const top = Math.max(0, viewport?.top ?? 0);
+      const bottom = Math.min(window.innerHeight, viewport?.bottom ?? window.innerHeight);
+      if (trigger.bottom <= top || trigger.top >= bottom) {
+        if (pickerRef.current?.contains(document.activeElement)) {
+          triggerRef.current?.focus({ preventScroll: true });
+        }
+        setPickerOpen(false);
+        return false;
+      }
+      setPickerPosition({
+        left: Math.max(4, Math.min(trigger.right - picker.width, window.innerWidth - picker.width - 4)),
+        top: Math.max(4, Math.min(trigger.top >= picker.height + 4 ? trigger.top - picker.height - 4 : trigger.bottom + 4, window.innerHeight - picker.height - 4)),
+      });
+      return true;
+    };
+    pickerRef.current?.showPopover?.();
+    if (!position()) return;
+    pickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    window.addEventListener("resize", position);
+    document.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      document.removeEventListener("scroll", position, true);
+    };
   }, [pickerOpen]);
 
   // Group this message's reactions by emoji, preserving first-seen order.
@@ -474,13 +517,15 @@ export function MessageReactions(props: {
         // which would promise arrow-key roving semantics we don't implement.
         // Escape (document-level) closes and returns focus to the trigger.
         <div
+          ref={pickerRef}
           id={pickerId}
+          popover="manual"
+          data-chat-escape-local="true"
+          style={{ margin: 0, inset: "auto", ...pickerPosition }}
           role="group"
           data-testid={`${props.testIdPrefix}-reaction-picker`}
           aria-label="Choose a reaction"
-          className={`dohc-popover dohc-pop-in absolute bottom-full z-10 mb-1 flex gap-0.5 rounded-lg border border-line bg-panel p-1 ${
-            props.overlayWhenEmpty && byEmoji.length === 0 ? "right-0" : "left-0"
-          }`}
+          className="dohc-popover dohc-pop-in fixed z-50 flex max-w-[calc(100vw-8px)] flex-wrap gap-0.5 rounded-lg border border-line bg-panel p-1"
         >
           {choices.map((emoji) => {
             const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
@@ -511,12 +556,9 @@ export function MessageReactions(props: {
   );
 }
 
-// Memoized because each message body re-runs the file-token and mention scans
-// on every render: the hosts keep composer drafts in the same component that
-// renders this list, so without the boundary every keystroke re-scanned the
-// whole conversation. Callers keep every prop referentially stable across
-// unrelated renders (drafts, typing indicators) for the memo to hold.
 const GROUP_WINDOW_MS = 5 * 60_000;
+const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
+const messageKeyExtractor = (message: ChatMessageRecord) => message.id;
 
 // The chat lane. Messages from one author within five minutes read as one
 // run: the avatar and name once, then bare lines. A divider names each day.
@@ -526,14 +568,17 @@ const GROUP_WINDOW_MS = 5 * 60_000;
 // the boundary every keystroke re-scanned the whole conversation. Callers
 // keep every prop referentially stable across unrelated renders (drafts,
 // typing indicators) for the memo to hold.
+export interface ChatMessageListHandle {
+  scrollToEnd: () => void;
+  scrollToMessage: (messageId: string) => boolean;
+}
+
 export const ChatMessageList = memo(function ChatMessageList(props: {
   testIdPrefix: string;
   messages: ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
-  endRef: RefObject<HTMLDivElement | null>;
-  scrollRef?: RefObject<HTMLDivElement | null>;
-  onScroll?: () => void;
+  listRef?: RefObject<ChatMessageListHandle | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
   // File-reference tokens become navigation buttons when the host can open
@@ -543,137 +588,235 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   reactionControls?: ChatReactionControls;
   renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
   flashMessageId?: string | null;
-  onMessageElement?: (messageId: string, element: HTMLLIElement | null) => void;
 }) {
-  const candidates = props.mentionCandidates ?? [];
-  // Group active reactions by message once per render.
-  const reactionsByMessage = new Map<string, ChatReactionRecord[]>();
-  if (props.reactionControls) {
-    for (const reaction of props.reactionControls.reactions) {
-      const list = reactionsByMessage.get(reaction.messageId);
-      if (list) list.push(reaction);
-      else reactionsByMessage.set(reaction.messageId, [reaction]);
+  const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
+  const reactionsByMessage = useMemo(() => {
+    const grouped = new Map<string, ChatReactionRecord[]>();
+    for (const reaction of props.reactionControls?.reactions ?? []) {
+      const records = grouped.get(reaction.messageId);
+      if (records) records.push(reaction);
+      else grouped.set(reaction.messageId, [reaction]);
     }
-  }
-  return (
-    <div ref={props.scrollRef} onScroll={props.onScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-      {props.loading ? (
-        <p className="m-0 text-center text-[11px] text-subtle">Loading...</p>
-      ) : props.messages.length === 0 ? (
-        <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-          {props.emptyLabel}
-        </p>
-      ) : (
-        <ul className="m-0 flex list-none flex-col p-0">
-          {props.messages.map((message, at) => {
-            const previous = at > 0 ? props.messages[at - 1] : undefined;
-            const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
-            const continues =
-              !newDay &&
-              previous !== undefined &&
-              previous.authorKind === message.authorKind &&
-              (previous.authorUserId && message.authorUserId
-                ? previous.authorUserId === message.authorUserId
-                : !previous.authorUserId && !message.authorUserId &&
-                  previous.authorDisplayName === message.authorDisplayName) &&
-              message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
-            const isAgent = message.authorKind === "agent";
-            const time = formatChatTime(message.createdAtMs);
-            const reactions = reactionsByMessage.get(message.id) ?? [];
-            return (
-              <li
-                key={message.id}
-                ref={(element) => props.onMessageElement?.(message.id, element)}
-                data-testid={`${props.testIdPrefix}-message`}
-                data-message-id={message.id}
-                data-continues={continues ? "true" : "false"}
-                className={`group relative flex flex-col transition-shadow ${
-                  continues ? "mt-0.5" : "mt-3"
-                } ${
-                  props.flashMessageId === message.id
-                    ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-                    : ""
-                }`}
+    return grouped;
+  }, [props.reactionControls?.reactions]);
+  const list = useRef<LegendListRef | null>(null);
+  const [viewportHeight, setViewportHeight] = useState(700);
+  const [focusedMessage, setFocusedMessage] = useState<string | null>(null);
+  const [selectedMessages, setSelectedMessages] = useState<string[]>([]);
+  const indexes = useMemo(() => new Map(props.messages.map((message, index) => [message.id, index])), [props.messages]);
+  useImperativeHandle(props.listRef, () => ({
+    scrollToEnd: () => { void list.current?.scrollToEnd({ animated: false }); },
+    scrollToMessage(messageId) {
+      const index = indexes.get(messageId);
+      if (index === undefined) return false;
+      void list.current?.scrollToIndex({ index, animated: false, viewPosition: 0.5 });
+      return true;
+    },
+  }), [indexes]);
+
+  const messageKey = useCallback((node: Node | null) => {
+    const element = node instanceof Element ? node : node?.parentElement;
+    const id = element?.closest<HTMLElement>("[data-message-id]")?.dataset.messageId;
+    return id && indexes.has(id) ? id : null;
+  }, [indexes]);
+  useEffect(() => {
+    const selectionChanged = () => {
+      const selection = document.getSelection();
+      const start = messageKey(selection?.anchorNode ?? null);
+      const end = messageKey(selection?.focusNode ?? null);
+      if (selection?.isCollapsed || !start || !end) {
+        setSelectedMessages(current => current.length ? [] : current);
+        return;
+      }
+      const first = indexes.get(start)!;
+      const last = indexes.get(end)!;
+      const keys = props.messages.slice(Math.min(first, last), Math.max(first, last) + 1).map(message => message.id);
+      setSelectedMessages(current => current.length === keys.length && current.every((key, i) => key === keys[i]) ? current : keys);
+    };
+    document.addEventListener("selectionchange", selectionChanged);
+    return () => document.removeEventListener("selectionchange", selectionChanged);
+  }, [indexes, props.messages, messageKey]);
+  const hasReactionButtons = Boolean(props.reactionControls && !props.reactionControls.readOnly);
+  const canOpenPath = props.onOpenPath !== undefined;
+  const actionableIndexes = useMemo(() => {
+    if (hasReactionButtons || !canOpenPath) return [];
+    return props.messages.flatMap((message, index) =>
+      extractChatFileReferenceTokens(message.body).length > 0 ? [index] : []);
+  }, [props.messages, hasReactionButtons, canOpenPath]);
+  const pinned = useMemo(() => {
+    const focusedIndex = focusedMessage ? indexes.get(focusedMessage) : undefined;
+    const indices: number[] = [];
+    if (focusedIndex !== undefined) {
+      indices.push(focusedIndex);
+      if (hasReactionButtons) {
+        if (focusedIndex > 0) indices.push(focusedIndex - 1);
+        if (focusedIndex + 1 < props.messages.length) indices.push(focusedIndex + 1);
+      } else {
+        // Sparse read-only file links can be thousands of messages apart.
+        let lower = 0;
+        let upper = actionableIndexes.length;
+        while (lower < upper) {
+          const middle = Math.floor((lower + upper) / 2);
+          if (actionableIndexes[middle]! < focusedIndex) lower = middle + 1;
+          else upper = middle;
+        }
+        const previous = actionableIndexes[lower - 1];
+        const next = actionableIndexes[lower + (actionableIndexes[lower] === focusedIndex ? 1 : 0)];
+        if (previous !== undefined) indices.push(previous);
+        if (next !== undefined) indices.push(next);
+      }
+    }
+    return { keys: selectedMessages, indices };
+  }, [selectedMessages, focusedMessage, indexes, props.messages.length, hasReactionButtons, actionableIndexes]);
+
+  const renderMessage = useCallback(({ item: message, index: at }: { item: ChatMessageRecord; index: number }) => {
+    const previous = at > 0 ? props.messages[at - 1] : undefined;
+    const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
+    const continues =
+      !newDay &&
+      previous !== undefined &&
+      previous.authorKind === message.authorKind &&
+      (previous.authorUserId && message.authorUserId
+        ? previous.authorUserId === message.authorUserId
+        : !previous.authorUserId && !message.authorUserId &&
+          previous.authorDisplayName === message.authorDisplayName) &&
+      message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
+    const isAgent = message.authorKind === "agent";
+    const time = formatChatTime(message.createdAtMs);
+    const reactions = reactionsByMessage.get(message.id) ?? [];
+    return (
+      <li
+        key={message.id}
+        role="listitem"
+        aria-posinset={at + 1}
+        aria-setsize={props.messages.length}
+        data-testid={`${props.testIdPrefix}-message`}
+        data-message-id={message.id}
+        data-continues={continues ? "true" : "false"}
+        className={`group relative flex flex-col transition-shadow ${
+          continues ? "mt-0.5" : "mt-3"
+        } ${
+          props.flashMessageId === message.id
+            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            : ""
+        }`}
+      >
+        {newDay ? (
+          <span
+            data-testid={`${props.testIdPrefix}-day`}
+            className="mb-3 flex items-center gap-2 text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+          >
+            {formatChatDay(message.createdAtMs)}
+          </span>
+        ) : null}
+        <div className="flex gap-2.5">
+          <span className="flex h-5 w-9 shrink-0 items-start justify-end">
+            {continues ? (
+              <time
+                dateTime={time.iso}
+                title={time.iso}
+                className="block w-full whitespace-nowrap text-right font-mono text-[9px] leading-5 text-subtle opacity-0 group-hover:opacity-100"
               >
-                {newDay ? (
-                  <span
-                    data-testid={`${props.testIdPrefix}-day`}
-                    className="mb-3 flex items-center gap-2 text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
-                  >
-                    {formatChatDay(message.createdAtMs)}
-                  </span>
-                ) : null}
-                <div className="flex gap-2.5">
-                  <span className="flex h-5 w-9 shrink-0 items-start justify-end">
-                    {continues ? (
-                      <time
-                        dateTime={time.iso}
-                        title={time.iso}
-                        className="block w-full whitespace-nowrap text-right font-mono text-[9px] leading-5 text-subtle opacity-0 group-hover:opacity-100"
-                      >
-                        {formatClock(message.createdAtMs)}
-                      </time>
-                    ) : (
-                      <ChatAvatar
-                        name={message.authorDisplayName}
-                        kind={isAgent ? "agent" : "human"}
-                        size="comment"
-                      />
-                    )}
-                  </span>
-                  <div className="relative min-w-0 flex-1 pr-6">
-                    {!continues ? (
-                      <span className="flex items-baseline gap-1.5">
-                        <span
-                          data-testid={`${props.testIdPrefix}-message-author`}
-                          data-author-kind={message.authorKind}
-                          className={`shrink-0 text-[13px] font-semibold ${
-                            isAgent ? "text-agent" : "text-ink"
-                          }`}
-                        >
-                          {chatAuthorLabel(message)}
-                        </span>
-                        <time
-                          dateTime={time.iso}
-                          title={time.iso}
-                          className="shrink-0 text-[11px] text-subtle"
-                        >
-                          {formatClock(message.createdAtMs)}
-                        </time>
-                      </span>
-                    ) : null}
-                    <p
-                      data-testid={`${props.testIdPrefix}-message-body`}
-                      className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-5 text-ink"
-                    >
-                      <MentionText
-                        body={message.body}
-                        candidates={candidates}
-                        attachments={message.attachments}
-                        testId={`${props.testIdPrefix}-message-body`}
-                        onOpenPath={props.onOpenPath}
-                      />
-                    </p>
-                    {props.renderMessageFooter?.(message)}
-                    {props.reactionControls ? (
-                      <MessageReactions
-                        testIdPrefix={props.testIdPrefix}
-                        messageId={message.id}
-                        records={reactions}
-                        controls={props.reactionControls}
-                        overlayWhenEmpty
-                      />
-                    ) : null}
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <div ref={props.endRef} />
-    </div>
-  );
+                {formatClock(message.createdAtMs)}
+              </time>
+            ) : (
+              <ChatAvatar
+                name={message.authorDisplayName}
+                kind={isAgent ? "agent" : "human"}
+                size="comment"
+              />
+            )}
+          </span>
+          <div className="relative min-w-0 flex-1 pr-6">
+            {!continues ? (
+              <span className="flex items-baseline gap-1.5">
+                <span
+                  data-testid={`${props.testIdPrefix}-message-author`}
+                  data-author-kind={message.authorKind}
+                  className={`shrink-0 text-[13px] font-semibold ${
+                    isAgent ? "text-agent" : "text-ink"
+                  }`}
+                >
+                  {chatAuthorLabel(message)}
+                </span>
+                <time
+                  dateTime={time.iso}
+                  title={time.iso}
+                  className="shrink-0 text-[11px] text-subtle"
+                >
+                  {formatClock(message.createdAtMs)}
+                </time>
+              </span>
+            ) : null}
+            <p
+              data-testid={`${props.testIdPrefix}-message-body`}
+              className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-5 text-ink"
+            >
+              <MentionText
+                body={message.body}
+                candidates={candidates}
+                attachments={message.attachments}
+                testId={`${props.testIdPrefix}-message-body`}
+                onOpenPath={props.onOpenPath}
+              />
+            </p>
+            {props.renderMessageFooter?.(message)}
+            {props.reactionControls ? (
+              <MessageReactions
+                testIdPrefix={props.testIdPrefix}
+                messageId={message.id}
+                records={reactions}
+                controls={props.reactionControls}
+                overlayWhenEmpty
+              />
+            ) : null}
+          </div>
+        </div>
+      </li>
+    );
+  }, [props, candidates, reactionsByMessage]);
+  if (props.loading || props.messages.length === 0) {
+    return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+      <p className={`m-0 text-center text-[11px] text-subtle ${props.loading ? "" : "pt-4"}`}>
+        {props.loading ? "Loading..." : props.emptyLabel}
+      </p>
+    </div>;
+  }
+  return <LegendList
+    ref={list}
+    data={props.messages}
+    extraData={props}
+    keyExtractor={messageKeyExtractor}
+    renderItem={renderMessage}
+    estimatedItemSize={80}
+    initialScrollAtEnd
+    maintainScrollAtEnd={{ animated: false, on: { dataChange: true, itemLayout: true, layout: true } }}
+    // DOM scrollHeight rounds fractional row sizes to whole CSS pixels.
+    maintainScrollAtEndThreshold={40.5 / Math.max(1, viewportHeight)}
+    maintainVisibleContentPosition
+    onLayout={event => setViewportHeight(event.nativeEvent.layout.height)}
+    recycleItems={false}
+    alwaysRender={pinned}
+    className="min-h-0 flex-1 overflow-y-auto"
+    style={{ paddingTop: 8, paddingBottom: 8, paddingLeft: 12, paddingRight: 12 }}
+    role="list"
+    data-chat-virtualized="true"
+    onKeyDown={event => {
+      if (event.defaultPrevented || event.shiftKey || event.altKey || event.metaKey || event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      const viewport = list.current?.getScrollableNode();
+      if (!viewport || viewport.scrollHeight <= viewport.clientHeight) return;
+      // Browser offsets include Legend's measurement compensation. Navigate by item.
+      if (event.key === "Home") {
+        event.preventDefault();
+        void list.current?.scrollToIndex({ index: 0, animated: false });
+      } else if (event.key === "End") {
+        event.preventDefault();
+        void list.current?.scrollToEnd({ animated: false });
+      }
+    }}
+    onFocusCapture={event => setFocusedMessage(messageKey(event.target))}
+    onBlurCapture={event => setFocusedMessage(messageKey(event.relatedTarget))}
+  />;
 });
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while

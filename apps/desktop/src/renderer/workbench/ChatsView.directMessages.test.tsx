@@ -997,7 +997,9 @@ describe("ChatsView direct messages", () => {
     renderView();
     await user.click(await screen.findByTestId("chats-dm-item"));
     expect(await screen.findByText("React here")).toBeTruthy();
-    await user.click(screen.getByTestId("chats-dm-add-reaction"));
+    const reactionTrigger = screen.getByTestId("chats-dm-add-reaction");
+    vi.spyOn(reactionTrigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    await user.click(reactionTrigger);
     const thumbsUp = screen
       .getAllByTestId("chats-dm-reaction-choice")
       .find((button) => button.getAttribute("data-emoji") === "👍");

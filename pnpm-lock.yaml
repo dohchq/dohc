@@ -40,6 +40,7 @@ overrides:
   prosemirror-view: 1.42.2
 
 patchedDependencies:
+  '@legendapp/list@3.3.11': 56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b
   chokidar@5.0.0: 692638d364e0aa2e401826301baf15bbf83e8798bafcb69badefbad31928ee6e
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
 
@@ -101,6 +102,9 @@ importers:
       '@dohc/ydoc-projection':
         specifier: workspace:*
         version: link:../../packages/ydoc-projection
+      '@legendapp/list':
+        specifier: 3.3.11
+        version: 3.3.11(patch_hash=56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@tiptap/core':
         specifier: 3.29.2
         version: 3.29.2(@tiptap/pm@3.29.2)
@@ -1779,6 +1783,18 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@legendapp/list@3.3.11':
+    resolution: {integrity: sha512-QlCCkjbnpW6DUOtHNEUQ/qqB0hl3+JagbyjhzbMcUj1eD/gkl8QaGYB+wJMiG/omzjJRCpsM10bPPl9PWbx7CA==}
+    peerDependencies:
+      react: '*'
+      react-dom: '*'
+      react-native: '*'
+    peerDependenciesMeta:
+      react-dom:
+        optional: true
+      react-native:
+        optional: true
 
   '@lezer/common@1.5.2':
     resolution: {integrity: sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==}
@@ -7708,6 +7724,13 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@legendapp/list@3.3.11(patch_hash=56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+    dependencies:
+      react: 19.2.8
+      use-sync-external-store: 1.6.0(react@19.2.8)
+    optionalDependencies:
+      react-dom: 19.2.8(react@19.2.8)
 
   '@lezer/common@1.5.2': {}
 

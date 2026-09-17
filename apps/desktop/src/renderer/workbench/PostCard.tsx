@@ -157,7 +157,7 @@ export function PostCard(props: {
   const readOnly = props.reactionControls.readOnly === true || message === null;
 
   return (
-    <li
+    <div
       data-testid="chats-post-card"
       data-thread-id={props.thread.id}
       data-author-kind={message?.authorKind ?? "unknown"}
@@ -320,6 +320,6 @@ export function PostCard(props: {
           onOpen={props.onOpenBookmark}
         />
       </div>
-    </li>
+    </div>
   );
 }

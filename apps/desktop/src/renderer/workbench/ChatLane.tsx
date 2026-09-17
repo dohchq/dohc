@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatChannelRecord,
   ChatDecisionRecord,
@@ -10,7 +10,7 @@ import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { extractChatFileReferences } from "./chatFileMentions";
-import { ChatMessageList, runReactionToggle, type ChatReactionControls } from "./chatMessages";
+import { ChatMessageList, runReactionToggle, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
@@ -52,9 +52,7 @@ export function ChatLane(props: {
   const onThreadRead = useRef(props.onThreadRead);
   onThreadRead.current = props.onThreadRead;
   const reactionSeq = useRef(new Map<string, number>());
-  const endRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const followingEnd = useRef(true);
+  const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
@@ -161,33 +159,6 @@ export function ChatLane(props: {
     return () => { active = false; unsubscribe(); };
   }, [load, workspaceId]);
 
-  useLayoutEffect(() => {
-    followingEnd.current = true;
-  }, [channelId, workspaceId]);
-
-  const followEnd = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (scroll && followingEnd.current) scroll.scrollTop = scroll.scrollHeight;
-  }, []);
-  const onScroll = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (scroll) followingEnd.current = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 40;
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!loading) followEnd();
-  }, [followEnd, loading, messages]);
-
-  useEffect(() => {
-    const scroll = scrollRef.current;
-    const content = scroll?.firstElementChild;
-    if (loading || !scroll || !content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(followEnd);
-    observer.observe(scroll);
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [followEnd, loading, messages.length === 0]);
-
   const send = useCallback(async () => {
     const body = composer.trim();
     if (body.length === 0 || sending || loading || props.locked) return;
@@ -204,7 +175,7 @@ export function ChatLane(props: {
         });
         if (current !== token.current) return;
         loadSequence.current += 1;
-        followingEnd.current = true;
+        listRef.current?.scrollToEnd();
         setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
       } else {
         const result = await bridge().startChannelThread({
@@ -216,7 +187,7 @@ export function ChatLane(props: {
         });
         if (current !== token.current) return;
         loadSequence.current += 1;
-        followingEnd.current = true;
+        listRef.current?.scrollToEnd();
         setThreadId(result.thread.id);
         setMessages([result.message]);
         setViewerAuthorId(result.viewerAuthorId);
@@ -239,7 +210,7 @@ export function ChatLane(props: {
       const result = await bridge().sendChatMessage({ workspaceId, threadId, body: option });
       if (current !== token.current) return;
       loadSequence.current += 1;
-      followingEnd.current = true;
+      listRef.current?.scrollToEnd();
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
       const resolved = await bridge().resolveChatDecision({
         workspaceId, threadId, messageId: decision.messageId,
@@ -300,9 +271,8 @@ export function ChatLane(props: {
         messages={messages}
         loading={loading}
         emptyLabel="No messages yet"
-        endRef={endRef}
-        scrollRef={scrollRef}
-        onScroll={onScroll}
+        key={`${workspaceId}:${channelId}`}
+        listRef={listRef}
         mentionCandidates={props.mentionCandidates}
         onOpenPath={props.onOpenPath}
         reactionControls={reactionControls}

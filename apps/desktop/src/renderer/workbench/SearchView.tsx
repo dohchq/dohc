@@ -82,7 +82,14 @@ const FileGroup = memo(function FileGroup(props: {
   const chatEntry = group.entries.find((entry) => entry.surface === "chat");
   const groupTitle = chatEntry?.title ?? basenameOf(group.path);
   return (
-    <li data-testid="search-result-group" data-path={group.path}>
+    <li
+      data-testid="search-result-group"
+      data-path={group.path}
+      style={{
+        contentVisibility: "auto",
+        containIntrinsicSize: `auto ${props.collapsed ? 28 : 28 * (1 + visible.length + (hidden > 0 ? 1 : 0))}px`,
+      }}
+    >
       <button
         type="button"
         data-testid="search-group-toggle"

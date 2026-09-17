@@ -1,0 +1,150 @@
+diff --git a/react.js b/react.js
+index 874465090398bbfb1b079e82dd175490020eaabf..e89b2e34a110c965c756635776b2081a03c72d3d 100644
+--- a/react.js
++++ b/react.js
+@@ -721,7 +721,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
+     set$(
+       ctx,
+       "isWithinMaintainScrollAtEndThreshold",
+-      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || maintainingScrollAtEnd === "animated" || maintainingScrollAtEnd === "instant"
++      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || !!maintainingScrollAtEnd
+     );
+     const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
+     if (!shouldSkipThresholdChecks) {
+@@ -5926,6 +5926,29 @@ function useDOMOrder(ref) {
+     let timeoutId;
+     let lastUpdateTime = 0;
+     let delay = 500;
++    const reorder = () => {
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
++          }
++        }
++        sortDOMElements(parent, indexByElement);
++      }
++    };
++    const onKeyDown = (event) => {
++      if (event.key === "Tab") {
++        clearTimeout(timeoutId);
++        timeoutId = void 0;
++        reorder();
++      }
++    };
++    const ownerDocument = ref.current?.ownerDocument;
++    ownerDocument?.addEventListener("keydown", onKeyDown, true);
+     const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
+       const container = ref.current;
+       const now = Date.now();
+@@ -5934,21 +5957,11 @@ function useDOMOrder(ref) {
+       clearTimeout(timeoutId);
+       timeoutId = setTimeout(() => {
+         timeoutId = void 0;
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
+-          }
+-          sortDOMElements(parent, indexByElement);
+-        }
++        reorder();
+       }, delay);
+     });
+     return () => {
++      ownerDocument?.removeEventListener("keydown", onKeyDown, true);
+       unsubscribe();
+       clearTimeout(timeoutId);
+     };
+@@ -7670,6 +7683,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+     scrollToIndex: (params) => {
+       return runScrollWithPromise(
+         () => {
++          state.mvcpAnchorLock = void 0;
+           scrollToIndex(ctx, params);
+           return true;
+         },
+diff --git a/react.mjs b/react.mjs
+index d9a4414a9295c694f9c2b71cf75268a422f897e4..e0589e926e776219b268a385aec89ace02d2557f 100644
+--- a/react.mjs
++++ b/react.mjs
+@@ -700,7 +700,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
+     set$(
+       ctx,
+       "isWithinMaintainScrollAtEndThreshold",
+-      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || maintainingScrollAtEnd === "animated" || maintainingScrollAtEnd === "instant"
++      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || !!maintainingScrollAtEnd
+     );
+     const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
+     if (!shouldSkipThresholdChecks) {
+@@ -5905,6 +5905,29 @@ function useDOMOrder(ref) {
+     let timeoutId;
+     let lastUpdateTime = 0;
+     let delay = 500;
++    const reorder = () => {
++      const parent = ref.current;
++      if (parent) {
++        const indexByElement = /* @__PURE__ */ new Map();
++        for (const [containerId, viewRef] of ctx.viewRefs) {
++          const element = viewRef.current;
++          const index = peek$(ctx, `containerItemIndex${containerId}`);
++          if (element && index !== void 0) {
++            indexByElement.set(element, index);
++          }
++        }
++        sortDOMElements(parent, indexByElement);
++      }
++    };
++    const onKeyDown = (event) => {
++      if (event.key === "Tab") {
++        clearTimeout(timeoutId);
++        timeoutId = void 0;
++        reorder();
++      }
++    };
++    const ownerDocument = ref.current?.ownerDocument;
++    ownerDocument?.addEventListener("keydown", onKeyDown, true);
+     const unsubscribe = listen$(ctx, "lastPositionUpdate", () => {
+       const container = ref.current;
+       const now = Date.now();
+@@ -5913,21 +5936,11 @@ function useDOMOrder(ref) {
+       clearTimeout(timeoutId);
+       timeoutId = setTimeout(() => {
+         timeoutId = void 0;
+-        const parent = ref.current;
+-        if (parent) {
+-          const indexByElement = /* @__PURE__ */ new Map();
+-          for (const [containerId, viewRef] of ctx.viewRefs) {
+-            const element = viewRef.current;
+-            const index = peek$(ctx, `containerItemIndex${containerId}`);
+-            if (element && index !== void 0) {
+-              indexByElement.set(element, index);
+-            }
+-          }
+-          sortDOMElements(parent, indexByElement);
+-        }
++        reorder();
+       }, delay);
+     });
+     return () => {
++      ownerDocument?.removeEventListener("keydown", onKeyDown, true);
+       unsubscribe();
+       clearTimeout(timeoutId);
+     };
+@@ -7649,6 +7662,7 @@ function createImperativeHandle(ctx, scheduleImperativeScrollCommit) {
+     scrollToIndex: (params) => {
+       return runScrollWithPromise(
+         () => {
++          state.mvcpAnchorLock = void 0;
+           scrollToIndex(ctx, params);
+           return true;
+         },

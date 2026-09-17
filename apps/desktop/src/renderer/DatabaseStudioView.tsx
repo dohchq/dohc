@@ -111,7 +111,7 @@ export function DatabaseStudioView(props: {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [activeName, setActiveName] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
-  const [draft, setDraft] = useState("");
+  const draftRef = useRef("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState>(null);
   const [error, setError] = useState(false);
@@ -240,7 +240,7 @@ export function DatabaseStudioView(props: {
     setSort(null);
   }
 
-  async function commitEdit(table: Table) {
+  async function commitEdit(table: Table, draft: string) {
     if (!editing) return;
     const current = editing;
     const targetWorkspaceId = workspaceId;
@@ -438,9 +438,8 @@ export function DatabaseStudioView(props: {
                 table={active}
                 rows={visibleRows}
                 editing={editing}
-                draft={draft}
+                draftRef={draftRef}
                 sort={sort}
-                onDraft={setDraft}
                 onSort={(column) =>
                   setSort((current) => {
                     if (current?.column !== column)
@@ -453,10 +452,10 @@ export function DatabaseStudioView(props: {
                 }
                 onBeginEdit={(cell, value) => {
                   if (props.readOnly) return;
-                  setDraft(value);
+                  draftRef.current = value;
                   setEditing(cell);
                 }}
-                onCommit={() => void commitEdit(active)}
+                onCommit={(value) => void commitEdit(active, value)}
                 onCancel={() => setEditing(null)}
               />
             </>
@@ -500,12 +499,11 @@ function DatabaseGrid(props: {
   table: Table;
   rows: Array<{ row: Row; sourceIndex: number }>;
   editing: EditingCell | null;
-  draft: string;
+  draftRef: { current: string };
   sort: SortState;
-  onDraft: (value: string) => void;
   onSort: (column: string) => void;
   onBeginEdit: (cell: EditingCell, currentValue: string) => void;
-  onCommit: () => void;
+  onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
   const { table } = props;
@@ -631,18 +629,10 @@ function DatabaseGrid(props: {
                       } ${editable ? "cursor-text text-ink" : "text-muted"}`}
                     >
                       {isEditing ? (
-                        <input
-                          spellCheck={false}
-                          data-testid="db-cell-input"
-                          autoFocus
-                          value={props.draft}
-                          onChange={(e) => props.onDraft(e.target.value)}
-                          onBlur={props.onCommit}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") props.onCommit();
-                            else if (e.key === "Escape") props.onCancel();
-                          }}
-                          className="w-full rounded border border-ink bg-bg px-1.5 py-0.5 text-[13px] text-ink outline-none"
+                        <DatabaseCellEditor
+                          draftRef={props.draftRef}
+                          onCommit={props.onCommit}
+                          onCancel={props.onCancel}
                         />
                       ) : (
                         <span
@@ -666,5 +656,36 @@ function DatabaseGrid(props: {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function DatabaseCellEditor({
+  draftRef,
+  onCommit,
+  onCancel,
+}: {
+  draftRef: { current: string };
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(draftRef.current);
+  return (
+    <input
+      spellCheck={false}
+      data-testid="db-cell-input"
+      autoFocus
+      value={draft}
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => {
+        draftRef.current = event.target.value;
+        setDraft(event.target.value);
+      }}
+      onBlur={() => onCommit(draft)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") onCommit(draft);
+        else if (event.key === "Escape") onCancel();
+      }}
+      className="w-full rounded border border-ink bg-bg px-1.5 py-0.5 text-[13px] text-ink outline-none"
+    />
   );
 }
