@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
@@ -7,6 +7,9 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 import { buildTree } from "./path-tree";
 import { basenameOf } from "../path";
 import { isSingletonEditorTabPath } from "./workbenchState";
+import { useWorkspaceListing } from "../shell/useWorkspaceListing";
+import { indexFileListing } from "./file-listing-index";
+import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 
 // Real implementations, spied: every TreeRow render names its row through
 // basenameOf, so its call count shows which rows actually re-rendered (the
@@ -16,6 +19,7 @@ import { isSingletonEditorTabPath } from "./workbenchState";
 vi.mock("./path-tree", { spy: true });
 vi.mock("../path", { spy: true });
 vi.mock("./workbenchState", { spy: true });
+vi.mock("./file-listing-index", { spy: true });
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -83,6 +87,48 @@ function basenameOfCalls(): number {
 }
 
 describe("Explorer render cost", () => {
+  it("keeps listing indexes and the tree through equal revalidation and activity replies", async () => {
+    const previousBridge = window.dohcDesktop;
+    const listWorkspaceFiles = vi.fn();
+    window.dohcDesktop = { listWorkspaceFiles } as unknown as DohcDesktopBridge;
+    const props = explorerProps();
+    let listing!: ReturnType<typeof useWorkspaceListing>;
+    function Host() {
+      listing = useWorkspaceListing(props.workspaceId);
+      return <Explorer {...props} files={listing.files} folders={listing.folders} />;
+    }
+    try {
+      render(<Host />);
+      const costs: Array<{ indexes: number; trees: number }> = [];
+      for (const cached of [true, false, true, true]) {
+        listWorkspaceFiles.mockResolvedValueOnce({
+          files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" })),
+          folders: [],
+          ...(cached ? { cached: true } : {}),
+        });
+        const indexes = vi.mocked(indexFileListing).mock.calls.length;
+        const trees = vi.mocked(buildTree).mock.calls.length;
+        await act(async () => { await listing.refreshFiles(cached ? { allowCached: true } : {}); });
+        costs.push({
+          indexes: vi.mocked(indexFileListing).mock.calls.length - indexes,
+          trees: vi.mocked(buildTree).mock.calls.length - trees,
+        });
+        expect(listing.filesRevalidated).toBe(!cached);
+      }
+      expect(costs).toEqual([
+        { indexes: 1, trees: 1 },
+        { indexes: 0, trees: 0 },
+        { indexes: 0, trees: 0 },
+        { indexes: 0, trees: 0 },
+      ]);
+      expect(listing.fileListingCommit?.request).toBe(4);
+      expect(listing.listingsSettled).toBe(4);
+      expect(screen.getAllByTestId("tree-row").length).toBeGreaterThan(0);
+    } finally {
+      window.dohcDesktop = previousBridge;
+    }
+  });
+
   it("keeps the same tree for a same-listing rerender", () => {
     const props = explorerProps();
     const view = render(<Explorer {...props} />);
