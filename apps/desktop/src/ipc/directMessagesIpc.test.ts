@@ -121,7 +121,7 @@ async function harness() {
     registerHandler: () => undefined, assertTrustedSender, withRendererWorkspaceOperation,
     requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor,
     remoteForWorkspace: remote, currentCredentialGeneration: () => generation, currentCredentials: () => current,
-    warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => undefined,
+    warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => ({}),
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
     listWorkspaces: () => [workspace], setWorkspaceSharedChannels: writeChannels,
     relayClientForWorkspace: () => ({ pullSharedChannel: pull }), projectPendingChatBookmarksAfterPull: project,

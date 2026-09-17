@@ -77,7 +77,7 @@ export function registerSharedChannelsIpcHandlers<
   // code does. Joining a group is one action: the channel, then its folder.
   unmountShareFolder(input: {
     workspace: Workspace; shareId: string; assertCurrent(): void;
-  }): Promise<unknown>;
+  }): Promise<{ folderLeft?: true }>;
   mountShareFolder(input: {
     workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
   }): Promise<unknown>;
@@ -584,13 +584,19 @@ export function registerSharedChannelsIpcHandlers<
       async (operation) => {
         endWorkspaceJoinedChannel(operation, input.shareId);
         if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
+          let folderLeft = false;
           try {
-            await unmountShareFolder({
+            folderLeft = (await unmountShareFolder({
               workspace: operation.workspace, shareId: input.shareId, assertCurrent: operation.assertCurrent,
-            });
+            })).folderLeft === true;
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
+          }
+          if (folderLeft) {
+            throw new Error(
+              "Left the group, but its folder could not be removed. Remove it under Settings, Shared folders.",
+            );
           }
         }
         return undefined;

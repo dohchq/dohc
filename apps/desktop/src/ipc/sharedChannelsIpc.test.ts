@@ -67,7 +67,7 @@ async function harness() {
   });
   const notify = vi.fn();
   const acknowledge = vi.fn();
-  const unmount = vi.fn(async () => undefined);
+  const unmount = vi.fn<() => Promise<{ folderLeft?: true }>>(async () => ({}));
   const mount = vi.fn(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
@@ -184,6 +184,11 @@ describe("registered shared-channel handlers", () => {
     await expect(h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" }))
       .rejects.toThrow("Left the group, but its folder could not be removed. disk busy");
     expect(h.workspace.sharedChannels?.find(row => row.shareId === "shown")?.ended).toBe(true);
+    // The unmount can resolve with the folder still on disk; that is reported
+    // the same way, and the leave still stands.
+    h.unmount.mockResolvedValueOnce({ folderLeft: true });
+    await expect(h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" }))
+      .rejects.toThrow("Left the group, but its folder could not be removed. Remove it under Settings");
   });
 
   it("does not cache an invitation kind returned after the account changes", async () => {

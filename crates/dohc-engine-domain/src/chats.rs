@@ -2342,10 +2342,7 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
-            return self.reconstruct_thread_message(
-                &input.workspace_id,
-                &input.message_id,
-            );
+            return self.reconstruct_thread_message(&input.workspace_id, &input.message_id);
         }
 
         let mut input = input.clone();
@@ -2424,7 +2421,7 @@ impl<'a> LinkedChatStore<'a> {
             index_message_mentions_in_tx(
                 tx,
                 &input.workspace_id,
-                &thread_id,
+                thread_id,
                 &input.message_id,
                 input.author_kind,
                 &body_c,
@@ -2434,18 +2431,18 @@ impl<'a> LinkedChatStore<'a> {
                 "UPDATE chat_threads SET updated_at_ms = ?3 WHERE workspace_id = ?1 AND thread_id = ?2",
                 params![input.workspace_id, thread_id, now],
             ).map_err(DomainError::sql_persist)?;
-            mark_live_bookmarks_pending(tx, &input.workspace_id, &thread_id, now)?;
+            mark_live_bookmarks_pending(tx, &input.workspace_id, thread_id, now)?;
             if input.author_kind == ChatActorKind::Human {
-                advance_read_cursor(tx, &input.workspace_id, &thread_id, order.saturating_add(1), now, None)?;
+                advance_read_cursor(tx, &input.workspace_id, thread_id, order.saturating_add(1), now, None)?;
             }
             let thread = require_thread(tx, &input.workspace_id, thread_id)?;
             let display_title = &thread.title;
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
-                &thread_id,
+                thread_id,
                 CHAT_THREAD_HEADER_MESSAGE_ID,
-                &display_title,
+                display_title,
             )
             .map_err(DomainError::sql_persist)?;
             let message_search_text = chat_message_search_text(
@@ -2456,7 +2453,7 @@ impl<'a> LinkedChatStore<'a> {
             upsert_chat_search_index_row(
                 tx,
                 &input.workspace_id,
-                &thread_id,
+                thread_id,
                 &input.message_id,
                 &message_search_text,
             )
@@ -2483,7 +2480,7 @@ impl<'a> LinkedChatStore<'a> {
                 ensure_thread_structure_exported(
                     tx,
                     &input.workspace_id,
-                    &thread_id,
+                    thread_id,
                     now,
                 )?;
                 journal_local_op_in_tx(
@@ -2501,7 +2498,7 @@ impl<'a> LinkedChatStore<'a> {
                     tx,
                     &input.workspace_id,
                     author_user_id,
-                    &thread_id,
+                    thread_id,
                     now,
                 )?;
             }
@@ -2509,7 +2506,7 @@ impl<'a> LinkedChatStore<'a> {
                 journal_decision_set(
                     tx,
                     &input.workspace_id,
-                    &thread_id,
+                    thread_id,
                     &input.message_id,
                     ChatDecisionState::Open,
                     None,
@@ -2521,14 +2518,14 @@ impl<'a> LinkedChatStore<'a> {
             let message_attachments = add_local_attachments(
                 tx,
                 &input.workspace_id,
-                &thread_id,
+                thread_id,
                 &input.message_id,
                 &attachments_c,
                 now,
                 replicate,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
-            bump_chat_conversation_revision(tx, &input.workspace_id, &thread_id)?;
+            bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
             let message = ChatMessage {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: thread_id.to_owned(),
@@ -5539,7 +5536,8 @@ pub fn normalize_channel_group(
     kind: ChatChannelKind,
 ) -> Result<ChannelGroup, DomainError> {
     let purpose = group.purpose.trim().to_owned();
-    if purpose.encode_utf16().count() > MAX_CHANNEL_PURPOSE_CHARS || purpose.contains(['\n', '\r']) {
+    if purpose.encode_utf16().count() > MAX_CHANNEL_PURPOSE_CHARS || purpose.contains(['\n', '\r'])
+    {
         return Err(DomainError::chat(
             "invalid-channel-purpose",
             "A group's purpose is one line of at most 200 characters.",

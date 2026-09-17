@@ -179,7 +179,18 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
     assert_eq!(err.code(), "invalid-channel-folder");
 
     // Traversal and absolute paths are refused.
-    for bad in ["../up", "/abs", "a//b", "a/./b", ".dohc/chats", ".git/config", "a/%2e%2e/b", "a/%2e/b", " team", "team "] {
+    for bad in [
+        "../up",
+        "/abs",
+        "a//b",
+        "a/./b",
+        ".dohc/chats",
+        ".git/config",
+        "a/%2e%2e/b",
+        "a/%2e/b",
+        " team",
+        "team ",
+    ] {
         let err = chats
             .create_group(
                 WS,
@@ -222,10 +233,33 @@ fn competing_chat_lane_starts_append_to_one_thread_and_retry_the_same_message() 
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
-    chats.create_channel(WS, "chan-1", "Team", ChatChannelKind::Channel, 1, &NO_FAULTS).unwrap();
-    let mut first = start_thread("chan-1", "lane-a", "msg-a", "First", ChatActorKind::Human, 10);
+    chats
+        .create_channel(
+            WS,
+            "chan-1",
+            "Team",
+            ChatChannelKind::Channel,
+            1,
+            &NO_FAULTS,
+        )
+        .unwrap();
+    let mut first = start_thread(
+        "chan-1",
+        "lane-a",
+        "msg-a",
+        "First",
+        ChatActorKind::Human,
+        10,
+    );
     first.lane = ChatThreadLane::Chat;
-    let mut second = start_thread("chan-1", "lane-b", "msg-b", "Second", ChatActorKind::Human, 10);
+    let mut second = start_thread(
+        "chan-1",
+        "lane-b",
+        "msg-b",
+        "Second",
+        ChatActorKind::Human,
+        10,
+    );
     second.lane = ChatThreadLane::Chat;
     second.author_user_id = Some("user-bob".to_owned());
     second.request_id = Some("second-start".to_owned());
@@ -237,15 +271,25 @@ fn competing_chat_lane_starts_append_to_one_thread_and_retry_the_same_message() 
     let (retry_thread, retry_message) = chats.start_channel_thread(&second, &NO_FAULTS).unwrap();
     assert_eq!(retry_thread.thread_id, "lane-a");
     assert_eq!(retry_message.message_id, "msg-b");
-    let threads = chats.list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10).unwrap();
+    let threads = chats
+        .list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10)
+        .unwrap();
     assert_eq!(threads.len(), 1);
     assert_eq!(threads[0].message_count, 2);
 }
 
 #[test]
 fn group_purpose_counts_utf16_units() {
-    let group = ChannelGroup { purpose: "💥".repeat(101), ..ChannelGroup::default() };
-    assert_eq!(dohc_engine_domain::normalize_channel_group(group, ChatChannelKind::Channel).unwrap_err().code(), "invalid-channel-purpose");
+    let group = ChannelGroup {
+        purpose: "💥".repeat(101),
+        ..ChannelGroup::default()
+    };
+    assert_eq!(
+        dohc_engine_domain::normalize_channel_group(group, ChatChannelKind::Channel)
+            .unwrap_err()
+            .code(),
+        "invalid-channel-purpose"
+    );
 }
 
 #[test]

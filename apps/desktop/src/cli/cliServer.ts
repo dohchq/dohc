@@ -595,10 +595,7 @@ async function loadThreads(
   const summaries = await Promise.all(
     channels.map(async ({ engine, cli }) => ({
       cli,
-      summaries: await context.store.listChannelThreads({
-        workspaceId: context.workspaceId,
-        channelId: engine.id,
-      }),
+      summaries: await listCliChannelThreads(context, engine),
     })),
   );
   const byId = new Map<string, LoadedThread>();
@@ -2025,10 +2022,7 @@ async function dispatch(
         const groups = await Promise.all(
           channels.map(async (channel) => ({
             channel,
-            summaries: await context.store.listChannelThreads({
-              workspaceId: context.workspaceId,
-              channelId: channel.engine.id,
-            }),
+            summaries: await listCliChannelThreads(context, channel.engine),
           })),
         );
         const channelThreads = groups.flatMap(({ channel, summaries }) =>
