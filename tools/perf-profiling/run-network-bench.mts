@@ -180,11 +180,13 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
 async function pushAll(relay: { push(): Promise<any> }) {
   let total = 0;
   let last: any = null;
+  const responses: any[] = [];
   do {
     last = await relay.push();
+    responses.push(last);
     total += last.pushed;
   } while (last.pushed > 0);
-  return { ...last, pushed: total };
+  return { ...last, pushed: total, responses };
 }
 
 try {
