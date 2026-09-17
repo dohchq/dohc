@@ -5303,6 +5303,265 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     call(&transport, &handle, 8, "workspace.close", json!({})).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edited_document_can_reseed_and_close_without_another_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let path = "notes/reopen.md";
+    write_file(scratch.path(), path, b"Original paragraph.\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-edited-reseed", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": path, "contentKind": "richdoc"
+        }),
+    )
+    .await;
+    let session = opened["sessionId"].as_str().expect("session");
+    let object = opened["objectId"].as_str().expect("object");
+    let doc = Ydoc::wire();
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
+    })).await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session, "updateBase64": richdoc_update(&doc, "One edit.")
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    let before = std::fs::read(scratch.path().join(path)).expect("settled bytes");
+    let before_mtime = std::fs::metadata(scratch.path().join(path))
+        .expect("metadata")
+        .modified()
+        .expect("mtime");
+    let before_moments = moment_count_for_object(&transport, &handle, 6, object).await;
+
+    let reopened = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": path, "contentKind": "richdoc"
+        }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("absent"));
+    assert_eq!(
+        reopened["seedContent"],
+        json!(String::from_utf8(before.clone()).expect("utf8"))
+    );
+    let session = reopened["sessionId"].as_str().expect("reopened session");
+    call(&transport, &handle, 8, "ydoc.recordUpdate", json!({
+        "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
+    })).await;
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.close",
+        json!({ "sessionId": session }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join(path)).expect("bytes"),
+        before
+    );
+    assert_eq!(
+        std::fs::metadata(scratch.path().join(path))
+            .expect("metadata")
+            .modified()
+            .expect("mtime"),
+        before_mtime
+    );
+    assert_eq!(
+        moment_count_for_object(&transport, &handle, 10, object).await,
+        before_moments
+    );
+    let final_open = call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": path, "contentKind": "richdoc"
+        }),
+    )
+    .await;
+    assert_eq!(final_open["lineage"], json!("absent"));
+    call(
+        &transport,
+        &handle,
+        12,
+        "ydoc.close",
+        json!({
+            "sessionId": final_open["sessionId"], "settle": false
+        }),
+    )
+    .await;
+    call(&transport, &handle, 13, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_before_pruning() {
+    for missing_proof in [
+        "disk-changed",
+        "head-moved",
+        "seed-missing",
+        "pending-job",
+        "failed-job",
+        "new-edit",
+    ] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = "notes/reopen.md";
+        write_file(scratch.path(), path, b"Original paragraph.\n");
+        let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-reseed-proof", 1).await;
+        let opened = call(
+            &transport,
+            &handle,
+            2,
+            "ydoc.open",
+            json!({
+                "versionId": "main", "path": path, "contentKind": "richdoc"
+            }),
+        )
+        .await;
+        let session = opened["sessionId"].as_str().expect("session");
+        let object = opened["objectId"].as_str().expect("object");
+        let doc = Ydoc::wire();
+        call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+            "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
+        })).await;
+        call(
+            &transport,
+            &handle,
+            4,
+            "ydoc.recordUpdate",
+            json!({
+                "sessionId": session, "updateBase64": richdoc_update(&doc, "Saved edit.")
+            }),
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            5,
+            "ydoc.close",
+            json!({ "sessionId": session }),
+        )
+        .await;
+        let reopened = call(
+            &transport,
+            &handle,
+            6,
+            "ydoc.open",
+            json!({
+                "versionId": "main", "path": path, "contentKind": "richdoc"
+            }),
+        )
+        .await;
+        let session = reopened["sessionId"].as_str().expect("reopened session");
+        call(&transport, &handle, 7, "ydoc.recordUpdate", json!({
+            "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
+        })).await;
+        let connection = rusqlite::Connection::open(engine_db_path(&scratch).expect("db path"))
+            .expect("connection");
+        match missing_proof {
+            "disk-changed" => write_file(scratch.path(), path, b"External work.\n"),
+            "head-moved" => {
+                connection
+                    .execute(
+                        "UPDATE snapshots SET path = 'notes/moved.md' WHERE object_id = ?1",
+                        [object],
+                    )
+                    .expect("move head");
+            }
+            "seed-missing" => {
+                connection
+                    .execute(
+                        "UPDATE ydoc_docs SET seed_source_sha256 = NULL WHERE object_id = ?1",
+                        [object],
+                    )
+                    .expect("remove seed proof");
+            }
+            "pending-job" => {
+                connection.execute("UPDATE materialization_jobs SET status = 'pending', completed_at_ms = NULL WHERE target_path = ?1", [path]).expect("pending job");
+            }
+            "failed-job" => {
+                connection.execute("UPDATE materialization_jobs SET status = 'conflict' WHERE target_path = ?1", [path]).expect("failed job");
+                write_file(scratch.path(), path, b"External work.\n");
+            }
+            "new-edit" => {
+                call(
+                    &transport,
+                    &handle,
+                    8,
+                    "ydoc.recordUpdate",
+                    json!({
+                        "sessionId": session, "updateBase64": richdoc_update(&doc, "Still unsaved.")
+                    }),
+                )
+                .await;
+            }
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(scratch.path().join(path)).expect("before refused close");
+        let refused = call_error(
+            &transport,
+            &handle,
+            9,
+            "ydoc.close",
+            json!({
+                "sessionId": session, "settle": false
+            }),
+        )
+        .await;
+        assert_eq!(refused.message, "ydoc-unsettled-close", "{missing_proof}");
+        assert_eq!(
+            std::fs::read(scratch.path().join(path)).expect("after refused close"),
+            before,
+            "{missing_proof}"
+        );
+        let updates: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM ydoc_updates WHERE object_id = ?1",
+                [object],
+                |row| row.get(0),
+            )
+            .expect("retained updates");
+        assert!(
+            updates > 0,
+            "{missing_proof}: refusal must retain durable edits"
+        );
+        drop(connection);
+        call(
+            &transport,
+            &handle,
+            10,
+            "ydoc.evict",
+            json!({ "sessionId": session }),
+        )
+        .await;
+        call(&transport, &handle, 11, "workspace.close", json!({})).await;
+    }
+}
+
 /// #815 pin 3: a prior session's unsettled real ops (seed + edit surviving an
 /// evict) must still settle with a write when the next session — which itself
 /// records nothing — closes.
