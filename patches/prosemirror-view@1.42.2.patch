@@ -1,0 +1,69 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index a615cb7cd5d320ac05db42ae3b0a516e08c72e91..a354ebc135fabdaf084918d28859fb03858bbf17 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -3860,6 +3860,7 @@ var DecorationSet = function () {
+   function DecorationSet(local, children) {
+     _classCallCheck(this, DecorationSet);
+     this.local = local.length ? local : none;
++    this.hasInline = local.some(InlineType.is);
+     this.children = children.length ? children : none;
+   }
+   _createClass(DecorationSet, [{
+@@ -3975,6 +3976,7 @@ var DecorationSet = function () {
+         if (this.children[i] == offset) child = this.children[i + 2];
+         break;
+       }
++      if (!this.hasInline) return child || empty;
+       var start = offset + 1,
+         end = start + node.content.size;
+       for (var _i9 = 0; _i9 < this.local.length; _i9++) {
+diff --git a/dist/index.js b/dist/index.js
+index 61118eedda91103ffe9801239855f505c42b0751..3339e84544ee5cc9f1b1f4c8161715a1958974de 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -4115,6 +4115,7 @@ class DecorationSet {
+     */
+     constructor(local, children) {
+         this.local = local.length ? local : none;
++        this.hasInline = local.some(InlineType.is);
+         this.children = children.length ? children : none;
+     }
+     /**
+@@ -4272,6 +4273,7 @@ class DecorationSet {
+                     child = this.children[i + 2];
+                 break;
+             }
++        if (!this.hasInline) return child || empty;
+         let start = offset + 1, end = start + node.content.size;
+         for (let i = 0; i < this.local.length; i++) {
+             let dec = this.local[i];
+diff --git a/src/decoration.ts b/src/decoration.ts
+index 31ee3700a3da54a83f37c61a5a2e1c874d5e1ece..0b85b04628a0cae05b5a6d791d696a1008b1dd5c 100644
+--- a/src/decoration.ts
++++ b/src/decoration.ts
+@@ -284,6 +284,8 @@ export interface DecorationSource {
+ /// them. This is a persistent data structure—it is not modified,
+ /// updates create a new value.
+ export class DecorationSet implements DecorationSource {
++  /// @internal
++  hasInline: boolean
+   /// @internal
+   local: readonly Decoration[]
+   /// @internal
+@@ -292,6 +294,7 @@ export class DecorationSet implements DecorationSource {
+   /// @internal
+   constructor(local: readonly Decoration[], children: readonly (number | DecorationSet)[]) {
+     this.local = local.length ? local : none
++    this.hasInline = local.some(InlineType.is)
+     this.children = children.length ? children : none
+   }
+ 
+@@ -437,6 +440,7 @@ export class DecorationSet implements DecorationSource {
+       if (this.children[i] == offset) child = this.children[i + 2] as DecorationSet
+       break
+     }
++    if (!this.hasInline) return child || empty
+     let start = offset + 1, end = start + node.content.size
+     for (let i = 0; i < this.local.length; i++) {
+       let dec = this.local[i]

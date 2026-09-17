@@ -618,6 +618,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
+  assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), { rust: true, js: true });
   for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", "scripts/verification/verify.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
