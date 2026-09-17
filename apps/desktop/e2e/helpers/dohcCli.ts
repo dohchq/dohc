@@ -73,4 +73,3 @@ export async function waitForCliEndpoint(homeDir: string): Promise<void> {
     )
     .toBe(true);
 }
-

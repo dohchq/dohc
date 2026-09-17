@@ -23,11 +23,11 @@ function message(index: number): ChatMessageRecord {
     id: `m-${index}`,
     threadId: "conversation",
     authorKind: "human",
-    authorDisplayName: `Person ${Math.floor(index / 3) % 4}`,
+    authorDisplayName: `Person ${Math.abs(Math.floor(index / 3) % 4)}`,
     createdAtMs: 1_700_000_000_000 + index * 60_000,
     body: `Message ${index}. ` + (sparse
       ? index % 100 === 0 ? `See @[notes/plan-${index}.md].` : "Plain text."
-      : "A varied length conversation for scrolling and reading. ".repeat(1 + index % 4)),
+      : "A varied length conversation for scrolling and reading. ".repeat(1 + Math.abs(index % 4))),
   };
 }
 
