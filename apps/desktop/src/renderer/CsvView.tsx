@@ -211,15 +211,13 @@ export function CsvView({
     setRowsState(nextRows);
   }, [delimiter, draft.draft, raw]);
 
-  const [header, ...data] = rows;
+  const header = rows[0];
+  const dataRowCount = Math.max(0, rows.length - 1);
   // Bounded preview: an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
   // inspect and edit common CSVs; working with all of them is what Import to
   // SQLite or raw mode is for.
-  const previewRows =
-    data.length > MAX_CSV_PREVIEW_ROWS
-      ? data.slice(0, MAX_CSV_PREVIEW_ROWS)
-      : data;
+  const previewRows = rows.slice(1, MAX_CSV_PREVIEW_ROWS + 1);
   const columnCount = Math.max(
     header?.length ?? 0,
     ...previewRows.map((row) => row.length),
@@ -505,12 +503,12 @@ export function CsvView({
               ))}
             </tbody>
           </table>
-          {data.length > previewRows.length ? (
+          {dataRowCount > previewRows.length ? (
             <p
               data-testid="csv-preview-bound"
               className="mb-0 mt-2 text-[11px] text-subtle"
             >
-              Showing the first {MAX_CSV_PREVIEW_ROWS} of {data.length} rows —
+              Showing the first {MAX_CSV_PREVIEW_ROWS} of {dataRowCount} rows —
               import to SQLite to work with all of them.
             </p>
           ) : null}
