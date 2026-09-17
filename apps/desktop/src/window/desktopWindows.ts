@@ -293,30 +293,45 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     );
   }
 
+  let appliedNativeWorkspaceRoots: readonly string[] | null = null;
+
   function refreshNativeWorkspaceSurfaces(): void {
     if (!app.isReady()) return;
-    const workspaces = nativeWorkspaceSummaries();
+    const roots = nativeWorkspaceSummaries().map((workspace) => workspace.rootPath);
     try {
-      app.clearRecentDocuments();
-      for (const workspace of [...workspaces].reverse()) {
-        app.addRecentDocument(workspace.rootPath);
+      if (
+        appliedNativeWorkspaceRoots?.length === roots.length &&
+        roots.every((root, index) => root === appliedNativeWorkspaceRoots?.[index])
+      ) return;
+
+      // A partial refresh invalidates the previous list even if we later return to it.
+      appliedNativeWorkspaceRoots = null;
+      let recentDocumentsApplied = true;
+      try {
+        app.clearRecentDocuments();
+        for (const root of [...roots].reverse()) {
+          app.addRecentDocument(root);
+        }
+      } catch {
+        // Linux and some dev shells do not expose native recent-document storage.
+        recentDocumentsApplied = false;
       }
-    } catch {
-      // Linux and some dev shells do not expose native recent-document storage.
-    }
-    if (process.platform === "win32") {
-      app.setUserTasks(
-        workspaces.slice(0, 10).map((workspace) => ({
+      const userTasksApplied = process.platform !== "win32" || app.setUserTasks(
+        roots.slice(0, 10).map((root) => ({
           program: process.execPath,
-          arguments: `--open-workspace ${quoteWindowsArg(workspace.rootPath)}`,
+          arguments: `--open-workspace ${quoteWindowsArg(root)}`,
           iconPath: process.execPath,
           iconIndex: 0,
-          title: `Open ${workspace.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace"}`,
-          description: workspace.rootPath,
+          title: `Open ${root.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace"}`,
+          description: root,
         })),
       );
+      if (recentDocumentsApplied && userTasksApplied) {
+        appliedNativeWorkspaceRoots = roots;
+      }
+    } finally {
+      refreshApplicationMenu();
     }
-    refreshApplicationMenu();
   }
 
   async function prepareForRendererReload(

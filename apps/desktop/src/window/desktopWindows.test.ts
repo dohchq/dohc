@@ -601,6 +601,87 @@ describe("desktop native menus", () => {
     expect(second.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
 
+  it("reuses native recents for cloned roots while rebuilding current menus", () => {
+    const f = fixture();
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+
+    const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
+    f.setRows(rows);
+    f.setCanInstall(true);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    f.setRows(structuredClone(rows));
+    f.windows.refreshNativeWorkspaceSurfaces();
+
+    expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
+    expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
+    expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
+    expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
+    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    const target = new Window();
+    f.windows.trackWorkspaceWindow(target.native);
+    click(submenu(item(f, "File", "Open Recent"))[0]!, target.native);
+    expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[0]);
+    expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
+  });
+
+  it.each<NodeJS.Platform>(["win32", "darwin", "linux"])(
+    "refreshes changed root order, additions, and removals on %s",
+    (platform) => {
+      const f = fixture(platform);
+      const lists = [
+        [workspace("a"), workspace("b")],
+        [workspace("b"), workspace("a")],
+        [workspace("b"), workspace("a"), workspace("c")],
+        [workspace("a")],
+        [],
+      ];
+      for (const rows of lists) {
+        f.setRows(rows);
+        f.windows.refreshNativeWorkspaceSurfaces();
+        f.setRows(structuredClone(rows));
+        f.windows.refreshNativeWorkspaceSurfaces();
+      }
+      expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledTimes(lists.length);
+      expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual(
+        lists.flatMap((rows) => [...rows].reverse().map((row) => [row.rootPath])),
+      );
+      expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(platform === "win32" ? lists.length : 0);
+      expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(lists.length * 2);
+    },
+  );
+
+  it.each(
+    (["clear", "add", "tasks-false", "tasks-throw"] as const).flatMap((failure) =>
+      (["failed", "previous"] as const).map((retry) => ({ failure, retry })),
+    ),
+  )(
+    "retries the $retry root list after $failure fails",
+    ({ failure, retry }) => {
+      const f = fixture();
+      f.windows.refreshNativeWorkspaceSurfaces();
+      const fail = () => { throw new Error("native storage failed"); };
+      if (failure === "clear") vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementationOnce(fail);
+      if (failure === "add") vi.mocked(f.dependencies.app.addRecentDocument).mockImplementationOnce(fail);
+      if (failure === "tasks-false") vi.mocked(f.dependencies.app.setUserTasks).mockReturnValueOnce(false);
+      if (failure === "tasks-throw") vi.mocked(f.dependencies.app.setUserTasks).mockImplementationOnce(fail);
+      f.setRows([workspace("c")]);
+      if (failure === "tasks-throw") {
+        expect(() => f.windows.refreshNativeWorkspaceSurfaces()).toThrow("native storage failed");
+      } else {
+        f.windows.refreshNativeWorkspaceSurfaces();
+      }
+      expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(2);
+
+      f.setRows(retry === "previous" ? [workspace("a"), workspace("b")] : [workspace("c")]);
+      f.windows.refreshNativeWorkspaceSurfaces();
+      f.windows.refreshNativeWorkspaceSurfaces();
+      expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledTimes(3);
+      expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(3);
+      expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(4);
+    },
+  );
+
   it("reverses native recents, limits Windows tasks, and quotes roots exactly", () => {
     const f = fixture(); const rows = Array.from({ length: 12 }, (_, index) => workspace(`w${index}`));
     rows[0] = workspace("quoted", "C:\\say\"hi\\"); f.setRows(rows);
