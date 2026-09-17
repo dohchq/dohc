@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import "../testing/legendListMock";
 import {
   act,
   cleanup,
