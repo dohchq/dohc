@@ -30,6 +30,7 @@
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.8",
     "@dohc/brand": "workspace:*",
+    "@dohc/collection-views": "workspace:*",
     "@dohc/excalidraw-scene": "workspace:*",
     "@dohc/mcp": "workspace:*",
     "@electron/asar": "^4.2.1",
@@ -73,7 +74,6 @@
   },
   "dependencies": {
     "@dohc/cli": "workspace:*",
-    "@dohc/collection-views": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
     "@dohc/sdk": "workspace:*",
