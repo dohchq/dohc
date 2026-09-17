@@ -67,6 +67,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
   const expected = new Map<string, string>();
   const workspaceId = `network-${settings.name}`;
   const row: any = { ...settings, status: "running" };
+  console.log(`[network-bench] ${settings.name}: setup`);
   report.cases.push(row);
   await save();
   try {
@@ -86,6 +87,7 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       await writer.store.writeTextFile({ workspaceId, versionId: "main", path, text, metadata: { origin: "api" } });
     }
     row.seedMs = performance.now() - seedStart;
+    console.log(`[network-bench] ${settings.name}: seeded ${files} files; pushing relay pages`);
     row.push = await pushAll(writer.relay);
     assert.equal(row.push.pushed, files);
     reader = await open(roots[1], workspaceId, connection, true);
@@ -102,9 +104,11 @@ async function runCase(settings: { name: string; latencyMs: number; bytesPerSeco
       proxy.configure({ latencyMs: settings.latencyMs, bytesPerSecond: settings.bytesPerSecond });
       reader = await open(roots[1], workspaceId, connection, false);
     }
+    console.log(`[network-bench] ${settings.name}: catch-up timing starts`);
     const started = performance.now();
     row.pull = await reader.pull();
     row.catchUpMs = performance.now() - started;
+    console.log(`[network-bench] ${settings.name}: catch-up timing ended; verifying restart and resumed edit`);
     row.requests = proxy.snapshot();
     for (const [path, text] of expected) assert.equal(await readFile(join(roots[1], path), "utf8"), text, path);
     const idleStarted = performance.now();
