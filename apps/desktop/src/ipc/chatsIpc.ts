@@ -1,4 +1,4 @@
-import { channelSlugForName } from "@dohc/security-contract";
+import { groupFolderForName } from "@dohc/security-contract";
 import {
   ListFileChatsPayload,
   CreateFileChatPayload,
@@ -943,7 +943,7 @@ export function registerChatsIpcHandlers<
         // A group is a folder: the folder is the group's slug unless the
         // creator named one. Main creates it so the group's files have a
         // home before the first post.
-        const folderPath = input.folderPath ?? channelSlugForName(input.name);
+        const folderPath = input.folderPath ?? groupFolderForName(input.name);
         if (!folderPath) {
           throw new Error("Give the group a name with a letter or a number, or name its folder.");
         }

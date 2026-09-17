@@ -1125,8 +1125,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
       throw new Error("invalid-channel-type");
     }
     const purpose = (optionalString(params, "purpose") ?? "").trim();
+    if (purpose.length > 200 || /[\r\n]/u.test(purpose)) throw new Error("invalid-channel-purpose");
     const folderPath = optionalString(params, "folderPath")?.trim();
     if (folderPath && kind !== "channel") throw new Error("invalid-channel-folder");
+    if (
+      folderPath !== undefined &&
+      (folderPath.length === 0 ||
+        folderPath.startsWith("/") ||
+        folderPath.includes("\\") ||
+        folderPath.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+        /[\p{Cc}]/u.test(folderPath))
+    ) {
+      throw new Error("invalid-channel-folder");
+    }
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const channelSlug = slug(name);
     if (
@@ -1237,6 +1248,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const title = optionalString(params, "title")?.trim() || body.split("\n")[0]?.slice(0, 80) || "New chat";
     const lane = optionalString(params, "lane") ?? "posts";
     if (lane !== "posts" && lane !== "chat") throw new Error("invalid-thread-lane");
+    // One chat lane per channel: a second start appends to the oldest,
+    // the way the engine does, and the caller's thread id is not used.
+    const existingLane = lane === "chat"
+      ? [...state.threads.values()]
+          .filter((thread) => thread.channelId === channelId && thread.lane === "chat")
+          .sort((a, b) => a.createdAtMs - b.createdAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+      : undefined;
+    if (existingLane) {
+      const message = this.insertMessage(state, workspace, params, existingLane.id, atMs);
+      existingLane.updatedAtMs = atMs;
+      this.bumpThreadRevision(state, existingLane.id);
+      return jsonResult({ thread: existingLane, message });
+    }
     const thread: ChatThread = {
       id: threadId,
       workspaceId: workspace,

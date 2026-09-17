@@ -1207,6 +1207,39 @@ export function filterOpForShare(
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
 // and every unknown kind are refused there. This function never falls through
 // to the read filter.
+// The poll rules the engine applies (`normalize_poll_options` and
+// `validate_chosen_option`): up to 12 distinct non-empty choices of at most
+// 200 UTF-16 units, and a resolved poll names exactly one of them. A member
+// append that breaks them would be stored here and refused by every
+// replica, so it is refused here instead.
+const MAX_POLL_OPTIONS = 12;
+const MAX_POLL_OPTION_UNITS = 200;
+function decisionPollFieldsValid(payload: unknown): boolean {
+  const record = asRecord(payload);
+  if (!record) return false;
+  const options = record.options;
+  const chosen = record.chosenOption;
+  if (options !== undefined) {
+    if (!Array.isArray(options) || options.length > MAX_POLL_OPTIONS) return false;
+    const seen = new Set<string>();
+    for (const option of options) {
+      if (typeof option !== "string") return false;
+      const trimmed = option.trim();
+      if (trimmed.length === 0 || trimmed !== option || option.length > MAX_POLL_OPTION_UNITS) return false;
+      if (seen.has(option)) return false;
+      seen.add(option);
+    }
+  }
+  const hasOptions = Array.isArray(options) && options.length > 0;
+  if (chosen !== undefined) {
+    if (typeof chosen !== "string" || record.state !== "resolved" || !hasOptions) return false;
+    if (!(options as string[]).includes(chosen)) return false;
+  } else if (record.state === "resolved" && hasOptions) {
+    return false;
+  }
+  return true;
+}
+
 export function filterOpForShareAppend(
   selector: AnyShareSelector,
   opKind: string,
@@ -1217,6 +1250,9 @@ export function filterOpForShareAppend(
   try {
     payload = JSON.parse(payloadJson);
   } catch {
+    return { allowed: false };
+  }
+  if (opKind === "chat.decision.set" && !decisionPollFieldsValid(payload)) {
     return { allowed: false };
   }
   if (isGroupSelector(selector)) {

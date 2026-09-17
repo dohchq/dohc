@@ -297,6 +297,10 @@ describe("a group share is one grant for the channel and its folder", () => {
       request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100`),
     );
     expect(after.status).toBe(404);
+    const afterChat = await h(
+      request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${SHARED_WIRE}`),
+    );
+    expect(afterChat.status).toBe(404);
   });
 
   it("refuses a group share on a direct message, an unknown channel, the general channel, or an agent channel", async () => {
@@ -309,7 +313,7 @@ describe("a group share is one grant for the channel and its folder", () => {
         `/sync/${WORKSPACE}/log`,
         jsonBody({
           originId: "origin-owner",
-          ops: [channelCreate("wire-dm", "someone", "dm")],
+          ops: [channelCreate("wire-dm", "someone", "dm"), channelCreate("wire-bot", "bot", "agent")],
         }),
       ),
     );
@@ -323,6 +327,15 @@ describe("a group share is one grant for the channel and its folder", () => {
     );
     expect(dm.status).toBe(400);
     expect((await json(dm)).code).toBe("invalid_channel");
+    const agent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "wire-bot", paths: ["bot"] }),
+      ),
+    );
+    expect(agent.status).toBe(400);
+    expect((await json(agent)).code).toBe("invalid_channel");
     // A wire the log has not named yet could become a direct message later
     // and carry the folder grant with it, so a group needs a known channel.
     const unknown = await h(
@@ -654,6 +667,7 @@ describe("shared channels (MU-C4)", () => {
     expect(append.status).toBe(200);
     expect(await json(append)).toMatchObject({ ok: true, accepted: 3, inserted: 3 });
 
+
     // The owner sees member A's ops in their own bucket, under a
     // share-namespaced origin (a member can never extend an owner origin).
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)));
@@ -675,6 +689,27 @@ describe("shared channels (MU-C4)", () => {
     // And member A sees their own echo plus the owner's history identically.
     const opsForA = await fetchSharePage(h, MEMBER_A, shareA);
     expect(opsForA.map((op) => op.opKind)).toEqual(opsForB.map((op) => op.opKind));
+    // A poll a member resolves names one of its choices; a choice outside
+    // them, or a resolved poll with none, is refused before it is stored.
+    const decision = (messageId: string, fields: Record<string, unknown>) => logOp("chat.decision.set", {
+      threadId: "thread-by-a", messageId, state: "resolved", resolvedByMessageId: "msg-a-1", atMs: 5, ...fields,
+    });
+    const badChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Sunday" }), originSeq: 3 }],
+    })));
+    expect(badChoice.status).toBe(403);
+    expect((await json(badChoice)).code).toBe("share_op_rejected");
+    const noChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"] }), originSeq: 3 }],
+    })));
+    expect(noChoice.status).toBe(403);
+    const goodChoice = await h(request(MEMBER_A, `/sync/shares/${shareA}/log`, jsonBody({
+      originId: "origin-member-a",
+      ops: [{ ...decision("msg-a-1", { options: ["Friday", "Monday"], chosenOption: "Friday" }), originSeq: 3 }],
+    })));
+    expect(goodChoice.status).toBe(200);
   });
 
   it("refuses a read-only member's append but keeps serving them reads", async () => {

@@ -388,6 +388,10 @@ describe("registered channels and personal chat projections", () => {
     expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
     await test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "💥", folderPath: "team" });
     expect(test.storeMethods.createChannel).toHaveBeenCalledWith(expect.objectContaining({ folderPath: "team" }));
+    // A name in another script is a name; its folder is spelled the same way.
+    await test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "会议" });
+    expect(test.ensureGroupFolder).toHaveBeenLastCalledWith(test.workspace, "会议");
+    expect(test.storeMethods.createChannel).toHaveBeenLastCalledWith(expect.objectContaining({ folderPath: "会议" }));
   });
 
   it("saves and archives with the existing bookmark owner after identity warming", async () => {
