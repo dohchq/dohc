@@ -2,6 +2,69 @@ import { type StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
 
+async function excludeLogReferencedBlobs(
+  storage: StorageContext,
+  workspaceId: string,
+  candidates: string[],
+): Promise<string[]> {
+  const unreferenced = new Set(candidates.filter((sha) => /^[a-f0-9]{64}$/.test(sha)));
+  const referenced = new Set<string>();
+  if (unreferenced.size === 0) return candidates;
+
+  // Bound copied text even for a large payload. SQLite substr stops at
+  // literal NUL, as LIKE does. Offsets count SQLite characters, not JS UTF-16.
+  const TEXT_CHUNK = 32_768;
+  const PAGE_ROWS = 32;
+  const pageStmt = storage.db.prepare(
+    `SELECT relay_seq, substr(payload_json, 1, ?) AS payload
+     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ?
+     ORDER BY relay_seq LIMIT ?`,
+  );
+  const continuationStmt = storage.db.prepare(
+    `SELECT substr(payload_json, ?, ?) AS payload
+     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq = ?`,
+  );
+  let afterSeq = 0;
+  while (unreferenced.size > 0) {
+    const page = pageStmt.all(TEXT_CHUNK, workspaceId, afterSeq, PAGE_ROWS);
+    if (page.length === 0) break;
+    for (const row of page) {
+      let payload = String(row.payload);
+      let offset = TEXT_CHUNK + 1;
+      let carry = "";
+      while (payload.length > 0) {
+        const text = carry + payload;
+        for (const match of text.matchAll(/[a-fA-F0-9]{64,}/g)) {
+          const run = match[0].toLowerCase();
+          // LIKE also matches hashes embedded in longer runs, including overlaps.
+          for (let start = 0; start <= run.length - 64; start++) {
+            const sha = run.slice(start, start + 64);
+            if (unreferenced.delete(sha)) referenced.add(sha);
+          }
+        }
+        if (unreferenced.size === 0) break;
+        // A short UTF-16 string is necessarily shorter than TEXT_CHUNK SQLite
+        // characters. Astral text can require one harmless extra read.
+        if (payload.length < TEXT_CHUNK) break;
+        carry = text.slice(-63);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        payload = String(continuationStmt.get(offset, TEXT_CHUNK, workspaceId, row.relay_seq)?.payload ?? "");
+        offset += TEXT_CHUNK;
+      }
+      if (unreferenced.size === 0) break;
+    }
+    afterSeq = Number(page[page.length - 1]!.relay_seq);
+    if (unreferenced.size > 0 && page.length === PAGE_ROWS) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } else {
+      break;
+    }
+  }
+  // Noncanonical storage identifiers retain the original SQL LIKE behavior,
+  // including wildcard characters, through the unchanged locked delete check.
+  return candidates.filter((sha) => !referenced.has(sha));
+}
+
 export function putBlob(storage: StorageContext, input: {
     workspaceId: string;
     sha256: string;
@@ -54,20 +117,13 @@ export async function collectUnreferencedBlobs(
     // one has them in the log, and a declined one never will.
     // Immutable publications retain their manifest and bundle pins after withdrawal.
     const cutoff = options.nowMs - storage.options.blobGraceMs;
-    // Phase 1 (read only, no write lock): candidate shas that are unreferenced
-    // and aged past the grace window.
-    const candidates = storage.db
+    // Read aged candidates without a write lock, then scan log roots once.
+    const agedCandidates = storage.db
       .prepare(
         `SELECT b.sha256
          FROM sync_relay_blobs b
          WHERE b.workspace_id = ?
            AND b.created_at_ms <= ?
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_log l
-             WHERE l.workspace_id = b.workspace_id
-               AND l.payload_json LIKE '%' || b.sha256 || '%'
-           )
            AND NOT EXISTS (
              SELECT 1
              FROM sync_relay_share_proposal_ops o
@@ -84,11 +140,10 @@ export async function collectUnreferencedBlobs(
       )
       .all(workspaceId, cutoff)
       .map((row) => String(row.sha256));
-    // Delete in bounded chunks, each in its own short transaction, and
-    // yield the event loop between chunks so a large sweep never monopolizes it
-    // (CodeRabbit: keep GC off the single-threaded request path). The delete
-    // RE-CHECKS unreferenced + aged so a blob newly referenced (or replaced)
-    // between phases is left alone.
+    const candidates = await excludeLogReferencedBlobs(storage, workspaceId, agedCandidates);
+    // Each deletion still rechecks every root and age under the write lock.
+    // Discovery can yield without granting stale results deletion authority.
+    // Yield between committed chunks; each orphan still scans its log history.
     const removedSha256s: string[] = [];
     const deleteStmt = storage.db.prepare(
       `DELETE FROM sync_relay_blobs
