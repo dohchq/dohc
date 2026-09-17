@@ -1,4 +1,4 @@
-import { formatChatTime } from "../time";
+import { formatChatDay, formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
@@ -76,6 +76,38 @@ describe("ChatComposer Enter-to-send", () => {
 });
 
 describe("chat authorship display", () => {
+  it.each([
+    { name: "same identity after a rename", firstId: "a", secondId: "a", secondName: "Renamed", continues: true },
+    { name: "different identities with the same name", firstId: "a", secondId: "b", continues: false },
+    { name: "only the earlier identity known", firstId: "a", continues: false },
+    { name: "only the later identity known", secondId: "a", continues: false },
+    { name: "neither identity known", continues: true },
+    { name: "different names without identities", secondName: "Other", continues: false },
+    { name: "different author kinds", firstId: "a", secondId: "a", secondKind: "agent" as const, continues: false },
+    { name: "five minutes apart", firstId: "a", secondId: "a", gap: 300_000, continues: false },
+    { name: "different days", gap: 120_000, start: new Date(2026, 8, 17, 23, 59).getTime(), continues: false },
+  ])("groups messages by identity: $name", (test) => {
+    const first: ChatMessageRecord = {
+      id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Ice",
+      authorUserId: test.firstId, body: "First", createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
+    };
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[first, {
+          ...first, id: "second", authorUserId: test.secondId,
+          authorDisplayName: test.secondName ?? first.authorDisplayName,
+          authorKind: test.secondKind ?? first.authorKind,
+          createdAtMs: first.createdAtMs + (test.gap ?? 60_000),
+        }]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
+  });
+
   it("renders agent messages as \"<Name>'s agent\" and humans by name", () => {
     expect(
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice" }),
@@ -332,6 +364,19 @@ describe("chat authorship display", () => {
 });
 
 describe("formatChatTime", () => {
+  it("includes the year only for day labels outside the current year", () => {
+    const now = new Date(2026, 8, 17).getTime();
+    for (const year of [2025, 2026, 2027]) {
+      const day = new Date(year, 2, 4);
+      expect(formatChatDay(day.getTime(), now)).toBe(day.toLocaleDateString(undefined, {
+        weekday: "long", month: "long", day: "numeric",
+        ...(year !== 2026 ? { year: "numeric" as const } : {}),
+      }));
+    }
+    expect(formatChatDay(now, now)).toBe("Today");
+    expect(formatChatDay(new Date(2026, 8, 16).getTime(), now)).toBe("Yesterday");
+  });
+
   // The cached Intl.DateTimeFormat must format exactly like the
   // toLocaleString call it replaced — same ambient locale, same options.
   it("matches the ambient-locale toLocaleString output exactly", () => {

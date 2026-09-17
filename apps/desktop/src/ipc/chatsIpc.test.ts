@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
 import { createChatScopeCapability } from "./chatScope";
-import { registerChatsIpcHandlers } from "./chatsIpc";
+import { chatMessageForIpc, registerChatsIpcHandlers } from "./chatsIpc";
+import { ChatMessageRecord } from "./bridgeContract";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -118,6 +119,12 @@ function fixture(kind: ScopeKind = "local") {
     archiveChatBookmark: vi.fn(async () => ({ ...bookmark, state: "archived" as const, generation: 2, projectionState: "ready" as const })),
   };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
+  const chatRelayIdentityFor = vi.fn<Parameters<typeof registerChatsIpcHandlers>[0]["chatRelayIdentityFor"]>(
+    async (_workspaceId, target) =>
+      "threadId" in target && target.threadId === "thread-joined"
+        ? { joinedChannel: null, authorUserId: "recipient" }
+        : { joinedChannel: null, authorUserId: "verified-owner" },
+  );
   const sender = { trusted: true };
   const assertTrustedSender = vi.fn((event: Event) => {
     if (!event.sender.trusted) throw new Error("Untrusted sender");
@@ -130,10 +137,7 @@ function fixture(kind: ScopeKind = "local") {
     warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Ice",
     localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
     verifiedChatAuthorUserIdFor, revalidateChatWrite,
-    chatRelayIdentityFor: async (_workspaceId, target, _store) =>
-      "threadId" in target && target.threadId === "thread-joined"
-        ? { joinedChannel: null, authorUserId: "recipient" }
-        : { joinedChannel: null, authorUserId: "verified-owner" },
+    chatRelayIdentityFor,
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
@@ -148,7 +152,7 @@ function fixture(kind: ScopeKind = "local") {
   return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, activeEngineFileIndex, readOwnedWorkspaceText,
-    warmCredentialCache, verifiedChatAuthorUserIdFor, revalidateChatWrite, chatDispatchService, desktopChatBookmarks };
+    warmCredentialCache, verifiedChatAuthorUserIdFor, chatRelayIdentityFor, revalidateChatWrite, chatDispatchService, desktopChatBookmarks };
 }
 
 const mutations = [
@@ -159,6 +163,23 @@ const mutations = [
 ] as const;
 
 describe("the personal feed names each item's viewer", () => {
+  it("falls back only for the thread whose identity lookup rejects", async () => {
+    const test = fixture();
+    test.chatRelayIdentityFor.mockRejectedValueOnce(new Error("Identity unavailable"));
+    test.storeMethods.listPersonalFeed.mockResolvedValueOnce({
+      items: ["thread", "thread-joined"].map((threadId) => ({
+        message: { ...test.message, id: `message-${threadId}`, threadId },
+        thread: { ...test.thread, id: threadId },
+        reactions: [],
+        matchedBy: ["thread" as const],
+      })),
+    });
+    const result = await test.invoke(CHANNELS.listPersonalChatFeed, { workspaceId: "workspace" }) as {
+      items: Array<{ viewerAuthorId?: string }>;
+    };
+    expect(result.items.map((row) => row.viewerAuthorId)).toEqual(["local-owner", "recipient"]);
+  });
+
   it("normalizes each item's reactions to its thread's viewer", async () => {
     const test = fixture();
     const reaction = (threadId: string, messageId: string, authorId: string) => ({
@@ -180,6 +201,15 @@ describe("the personal feed names each item's viewer", () => {
     };
     expect(result.items.map((row) => row.viewerAuthorId)).toEqual(["verified-owner", "recipient"]);
     expect(result.items.map((row) => row.reactions[0]?.authorId)).toEqual(["verified-owner", "recipient"]);
+  });
+});
+
+describe("chat message IPC identity", () => {
+  it("preserves an optional author identity through the bridge contract", () => {
+    const { message } = fixture();
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" })))
+      .toMatchObject({ authorUserId: "person-1" });
+    expect(ChatMessageRecord.parse(chatMessageForIpc(message))).not.toHaveProperty("authorUserId");
   });
 });
 

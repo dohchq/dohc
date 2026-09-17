@@ -1425,6 +1425,7 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   authorKind: z.enum(["human", "agent"]),
   authorDisplayName: z.string().min(1).max(200),
+  authorUserId: z.string().min(1).max(256).optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,

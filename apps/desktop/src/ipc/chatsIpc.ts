@@ -107,6 +107,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     threadId: message.threadId,
     authorKind: message.author.kind,
     authorDisplayName: message.author.displayName,
+    ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
       : {}),
@@ -859,7 +860,7 @@ export function registerChatsIpcHandlers<
             resolveReplicationAuthorId: async () =>
               (await chatRelayIdentityFor(workspace.workspaceId, { threadId }, store))
                 .authorUserId,
-          }),
+          }).catch(() => localFallbackAuthorId),
         ] as const),
       ),
     );

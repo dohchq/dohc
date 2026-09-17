@@ -65,6 +65,7 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
+  const highlightFileOnOpen = useRef(false);
 
   const active = useMemo(
     () => (menuOpen ? activeMentionQuery(props.value, caret) : null),
@@ -88,6 +89,12 @@ export function MentionComposer(props: {
   }, [active, props.fileCandidates]);
   const menuLength = fileStage ? fileStage.headings.length + 1 : matches.length + fileMatches.length;
   const showMenu = fileStage !== null || (active !== null && menuLength > 0);
+
+  useLayoutEffect(() => {
+    if (!highlightFileOnOpen.current || pendingCaret.current !== null || !active) return;
+    highlightFileOnOpen.current = false;
+    setHighlight(fileMatches.length > 0 ? matches.length : 0);
+  }, [active, fileMatches.length, matches.length]);
 
   useLayoutEffect(() => {
     if (pendingCaret.current === null) return;
@@ -491,6 +498,7 @@ export function MentionComposer(props: {
                 disabled={props.sending}
                 onMouseDown={(event) => {
                   event.preventDefault();
+                  highlightFileOnOpen.current = true;
                   insertAtCaret("@");
                 }}
                 className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-40"

@@ -193,9 +193,9 @@ test("My agent posts a durable failure note when the runner exits silently", asy
     await expect(failureNote.getByTestId("chats-message-body")).toHaveText(
       "⚠ Agent run failed (exit 3). Open the run chip for details.",
     );
-    await expect(failureNote.getByTestId("chats-comment-agent-badge")).toHaveText(
-      "agent",
-    );
+    await expect(failureNote.getByTestId("chats-comment-agent-badge")).toHaveCount(0);
+    await expect(failureNote.getByTestId("chats-message-author")).toHaveText("dohc");
+    await expect(failureNote.getByTestId("chats-message-author")).toHaveAttribute("data-author-kind", "system");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

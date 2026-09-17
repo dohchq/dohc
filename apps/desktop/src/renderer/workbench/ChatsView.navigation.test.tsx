@@ -328,7 +328,7 @@ describe("ChatsView expand-to-tab", () => {
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
       items: [
         {
-          message: message(),
+          message: message({ parentMessageId: "opening-message" }),
           thread: thread(),
           channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
           reactions: [],
@@ -376,7 +376,7 @@ describe("ChatsView expand-to-tab", () => {
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
       items: [
         {
-          message: message(),
+          message: message({ parentMessageId: "opening-message" }),
           thread: thread(),
           channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
           reactions: [],
