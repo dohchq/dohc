@@ -15,6 +15,13 @@ import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
 
+type PaintedLane = {
+  threadId: string;
+  revision: number;
+  messageCount: number;
+  readState: "retry" | "pending" | "done";
+};
+
 // A group's chat lane: one running conversation, kept out of the feed. The
 // lane is the group's oldest chat-lane thread; the first message starts it.
 // Every response is guarded by the mount token so a slow answer for a group
@@ -48,9 +55,25 @@ export function ChatLane(props: {
   const endRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followingEnd = useRef(true);
-  const paintedRevision = useRef<{ threadId: string; revision: number } | null>(null);
+  const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
+
+  const markRead = useCallback((painted: PaintedLane) => {
+    if (painted.readState !== "retry") return;
+    const current = token.current;
+    const isCurrent = () => current === token.current && paintedRevision.current === painted;
+    painted.readState = "pending";
+    void bridge().markChatThreadRead({
+      workspaceId, threadId: painted.threadId, upToSequence: painted.messageCount,
+    }).then(() => {
+      if (!isCurrent()) return;
+      painted.readState = "done";
+      onThreadRead.current?.();
+    }, () => {
+      if (isCurrent()) painted.readState = "retry";
+    });
+  }, [workspaceId]);
 
   const load = useCallback(async (force = false) => {
     const current = token.current;
@@ -79,28 +102,31 @@ export function ChatLane(props: {
       // remembered as painted until its content has actually been loaded.
       const { revision } = await bridge().getChatThreadRevision({ workspaceId, threadId: lane.id });
       if (!isCurrent()) return;
-      if (!force && paintedRevision.current?.threadId === lane.id && paintedRevision.current.revision === revision) return;
+      if (!force && paintedRevision.current?.threadId === lane.id && paintedRevision.current.revision === revision) {
+        markRead(paintedRevision.current);
+        return;
+      }
       const [page, reacted, polled] = await Promise.all([
         bridge().listChatMessages({ workspaceId, threadId: lane.id }),
         bridge().listChatReactions({ workspaceId, threadId: lane.id }),
         bridge().listChatThreadDecisions({ workspaceId, threadId: lane.id }),
       ]);
       if (!isCurrent()) return;
-      paintedRevision.current = { threadId: lane.id, revision };
+      const painted: PaintedLane = { threadId: lane.id, revision, messageCount: page.messages.length, readState: "retry" };
+      paintedRevision.current = painted;
       setThreadId(lane.id);
       setMessages(page.messages);
       setReactions(reacted.reactions);
       setDecisions(polled.decisions);
       setViewerAuthorId(reacted.viewerAuthorId);
       setLoading(false);
-      void bridge().markChatThreadRead({ workspaceId, threadId: lane.id, upToSequence: page.messages.length })
-        .then(() => { if (isCurrent()) onThreadRead.current?.(); }, () => undefined);
+      markRead(painted);
     } catch (error) {
       if (!isCurrent()) return;
       setLoading(false);
       onError(ipcErrorMessage(error, "Could not load the chat."));
     }
-  }, [channelId, onError, workspaceId]);
+  }, [channelId, markRead, onError, workspaceId]);
 
   useEffect(() => {
     setThreadId(null);

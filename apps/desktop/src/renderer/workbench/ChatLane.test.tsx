@@ -159,6 +159,28 @@ describe("ChatLane", () => {
     expect(await screen.findByText("After retry")).toBeTruthy();
   });
 
+  it("retries a failed mark-read on unchanged activity without reloading content", async () => {
+    bridgeMock.markChatThreadRead.mockRejectedValueOnce(new Error("Read cursor unavailable"));
+    render(lane());
+    await screen.findByText("Old message");
+    expect(onThreadRead).not.toHaveBeenCalled();
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
+    expect(onThreadRead).toHaveBeenCalledOnce();
+  });
+
+  it("keeps one pending mark-read across unchanged activity", async () => {
+    const read = deferred<void>();
+    bridgeMock.markChatThreadRead.mockReturnValueOnce(read.promise);
+    render(lane());
+    await screen.findByText("Old message");
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(bridgeMock.markChatThreadRead).toHaveBeenCalledOnce();
+    await act(async () => read.resolve());
+    expect(onThreadRead).toHaveBeenCalledOnce();
+  });
+
   it("refreshes messages on matching activity and coalesces a burst", async () => {
     render(lane());
     await screen.findByText("Old message");
