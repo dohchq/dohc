@@ -79,6 +79,7 @@ import { bridge } from "../bridge";
 import type { AgentNotification } from "./agentNotifications";
 import {
   ChatMessageList,
+  type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
   runReactionToggle,
@@ -576,6 +577,7 @@ export function ChatsView(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
   // across draft keystrokes.
@@ -2154,11 +2156,6 @@ export function ChatsView(props: {
             ),
           );
         }
-        requestAnimationFrame(() => {
-          if (token === liveToken.current) {
-            messagesEndRef.current?.scrollIntoView({ block: "end" });
-          }
-        });
       } catch (error) {
         if (token !== liveToken.current || request !== dmRefreshSeq.current) {
           return;
@@ -2378,7 +2375,7 @@ export function ChatsView(props: {
         };
         setComposer("");
       }
-      messagesEndRef.current?.scrollIntoView({ block: "end" });
+      flatChatListRef.current?.scrollToEnd();
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
@@ -3158,8 +3155,12 @@ export function ChatsView(props: {
 
   const scrollToMessage = useCallback((messageId: string) => {
     const node = messageNodes.current.get(messageId);
-    if (!node) return;
-    node.scrollIntoView({ block: "center" });
+    if (flatChatListRef.current) {
+      if (!flatChatListRef.current.scrollToMessage(messageId)) return;
+    } else {
+      if (!node) return;
+      node.scrollIntoView({ block: "center" });
+    }
     setFlashMessageId(messageId);
     const token = liveToken.current;
     window.setTimeout(() => {
@@ -3687,11 +3688,11 @@ export function ChatsView(props: {
               messages={messages}
               loading={messagesLoading}
               emptyLabel="No messages yet."
-              endRef={messagesEndRef}
+              key={`${workspaceId}:${dm.threadId}`}
+              listRef={flatChatListRef}
               mentionCandidates={mentionCandidates}
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
-              onMessageElement={setMessageNode}
               reactionControls={reactionControls}
             />
           ) : (

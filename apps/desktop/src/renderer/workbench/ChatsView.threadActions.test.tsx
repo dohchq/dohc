@@ -1,3 +1,4 @@
+import "../../testing/legendListMock";
 // @vitest-environment jsdom
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

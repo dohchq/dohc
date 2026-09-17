@@ -1,3 +1,4 @@
+import "../../testing/legendListMock";
 import { formatChatDay, formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -7,6 +8,7 @@ import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeCont
 import {
   ChatComposer,
   ChatMessageList,
+  type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
   runReactionToggle,
@@ -102,7 +104,7 @@ describe("chat authorship display", () => {
         }]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
@@ -130,7 +132,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
@@ -154,7 +156,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         mentionCandidates={[]}
       />,
     );
@@ -185,7 +187,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -228,7 +230,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -272,7 +274,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -324,7 +326,7 @@ describe("chat authorship display", () => {
         ]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         onOpenPath={onOpenPath}
       />,
     );
@@ -408,7 +410,7 @@ describe("ChatMessageList memo boundary", () => {
         createdAtMs: 1_700_000_000_000,
       },
     ];
-    const endRef = createRef<HTMLDivElement>();
+    const endRef = createRef<ChatMessageListHandle>();
     function Host() {
       const [, setTick] = useState(0);
       return (
@@ -419,7 +421,7 @@ describe("ChatMessageList memo boundary", () => {
             messages={messages}
             loading={false}
             emptyLabel="No messages"
-            endRef={endRef}
+            listRef={endRef}
           />
         </>
       );
@@ -466,7 +468,7 @@ describe("message reactions (WS-MU-C2)", () => {
         messages={[message]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
         reactionControls={{ reactions, viewerAuthorId, onToggle }}
       />,
     );
@@ -560,7 +562,7 @@ describe("message reactions (WS-MU-C2)", () => {
         messages={[message]}
         loading={false}
         emptyLabel="No messages"
-        endRef={createRef<HTMLDivElement>()}
+        listRef={createRef<ChatMessageListHandle>()}
       />,
     );
     expect(screen.queryByTestId("test-chat-message-reactions")).toBeNull();

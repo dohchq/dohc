@@ -13,6 +13,7 @@ import { bridge } from "../bridge";
 import {
   ChatComposer,
   ChatMessageList,
+  type ChatMessageListHandle,
   chatAuthorLabel,
   runReactionToggle,
 } from "./chatMessages";
@@ -110,8 +111,7 @@ export function LinkedChatsPanel(props: {
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const threadViewRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<ChatMessageListHandle | null>(null);
 
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
@@ -211,17 +211,9 @@ export function LinkedChatsPanel(props: {
           // deferred callback: another thread/file/workspace may have opened
           // after the response committed but before this frame ran.
           if (token !== liveToken.current) return;
-          const focusedMessage = focusMessageId
-            ? Array.from(
-                threadViewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ??
-                  [],
-              ).find((element) => element.dataset.messageId === focusMessageId)
-            : undefined;
-          // A file mention lands on the exact referenced message. Ordinary
-          // thread opens retain the established latest-message landing.
-          (focusedMessage ?? messagesEndRef.current)?.scrollIntoView({
-            block: focusedMessage ? "center" : "end",
-          });
+          if (!focusMessageId || !listRef.current?.scrollToMessage(focusMessageId)) {
+            listRef.current?.scrollToEnd();
+          }
         });
       } catch (error) {
         if (token !== liveToken.current) return;
@@ -292,7 +284,7 @@ export function LinkedChatsPanel(props: {
       if (token !== liveToken.current) return;
       setMessages((current) => [...current, result.message]);
       setComposer("");
-      messagesEndRef.current?.scrollIntoView({ block: "end" });
+      listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
@@ -344,7 +336,6 @@ export function LinkedChatsPanel(props: {
   if (activeThread) {
     return (
       <div
-        ref={threadViewRef}
         data-testid="linked-chat-thread"
         className="flex min-h-0 flex-1 flex-col"
       >
@@ -375,7 +366,8 @@ export function LinkedChatsPanel(props: {
           messages={messages}
           loading={messagesLoading}
           emptyLabel={`No messages yet${filePath ? ` about ${basenameOf(filePath)}` : ""}.`}
-          endRef={messagesEndRef}
+          key={`${workspaceId}:${activeThread.id}`}
+          listRef={listRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
         />
