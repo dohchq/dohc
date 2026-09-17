@@ -4,8 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 
-let activity: (event: { workspaceId: string }) => void;
+vi.mock("./chatFileMentions", { spy: true });
+
+let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
 function lane(id = "channel-1", workspaceId = "workspace-a") {
@@ -27,6 +31,134 @@ beforeEach(() => {
 });
 
 describe("ChatLane", () => {
+  it("does not render message bodies while typing a draft", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    fireEvent.change(screen.getByTestId("chats-lane-composer"), { target: { value: "A draft" } });
+    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+  });
+
+  it("does not load conversation content or mark it read on an unchanged revision", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const reads = bridgeMock.listChatMessages.mock.calls.length;
+    const marks = bridgeMock.markChatThreadRead.mock.calls.length;
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(reads);
+    expect(bridgeMock.markChatThreadRead).toHaveBeenCalledTimes(marks);
+  });
+
+  it("keeps the reader in history when a message arrives", async () => {
+    render(lane());
+    const body = await screen.findByText("Old message");
+    const scroll = body.closest("ul")!.parentElement!;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 2000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    scroll.scrollTop = 200;
+    fireEvent.scroll(scroll);
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "new", body: "Incoming" })] });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await screen.findByText("Incoming");
+    expect(scroll.scrollTop).toBe(200);
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("follows an incoming message after the reader returns to the bottom", async () => {
+    render(lane());
+    const body = await screen.findByText("Old message");
+    const scroll = body.closest("ul")!.parentElement!;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 2000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    scroll.scrollTop = 200;
+    fireEvent.scroll(scroll);
+    scroll.scrollTop = 1600;
+    fireEvent.scroll(scroll);
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 2200 });
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), message({ id: "new", body: "Incoming" })] });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await screen.findByText("Incoming");
+    // jsdom does not clamp scrollTop to scrollHeight - clientHeight.
+    expect(scroll.scrollTop).toBe(2200);
+  });
+
+  it("shows the user's own sent message even when they were reading history", async () => {
+    render(lane());
+    const body = await screen.findByText("Old message");
+    const scroll = body.closest("ul")!.parentElement!;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, value: 2000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    scroll.scrollTop = 200;
+    fireEvent.scroll(scroll);
+    bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
+      const sent = message({ id: "sent", body: "My reply" });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "Old message" }), sent] });
+      return { message: sent };
+    });
+    send("My reply");
+    await screen.findByText("My reply");
+    expect(scroll.scrollTop).toBe(2000);
+  });
+
+  it("checks global activity and reloads changed reactions and polls", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const reads = bridgeMock.listChatReactions.mock.calls.length;
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1, options: ["Yes", "No"] }] });
+    await act(async () => activity({}));
+    expect(await screen.findByRole("button", { name: "Yes" })).toBeTruthy();
+    expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(reads + 1);
+  });
+
+  it("does not cache a newer revision over an older content snapshot", async () => {
+    const snapshot = deferred<{ messages: ReturnType<typeof message>[] }>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(snapshot.promise);
+    render(lane());
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledOnce());
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    await act(async () => snapshot.resolve({ messages: [message({ body: "Old message" })] }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "New revision" })] });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(await screen.findByText("New revision")).toBeTruthy();
+  });
+
+  it("ignores a revision response from a group the reader has left", async () => {
+    const revision = deferred<{ revision: number }>();
+    bridgeMock.getChatThreadRevision.mockReturnValueOnce(revision.promise);
+    const view = render(lane());
+    await waitFor(() => expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledOnce());
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "thread-2", channelId: "channel-2" })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ id: "m2", threadId: "thread-2", body: "Second channel" })] });
+    view.rerender(lane("channel-2"));
+    await screen.findByText("Second channel");
+    await act(async () => revision.resolve({ revision: 0 }));
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Second channel")).toBeTruthy();
+  });
+
+  it("retries a failed content read without treating its revision as painted", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    bridgeMock.listChatMessages.mockRejectedValueOnce(new Error("Offline"));
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(screen.getByText("Old message")).toBeTruthy();
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "After retry" })] });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(await screen.findByText("After retry")).toBeTruthy();
+  });
+
   it("refreshes messages on matching activity and coalesces a burst", async () => {
     render(lane());
     await screen.findByText("Old message");
@@ -34,6 +166,7 @@ describe("ChatLane", () => {
     act(() => activity({ workspaceId: "elsewhere" }));
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(count);
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body: "New message" })] });
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
     await act(async () => { activity({ workspaceId: "workspace-a" }); activity({ workspaceId: "workspace-a" }); });
     await screen.findByText("New message");
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(count + 1);
@@ -93,6 +226,7 @@ describe("ChatLane", () => {
     render(lane());
     await screen.findByText("Old message");
     const snapshot = deferred<{ messages: ReturnType<typeof message>[] }>();
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
     bridgeMock.listChatMessages.mockReturnValueOnce(snapshot.promise);
     await act(async () => activity({ workspaceId: "workspace-a" }));
     bridgeMock.sendChatMessage.mockImplementationOnce(async () => {
