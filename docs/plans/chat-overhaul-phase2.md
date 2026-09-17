@@ -45,7 +45,7 @@ Two facts change the shape of the work.
 
 Each step compiles and passes the Rust gate on its own.
 
-1. Migration 1: the five new columns. `type`, `purpose`, `folder_path` on channels; `lane` on threads; `options_json`, `chosen_option` on decisions.
+1. Migration 1: the six new columns. `type`, `purpose`, `folder_path` on channels; `lane` on threads; `options_json`, `chosen_option` on decisions.
 2. Channel type, purpose, folder path through domain, RPC, sync apply, wire contract, desktop store, IPC, and the create-group dialog.
 3. Thread lane through the same layers, plus the list filter and feed predicate.
 4. Poll options through the same layers, plus the CLI and the runner context.
