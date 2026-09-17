@@ -49,3 +49,10 @@ export async function createEvidenceDirectory(output) {
   await mkdir(resolve(output, '..'), { recursive: true });
   await mkdir(output);
 }
+
+export function benchmarkEnvironment(inherited, updateUrl) {
+  const env = Object.fromEntries(Object.entries(inherited).filter(([name]) =>
+    !name.toUpperCase().startsWith('DOHC_') && !['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS'].includes(name.toUpperCase())
+  ));
+  return { ...env, DOHC_UPDATE_URL: updateUrl };
+}

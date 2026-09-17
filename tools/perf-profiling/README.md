@@ -40,6 +40,8 @@ missing samples stay missing, including when no typing workload ran. Trusted CDP
 Idle counters cover observed descendants and match PID plus creation time. IO counters are not physical disk traffic.
 Context switches and hardware wakeups are unavailable. Minimized idle does not represent every background or power state.
 The loopback updater feed advertises no installable update. Fresh profiles do not imply a cold OS cache.
+The app receives no inherited `DOHC_*`, `NODE_OPTIONS`, or `ELECTRON_RUN_AS_NODE` settings.
+Only the controlled loopback `DOHC_UPDATE_URL` is added.
 
 `--profile-renderer true` records diagnostic switch CPU profiles.
 `--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.

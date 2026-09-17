@@ -6,12 +6,24 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseOptions, createEvidenceDirectory } from './packaged-benchmark-options.mjs';
+import { parseOptions, createEvidenceDirectory, benchmarkEnvironment } from './packaged-benchmark-options.mjs';
 import { startWindowController } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 
 const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
+test('release environment excludes inherited dohc integration and Node controls', () => {
+  const inherited = {
+    PATH: 'runtime-path', SystemRoot: 'windows-root', HOME: 'user-home',
+    DOHC_DESKTOP_OWNER_HOST_CONFIG: 'private-host', DOHC_DESKTOP_OWNER_DELIVERY_CONFIG: 'private-delivery',
+    DOHC_UPDATE_URL: 'external-feed', DOHC_TEST_HOME: 'other-profile', DOHC_FUTURE_CONTROL: 'future',
+    dohc_lowercase_control: 'windows-case-variant', ELECTRON_RUN_AS_NODE: '1', node_options: 'injected',
+  };
+  assert.deepEqual(benchmarkEnvironment(inherited, 'http://127.0.0.1:1234'), {
+    PATH: 'runtime-path', SystemRoot: 'windows-root', HOME: 'user-home', DOHC_UPDATE_URL: 'http://127.0.0.1:1234',
+  });
+  assert.equal(inherited.DOHC_DESKTOP_OWNER_HOST_CONFIG, 'private-host');
+});
 test('strict release CLI rejects typos, duplicates, missing provenance and ambiguous modes', () => {
   assert.equal(parseOptions(required).scenario, 'full');
   assert.equal(parseOptions(required).runCount, 3);

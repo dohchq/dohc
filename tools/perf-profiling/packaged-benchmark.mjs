@@ -1,5 +1,5 @@
 import { startWindowController } from './window-controller.mjs';
-import { parseOptions, createEvidenceDirectory, usage } from './packaged-benchmark-options.mjs';
+import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation } from './packaged-process.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
@@ -67,8 +67,7 @@ const feed = createServer((req, res) => {
 });
 await new Promise((resolve, reject) => { feed.once('error', reject); feed.listen(0, '127.0.0.1', resolve); });
 const feedUrl = `http://127.0.0.1:${feed.address().port}`;
-const env = { ...process.env, DOHC_UPDATE_URL: feedUrl };
-for (const key of Object.keys(env)) if (key.startsWith('DOHC_TEST_') || ['DOHC_DESKTOP_TEST', 'DOHC_DESKTOP_MOCK_UPDATES', 'ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS'].includes(key)) delete env[key];
+const env = benchmarkEnvironment(process.env, feedUrl);
 let active;
 let windowController;
 let helperStartup;
