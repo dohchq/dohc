@@ -586,8 +586,6 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }, [props.reactionControls?.reactions]);
   const list = useRef<LegendListRef | null>(null);
   const [viewportHeight, setViewportHeight] = useState(700);
-  const nearEnd = useRef(true);
-  const viewportSize = useRef({ width: 0, height: 0 });
   const [focusedMessage, setFocusedMessage] = useState<string | null>(null);
   const [selectedMessages, setSelectedMessages] = useState<string[]>([]);
   const indexes = useMemo(() => new Map(props.messages.map((message, index) => [message.id, index])), [props.messages]);
@@ -768,22 +766,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     // DOM scrollHeight rounds fractional row sizes to whole CSS pixels.
     maintainScrollAtEndThreshold={40.5 / Math.max(1, viewportHeight)}
     maintainVisibleContentPosition
-    // Keep the pre-resize bottom position until the new viewport is measured.
-    onScroll={event => {
-      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-      if (Math.abs(layoutMeasurement.height - viewportSize.current.height) < 1) {
-        nearEnd.current = contentSize.height - contentOffset.y - layoutMeasurement.height <= 40.5;
-      }
-    }}
-    onLayout={event => {
-      const next = event.nativeEvent.layout;
-      const previous = viewportSize.current;
-      viewportSize.current = next;
-      setViewportHeight(next.height);
-      if (nearEnd.current && previous.height > 0 && (previous.height !== next.height || previous.width !== next.width)) {
-        void list.current?.scrollToEnd({ animated: false });
-      }
-    }}
+    onLayout={event => setViewportHeight(event.nativeEvent.layout.height)}
     recycleItems={false}
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
