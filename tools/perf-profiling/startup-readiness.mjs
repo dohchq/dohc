@@ -57,7 +57,12 @@ export function observeStartupReadiness({ workspaceName, path, content, timeoutM
     check();
   });
 }
-export function startupTargetAfterSwitches(switches = []) {
-  const index = switches.at(-1)?.to ?? 0;
+export function startupTargetFromRegistry(registry, fixtureWorkspaces) {
+  // A new process has no preferredWorkspaceId. DesktopRoot opens the first
+  // registry entry; lastOpenedAt and the prior renderer selection do not reorder it.
+  const selected = registry?.workspaces?.[0];
+  const index = fixtureWorkspaces.findIndex(workspace =>
+    workspace.workspaceId === selected?.workspaceId && workspace.rootPath === selected?.rootPath);
+  if (registry?.version !== 1 || index < 0) throw Error('Startup registry does not select a known fixture workspace');
   return { workspaceName: `workspace-${index}`, path: 'small.md', content: `Workspace ${index} small` };
 }

@@ -11,7 +11,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
-import { observeStartupReadiness, startupTargetAfterSwitches } from './startup-readiness.mjs';
+import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 
 function readinessPage(t) {
   const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
@@ -46,7 +46,7 @@ function readinessPage(t) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback(now);
   };
-  const observe = (target = startupTargetAfterSwitches()) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
+  const observe = (target = { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small' }) => w.eval(`(${observeStartupReadiness.toString()})`)({ ...target, timeoutMs: 1000 });
   return { document: w.document, observe, step, frame, frames, timers };
 }
 
@@ -101,18 +101,51 @@ test('startup observer restarts its frame check when the bound editor is replace
   assert.equal(observed.secondAnimationFrameMs, 74);
 });
 
-test('full restart after an odd switch count observes workspace 1 without another switch', async t => {
+const fixtureWorkspaces = [0, 1].map(index => ({ workspaceId: `perf4-package-${index}`, rootPath: `C:/fixture/workspace-${index}` }));
+
+test('full restart after odd switches opens registry workspace 0 despite workspace 1 recency', async t => {
   const p = readinessPage(t);
-  const priorSwitches = [{ to: 1 }, { to: 0 }, { to: 1 }];
+  const registry = { version: 1, workspaces: fixtureWorkspaces.map((workspace, index) => ({ ...workspace, lastOpenedAt: 100 + index })) };
+  const result = p.observe(startupTargetFromRegistry(registry, fixtureWorkspaces));
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.alreadyReady, true);
+  assert.equal(observed.workspaceName, 'workspace-0');
+  assert.equal(observed.path, 'small.md');
+});
+
+test('restart records a different known workspace only when the persisted registry selects it', async t => {
+  const p = readinessPage(t);
   p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
   p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
-  const result = p.observe(startupTargetAfterSwitches(priorSwitches));
+  const result = p.observe(startupTargetFromRegistry({ version: 1, workspaces: [...fixtureWorkspaces].reverse() }, fixtureWorkspaces));
   p.frame(); p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
   assert.equal(observed.workspaceName, 'workspace-1');
   assert.equal(observed.path, 'small.md');
-  assert.deepEqual(startupTargetAfterSwitches(priorSwitches.slice(0, 2)), startupTargetAfterSwitches());
+});
+
+test('startup target refuses unknown workspace identities and roots', () => {
+  for (const selected of [{ workspaceId: 'unknown', rootPath: 'C:/fixture/workspace-0' }, { ...fixtureWorkspaces[0], rootPath: 'C:/other' }]) {
+    assert.throws(() => startupTargetFromRegistry({ version: 1, workspaces: [selected] }, fixtureWorkspaces), /known fixture workspace/);
+  }
+});
+
+test('startup observer cannot combine the active selection with content in another group', async t => {
+  const p = readinessPage(t);
+  const group = p.document.querySelector('[data-editor-group-id]');
+  const inactiveGroup = group.cloneNode(true);
+  inactiveGroup.removeAttribute('data-active');
+  inactiveGroup.setAttribute('data-editor-group-id', 'other');
+  group.after(inactiveGroup);
+  const activeEditor = group.querySelector('.tiptap');
+  activeEditor.textContent = 'Workspace 1 small';
+  const result = p.observe();
+  assert.equal(p.frames.size, 0);
+  activeEditor.textContent = 'Workspace 0 small';
+  p.step(); p.frame(); p.frame();
+  assert.equal((await result).alreadyReady, false);
 });
 
 for (const frameNumber of [1, 2]) test(`startup observer rejects a DOM error in animation frame ${frameNumber}`, async t => {
