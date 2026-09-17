@@ -636,25 +636,38 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     document.addEventListener("selectionchange", selectionChanged);
     return () => document.removeEventListener("selectionchange", selectionChanged);
   }, [indexes, props.messages, messageKey]);
+  const hasReactionButtons = Boolean(props.reactionControls && !props.reactionControls.readOnly);
+  const canOpenPath = props.onOpenPath !== undefined;
+  const actionableIndexes = useMemo(() => {
+    if (hasReactionButtons || !canOpenPath) return [];
+    return props.messages.flatMap((message, index) =>
+      extractChatFileReferenceTokens(message.body).length > 0 ? [index] : []);
+  }, [props.messages, hasReactionButtons, canOpenPath]);
   const pinned = useMemo(() => {
     const focusedIndex = focusedMessage ? indexes.get(focusedMessage) : undefined;
     const indices: number[] = [];
     if (focusedIndex !== undefined) {
       indices.push(focusedIndex);
-      for (const direction of [-1, 1]) {
-        for (let index = focusedIndex + direction; index >= 0 && index < props.messages.length; index += direction) {
-          const message = props.messages[index]!;
-          const hasReactionButton = props.reactionControls && !props.reactionControls.readOnly;
-          const hasFileButton = props.onOpenPath && extractChatFileReferenceTokens(message.body).length > 0;
-          if (hasReactionButton || hasFileButton) {
-            indices.push(index);
-            break;
-          }
+      if (hasReactionButtons) {
+        if (focusedIndex > 0) indices.push(focusedIndex - 1);
+        if (focusedIndex + 1 < props.messages.length) indices.push(focusedIndex + 1);
+      } else {
+        // Sparse read-only file links can be thousands of messages apart.
+        let lower = 0;
+        let upper = actionableIndexes.length;
+        while (lower < upper) {
+          const middle = Math.floor((lower + upper) / 2);
+          if (actionableIndexes[middle]! < focusedIndex) lower = middle + 1;
+          else upper = middle;
         }
+        const previous = actionableIndexes[lower - 1];
+        const next = actionableIndexes[lower + (actionableIndexes[lower] === focusedIndex ? 1 : 0)];
+        if (previous !== undefined) indices.push(previous);
+        if (next !== undefined) indices.push(next);
       }
     }
     return { keys: selectedMessages, indices };
-  }, [selectedMessages, focusedMessage, indexes, props.messages, props.reactionControls, props.onOpenPath]);
+  }, [selectedMessages, focusedMessage, indexes, props.messages.length, hasReactionButtons, actionableIndexes]);
 
   const renderMessage = useCallback(({ item: message, index: at }: { item: ChatMessageRecord; index: number }) => {
     const previous = at > 0 ? props.messages[at - 1] : undefined;
