@@ -16,6 +16,7 @@ import {
   navigatorView,
   mentionRoster,
 } from "./ChatsView.testHarness";
+import { runnerProgram } from "./ChatsView";
 
 describe("ChatsView My agent", () => {
   it("attributes a runner failure to dohc without an agent badge", async () => {
@@ -113,6 +114,13 @@ describe("ChatsView My agent", () => {
     expect(screen.getByTestId("chats-agent-screen-reach").textContent).toBe("reaches work");
     await user.click(screen.getByTestId("chats-agent-screen-manage"));
     expect(onSetupAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("names the program a runner command starts, with the whole command on hover", () => {
+    expect(runnerProgram('node "C:\\w\\dohc\\apps\\desktop\\e2e\\fixtures\\fakeChatRunner.mjs" ask')).toBe("node fakeChatRunner.mjs");
+    expect(runnerProgram("codex exec --sandbox read-only")).toBe("codex");
+    expect(runnerProgram('"C:\\Program Files\\Agent\\agent.exe" --serve')).toBe("agent.exe");
+    expect(runnerProgram("python3 /home/me/bot.py")).toBe("python3 bot.py");
   });
 
   it("lists other people's agents from joined channels, read-only, under who shared them", async () => {

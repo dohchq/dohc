@@ -323,6 +323,22 @@ function NavRow(props: {
   );
 }
 
+// The strip names the program a runner command starts, not its whole
+// command line: a quoted path to a script is a path, and the strip is a
+// sentence. The full command sits in the title.
+export function runnerProgram(command: string): string {
+  const trimmed = command.trim();
+  const first = trimmed.startsWith('"')
+    ? trimmed.slice(1, trimmed.indexOf('"', 1) > 0 ? trimmed.indexOf('"', 1) : undefined)
+    : trimmed.split(/\s+/u)[0] ?? trimmed;
+  const program = first.split(/[\\/]/u).pop() ?? first;
+  // `node "…/agent.mjs"` names the script, which is what the person wrote.
+  const rest = trimmed.slice(trimmed.indexOf(first) + first.length).trim();
+  const script = rest.match(/^"([^"]+)"|^(\S+)/u);
+  const scriptName = script ? (script[1] ?? script[2] ?? "").split(/[\\/]/u).pop() : undefined;
+  return scriptName && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(scriptName) ? `${program} ${scriptName}` : program;
+}
+
 export function ChatsView(props: {
   workspaceId: string;
   workspaces: readonly DmWorkspaceOption[];
@@ -4028,10 +4044,14 @@ export function ChatsView(props: {
             className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
           >
             <Bot size={12} aria-hidden className="shrink-0 text-agent" />
-            <span data-testid="chats-agent-screen-runner" className="min-w-0 flex-1 truncate">
+            <span
+              data-testid="chats-agent-screen-runner"
+              className="min-w-0 flex-1 truncate"
+              title={agentReady ? props.userSettings?.runner.command.trim() : undefined}
+            >
               {agentReady
                 ? props.userSettings?.runner.command.trim()
-                  ? `Runs ${props.userSettings.runner.command.trim()}`
+                  ? `Runs ${runnerProgram(props.userSettings.runner.command)}`
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"

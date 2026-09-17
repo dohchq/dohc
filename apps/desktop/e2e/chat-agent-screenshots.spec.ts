@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { launchDesktopApp } from "./helpers/desktopApp";
+import { join, resolve } from "node:path";
+import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -16,7 +16,7 @@ import {
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture agent screenshots");
 
-const fakeRunner = join(__dirname, "fixtures", "fakeChatRunner.mjs");
+const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await page.evaluate(async (value) => {
