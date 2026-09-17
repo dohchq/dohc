@@ -1591,6 +1591,64 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  it.each([false, true])("coalesces blocked capture health polls and resumes after failure=%s", async (failFirst) => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const entered = deferred();
+    const release = deferred();
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const watcherStatus = vi.fn(async () => {
+      if (watcherStatus.mock.calls.length === 1) {
+        entered.resolve();
+        await release.promise;
+        if (failFirst) throw new Error("temporary watcher failure");
+      }
+      return { running: true, degraded: false, terminal: false };
+    });
+    const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return watcherStatus;
+        if (property === "listPendingCollectionAdoptions") return adoptions;
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    try {
+      engine.start();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(12 * DAEMON_CAPTURE_HEALTH_POLL_MS);
+      expect(watcherStatus).toHaveBeenCalledTimes(1);
+      release.resolve();
+      await engine.flush();
+      // One current observation, not twelve obsolete observations queued behind it.
+      expect(watcherStatus).toHaveBeenCalledTimes(1);
+      expect(adoptions).toHaveBeenCalledTimes(failFirst ? 1 : 2);
+      expect(outcomes).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await engine.flush();
+      expect(watcherStatus).toHaveBeenCalledTimes(2);
+      expect(outcomes.at(-1)).toBeNull();
+      await engine.stop();
+      await vi.advanceTimersByTimeAsync(2 * DAEMON_CAPTURE_HEALTH_POLL_MS);
+      expect(watcherStatus).toHaveBeenCalledTimes(2);
+    } finally {
+      release.resolve();
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   // The engine refusing the workspace's database is not a degraded
   // watcher. The outcome carries the fence's classification so the product
   // offers the move-aside rebuild instead of "History paused" — and a later
