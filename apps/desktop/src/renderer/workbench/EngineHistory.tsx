@@ -356,6 +356,12 @@ export function EngineHistoryView(props: {
   const retainedKeys = focusedIndex < 0
     ? []
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
+  const headerItemCount = props.protectedTruncated ? 1 : 0;
+  const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
+  const rowPresentation = useMemo(
+    () => ({ expandedGroups, headerItemCount, listItemCount }),
+    [expandedGroups, headerItemCount, listItemCount],
+  );
 
   // A known page with no moments. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
@@ -419,14 +425,24 @@ export function EngineHistoryView(props: {
         onBlurCapture={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
         }}
-        extraData={expandedGroups}
+        extraData={rowPresentation}
         ListHeaderComponent={props.protectedTruncated ? (
-          <li role="listitem" className="border-b border-line px-3 py-2 text-[11px] text-muted">
+          <li
+            role="listitem"
+            aria-posinset={1}
+            aria-setsize={listItemCount}
+            className="border-b border-line px-3 py-2 text-[11px] text-muted"
+          >
             Some protected activity in this range is not shown.
           </li>
         ) : null}
-        renderItem={({ item }) => item.day ? (
-          <li role="listitem" className="border-b border-line bg-panel-2 px-3 py-1">
+        renderItem={({ item, index }) => item.day ? (
+          <li
+            role="listitem"
+            aria-posinset={headerItemCount + index + 1}
+            aria-setsize={listItemCount}
+            className="border-b border-line bg-panel-2 px-3 py-1"
+          >
             <time
               data-testid="engine-history-day-heading"
               dateTime={item.day.dateTime}
@@ -438,6 +454,8 @@ export function EngineHistoryView(props: {
         ) : (
           <li
             role="listitem"
+            aria-posinset={headerItemCount + index + 1}
+            aria-setsize={listItemCount}
             data-testid="engine-moment"
             data-history-key={item.key}
             className="border-b border-line"
@@ -460,7 +478,12 @@ export function EngineHistoryView(props: {
           </li>
         )}
         ListFooterComponent={props.hasMore ? (
-          <li role="listitem" className="border-b border-line">
+          <li
+            role="listitem"
+            aria-posinset={listItemCount}
+            aria-setsize={listItemCount}
+            className="border-b border-line"
+          >
             <button
               type="button"
               data-testid="engine-history-load-more"
