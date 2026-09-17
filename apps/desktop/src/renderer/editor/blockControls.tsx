@@ -3,7 +3,8 @@ import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
-import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { ReplaceStep } from "@tiptap/pm/transform";
 import type { Node as ProseMirrorNode, Slice } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { ChevronDown } from "lucide-react";
@@ -200,6 +201,28 @@ function buildBlockControlDecorations(
   return DecorationSet.create(doc, decorations);
 }
 
+/**
+ * A text-only replacement cannot change the set or kind of top-level blocks.
+ * Keeping the persistent decoration tree and mapping its positions avoids
+ * rebuilding two decorations for every block while typing. Structural edits,
+ * node replacements, and multi-step transactions still take the
+ * full rebuild path below.
+ */
+function isSingleTextblockReplacement(
+  tr: Transaction,
+): boolean {
+  if (tr.steps.length !== 1) return false;
+  const step = tr.steps[0];
+  if (!(step instanceof ReplaceStep)) return false;
+  if (step.slice.openStart !== 0 || step.slice.openEnd !== 0) return false;
+  for (let index = 0; index < step.slice.content.childCount; index++) {
+    if (!step.slice.content.child(index).isText) return false;
+  }
+  const from = tr.before.resolve(step.from);
+  const to = tr.before.resolve(step.to);
+  return from.depth === 1 && from.sameParent(to) && from.parent.isTextblock;
+}
+
 function setVisibleBlockControl(
   view: EditorView,
   target: EventTarget | null,
@@ -268,6 +291,11 @@ export function makeBlockControlsPlugin({
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
         activeBlockIndex = undefined;
+        if (isSingleTextblockReplacement(tr)) {
+          return tr.doc.content.size === tr.before.content.size
+            ? old
+            : old.map(tr.mapping, tr.doc);
+        }
         return buildBlockControlDecorations(
           tr.doc,
           onInsertRef,
