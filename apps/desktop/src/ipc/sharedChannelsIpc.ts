@@ -75,6 +75,9 @@ export function registerSharedChannelsIpcHandlers<
   notifyRenderer(input: { workspaceId: string }): void;
   // Mounts a group's folder under shared-with-me, the way a pasted share
   // code does. Joining a group is one action: the channel, then its folder.
+  unmountShareFolder(input: {
+    workspace: Workspace; shareId: string; assertCurrent(): void;
+  }): Promise<unknown>;
   mountShareFolder(input: {
     workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
   }): Promise<unknown>;
@@ -86,7 +89,7 @@ export function registerSharedChannelsIpcHandlers<
     relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer, mountShareFolder,
+    notifyRenderer, mountShareFolder, unmountShareFolder,
   } = dependencies;
 
   // --- Shared channels (MU-C4) --------------------------------------------
@@ -578,8 +581,18 @@ export function registerSharedChannelsIpcHandlers<
       event.sender,
       input.workspaceId,
       "Leaving stopped because this window changed workspaces.",
-      (operation) => {
+      async (operation) => {
         endWorkspaceJoinedChannel(operation, input.shareId);
+        if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
+          try {
+            await unmountShareFolder({
+              workspace: operation.workspace, shareId: input.shareId, assertCurrent: operation.assertCurrent,
+            });
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
+          }
+        }
         return undefined;
       },
     );

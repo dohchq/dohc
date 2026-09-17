@@ -4135,6 +4135,8 @@ function registerIpcHandlers(): void {
     peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
+    unmountShareFolder: ({ workspace, shareId, assertCurrent }) =>
+      shareMountCommands.unmount({ workspace, shareId, assertCurrent }),
     mountShareFolder: ({ workspace, shareId, relayUrl, labelHint, assertCurrent }) =>
       shareMountCommands.mount({
         workspace,

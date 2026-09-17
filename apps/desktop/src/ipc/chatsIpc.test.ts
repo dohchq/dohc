@@ -341,9 +341,23 @@ describe("registered channels and personal chat projections", () => {
     // A group is a folder: the default folder is the slug, and main creates it.
     expect(test.storeMethods.createChannel).toHaveBeenCalledWith({ workspaceId: "workspace", name: "General", kind: "channel", folderPath: "general" });
     expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
+    expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
     expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Ice" }, authorUserId: "verified-owner" });
     expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);
+  });
+
+  it("requires a usable default folder and creates no channel if the folder fails", async () => {
+    const test = fixture();
+    await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "💥" }))
+      .rejects.toThrow("Give the group a name with a letter or a number, or name its folder.");
+    expect(test.ensureGroupFolder).not.toHaveBeenCalled();
+    expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
+    test.ensureGroupFolder.mockRejectedValueOnce(new Error("disk full"));
+    await expect(test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "Team" })).rejects.toThrow("disk full");
+    expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
+    await test.invoke(CHANNELS.createChatChannel, { workspaceId: "workspace", name: "💥", folderPath: "team" });
+    expect(test.storeMethods.createChannel).toHaveBeenCalledWith(expect.objectContaining({ folderPath: "team" }));
   });
 
   it("saves and archives with the existing bookmark owner after identity warming", async () => {

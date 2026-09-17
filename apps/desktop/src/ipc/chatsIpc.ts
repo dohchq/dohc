@@ -943,6 +943,10 @@ export function registerChatsIpcHandlers<
         // creator named one. Main creates it so the group's files have a
         // home before the first post.
         const folderPath = input.folderPath ?? channelSlugForName(input.name);
+        if (!folderPath) {
+          throw new Error("Give the group a name with a letter or a number, or name its folder.");
+        }
+        await ensureGroupFolder(workspace, folderPath);
         const channel = await linkedChatStoreFor(workspace).createChannel({
           workspaceId: workspace.workspaceId,
           name: input.name,
@@ -951,9 +955,6 @@ export function registerChatsIpcHandlers<
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
           ...(folderPath ? { folderPath } : {}),
         });
-        if (channel.folderPath) {
-          await ensureGroupFolder(workspace, channel.folderPath);
-        }
         return CreateChatChannelResult.parse({
           // A locally created channel's wire identity is its own id.
           channel: {

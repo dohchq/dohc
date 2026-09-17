@@ -67,10 +67,11 @@ async function harness() {
   });
   const notify = vi.fn();
   const acknowledge = vi.fn();
+  const unmount = vi.fn(async () => undefined);
   const mount = vi.fn(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
-    getChannelWireId: vi.fn(async (): Promise<string | null> => null),
+    getChannelWireId: vi.fn(async (_input: { workspaceId: string; channelId: string }): Promise<string | null> => null),
   };
   const relayCalls: Array<{ path: string; init?: RequestInit }> = [];
   const helpers = registerSharedChannelsIpcHandlers<string, Event, Workspace, Operation>({
@@ -95,13 +96,13 @@ async function harness() {
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
-    notifyRenderer: notify, mountShareFolder: mount,
+    notifyRenderer: notify, mountShareFolder: mount, unmountShareFolder: unmount,
   });
   const invoke = async (channel: string, payload: unknown, trusted = true) =>
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
-    mount, store, relayCalls,
+    mount, unmount, store, relayCalls,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -167,6 +168,24 @@ describe("registered shared-channel handlers", () => {
     expect(h.relayListing).not.toHaveBeenCalled();
   });
 
+  it("unmounts a group on leave, leaves plain channels alone, and preserves leave on failure", async () => {
+    const h = await harness();
+    h.workspace.shareMounts = [{
+      shareId: "shown", label: "team", granterEmail: "owner@example.test", relayUrl: credentials.relayUrl!,
+      grantedSelector: { paths: ["team"], versionId: null, access: "view" },
+    }];
+    await h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" });
+    expect(h.unmount).toHaveBeenCalledWith({
+      workspace: expect.objectContaining({ workspaceId: "workspace" }), shareId: "shown", assertCurrent: expect.any(Function),
+    });
+    await h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "history" });
+    expect(h.unmount).toHaveBeenCalledOnce();
+    h.unmount.mockRejectedValueOnce(new Error("disk busy"));
+    await expect(h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" }))
+      .rejects.toThrow("Left the group, but its folder could not be removed. disk busy");
+    expect(h.workspace.sharedChannels?.find(row => row.shareId === "shown")?.ended).toBe(true);
+  });
+
   it("does not cache an invitation kind returned after the account changes", async () => {
     const h = await harness();
     h.relayListing.mockResolvedValue({ received: [{
@@ -186,7 +205,7 @@ describe("registered shared-channel handlers", () => {
   it("shares a channel's folder with it, as one group grant", async () => {
     const h = await harness();
     h.store.listChannels.mockResolvedValue([channel({ folderPath: "team" }), channel({ id: "bare", name: "Bare", slug: "bare" })]);
-    h.store.getChannelWireId.mockResolvedValue("wire-team");
+    h.store.getChannelWireId.mockImplementation(async ({ channelId }) => channelId === "chan" ? "wire-team" : "wire-bare");
     h.relayListing.mockResolvedValue({ shareId: "share-team" });
     await expect(h.invoke(CHANNELS.shareChatChannel, {
       workspaceId: "workspace", channelId: "chan", recipientEmail: "ana@example.test", access: "read-only",
@@ -196,7 +215,7 @@ describe("registered shared-channel handlers", () => {
     });
     expect(h.relayCalls.map((call) => JSON.parse(String(call.init?.body)))).toEqual([
       { recipientEmail: "ana@example.test", channelWireId: "wire-team", paths: ["team"], access: "read-only" },
-      { recipientEmail: "ana@example.test", channelWireId: "wire-team" },
+      { recipientEmail: "ana@example.test", channelWireId: "wire-bare" },
     ]);
   });
 
