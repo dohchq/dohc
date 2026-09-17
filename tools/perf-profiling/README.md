@@ -1,5 +1,56 @@
 # Renderer profiling harness
 
+## Measure a Windows release package
+
+Use this workload when comparing release startup, editing, workspace switches, and idle cost.
+It launches the packaged executable with isolated local workspaces and a new profile.
+It does not rebuild the package, change Electron fuses, or enable a product test bridge.
+
+1. Install the checkout's pinned dependencies before the measurement slot.
+2. Prepare baseline and candidate packages with their build receipts.
+3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.14 or newer and PowerShell 7.
+4. Run `node tools/perf-profiling/packaged-benchmark.mjs --help` for the options.
+5. Run each package with a new output directory and its full build commit:
+
+```powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary C:/packages/baseline/dohc.exe --package-commit <full-build-SHA> --output C:/perf/baseline-1 --label baseline
+node tools/perf-profiling/summarize-packaged-benchmark.mjs C:/perf/baseline-1
+```
+
+Use `--label candidate` for the candidate. Keep the workload settings identical and alternate execution order.
+Use `--engine-commit <full-SHA>` when a diagnostic package has a separately built engine.
+The receipt records executable, ASAR, engine, harness, and helper hashes separately from the harness checkout commit.
+Output directories cannot be reused. Failure logs and fixtures remain available for diagnosis.
+Cleanup closes the recorded app and helper; failed startup and shutdown also terminate their owned process trees.
+Ctrl-C and SIGTERM cancel pending launch or idle work, stop owned processes, and preserve the failed-run receipt.
+
+The default workload uses three fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
+30 trusted keystrokes per document, ten switches, and 60 seconds each of visible and minimized idle.
+`--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
+Fixture receipts contain file counts and content/name digests. Other scenarios are `startup`, `small-switch`, and `small-tab`.
+
+Startup waits for a naturally visible app window and editable DOM, then two animation frames.
+Observed latency includes CDP, window verification, and scheduling. Window verification is not subtracted.
+`spawnedObservedMs` includes synchronous spawn and receipt writes; it is not OS process birth.
+Native launch marks start at module evaluation. Renderer paint timestamps are aligned with the harness spawn wall clock.
+Workspace-switch phases come from production performance entries; external click-to-editable observations remain separate.
+
+Only reported Chromium EventTiming durations are called input-to-next-paint. The reporting floor is 16 ms;
+missing samples stay missing, including when no typing workload ran. Trusted CDP input excludes physical keyboard delivery.
+Idle counters cover observed descendants and match PID plus creation time. IO counters are not physical disk traffic.
+Context switches and hardware wakeups are unavailable. Minimized idle does not represent every background or power state.
+The loopback updater feed advertises no installable update. Fresh profiles do not imply a cold OS cache.
+The app receives no inherited `DOHC_*`, `NODE_OPTIONS`, or `ELECTRON_RUN_AS_NODE` settings.
+Only the controlled loopback `DOHC_UPDATE_URL` is added.
+
+`--profile-renderer true` records diagnostic switch CPU profiles.
+`--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.
+Main profiling must produce a log matching the recorded main PID. Profiled runs are marked diagnostic in summaries.
+Keep them separate from unprofiled comparisons. `packaged-host-load.ps1` captures host counters without process command lines.
+
+Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, and summary checks.
+These tests also run through the canonical root test command. They do not launch the GUI workload.
+
 This harness profiles the desktop renderer on seeded workspaces. Its six
 scenarios measure:
 
