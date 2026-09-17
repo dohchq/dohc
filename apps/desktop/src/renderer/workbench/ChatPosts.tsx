@@ -21,50 +21,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import type { ChatsNav } from "./ChatsView";
-
-interface ThreadCommentNode {
-  message: ChatMessageRecord;
-  replies: ThreadCommentNode[];
-}
-
-// The store keeps the true parent id for every reply. Turn the chronological
-// message stream into a display tree without trusting malformed relationships:
-// missing parents, self-links, and cycles stay visible as top-level comments.
-function buildThreadCommentTree(
-  openingMessageId: string,
-  comments: readonly ChatMessageRecord[],
-): ThreadCommentNode[] {
-  const nodes: ThreadCommentNode[] = comments.map((message) => ({
-    message,
-    replies: [],
-  }));
-  const byId = new Map(nodes.map((node) => [node.message.id, node]));
-  const roots: ThreadCommentNode[] = [];
-
-  const createsCycle = (messageId: string, parentId: string): boolean => {
-    const seen = new Set([messageId]);
-    let cursor: string | undefined = parentId;
-    while (cursor && cursor !== openingMessageId) {
-      if (seen.has(cursor)) return true;
-      seen.add(cursor);
-      cursor = byId.get(cursor)?.message.parentMessageId;
-    }
-    return false;
-  };
-
-  for (const node of nodes) {
-    const parentId = node.message.parentMessageId;
-    const parent =
-      parentId && parentId !== openingMessageId ? byId.get(parentId) : undefined;
-    if (parent && !createsCycle(node.message.id, parentId!)) {
-      parent.replies.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-
-  return roots;
-}
+import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 
 function pathBasename(pathHint: string | undefined): string {
   if (!pathHint) return "attachment";
