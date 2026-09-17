@@ -40,7 +40,7 @@ overrides:
   prosemirror-view: 1.42.2
 
 patchedDependencies:
-  '@legendapp/list@3.3.11': 003be958e346c828e4de460c47df2222d7ff59fb28e59d6ec55aaa7328db249e
+  '@legendapp/list@3.3.11': 0cb13b259c74798e7ffd1ba9020464e2105defda19ee844f0c1adcc8fe723352
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
 
 importers:
@@ -103,7 +103,7 @@ importers:
         version: link:../../packages/ydoc-projection
       '@legendapp/list':
         specifier: 3.3.11
-        version: 3.3.11(patch_hash=003be958e346c828e4de460c47df2222d7ff59fb28e59d6ec55aaa7328db249e)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        version: 3.3.11(patch_hash=0cb13b259c74798e7ffd1ba9020464e2105defda19ee844f0c1adcc8fe723352)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@tiptap/core':
         specifier: 3.29.2
         version: 3.29.2(@tiptap/pm@3.29.2)
@@ -7724,7 +7724,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@legendapp/list@3.3.11(patch_hash=003be958e346c828e4de460c47df2222d7ff59fb28e59d6ec55aaa7328db249e)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@legendapp/list@3.3.11(patch_hash=0cb13b259c74798e7ffd1ba9020464e2105defda19ee844f0c1adcc8fe723352)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       react: 19.2.8
       use-sync-external-store: 1.6.0(react@19.2.8)

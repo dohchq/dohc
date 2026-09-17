@@ -1,7 +1,16 @@
 diff --git a/react.js b/react.js
-index 874465090398bbfb1b079e82dd175490020eaabf..09b49382e61395bdb7c4c7e6525fbf0c5ef836e2 100644
+index 874465090398bbfb1b079e82dd175490020eaabf..b4e2f9a645c021a114e0d6ebe899d8b67f6c038d 100644
 --- a/react.js
 +++ b/react.js
+@@ -721,7 +721,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
+     set$(
+       ctx,
+       "isWithinMaintainScrollAtEndThreshold",
+-      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || maintainingScrollAtEnd === "animated" || maintainingScrollAtEnd === "instant"
++      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || !!maintainingScrollAtEnd
+     );
+     const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
+     if (!shouldSkipThresholdChecks) {
 @@ -5926,6 +5926,29 @@ function useDOMOrder(ref) {
      let timeoutId;
      let lastUpdateTime = 0;
@@ -57,9 +66,18 @@ index 874465090398bbfb1b079e82dd175490020eaabf..09b49382e61395bdb7c4c7e6525fbf0c
        clearTimeout(timeoutId);
      };
 diff --git a/react.mjs b/react.mjs
-index d9a4414a9295c694f9c2b71cf75268a422f897e4..8bfe9eb87947e9bcd80bcd8f7596791ec896ca23 100644
+index d9a4414a9295c694f9c2b71cf75268a422f897e4..464c507c59b73169be57ec2b9d9ca2c050dd068a 100644
 --- a/react.mjs
 +++ b/react.mjs
+@@ -700,7 +700,7 @@ function checkAtBottom(ctx, allowedEdge, allowGateCreatedInCurrentCheck) {
+     set$(
+       ctx,
+       "isWithinMaintainScrollAtEndThreshold",
+-      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || maintainingScrollAtEnd === "animated" || maintainingScrollAtEnd === "instant"
++      isContentLess || distanceFromEnd <= maintainScrollAtEndThreshold * scrollLength || state.pendingMaintainScrollAtEnd || !!maintainingScrollAtEnd
+     );
+     const shouldSkipThresholdChecks = hasActiveInitialScroll(state) || maintainingScrollAtEnd;
+     if (!shouldSkipThresholdChecks) {
 @@ -5905,6 +5905,29 @@ function useDOMOrder(ref) {
      let timeoutId;
      let lastUpdateTime = 0;
