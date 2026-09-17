@@ -2021,7 +2021,7 @@ export function ChatsView(props: {
           setMessageReactions(messageId, result.reactions, result.viewerAuthorId);
         })
         .catch((error) => {
-          if (token !== liveToken.current) return;
+          if (!isCurrent()) return;
           props.onError(ipcErrorMessage(error, "Could not update that reaction."));
         });
     },
@@ -3174,7 +3174,17 @@ export function ChatsView(props: {
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className={`px-3 pb-12 pt-3 sm:px-4 ${pageColumn}`}>
             {personalFeed.length === 0 && !personalFeedLoading ? (
-              <p className="m-0 py-10 text-center text-[13px] text-subtle">Nothing new yet</p>
+              <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
+                <p className="m-0">Nothing new yet</p>
+                <button
+                  type="button"
+                  data-testid="chats-feed-empty-groups"
+                  onClick={goBack}
+                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  Open Groups
+                </button>
+              </div>
             ) : null}
             <ul className="m-0 flex list-none flex-col gap-3 p-0">
               {personalFeed.map((item) => {
@@ -3188,11 +3198,21 @@ export function ChatsView(props: {
                   item.channel?.kind === "dm"
                     ? dms.find((dm) => dm.channelId === item.channel?.id)
                     : undefined;
-                const bookmark = bookmarkFor("message", item.message.id);
-                const bookmarkKey = `message:${item.message.id}`;
+                const isComment = item.openingMessage
+                  ? item.openingMessage.id !== item.message.id
+                  : item.message.parentMessageId !== undefined;
+                const bookmarkTarget = isComment
+                  ? { kind: "message" as const, threadId: item.thread.id, messageId: item.message.id }
+                  : { kind: "thread" as const, threadId: item.thread.id };
+                const bookmarkId = isComment ? item.message.id : item.thread.id;
+                const bookmark = bookmarkFor(bookmarkTarget.kind, bookmarkId);
+                const bookmarkKey = `${bookmarkTarget.kind}:${bookmarkId}`;
+                const joined = item.channel?.wireId
+                  ? joinedByWire.get(item.channel.wireId)
+                  : undefined;
+                const locked = joined?.access === "read-only" || joined?.ended === true;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
                 const isAgent = item.message.authorKind === "agent";
-                const isComment = item.message.parentMessageId !== undefined;
                 const time = formatChatTime(item.message.createdAtMs);
                 const itemReactions = item.reactions.filter(
                   (reaction) => reaction.messageId === item.message.id,
@@ -3327,6 +3347,7 @@ export function ChatsView(props: {
                       <ActionButton
                         testId="chats-feed-like"
                         label="Like"
+                        disabled={locked}
                         icon={<SmilePlus size={15} strokeWidth={1.9} aria-hidden />}
                         active={liked}
                         onClick={() => toggleHomeReaction(item.thread.id, item.message.id, liked)}
@@ -3342,11 +3363,7 @@ export function ChatsView(props: {
                         busy={bookmarkBusy.has(bookmarkKey)}
                         onToggle={(mode) =>
                           void toggleBookmark({
-                            target: {
-                              kind: "message",
-                              threadId: item.thread.id,
-                              messageId: item.message.id,
-                            },
+                            target: bookmarkTarget,
                             mode,
                           })
                         }

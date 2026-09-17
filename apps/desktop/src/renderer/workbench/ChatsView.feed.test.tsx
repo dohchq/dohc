@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { type ChatsNav } from "./ChatsView";
@@ -13,9 +13,112 @@ import {
   fileThread,
   bridgeMock,
   renderView,
+  shareListing,
 } from "./ChatsView.testHarness";
+import { deferred } from "../../testing/deferred";
 
 describe("ChatsView hybrid feed", () => {
+  it("opens Groups from an empty Home", async () => {
+    const onNavCommand = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onNavCommand });
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Nothing new yet");
+    await userEvent.click(screen.getByTestId("chats-feed-empty-groups"));
+    expect(onNavCommand).toHaveBeenLastCalledWith({ level: "channels" });
+    expect(await screen.findByTestId("chats-channel")).toBeTruthy();
+  });
+
+  it.each([
+    { access: "read-only", ended: false, locked: true },
+    { access: "read-write", ended: true, locked: true },
+    { access: "read-write", ended: false, locked: false },
+  ])("sets Home Like availability for joined $access groups, ended=$ended", async ({ access, ended, locked }) => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-joined" })], fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({
+      joined: [{ channelWireId: "wire-joined", access, ended, shareId: "share-1" }],
+    }));
+    const item = personalFeedItem("Shared post", "shared-message");
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...item, channel: { ...item.channel, wireId: "wire-joined" } }],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const like = await screen.findByTestId("chats-feed-like");
+    expect((like as HTMLButtonElement).disabled).toBe(locked);
+    await userEvent.click(like);
+    expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(locked ? 0 : 1);
+  });
+
+  it("ignores an older Home reaction error after a newer toggle succeeds", async () => {
+    const older = deferred();
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [personalFeedItem("A post", "message-1")],
+    });
+    bridgeMock.setChatReaction.mockImplementationOnce(() => older.promise);
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [{ reactionId: "like", threadId: "thread-1", messageId: "message-1",
+        emoji: "👍", authorId: "you", authorKind: "human", authorDisplayName: "You" }],
+      viewerAuthorId: "you",
+    });
+    renderView(vi.fn(), onError);
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const like = await screen.findByTestId("chats-feed-like");
+    await userEvent.click(like);
+    await userEvent.click(like);
+    await waitFor(() => expect(like.getAttribute("aria-pressed")).toBe("true"));
+    await act(async () => {
+      older.reject(new Error("Older request failed"));
+      await older.promise.catch(() => undefined);
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "opening post", openingId: "message-1", comment: false },
+    { name: "ordinary comment", openingId: "opening", comment: true },
+    { name: "reply without opening metadata", parentId: "opening", comment: true },
+    { name: "post without opening metadata", comment: false },
+  ])("uses the right Home context and bookmark target for an $name", async ({ openingId, parentId, comment }) => {
+    const item = personalFeedItem("Home message", "message-1");
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [{
+      ...item,
+      message: { ...item.message, ...(parentId ? { parentMessageId: parentId } : {}) },
+      ...(openingId ? { openingMessage: message({ id: openingId }) } : {}),
+    }] });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const card = within(await screen.findByTestId("chats-feed-item"));
+    expect(card.queryByText(item.thread.title) !== null).toBe(comment);
+    expect(card.getByRole("button", { name: comment ? "Reply" : "Comment" })).toBeTruthy();
+    await userEvent.click(card.getByTestId("chats-feed-bookmark"));
+    expect(bridgeMock.saveChatBookmark).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      target: comment
+        ? { kind: "message", threadId: "thread-1", messageId: "message-1" }
+        : { kind: "thread", threadId: "thread-1" },
+      mode: "live",
+    });
+  });
+
+  it("shows an opening post saved in Groups as Saved on Home", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...personalFeedItem("Opening post", "message-1"), openingMessage: message() }],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-post-bookmark"));
+    await waitFor(() => expect(screen.getByTestId("chats-post-bookmark").getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(screen.getByTestId("chats-channel-back"));
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const saved = await screen.findByTestId("chats-feed-bookmark");
+    expect(saved.getAttribute("aria-pressed")).toBe("true");
+    expect(saved.textContent).toContain("Saved");
+  });
+
   it("consumes a rejected best-effort Feed seen cursor", async () => {
     const onError = vi.fn();
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
