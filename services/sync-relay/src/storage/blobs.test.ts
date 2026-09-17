@@ -58,16 +58,16 @@ it.each(cases)("matches existing SQL retention for %s", async (_name, payload, h
     .toEqual({ removed: expected.length, removedSha256s: expected });
 });
 
-it("does not join payloads across log rows or cross workspace boundaries", async () => {
+it.each([2, 4])("does not join log rows or cross workspace boundaries with %i candidates", async count => {
   const f = await fixture();
-  f.put(hash);
-  f.put(orphan);
+  const hashes = [hash, orphan, "a".repeat(64), "b".repeat(64)].slice(0, count).sort();
+  for (const sha of hashes) f.put(sha);
   f.put(hash, 1, "other");
   append(f.db, JSON.stringify(hash.slice(0, 32)), 0);
   append(f.db, JSON.stringify(hash.slice(32)), 1);
   append(f.db, JSON.stringify(hash), 0, "other");
   expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 }))
-    .toEqual({ removed: 2, removedSha256s: [hash, orphan] });
+    .toEqual({ removed: hashes.length, removedSha256s: hashes });
   expect(f.storage.getBlob("other", hash)).not.toBeNull();
 });
 
@@ -91,8 +91,9 @@ it("preserves the grace boundary and returns sorted actual deletions across chun
 it("rechecks external log writes and fresh replacement after discovery yields", async () => {
   const f = await fixture();
   const replacement = "e".repeat(64);
-  for (const sha of [hash, replacement, orphan]) f.put(sha);
-  for (let index = 0; index < 64; index++) append(f.db, "{}", index);
+  const existingRoot = "d".repeat(64);
+  for (const sha of [hash, replacement, orphan, existingRoot]) f.put(sha);
+  for (let index = 0; index < 64; index++) append(f.db, index === 0 ? JSON.stringify(existingRoot) : "{}", index);
   const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
   let changed = false;
   const change = new Promise<void>((resolve, reject) => setImmediate(() => {
@@ -113,6 +114,7 @@ it("rechecks external log writes and fresh replacement after discovery yields", 
   expect(result).toEqual({ removed: 1, removedSha256s: [orphan] });
   expect(f.storage.getBlob("w", hash)).not.toBeNull();
   expect(f.storage.getBlob("w", replacement)).toEqual(Buffer.from([1]));
+  expect(f.storage.getBlob("w", existingRoot)).not.toBeNull();
 });
 
 it("keeps every locked retention predicate after initial discovery", async () => {
@@ -187,9 +189,9 @@ it("retains a late-page root and a reference committed between deletion chunks",
 
 it("finishes discovery while a writer appends a full page at each yield", async () => {
   const f = await fixture();
-  f.put(hash);
-  f.put(orphan);
-  for (let index = 0; index < 32; index++) append(f.db, "{}", index);
+  const existingRoots = ["a".repeat(64), "b".repeat(64)];
+  for (const sha of [hash, orphan, ...existingRoots]) f.put(sha);
+  for (let index = 0; index < 32; index++) append(f.db, index === 0 ? JSON.stringify(existingRoots) : "{}", index);
   const external = inspectDatabase(storagePath(f.storage), { foreignKeys: true });
   let appendedPages = 0;
   let handle: NodeJS.Immediate;
@@ -207,6 +209,7 @@ it("finishes discovery while a writer appends a full page at each yield", async 
       .toEqual({ removed: 1, removedSha256s: [orphan] });
     expect(appendedPages).toBe(1);
     expect(f.storage.getBlob("w", hash)).not.toBeNull();
+    for (const sha of existingRoots) expect(f.storage.getBlob("w", sha)).not.toBeNull();
   } finally {
     clearImmediate(handle);
   }
@@ -215,7 +218,8 @@ it("finishes discovery while a writer appends a full page at each yield", async 
 it("retains a late root across payload pieces using the locked bulk scan", async () => {
   const f = await fixture();
   const secondOrphan = "e".repeat(64);
-  for (const sha of [hash, secondOrphan, orphan]) f.put(sha);
+  const thirdOrphan = "d".repeat(64);
+  for (const sha of [hash, secondOrphan, orphan, thirdOrphan]) f.put(sha);
   const external = inspectDatabase(storagePath(f.storage), {foreignKeys: true});
   const context = f.storage as StorageContext;
   const originalTx = context.tx.bind(context);
@@ -224,13 +228,14 @@ it("retains a late root across payload pieces using the locked bulk scan", async
     return originalTx(run);
   });
   expect(await f.storage.collectUnreferencedBlobs("w", {nowMs: 1_000}))
-    .toEqual({removed: 2, removedSha256s: [secondOrphan, orphan]});
+    .toEqual({removed: 3, removedSha256s: [thirdOrphan, secondOrphan, orphan]});
   expect(f.storage.getBlob("w", hash)).not.toBeNull();
 });
 
 it("does not delete after a partial locked log scan fails", async () => {
   const f = await fixture();
-  for (const sha of [hash, orphan]) f.put(sha);
+  const hashes = [hash, orphan, "a".repeat(64), "b".repeat(64)];
+  for (const sha of hashes) f.put(sha);
   for (let index = 0; index < 96; index++) append(f.db, "{}", index);
   const context = f.storage as StorageContext;
   const originalTx = context.tx.bind(context);
@@ -254,5 +259,24 @@ it("does not delete after a partial locked log scan fails", async () => {
   });
   await expect(f.storage.collectUnreferencedBlobs("w", {nowMs: 1_000})).rejects.toThrow("injected scan failure");
   expect(reads).toBe(2);
-  for (const sha of [hash, orphan]) expect(f.storage.getBlob("w", sha)).not.toBeNull();
+  for (const sha of hashes) expect(f.storage.getBlob("w", sha)).not.toBeNull();
+});
+
+it("rechecks late roots and workspace scope for a tiny inventory", async () => {
+  const f = await fixture();
+  const otherRoot = "e".repeat(64);
+  for (const sha of [hash, otherRoot, orphan]) f.put(sha);
+  f.put(otherRoot, 1, "other");
+  append(f.db, JSON.stringify(otherRoot), 0, "other");
+  const external = inspectDatabase(storagePath(f.storage), {foreignKeys: true});
+  const context = f.storage as StorageContext;
+  const originalTx = context.tx.bind(context);
+  vi.spyOn(context, "tx").mockImplementationOnce(run => {
+    append(external, JSON.stringify({value: "z".repeat(32_740) + hash.toUpperCase()}));
+    return originalTx(run);
+  });
+  expect(await f.storage.collectUnreferencedBlobs("w", {nowMs: 1_000}))
+    .toEqual({removed: 2, removedSha256s: [otherRoot, orphan]});
+  expect(f.storage.getBlob("w", hash)).not.toBeNull();
+  expect(f.storage.getBlob("other", otherRoot)).not.toBeNull();
 });

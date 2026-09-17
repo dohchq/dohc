@@ -3,11 +3,23 @@ import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
 import { BLOB_LOG_TEXT_CHUNK, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
 
+const DIRECT_SQL_INVENTORY_LIMIT = 3;
+
 async function excludeLogReferencedBlobs(
   storage: StorageContext,
   workspaceId: string,
   remaining: Set<string>,
 ): Promise<string[]> {
+  if (remaining.size === 0) return [];
+  if (remaining.size <= DIRECT_SQL_INVENTORY_LIMIT) {
+    // A few LIKE probes avoid copying a large raw payload into JavaScript.
+    const reference = storage.db.prepare(`SELECT 1 FROM sync_relay_log
+      WHERE workspace_id = ? AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
+    for (const sha of remaining) {
+      if (reference.get(workspaceId, sha) !== undefined) remaining.delete(sha);
+    }
+    return Array.from(remaining);
+  }
   let canonicalRemaining = 0;
   for (const sha of remaining) {
     if (isCanonicalBlobSha(sha)) canonicalRemaining++;
@@ -108,7 +120,9 @@ export async function collectUnreferencedBlobs(
       )
       .iterate(workspaceId, cutoff);
     for (const row of agedRows) agedCandidates.add(String(row.sha256));
+    const smallInventory = agedCandidates.size <= DIRECT_SQL_INVENTORY_LIMIT;
     const candidates = await excludeLogReferencedBlobs(storage, workspaceId, agedCandidates);
+    if (candidates.length === 0) return { removed: 0, removedSha256s: [] };
     // Discovery never grants deletion authority. Each transaction reads current
     // log roots before deletion and keeps proposal, publication, and age checks.
     const removedSha256s: string[] = [];
@@ -132,7 +146,7 @@ export async function collectUnreferencedBlobs(
            WHERE p.workspace_id = sync_relay_blobs.workspace_id AND p.sha256 = sync_relay_blobs.sha256
          )`,
     );
-    const deleteScannedStmt = storage.db.prepare(
+    const deleteScannedStmt = !smallInventory && candidates.length > 1 ? storage.db.prepare(
       `DELETE FROM sync_relay_blobs
        WHERE workspace_id = ? AND sha256 = ? AND created_at_ms <= ?
          AND NOT EXISTS (
@@ -144,14 +158,14 @@ export async function collectUnreferencedBlobs(
            SELECT 1 FROM sync_relay_app_publication_blobs p
            WHERE p.workspace_id = sync_relay_blobs.workspace_id AND p.sha256 = sync_relay_blobs.sha256
          )`,
-    );
+    ) : null;
     const CHUNK = 200;
     for (let start = 0; start < candidates.length; start += CHUNK) {
       const chunk = candidates.slice(start, start + CHUNK);
       storage.tx(() => {
         const unreferenced = new Set(chunk.filter(isCanonicalBlobSha));
         // One canonical candidate already needs only one SQL scan.
-        const bulk = unreferenced.size > 1;
+        const bulk = deleteScannedStmt !== null && unreferenced.size > 1;
         if (bulk) {
           const throughSeq = currentBlobLogSequence(storage.db, workspaceId);
           for (const payload of blobLogPayloadChunks(storage.db, workspaceId, throughSeq)) {
@@ -162,7 +176,7 @@ export async function collectUnreferencedBlobs(
         for (const sha256 of chunk) {
           const scanned = bulk && isCanonicalBlobSha(sha256);
           if (scanned && !unreferenced.has(sha256)) continue;
-          const result = scanned ? deleteScannedStmt.run(workspaceId, sha256, cutoff, workspaceId, sha256) : deleteStmt.run(
+          const result = scanned ? deleteScannedStmt!.run(workspaceId, sha256, cutoff, workspaceId, sha256) : deleteStmt.run(
             workspaceId,
             sha256,
             cutoff,
