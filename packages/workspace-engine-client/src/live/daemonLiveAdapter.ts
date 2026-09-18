@@ -208,7 +208,7 @@ export function isTransientEngineRefusal(error: unknown): boolean {
 
 // The store refusals the desktop recovers from by moving the store aside.
 // Each is the storage crate's `code()` for the variant.
-export const ENGINE_STORE_REFUSALS = [
+const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
   "migration-failed",
