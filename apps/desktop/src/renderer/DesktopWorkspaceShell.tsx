@@ -4285,6 +4285,10 @@ export function DesktopWorkspaceShell(props: {
   const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
     useDesktopUpdateStateFeed();
   const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
+  // One confirmation for every Restart: the stop state, the update notice,
+  // and the update toast. Restarting closes the app, so it is asked once.
+  const [restartPrompt, setRestartPrompt] = useState<"closed" | "open" | "restarting">("closed");
+  const openRestartPrompt = useCallback(() => setRestartPrompt("open"), []);
   const appVersion = storeUpdateState?.currentVersion
     ? storeUpdateState.channel
       ? `${storeUpdateState.currentVersion} (${storeUpdateState.channel})`
@@ -5378,7 +5382,8 @@ export function DesktopWorkspaceShell(props: {
               {storeUpdateState?.status === "checking" ? "Checking" : "Check for updates"}
             </PrimaryButton>
             {storeUpdateState?.canInstall ? (
-              <SecondaryButton onClick={() => void installDesktopUpdate()}>
+              <SecondaryButton onClick={openRestartPrompt}>
+                <RefreshCw size={12} aria-hidden />
                 Restart to update
               </SecondaryButton>
             ) : null}
@@ -5508,6 +5513,7 @@ export function DesktopWorkspaceShell(props: {
           engineRebuildReturnFocusRef.current = returnFocus;
           setEngineRebuild({ phase: "confirm", refusal });
         }}
+        onRestartToUpdate={openRestartPrompt}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
@@ -5515,6 +5521,56 @@ export function DesktopWorkspaceShell(props: {
         automationFailures={automationFailures}
         onDismissAutomationFailure={dismissAutomationFailure}
       />
+
+      {restartPrompt !== "closed" ? (
+        <Overlay
+          onClose={() => {
+            if (restartPrompt === "open") setRestartPrompt("closed");
+          }}
+          panelProps={{
+            "data-testid": "restart-to-update-dialog",
+            role: "dialog",
+            "aria-modal": true,
+            "aria-labelledby": "restart-to-update-title",
+          }}
+        >
+          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
+            <div className="p-4">
+              <p id="restart-to-update-title" className="m-0 text-sm text-ink">
+                Restart dohc to apply the update?
+              </p>
+              <p className="mb-0 mt-2 text-xs text-muted">
+                {storeUpdateState?.version
+                  ? `Update ${storeUpdateState.version} is downloaded. `
+                  : ""}
+                dohc closes and opens again on the new version. Your files are
+                saved.
+              </p>
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
+              <SecondaryButton
+                autoFocus
+                disabled={restartPrompt === "restarting"}
+                onClick={() => setRestartPrompt("closed")}
+              >
+                Not now
+              </SecondaryButton>
+              <PrimaryButton
+                data-testid="restart-to-update-confirm"
+                disabled={restartPrompt === "restarting"}
+                onClick={() => {
+                  setRestartPrompt("restarting");
+                  void installDesktopUpdate().finally(() =>
+                    setRestartPrompt("closed"),
+                  );
+                }}
+              >
+                {restartPrompt === "restarting" ? "Restarting" : "Restart now"}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
 
       {engineRebuild ? (
         <Overlay

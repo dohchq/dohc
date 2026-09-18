@@ -153,6 +153,9 @@ export function NoticeCenter(props: {
   // shell owns the dialog and the move; the notice only announces the
   // refusal and offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
+  // Opens the restart confirmation for a ready update. Without it the
+  // notice center installs directly.
+  onRestartToUpdate?: () => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -460,7 +463,10 @@ export function NoticeCenter(props: {
         action: updateState.canInstall
           ? {
               label: installPending ? "Restarting" : "Restart",
-              onClick: () => void installUpdate(),
+              onClick: () => {
+                if (props.onRestartToUpdate) props.onRestartToUpdate();
+                else void installUpdate();
+              },
               disabled: installPending,
             }
           : undefined,
@@ -526,7 +532,10 @@ export function NoticeCenter(props: {
             <button
               type="button"
               disabled={installPending}
-              onClick={() => void installUpdate()}
+              onClick={() => {
+                if (props.onRestartToUpdate) props.onRestartToUpdate();
+                else void installUpdate();
+              }}
               className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
             >
               {installPending ? "Restarting" : "Restart"}

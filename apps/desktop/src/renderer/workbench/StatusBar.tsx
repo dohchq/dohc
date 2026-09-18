@@ -48,6 +48,9 @@ export function StatusBar(props: {
   // Opens the rebuild confirmation for a refused data store; the
   // shell owns the dialog, the notice center offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
+  // Opens the restart confirmation for a ready update; the shell owns the
+  // dialog and the install, the notice center offers the way in.
+  onRestartToUpdate?: () => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];
@@ -111,6 +114,9 @@ export function StatusBar(props: {
           onOpenConflicts={props.onOpenConflicts}
           onRefreshShareView={props.onRefreshShareView}
           onRebuildEngineStore={props.onRebuildEngineStore}
+          {...(props.onRestartToUpdate
+            ? { onRestartToUpdate: props.onRestartToUpdate }
+            : {})}
           {...(props.shareChangeNotices
             ? { shareChangeNotices: props.shareChangeNotices }
             : {})}

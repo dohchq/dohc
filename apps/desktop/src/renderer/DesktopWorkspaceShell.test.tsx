@@ -184,7 +184,7 @@ const IDLE_UPDATE_STATE: UpdateStateEvent = {
 
 const READY_UPDATE_STATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready — restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,
@@ -7040,6 +7040,39 @@ describe("engine store recovery", () => {
     const notice = await screen.findByTestId("notice-engine-store-refused");
     expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+  });
+
+  // Restarting closes the app, so every Restart asks once first. The stop
+  // state's button opens the same prompt the update notice uses.
+  it("asks before restarting into a ready update from the stop state", async () => {
+    const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.getUpdateState = vi.fn(async () => READY_UPDATE_STATE);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const blocked = await screen.findByTestId("workspace-update-required");
+    await user.click(
+      await within(blocked).findByRole("button", { name: "Restart to update" }),
+    );
+    const dialog = await screen.findByTestId("restart-to-update-dialog");
+    expect(dialog.textContent).toContain("Restart dohc to apply the update?");
+    expect(dialog.textContent).toContain("Update 1.2.4 is downloaded.");
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Not now" }));
+    expect(screen.queryByTestId("restart-to-update-dialog")).toBeNull();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+
+    await user.click(within(blocked).getByRole("button", { name: "Restart to update" }));
+    await user.click(
+      within(await screen.findByTestId("restart-to-update-dialog")).getByRole("button", {
+        name: "Restart now",
+      }),
+    );
+    await waitFor(() => expect(bridge.installUpdate).toHaveBeenCalledOnce());
   });
 
   it(

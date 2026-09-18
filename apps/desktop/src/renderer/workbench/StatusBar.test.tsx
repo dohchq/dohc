@@ -19,7 +19,7 @@ const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
   accepted: true,
   state: {
     status: "ready" as const,
-    message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    message: "Update 1.2.3 is ready. Restart dohc to apply it.",
     currentVersion: "1.2.2",
     channel: "latest" as const,
     canCheck: false,
@@ -95,7 +95,7 @@ describe("update toast", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -123,7 +123,7 @@ describe("update toast", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -294,7 +294,7 @@ describe("notice center", () => {
     });
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -563,7 +563,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -584,7 +584,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -608,7 +608,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -626,7 +626,7 @@ describe("notice center", () => {
 
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -637,7 +637,7 @@ describe("notice center", () => {
       accepted: true,
       state: {
         status: "ready",
-        message: "Update 1.2.4 is ready — restart dohc to apply it.",
+        message: "Update 1.2.4 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -658,7 +658,7 @@ describe("notice center", () => {
       accepted: false,
       state: {
         status: "ready",
-        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -669,7 +669,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -696,7 +696,7 @@ describe("notice center", () => {
       accepted: false,
       state: {
         status: "ready",
-        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -707,7 +707,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -753,7 +753,7 @@ describe("notice center", () => {
     renderBar({ onOpenSettings });
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -836,7 +836,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,

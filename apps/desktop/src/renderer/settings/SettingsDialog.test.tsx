@@ -36,7 +36,7 @@ const idleUpdateState = {
 };
 const readyUpdateState = {
   status: "ready" as const,
-  message: "Update 1.2.4 is ready — restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
   currentVersion: "1.2.3",
   channel: "latest" as const,
   canCheck: false,
