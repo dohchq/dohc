@@ -45,12 +45,28 @@ export function useCopied(onError?: (error: unknown) => void) {
 export function CopyDetailsButton(props: {
   details: () => string;
   label?: string;
+  // Icon only, with the label as the accessible name and tooltip.
+  iconOnly?: boolean;
   "data-testid"?: string;
   onError?: (error: unknown) => void;
 }) {
   const { copied, copy } = useCopied(props.onError);
   const label = props.label ?? "Copy details";
   const { details } = props;
+  if (props.iconOnly) {
+    return (
+      <button
+        type="button"
+        data-testid={props["data-testid"]}
+        aria-label={label}
+        title={copied ? "Copied" : label}
+        onClick={() => void copy(details())}
+        className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+      >
+        {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+      </button>
+    );
+  }
   return (
     <SecondaryButton
       type="button"

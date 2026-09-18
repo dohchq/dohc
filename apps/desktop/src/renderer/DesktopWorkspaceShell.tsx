@@ -5420,6 +5420,7 @@ export function DesktopWorkspaceShell(props: {
                 <CopyDetailsButton
                   data-testid="workspace-update-copy-details"
                   label="Copy"
+                  iconOnly
                   details={() => storeDetailsText}
                   onError={(error) =>
                     reportShellError("Could not copy the details.", error)
