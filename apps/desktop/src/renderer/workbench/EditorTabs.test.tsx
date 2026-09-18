@@ -552,6 +552,12 @@ describe("EditorTabs pointer drag", () => {
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 700, clientY: 200 });
     flushFrames();
     expect(second.style.transform).toBe("");
+    // The dragged tab returns home too, with its corners at rest.
+    expect(first.style.transform).toBe("");
+    expect(
+      (first.querySelector('[data-tab-join="left"]')?.firstElementChild as HTMLElement).style
+        .borderRadius,
+    ).toBe("0px 0px 1px 0px");
 
     vi.mocked(document.elementFromPoint).mockReturnValue(first);
     fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 160, clientY: 10 });
@@ -601,6 +607,28 @@ describe("EditorTabs pointer drag", () => {
     // A press that stays a click leaves no frozen transform behind.
     fireEvent.pointerUp(first, { pointerId: 5, clientX: 10, clientY: 10 });
     expect(first.style.transform).toBe("");
+  });
+
+  it("lands a neighbour that is still settling before it slides aside", () => {
+    const neighbourAnimation = { cancel: vi.fn(), commitStyles: vi.fn(), addEventListener: vi.fn() };
+    const { onMove, reorder } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    const second = screen.getByTestId("tab-b.md");
+    // a moves past b and settles into its new slot.
+    dragTab(first, 4, 160);
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 160, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+    Element.prototype.animate = vi.fn(() => neighbourAnimation as unknown as Animation);
+    Object.defineProperty(first, "offsetLeft", { configurable: true, value: 100 });
+    reorder([{ path: "b.md" }, { path: "a.md" }, { path: "c.md" }]);
+    expect(first.animate).toHaveBeenCalledOnce();
+
+    // Grabbing b while a still settles lands a first.
+    layOut();
+    dragTab(second, 5, 160);
+    expect(neighbourAnimation.cancel).toHaveBeenCalledOnce();
+    expect(neighbourAnimation.commitStyles).not.toHaveBeenCalled();
+    expect(first.style.transform).toBe("translateX(-100px)");
   });
 
   it("starts a new drag after cancelling an unfinished pointer", () => {

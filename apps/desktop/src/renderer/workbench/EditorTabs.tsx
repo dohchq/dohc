@@ -295,13 +295,14 @@ function settleTab(tab: HTMLElement, visualLeft: number) {
   animation.addEventListener("finish", () => settling.delete(tab));
 }
 
-// Freezes a settling tab where it is: the animated transform becomes its
-// inline transform, so the next drag starts from there.
-function stopSettling(tab: HTMLElement) {
+// Stops a settling tab. Frozen, the animated transform becomes its inline
+// transform so the next drag starts from there; otherwise it lands in its
+// slot at once, so a drag preview can own its transform.
+function stopSettling(tab: HTMLElement, freeze: boolean) {
   const animation = settling.get(tab);
   if (!animation) return;
   settling.delete(tab);
-  animation.commitStyles();
+  if (freeze) animation.commitStyles();
   animation.cancel();
 }
 
@@ -395,17 +396,19 @@ function createTabDrag(host: TabDragHost) {
     const scroller = host.scroller();
     const slot = s.slots[s.index];
     if (!scroller || !slot) return;
+    const scrollLeft = scroller.scrollLeft;
     // Crossing into another group is committed on release. While the
     // pointer is over its destination, the source shows its committed order
-    // again instead of a stale preview.
+    // again instead of a stale preview; the grab offset survives, so coming
+    // back resumes under the pointer.
     if (s.multiGroup) {
       const target = editorGroupAtPoint(s.pointerX, s.pointerY);
       if (target && target.groupId !== host.groupId()) {
         placeNeighbours(s, s.index);
+        placeTab(s, slot.left, scrollLeft);
         return;
       }
     }
-    const scrollLeft = scroller.scrollLeft;
     const wanted = s.pointerX - s.frameLeft + scrollLeft - s.grab;
     // The tab stays inside the visible strip: the scroller would clip it
     // anyway, and the clamp keeps its joins inside the pane. The insertion
@@ -413,18 +416,25 @@ function createTabDrag(host: TabDragHost) {
     // left beside it could never reach the end.
     const min = scrollLeft;
     const max = Math.max(min, scrollLeft + s.viewWidth - slot.width);
-    const left = Math.min(max, Math.max(min, wanted));
-    const dx = left - slot.left;
-    if (dx !== s.dx) {
-      s.dx = dx;
-      s.tab.style.transform = `translateX(${dx}px)`;
-    }
+    placeTab(s, Math.min(max, Math.max(min, wanted)), scrollLeft);
     const center = wanted + slot.width / 2;
     let toIndex = 0;
     for (const other of s.slots) {
       if (other !== slot && other.left + other.width / 2 < center) toIndex += 1;
     }
     placeNeighbours(s, toIndex);
+  };
+
+  // Moves the dragged tab to a content-space left edge and morphs the
+  // corners with its distance from each pane edge.
+  const placeTab = (s: DragSession, left: number, scrollLeft: number) => {
+    const slot = s.slots[s.index];
+    if (!slot) return;
+    const dx = left - slot.left;
+    if (dx !== s.dx) {
+      s.dx = dx;
+      s.tab.style.transform = dx === 0 ? "" : `translateX(${dx}px)`;
+    }
     const distanceLeft = left - scrollLeft;
     const distanceRight = s.paneWidth - (left + slot.width - scrollLeft);
     const [joinLeft, joinRight] = s.joins;
@@ -478,6 +488,11 @@ function createTabDrag(host: TabDragHost) {
       s.tab.querySelector('[data-tab-join="right"]'),
     ];
     s.tab.dataset.dragging = "";
+    // A neighbour still settling from the last reorder lands now, or its
+    // animation would override the translation this drag writes.
+    for (const other of s.slots) {
+      if (other.el !== s.tab) stopSettling(other.el, false);
+    }
     // Pointer-driven writes must land as written; a transition would trail.
     for (const el of decorations(s)) {
       if (el instanceof HTMLElement) el.style.transition = "none";
@@ -583,7 +598,7 @@ function createTabDrag(host: TabDragHost) {
       // Finish the previous pointer's drag before arming this one; its
       // listeners would otherwise end the new drag.
       finish(true, null);
-      stopSettling(event.currentTarget);
+      stopSettling(event.currentTarget, true);
       session = {
         pointerId: event.pointerId,
         path,
