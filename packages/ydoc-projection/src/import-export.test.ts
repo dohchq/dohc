@@ -1637,10 +1637,20 @@ describe('Y.Doc markdown import/export', () => {
       ['```\nfenced\n```', 'codeBlock', 'fenced'],
       ['- item', 'bulletList', 'item'],
     ])('keeps the block right after an annotated table: %j', (following, type, text) => {
-      const doc = markdownToYDoc(`<!-- dohc:table row-heights=1:84 -->\n${table}\n${following}`)
-      const blocks = yDocBodyJSON(doc).content ?? []
-      expect(blocks.map(node => node.type)).toEqual(['table', type])
-      expect(JSON.stringify(blocks[1])).toContain(text)
+      for (const cell of ['apples', '`a|b`']) {
+        const doc = markdownToYDoc(
+          `<!-- dohc:table row-heights=1:84 -->\n${table.replace('apples', cell)}\n${following}`,
+        )
+        const blocks = yDocBodyJSON(doc).content ?? []
+        expect(blocks.map(node => node.type), cell).toEqual(['table', type])
+        expect(JSON.stringify(blocks[1]), cell).toContain(text)
+        expect(rowHeight(doc, 1), cell).toBe(84)
+      }
+    })
+
+    it('accepts a header row without pipes', () => {
+      const doc = markdownToYDoc('<!-- dohc:table row-heights=1:84 -->\nA\n| --- |\na')
+      expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual(['table'])
       expect(rowHeight(doc, 1)).toBe(84)
     })
 

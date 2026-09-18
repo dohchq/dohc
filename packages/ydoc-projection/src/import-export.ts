@@ -5,9 +5,10 @@ import type {
 } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
-import { Marked, type marked } from 'marked'
+import { Marked, type marked, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
+  preprocessTablePipes,
   renderTableToMarkdown,
   Table,
   TableCell,
@@ -228,6 +229,13 @@ function tableStart(src: string): number {
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
 
+// Measures the table under an annotation with marked's own rules and no
+// custom tokenizer: lexing the rest of the document with this package's
+// tokenizers would re-enter the annotation branch for every annotation that
+// follows an orphan one. GFM rows are one line each, which Tiptap's raw
+// reconstruction gets wrong when a cell holds a pipe inside inline code.
+const tableExtentLexer = new Marked()
+
 export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
@@ -236,24 +244,19 @@ export const DohcMarkdownTable = Table.extend({
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
       if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
       // The annotation belongs to the table that starts right after it. With
-      // no table there it stays an ordinary HTML comment for marked. Check
-      // the table's first two lines before lexing: lexing the rest of the
-      // document for an orphan annotation re-enters this tokenizer for every
-      // annotation after it.
+      // no table there it stays an ordinary HTML comment for marked.
       const rest = src.slice(annotation[0].length)
-      if (tableStart(rest) !== 0) return undefined
       const blankLineIndex = rest.indexOf('\n\n')
       const candidate = blankLineIndex >= 0 ? rest.slice(0, blankLineIndex) : rest
-      const table = helpers.blockTokens(candidate)[0]
-      if (table?.type !== 'table' || !table.raw) return undefined
-      // marked ends the table's raw with the newline it consumed. That
-      // newline is not another source line: counting it as one would hand
-      // the block after the table to this token.
-      const endsWithNewline = table.raw.endsWith('\n')
-      const lines = (endsWithNewline ? table.raw.slice(0, -1) : table.raw).split('\n').length
-      const raw = annotation[0]
-        + rest.split('\n').slice(0, lines).join('\n')
-        + (endsWithNewline ? '\n' : '')
+      const extent = tableExtentLexer.lexer(preprocessTablePipes(candidate))[0]
+      if (extent?.type !== 'table') return undefined
+      const lines = rest.split('\n')
+      const count = 2 + (extent as Tokens.Table).rows.length
+      const text = lines.slice(0, count).join('\n')
+      const table = helpers.blockTokens(text)[0]
+      if (table?.type !== 'table') return undefined
+      // The newline after the last row belongs to the table, as in marked.
+      const raw = annotation[0] + text + (lines.length > count ? '\n' : '')
       const rowHeights: [number, number][] = []
       for (const pair of annotation[1].split(',')) {
         const [index, height] = pair.split(':').map(Number)
