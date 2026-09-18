@@ -218,31 +218,42 @@ function tableRowHeightsAnnotation(rows: JSONContent[]): string {
   return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
 }
 
+// Table.start only inspects the first two lines. Avoid splitting the full
+// remaining document while probing ordinary blocks.
+function tableStart(src: string): number {
+  const newline = src.indexOf('\n')
+  if (newline < 0) return -1
+  const second = src.indexOf('\n', newline + 1)
+  const prefix = second < 0 ? src : src.slice(0, second)
+  return (tableTokenizer.start as (source: string) => number)(prefix)
+}
+
 export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
-    // Table.start only inspects the first two lines. Avoid splitting the full
-    // remaining document while probing ordinary blocks.
-    start: (src: string) => {
-      if (TABLE_ROW_HEIGHTS_RE.test(src)) return 0
-      const newline = src.indexOf('\n')
-      if (newline < 0) return -1
-      const second = src.indexOf('\n', newline + 1)
-      const prefix = second < 0 ? src : src.slice(0, second)
-      return (tableTokenizer.start as (source: string) => number)(prefix)
-    },
+    start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
     tokenize: (src, tokens, helpers) => {
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
       if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
       // The annotation belongs to the table that starts right after it. With
-      // no table there it stays an ordinary HTML comment for marked.
+      // no table there it stays an ordinary HTML comment for marked. Check
+      // the table's first two lines before lexing: lexing the rest of the
+      // document for an orphan annotation re-enters this tokenizer for every
+      // annotation after it.
       const rest = src.slice(annotation[0].length)
+      if (tableStart(rest) !== 0) return undefined
       const blankLineIndex = rest.indexOf('\n\n')
       const candidate = blankLineIndex >= 0 ? rest.slice(0, blankLineIndex) : rest
       const table = helpers.blockTokens(candidate)[0]
       if (table?.type !== 'table' || !table.raw) return undefined
-      const lineCount = table.raw.split('\n').length
-      const raw = annotation[0] + rest.split('\n').slice(0, lineCount).join('\n')
+      // marked ends the table's raw with the newline it consumed. That
+      // newline is not another source line: counting it as one would hand
+      // the block after the table to this token.
+      const endsWithNewline = table.raw.endsWith('\n')
+      const lines = (endsWithNewline ? table.raw.slice(0, -1) : table.raw).split('\n').length
+      const raw = annotation[0]
+        + rest.split('\n').slice(0, lines).join('\n')
+        + (endsWithNewline ? '\n' : '')
       const rowHeights: [number, number][] = []
       for (const pair of annotation[1].split(',')) {
         const [index, height] = pair.split(':').map(Number)

@@ -1631,6 +1631,46 @@ describe('Y.Doc markdown import/export', () => {
       expect(yDocToMarkdown(fencedDoc)).toBe(fenced)
     })
 
+    it.each([
+      ['# After', 'heading', 'After'],
+      ['<!-- ordinary -->', 'paragraph', '<!-- ordinary -->'],
+      ['```\nfenced\n```', 'codeBlock', 'fenced'],
+      ['- item', 'bulletList', 'item'],
+    ])('keeps the block right after an annotated table: %j', (following, type, text) => {
+      const doc = markdownToYDoc(`<!-- dohc:table row-heights=1:84 -->\n${table}\n${following}`)
+      const blocks = yDocBodyJSON(doc).content ?? []
+      expect(blocks.map(node => node.type)).toEqual(['table', type])
+      expect(JSON.stringify(blocks[1])).toContain(text)
+      expect(rowHeight(doc, 1)).toBe(84)
+    })
+
+    it('rejects orphan annotations without re-lexing the rest of the document', () => {
+      const exec = RegExp.prototype.exec
+      const measure = (annotations: number): number => {
+        let probes = 0
+        const spy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (
+          this: RegExp,
+          value: string,
+        ) {
+          if (this.source.includes('dohc:table')) probes += 1
+          return Reflect.apply(exec, this, [value]) as RegExpExecArray | null
+        })
+        try {
+          const doc = markdownToYDoc(
+            `${Array(annotations).fill('<!-- dohc:table row-heights=1:84 -->').join('\n')}\nNot a table.`,
+          )
+          expect(getDohcYDocBodyFragment(doc).length).toBe(annotations + 1)
+          doc.destroy()
+          return probes
+        } finally {
+          spy.mockRestore()
+        }
+      }
+      const small = measure(8)
+      const large = measure(16)
+      expect(large, `annotation probes: ${small} -> ${large}`).toBeLessThan(small * 2.5)
+    })
+
     it('leaves an annotation that no table follows as an ordinary comment', () => {
       const doc = markdownToYDoc('<!-- dohc:table row-heights=1:84 -->\nNot a table.')
       expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual([

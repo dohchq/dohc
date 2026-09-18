@@ -4989,7 +4989,11 @@ mod projection_tests {
                         xml_element(
                             "tableRow",
                             &[],
-                            [xml_element("tableCell", &[], [paragraph(format!("row {row}"))])],
+                            [xml_element(
+                                "tableCell",
+                                &[],
+                                [paragraph(format!("row {row}"))],
+                            )],
                         )
                     }),
                 ),
