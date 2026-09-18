@@ -19,7 +19,7 @@ const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
   accepted: true,
   state: {
     status: "ready" as const,
-    message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    message: "Update 1.2.3 is ready. Restart dohc to apply it.",
     currentVersion: "1.2.2",
     channel: "latest" as const,
     canCheck: false,
@@ -49,10 +49,8 @@ afterEach(() => {
   pushUpdate = null;
 });
 
-function renderBar(
-  props: Partial<Parameters<typeof StatusBar>[0]> = {},
-) {
-  return render(
+function barElement(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
+  return (
     <StatusBar
       workspaceId="ws-status-test"
       workspaceName="my-notes"
@@ -69,10 +67,18 @@ function renderBar(
         : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
+      {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
+      {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
+      {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
+      {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
-    />,
+    />
   );
+}
+
+function renderBar(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
+  return render(barElement(props));
 }
 
 function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
@@ -95,7 +101,7 @@ describe("update toast", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -123,7 +129,7 @@ describe("update toast", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -294,7 +300,7 @@ describe("notice center", () => {
     });
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -377,6 +383,76 @@ describe("notice center", () => {
 
     await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
     expect(onRebuildEngineStore).toHaveBeenCalledOnce();
+  });
+
+  // A store this build could not migrate is intact. The notice names the
+  // failure and the next step, and offers no rebuild that would lose it.
+  it("names a migration failure without offering the rebuild", async () => {
+    const onRebuildEngineStore = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyCaptureFailed: true,
+        engineStoreRefused: "migration-failed",
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      },
+      onRebuildEngineStore,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-engine-store-refused");
+    expect(notice.textContent).toContain(
+      "dohc could not update this workspace's data store to this version.",
+    );
+    expect(notice.textContent).toContain("Update dohc to continue. Your files are unchanged.");
+    expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
+    expect(onRebuildEngineStore).not.toHaveBeenCalled();
+  });
+
+  // A workspace error arrives as a toast in the corner and stays as a row in
+  // Notices. Try again and Copy ride with it; closing the toast keeps the row.
+  it("shows a workspace error as a toast and a notice with retry and copy", async () => {
+    const onRetryWorkspaceError = vi.fn();
+    const onDismissWorkspaceError = vi.fn();
+    const user = userEvent.setup();
+    const error = {
+      id: "shell-error-1",
+      message: "Could not refresh history. The engine did not answer.",
+      details: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
+      atMs: 1_000,
+      canRetry: true,
+      seen: false,
+    };
+    const barProps = (seen: boolean) => ({
+      workspaceErrors: [{ ...error, seen }],
+      onRetryWorkspaceError,
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError,
+    });
+    const { rerender } = renderBar(barProps(false));
+
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not refresh history.");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("Workspace: personal");
+    expect(screen.getAllByRole("status").some((el) => el.textContent === "Copied")).toBe(true);
+    // Closing the toast marks the error seen: the toast goes, the row stays.
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    rerender(barElement(barProps(true)));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-shell-error-1");
+    expect(row.textContent).toContain("Could not refresh history.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-1");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-shell-error-1")).getByRole("button", { name: "Dismiss notice" }));
+    expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
@@ -535,7 +611,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -556,7 +632,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -580,7 +656,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -598,7 +674,7 @@ describe("notice center", () => {
 
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -609,7 +685,7 @@ describe("notice center", () => {
       accepted: true,
       state: {
         status: "ready",
-        message: "Update 1.2.4 is ready — restart dohc to apply it.",
+        message: "Update 1.2.4 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -630,7 +706,7 @@ describe("notice center", () => {
       accepted: false,
       state: {
         status: "ready",
-        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -641,7 +717,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -668,7 +744,7 @@ describe("notice center", () => {
       accepted: false,
       state: {
         status: "ready",
-        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        message: "Update 1.2.3 is ready. Restart dohc to apply it.",
         currentVersion: "1.2.2",
         channel: "latest",
         canCheck: false,
@@ -679,7 +755,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -725,7 +801,7 @@ describe("notice center", () => {
     renderBar({ onOpenSettings });
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,
@@ -808,7 +884,7 @@ describe("notice center", () => {
     renderBar();
     pushUpdate?.({
       status: "ready",
-      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      message: "Update 1.2.3 is ready. Restart dohc to apply it.",
       currentVersion: "1.2.2",
       channel: "latest",
       canCheck: false,

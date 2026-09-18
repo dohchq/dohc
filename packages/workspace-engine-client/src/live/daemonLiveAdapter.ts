@@ -206,16 +206,21 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
-export type EngineStoreRefusal = "unsupported-fingerprint" | "foreign-database";
+// The store refusals the desktop recovers from by moving the store aside.
+// Each is the storage crate's `code()` for the variant.
+const ENGINE_STORE_REFUSALS = [
+  "unsupported-fingerprint",
+  "foreign-database",
+  "migration-failed",
+] as const;
+export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 
 export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null {
-  if (causeChainHasRefusal(error, "INTERNAL", "unsupported-fingerprint")) {
-    return "unsupported-fingerprint";
-  }
-  if (causeChainHasRefusal(error, "INTERNAL", "foreign-database")) {
-    return "foreign-database";
-  }
-  return null;
+  return (
+    ENGINE_STORE_REFUSALS.find((code) =>
+      causeChainHasRefusal(error, "INTERNAL", code),
+    ) ?? null
+  );
 }
 
 // Remote edits drained under this session's lease while this settle was in
@@ -244,6 +249,28 @@ function refusalMessageMatchesToken(
     message?.startsWith(detailPrefix) === true &&
     message.length > detailPrefix.length
   );
+}
+
+// The engine's own words after a store refusal's code, or null when it gave
+// none. The desktop shows them in a report, never in place of the code.
+export function engineStoreRefusalDetailOf(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    const message = refusalMessageOf(current, "INTERNAL");
+    if (message !== null) {
+      const code = ENGINE_STORE_REFUSALS.find((candidate) =>
+        refusalMessageMatchesToken(message, candidate),
+      );
+      if (code !== undefined) {
+        const prefix = `${code}${REFUSAL_DETAIL_DELIMITER}`;
+        return message.startsWith(prefix) ? message.slice(prefix.length) : null;
+      }
+    }
+    seen.add(current);
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
 }
 
 function causeChainHasRefusal(

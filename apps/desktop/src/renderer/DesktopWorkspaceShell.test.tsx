@@ -184,7 +184,7 @@ const IDLE_UPDATE_STATE: UpdateStateEvent = {
 
 const READY_UPDATE_STATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready — restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,
@@ -6989,6 +6989,90 @@ describe("engine store recovery", () => {
     expect(dialog.textContent).not.toContain(otherSentence);
     expect(dialog.textContent).not.toContain("older");
     expect(dialog.textContent).not.toContain("not created by dohc");
+  });
+
+  // A store this build could not migrate is intact and waits for a build
+  // that opens it. The workspace stops instead of offering a rebuild that
+  // would lose what the fixed build still opens.
+  it("stops the workspace on a migration failure instead of offering the rebuild", async () => {
+    const status = {
+      ...refusedStatus,
+      engineStoreRefused: "migration-failed" as const,
+      engineStoreRefusedDetail: "migration v2-baseline was applied from a different definition than this build's",
+    };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const blocked = await screen.findByTestId("workspace-update-required");
+    // Technical details reveals the report; Copy inside it copies the same lines.
+    await user.click(within(blocked).getByRole("button", { name: "Show technical details" }));
+    const details = await screen.findByTestId("workspace-update-details");
+    await user.click(within(details).getByRole("button", { name: "Copy" }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Code: migration-failed");
+    expect(copied).toContain("Engine: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain("Workspace id: ");
+    expect(copied).toContain("Folder: ");
+    expect(copied).toContain("Platform: ");
+    for (const line of copied.split("\n")) {
+      const [label, value] = line.split(": ");
+      expect(within(details).getByText(label!)).toBeTruthy();
+      expect(details.textContent).toContain(value!);
+    }
+    expect(blocked.textContent).toContain(
+      "dohc could not update this workspace's data store to this version.",
+    );
+    expect(blocked.textContent).toContain("Update dohc to continue");
+    // The check answers inside the stop state, where the user can see it.
+    bridge.checkForUpdates = vi.fn(async () => ({
+      checked: false,
+      state: { status: "idle" as const, message: "Updates are available in packaged builds." },
+    }));
+    await user.click(within(blocked).getByRole("button", { name: "Check for updates" }));
+    const result = await screen.findByTestId("workspace-update-check-result");
+    expect(result.textContent).toBe("Updates are available in packaged builds.");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-engine-store-refused");
+    expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+  });
+
+  // Restarting closes the app, so every Restart asks once first. The stop
+  // state's button opens the same prompt the update notice uses.
+  it("asks before restarting into a ready update from the stop state", async () => {
+    const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.getUpdateState = vi.fn(async () => READY_UPDATE_STATE);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const blocked = await screen.findByTestId("workspace-update-required");
+    await user.click(
+      await within(blocked).findByRole("button", { name: "Restart to update" }),
+    );
+    const dialog = await screen.findByTestId("restart-to-update-dialog");
+    expect(dialog.textContent).toContain("Restart dohc to apply the update?");
+    expect(dialog.textContent).toContain("Update 1.2.4 is downloaded.");
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Not now" }));
+    expect(screen.queryByTestId("restart-to-update-dialog")).toBeNull();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+
+    await user.click(within(blocked).getByRole("button", { name: "Restart to update" }));
+    await user.click(
+      within(await screen.findByTestId("restart-to-update-dialog")).getByRole("button", {
+        name: "Restart now",
+      }),
+    );
+    await waitFor(() => expect(bridge.installUpdate).toHaveBeenCalledOnce());
   });
 
   it(

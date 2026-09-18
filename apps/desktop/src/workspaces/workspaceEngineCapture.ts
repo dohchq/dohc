@@ -35,6 +35,7 @@ import type {
 import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
+  engineStoreRefusalDetailOf,
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
@@ -628,7 +629,11 @@ export interface WorkspaceEngineCaptureOptions {
   // than onError: version/restore operations reject to their caller (the UI
   // surfaces those directly) and best-effort rename coordination falls back
   // to plain capture, so neither means history is silently missing.
-  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
+  // `detail` is the engine's own words for a store refusal, for a report.
+  onCaptureOutcome?: (
+    failure: WorkspaceEngineCaptureFailure,
+    detail?: string | null,
+  ) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -1449,6 +1454,7 @@ export function createWorkspaceEngineCapture(
   // Set when a pass failed because the engine refused this
   // workspace's database, cleared by the next pass that reached the store.
   let storeRefused: EngineStoreRefusal | null = null;
+  let storeRefusedDetail: string | null = null;
   const pendingCollectionAdoptionProviders = new Map<
     string,
     {
@@ -1463,7 +1469,10 @@ export function createWorkspaceEngineCapture(
       backgroundCaptureHealthy && deadYDocSessions.size === 0
         ? null
         : (storeRefused ?? "other");
-    options.onCaptureOutcome?.(failure);
+    options.onCaptureOutcome?.(
+      failure,
+      failure !== null && failure === storeRefused ? storeRefusedDetail : null,
+    );
   };
 
   const emitCaptureOutcome = (ok: boolean): void => {
@@ -2807,11 +2816,14 @@ export function createWorkspaceEngineCapture(
     try {
       ok = await task();
       storeRefused = null;
+      storeRefusedDetail = null;
     } catch (error) {
       // A thrown pass says whether the engine refused the store or
       // failed some other way; a pass that completed — even degraded —
       // reached the store, so any earlier refusal no longer describes it.
       storeRefused = engineStoreRefusalOf(error);
+      storeRefusedDetail =
+        storeRefused === null ? null : engineStoreRefusalDetailOf(error);
       throw error;
     } finally {
       emitCaptureOutcome(ok);
@@ -5987,8 +5999,15 @@ export function createWorkspaceEngineCapture(
       await chain;
       try {
         if (store) {
-          await store.flushCapture?.();
-          await drainPendingCollectionAdoptions(store);
+          try {
+            await store.flushCapture?.();
+            await drainPendingCollectionAdoptions(store);
+          } catch (error) {
+            // A refused store was never opened, so nothing is pending in
+            // it. Failing the stop here would block the move-aside rebuild,
+            // which closes the capture first.
+            if (engineStoreRefusalOf(error) === null) throw error;
+          }
         }
       } finally {
         await releaseRetainedCollectionAdoptionProviders(new Set());

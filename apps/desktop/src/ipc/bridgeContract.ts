@@ -1144,6 +1144,18 @@ export const ImportToDatabaseResult = z.object({
 });
 export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
 
+// The renderer cannot import the engine client package, so the list lives
+// here and the type check keeps it complete.
+const ENGINE_STORE_REFUSALS = [
+  "unsupported-fingerprint",
+  "foreign-database",
+  "migration-failed",
+] as const satisfies readonly EngineStoreRefusal[];
+type AssertNever<T extends never> = T;
+type _AllEngineStoreRefusalsRepresented = AssertNever<
+  Exclude<EngineStoreRefusal, (typeof ENGINE_STORE_REFUSALS)[number]>
+>;
+
 const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
@@ -1213,15 +1225,16 @@ export const SyncStatusResult = z.union([
     historyCaptureFailed: z.literal(true),
     // A failed producer must say whether the engine refused the store. Null
     // means history capture failed for another reason.
-    engineStoreRefused: z
-      .enum(["unsupported-fingerprint", "foreign-database"])
-      .nullable(),
+    engineStoreRefused: z.enum(ENGINE_STORE_REFUSALS).nullable(),
+    // The engine's own words for the refusal, when it gave them.
+    engineStoreRefusedDetail: z.string().min(1).max(500).optional(),
   }),
   z
     .object({
       ...SYNC_STATUS_BASE_FIELDS,
       historyCaptureFailed: z.literal(false).optional(),
       engineStoreRefused: z.never().optional(),
+      engineStoreRefusedDetail: z.never().optional(),
     })
     .superRefine((status, context) => {
       if (Object.hasOwn(status, "engineStoreRefused")) {
@@ -1243,7 +1256,30 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "This workspace's data store is not in the format this version of dohc uses.";
     case "foreign-database":
       return "dohc cannot read this workspace's data store.";
+    case "migration-failed":
+      return "dohc could not update this workspace's data store to this version.";
   }
+}
+
+// What the refusal needs. A store from another format, or a file that is not
+// a dohc database, is rebuilt from the workspace files. A store this build
+// could not migrate is intact and waits for a build that can open it.
+export function engineStoreRefusalRecovery(
+  cause: EngineStoreRefusal,
+): "rebuild" | "update" {
+  return cause === "migration-failed" ? "update" : "rebuild";
+}
+
+export const ENGINE_STORE_UPDATE_NEXT_STEP =
+  "Update dohc to continue. Your files are unchanged.";
+
+// The sentence and its next step, for surfaces that show no control.
+export function engineStoreRefusalCopy(cause: EngineStoreRefusal): string {
+  const next =
+    engineStoreRefusalRecovery(cause) === "rebuild"
+      ? "Open Notices and choose Rebuild to review recovery options."
+      : ENGINE_STORE_UPDATE_NEXT_STEP;
+  return `${engineStoreRefusalSentence(cause)} ${next}`;
 }
 
 export const RebuildEngineStorePayload = z.object({

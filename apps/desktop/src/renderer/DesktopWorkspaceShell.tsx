@@ -2,17 +2,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import {
-  Bot,
-  CircleHelp,
-  Eye,
-  Maximize2,
-  RefreshCw,
-  Search,
-  Send,
-  User,
-  X,
-} from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -47,6 +37,7 @@ import type {
 import {
   activityPathsAffectWorkspaceListing,
   ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
@@ -83,6 +74,8 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
+import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
+import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -619,6 +612,11 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  // Read by callbacks that outlive a render: the global key handler and a
+  // slow update check must not act for a workspace this window has left.
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const storeUpdateRequiredRef = useRef(false);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const {
     callbacksForEditor,
@@ -759,7 +757,8 @@ export function DesktopWorkspaceShell(props: {
     };
   }
   const {
-    shellError,
+    shellErrors,
+    hideShellError,
     reportShellError,
     reportLaneFailure,
     reportSearchError,
@@ -3407,6 +3406,8 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // A stopped workspace answers no workspace shortcut.
+      if (storeUpdateRequiredRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
       if (event.metaKey && event.ctrlKey) return;
@@ -4285,6 +4286,110 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
+  // The updater's state, shown under Check for updates and followed live,
+  // so a download reaches "ready" without another click. The shell banner
+  // sits under this overlay, so an answer reported there would never be
+  // seen; a line that is always there also means the check moves nothing.
+  const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
+    useDesktopUpdateStateFeed();
+  const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
+  // One request at a time: the feed says "checking" only after main answers,
+  // so a second click before that would send the request twice.
+  const [storeUpdateCheckPending, setStoreUpdateCheckPending] = useState(false);
+  // One confirmation for every Restart: the stop state, the update notice,
+  // and the update toast. Restarting closes the app, so it is asked once.
+  const [restartPrompt, setRestartPrompt] = useState<"closed" | "open" | "restarting">("closed");
+  const openRestartPrompt = useCallback(() => setRestartPrompt("open"), []);
+  const appVersion = storeUpdateState?.currentVersion
+    ? storeUpdateState.channel
+      ? `${storeUpdateState.currentVersion} (${storeUpdateState.channel})`
+      : storeUpdateState.currentVersion
+    : null;
+  // Facts a person can paste into a report. The version comes from the
+  // updater's state; a bridge without it leaves the line out.
+  const reportFacts = useCallback(
+    (): ReadonlyArray<readonly [string, string | null | undefined]> => [
+      ["Workspace", workspaceName(props.workspace)],
+      ["Folder", props.workspace.rootPath],
+      ["dohc", appVersion],
+      ["Platform", bridge().platform],
+      ["Time", new Date().toISOString()],
+    ],
+    [appVersion, props.workspace],
+  );
+  // Errors as the notice center shows them: the message, whether it can be
+  // asked again, and the report Copy puts on the clipboard.
+  const workspaceErrors = useMemo(
+    () =>
+      shellErrors.map((error) => ({
+        id: error.id,
+        message: error.message,
+        details: errorDetails([["Error", error.message], ...reportFacts()]),
+        atMs: error.atMs,
+        canRetry: error.retry !== null,
+        seen: error.seen,
+      })),
+    [shellErrors, reportFacts],
+  );
+  // What Copy details copies, shown on request so a person can read what
+  // they are about to paste. One string for both, so they never differ.
+  const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
+  // A switch leaves the other workspace's answer and disclosure behind.
+  useEffect(() => {
+    setStoreUpdateCheckError(null);
+    setStoreDetailsOpen(false);
+  }, [workspaceId]);
+  const storeDetailFields = useMemo(
+    (): ReadonlyArray<readonly [string, string | null | undefined]> => [
+      ["Problem", engineStoreRefusalSentence("migration-failed")],
+      ["Code", "migration-failed"],
+      ["Engine", syncStatus?.engineStoreRefusedDetail],
+      ["Workspace id", props.workspace.workspaceId],
+      ["Data store", `${props.workspace.rootPath}/.dohc/engine`],
+      ...reportFacts(),
+    ],
+    [syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
+  );
+  const storeDetailsText = useMemo(
+    () => errorDetails(storeDetailFields),
+    [storeDetailFields],
+  );
+  // A store this build could not migrate is intact. Nothing in this
+  // workspace can run against it, so the workspace stops here until a build
+  // that opens it. Other workspaces keep their own stores.
+  const storeUpdateRequired =
+    syncStatus?.engineStoreRefused != null &&
+    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
+  storeUpdateRequiredRef.current = storeUpdateRequired;
+  // Dialogs float above the stop state and could still write to the
+  // stopped workspace. A stop closes them; a running workspace is unchanged.
+  useEffect(() => {
+    if (!storeUpdateRequired) return;
+    setNewFileOpen(false);
+    setNewCollectionFolder(null);
+    setQuickOpenOpen(false);
+    setPaletteOpen(false);
+    setShareTarget(null);
+    setOpenShareOpen(false);
+  }, [storeUpdateRequired]);
+  const checkForStoreUpdate = useCallback(async () => {
+    // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
+    // never repaint workspace B. The updater feed itself is app-wide; only
+    // this window's failure line is per workspace.
+    const askedFor = workspaceId;
+    setStoreUpdateCheckError(null);
+    setStoreUpdateCheckPending(true);
+    try {
+      const result = await bridge().checkForUpdates();
+      if (workspaceIdRef.current !== askedFor) return;
+      acceptStoreUpdateResult(result.state);
+    } catch {
+      if (workspaceIdRef.current !== askedFor) return;
+      setStoreUpdateCheckError("Could not check for updates.");
+    } finally {
+      setStoreUpdateCheckPending(false);
+    }
+  }, [acceptStoreUpdateResult, workspaceId]);
   return (
     <div
       data-testid="workspace-shell"
@@ -4313,32 +4418,6 @@ export function DesktopWorkspaceShell(props: {
           onToggle: () => mutateWb(toggleChats),
         }}
       />
-      {shellError ? (
-        <div
-          data-testid="workspace-shell-error"
-          className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
-        >
-          <span className="min-w-0 flex-1 truncate">{shellError.message}</span>
-          {shellError.retry ? (
-            <button
-              type="button"
-              data-testid="workspace-shell-error-retry"
-              onClick={retryShellError}
-              className="h-6 shrink-0 cursor-pointer rounded border border-danger/40 px-2 text-[11px] hover:bg-danger/10"
-            >
-              Try again
-            </button>
-          ) : null}
-          <button
-            type="button"
-            aria-label="Dismiss workspace error"
-            onClick={dismissShellError}
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
       {shellNotice ? (
         <div
           data-testid="shell-notice"
@@ -4549,7 +4628,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div
         data-testid="workspace-workbench"
-        inert={!workspaceIsReady ? true : undefined}
+        inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
         className="flex min-h-0 flex-1"
       >
         <ActivityBar
@@ -5272,25 +5351,142 @@ export function DesktopWorkspaceShell(props: {
           </ChatsPanel>
         ) : null}
       </div>
-      {!workspaceIsReady && workspaceOpenFailure ? (
+      {storeUpdateRequired ? (
+        <div
+          data-testid="workspace-update-required"
+          role="alert"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 grid grid-rows-[1fr_auto_1fr] justify-items-center overflow-y-auto bg-bg px-6 text-center"
+        >
+          {/* The middle row holds what everyone reads. It is centered by the
+              two equal rows around it, so opening the technical details in
+              the bottom row moves nothing above. */}
+          <div className="row-start-2 flex flex-col items-center gap-5">
+          <div className="flex max-w-md select-text cursor-text flex-col items-center gap-3">
+            <p className="dohc-section-label m-0 text-danger">Workspace stopped</p>
+            <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
+              This version of dohc can't open this workspace
+            </h2>
+            <div className="space-y-1">
+              <p className="m-0 text-[13px] leading-relaxed text-muted">
+                {engineStoreRefusalSentence("migration-failed")} Your files are
+                unchanged.
+              </p>
+              <p className="m-0 text-[13px] leading-relaxed text-muted">
+                Update dohc to continue, or keep working in another workspace.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <PrimaryButton
+              autoFocus
+              disabled={
+                storeUpdateCheckPending ||
+                storeUpdateState?.status === "checking" ||
+                storeUpdateState?.canCheck === false
+              }
+              onClick={() => void checkForStoreUpdate()}
+            >
+              {storeUpdateCheckPending || storeUpdateState?.status === "checking"
+                ? "Checking"
+                : "Check for updates"}
+            </PrimaryButton>
+            {storeUpdateState?.canInstall ? (
+              <SecondaryButton onClick={openRestartPrompt}>
+                <RefreshCw size={12} aria-hidden />
+                Restart to update
+              </SecondaryButton>
+            ) : null}
+            {props.onManageWorkspaces ? (
+              <SecondaryButton onClick={manageWorkspaces}>
+                Open another workspace
+              </SecondaryButton>
+            ) : null}
+          </div>
+          <p
+            data-testid="workspace-update-check-result"
+            role="status"
+            className="m-0 -mt-2 min-h-4 max-w-sm select-text cursor-text text-[12px] text-subtle"
+          >
+            {storeUpdateCheckError ?? storeUpdateState?.message}
+          </p>
+          <button
+            type="button"
+            aria-expanded={storeDetailsOpen}
+            onClick={() => setStoreDetailsOpen((open) => !open)}
+            className="flex items-center gap-1 rounded text-[12px] text-subtle transition-colors hover:text-ink"
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-100 ${storeDetailsOpen ? "rotate-90" : ""}`}
+            />
+            {storeDetailsOpen ? "Hide technical details" : "Show technical details"}
+          </button>
+          </div>
+          <div className="row-start-3 flex w-full max-w-md flex-col items-center gap-4 self-start pt-5">
+          {storeDetailsOpen ? (
+            <section
+              data-testid="workspace-update-details"
+              aria-label="Technical details"
+              className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+                <span className="dohc-section-label">Technical details</span>
+                <CopyDetailsButton
+                  data-testid="workspace-update-copy-details"
+                  label="Copy"
+                  iconOnly
+                  details={() => storeDetailsText}
+                  onError={(error) =>
+                    reportShellError("Could not copy the details.", error)
+                  }
+                />
+              </div>
+              <dl className="m-0 grid select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5 text-[12px] leading-snug">
+                {storeDetailFields.map(([label, value]) =>
+                  value ? (
+                    <Fragment key={label}>
+                      <dt className="text-subtle">{label}</dt>
+                      <dd className="m-0 break-words text-ink">{value}</dd>
+                    </Fragment>
+                  ) : null,
+                )}
+              </dl>
+            </section>
+          ) : null}
+          </div>
+        </div>
+      ) : !workspaceIsReady && workspaceOpenFailure ? (
         <div
           data-testid="workspace-open-failed"
           role="alert"
           className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
         >
-          <div className="max-w-md space-y-1.5">
+          <div className="max-w-md select-text cursor-text space-y-1.5">
             <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
             <p className="text-xs text-muted">{workspaceOpenFailure.message}</p>
             <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
           </div>
-          <PrimaryButton
-            onClick={() => {
-              setWorkspaceOpenFailedFor(null);
-              setWorkspaceOpenAttempt((attempt) => attempt + 1);
-            }}
-          >
-            Try again
-          </PrimaryButton>
+          <div className="flex items-center gap-2">
+            <PrimaryButton
+              onClick={() => {
+                setWorkspaceOpenFailedFor(null);
+                setWorkspaceOpenAttempt((attempt) => attempt + 1);
+              }}
+            >
+              Try again
+            </PrimaryButton>
+            <CopyDetailsButton
+              details={() =>
+                errorDetails([
+                  ["Error", "Couldn't open this workspace"],
+                  ["Detail", workspaceOpenFailure.message],
+                  ...reportFacts(),
+                ])
+              }
+            />
+          </div>
         </div>
       ) : !workspaceIsReady ? (
         <div
@@ -5322,10 +5518,15 @@ export function DesktopWorkspaceShell(props: {
         onOpenSettings={() => openSettings()}
         onRebuildEngineStore={(returnFocus) => {
           const refusal = syncStatus?.engineStoreRefused;
-          if (!refusal) return;
+          if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;
           engineRebuildReturnFocusRef.current = returnFocus;
           setEngineRebuild({ phase: "confirm", refusal });
         }}
+        onRestartToUpdate={openRestartPrompt}
+        workspaceErrors={workspaceErrors}
+        onRetryWorkspaceError={retryShellError}
+        onHideWorkspaceError={hideShellError}
+        onDismissWorkspaceError={dismissShellError}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
@@ -5333,6 +5534,56 @@ export function DesktopWorkspaceShell(props: {
         automationFailures={automationFailures}
         onDismissAutomationFailure={dismissAutomationFailure}
       />
+
+      {restartPrompt !== "closed" ? (
+        <Overlay
+          onClose={() => {
+            if (restartPrompt === "open") setRestartPrompt("closed");
+          }}
+          panelProps={{
+            "data-testid": "restart-to-update-dialog",
+            role: "dialog",
+            "aria-modal": true,
+            "aria-labelledby": "restart-to-update-title",
+          }}
+        >
+          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
+            <div className="p-4">
+              <p id="restart-to-update-title" className="m-0 text-sm text-ink">
+                Restart dohc to apply the update?
+              </p>
+              <p className="mb-0 mt-2 text-xs text-muted">
+                {storeUpdateState?.version
+                  ? `Update ${storeUpdateState.version} is downloaded. `
+                  : ""}
+                dohc closes and opens again on the new version. Your files are
+                saved.
+              </p>
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
+              <SecondaryButton
+                autoFocus
+                disabled={restartPrompt === "restarting"}
+                onClick={() => setRestartPrompt("closed")}
+              >
+                Not now
+              </SecondaryButton>
+              <PrimaryButton
+                data-testid="restart-to-update-confirm"
+                disabled={restartPrompt === "restarting"}
+                onClick={() => {
+                  setRestartPrompt("restarting");
+                  void installDesktopUpdate().finally(() =>
+                    setRestartPrompt("closed"),
+                  );
+                }}
+              >
+                {restartPrompt === "restarting" ? "Restarting" : "Restart now"}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
 
       {engineRebuild ? (
         <Overlay

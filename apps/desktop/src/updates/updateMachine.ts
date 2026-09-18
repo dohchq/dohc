@@ -11,7 +11,7 @@ export type UpdateState =
   | { status: "up-to-date"; message: string }
   | { status: "available"; version: string; message: string }
   | { status: "downloading"; version: string; percent: number; message: string }
-  // deferred: the user chose to keep working — the update installs on quit.
+  // deferred: the user chose to keep working; the update installs on quit.
   | { status: "ready"; version: string; deferred: boolean; message: string }
   | { status: "offline"; message: string }
   | { status: "error"; message: string };
@@ -59,7 +59,7 @@ function ready(version: string, deferred: boolean): UpdateState {
     deferred,
     message: deferred
       ? `Update ${version} will finish installing when you quit dohc.`
-      : `Update ${version} is ready — restart dohc to apply it.`,
+      : `Update ${version} is ready. Restart dohc to apply it.`,
   };
 }
 
@@ -78,7 +78,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
         ? {
             status: "available",
             version: event.version,
-            message: `Update ${event.version} is available — downloading…`,
+            message: `Update ${event.version} is available. Downloading…`,
           }
         : state;
     case "not-available":
@@ -91,7 +91,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
             status: "downloading",
             version: state.version,
             percent: event.percent,
-            message: `Downloading update ${state.version} — ${Math.round(event.percent)}%`,
+            message: `Downloading update ${state.version}, ${Math.round(event.percent)}%`,
           }
         : state;
     case "downloaded":
@@ -111,7 +111,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
             // One-shot reality: the wiring checks once at startup, so the next
             // check is the next launch (a "check" event still recovers here).
             status: "offline",
-            message: "You're offline — dohc will check for updates the next time it starts.",
+            message: "You're offline. dohc will check for updates the next time it starts.",
           };
     case "error":
       // A downloaded update still installs on quit (autoInstallOnAppQuit), so

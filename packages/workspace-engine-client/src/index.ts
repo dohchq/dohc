@@ -5,6 +5,7 @@ export type { Event, JsonValue, Request, Response, Retryability } from "./protoc
 export {
   DaemonRefusalError,
   WorkspaceDaemonRequester,
+  engineStoreRefusalDetailOf,
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,

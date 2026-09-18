@@ -101,6 +101,7 @@ There are no users yet. Optimize for the best current design instead of preservi
 - Remove deprecated aliases, dual formats, fallbacks, shims, and dead paths.
 - Update all internal callers, tests, fixtures, and docs in the same change.
 - Add a migration path only when the user asks for one.
+- Shipped engine migrations are append-only. A store the build cannot migrate stops its workspace until a fixed build opens it. To reset a development store, delete `<workspace>/.dohc/engine`.
 
 ## Engineering defaults
 

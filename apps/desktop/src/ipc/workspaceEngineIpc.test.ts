@@ -393,6 +393,9 @@ describe("registered engine-store repair", () => {
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     h.getStatus.mockReturnValueOnce(healthy);
     await expect(h.invoke(CHANNELS.rebuildEngineStore)).rejects.toMatchObject({ reason: "not-refused" });
+    // A store this build could not migrate is intact and never moved.
+    h.getStatus.mockReturnValueOnce({ ...refused, engineStoreRefused: "migration-failed" });
+    await expect(h.invoke(CHANNELS.rebuildEngineStore)).rejects.toMatchObject({ reason: "not-refused" });
     h.hasAgentRun.mockReturnValue(true);
     await expect(h.invoke(CHANNELS.rebuildEngineStore)).rejects.toMatchObject({ reason: "agent-run-active" });
     expect(h.closeActivity).not.toHaveBeenCalled();

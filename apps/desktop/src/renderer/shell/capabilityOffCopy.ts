@@ -1,4 +1,4 @@
-import { engineStoreRefusalSentence, type SyncStatusResult } from "../../ipc/bridgeContract";
+import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeContract";
 
 // What the history-off placeholder may claim. Whether changes are recorded
 // is main's answer (syncStatus, from the open that decided the recorder),
@@ -22,7 +22,7 @@ export function historyOffPlaceholderCopy(
       : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
   }
   if (syncStatus?.engineStoreRefused) {
-    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+    return engineStoreRefusalCopy(syncStatus.engineStoreRefused);
   }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision — same copy as the notice center.
@@ -46,7 +46,7 @@ export function historyOffPlaceholderCopy(
 // them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.engineStoreRefused) {
-    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+    return engineStoreRefusalCopy(syncStatus.engineStoreRefused);
   }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.
@@ -67,7 +67,7 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
 // capture build either way.
 export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.engineStoreRefused) {
-    return `${engineStoreRefusalSentence(syncStatus.engineStoreRefused)} Open Notices and choose Rebuild to review recovery options.`;
+    return engineStoreRefusalCopy(syncStatus.engineStoreRefused);
   }
   if (syncStatus?.historyRecordingUnavailable) {
     // A failure, not a decision, and not an emptiness.

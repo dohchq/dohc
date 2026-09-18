@@ -24,6 +24,24 @@ describe("refused data store copy", () => {
   });
 });
 
+// A store this build could not migrate is intact. No surface may send the
+// user to a rebuild that would lose what a fixed build still opens.
+describe("migration failure copy", () => {
+  it("directs every unavailable surface to an update, not a rebuild", () => {
+    const status: SyncStatusResult = {
+      state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false,
+      historyCaptureFailed: true, engineStoreRefused: "migration-failed",
+    };
+    for (const copy of [historyOffPlaceholderCopy(status, null), versionCompareOffCopy(status), chatsOffCopy(status)]) {
+      expect(copy).toBe(
+        "dohc could not update this workspace's data store to this version. Update dohc to continue. Your files are unchanged.",
+      );
+      expect(copy).not.toContain("Rebuild");
+    }
+  });
+});
+
 // A capability flag is not a count. Whatever main established about the
 // RECORDER, none of it establishes that no version exists: versions live on
 // disk and outlive a session whose capture failed to build, an engine the

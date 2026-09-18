@@ -92,7 +92,7 @@ interface CaptureOptions {
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
-  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -1712,6 +1712,62 @@ describe("workspaceEngineCapture batch capture", () => {
         } finally {
           await liveStore.close();
         }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The move-aside rebuild closes the capture before it moves the store. A
+  // refused store was never opened, so the closing flush can only repeat
+  // the refusal; the stop must finish anyway or the rebuild never starts.
+  it("stops a capture whose store is refused without failing on the closing flush", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await createTestScratch("dohc-engine-capture-");
+      // The engine names the cause after the code.
+      const message = "migration-failed: migration v2-baseline was applied from a different definition than this build's";
+      const refusal = () =>
+        Object.assign(new Error(message), {
+          wireError: { code: "INTERNAL", message, retry: "no" },
+        });
+      const outcomes: WorkspaceEngineCaptureFailure[] = [];
+      const details: Array<string | null> = [];
+      const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+      const liveStore = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+        sessions,
+      ).store;
+      const daemonStore = new Proxy(liveStore, {
+        get(target, property) {
+          if (property === "watcherStatus" || property === "flushCapture") {
+            return async () => {
+              throw refusal();
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        rustEngineSessions: sessions,
+        onError: () => {},
+        onCaptureOutcome: (outcome, detail) => {
+          outcomes.push(outcome);
+          details.push(detail ?? null);
+        },
+      });
+      try {
+        engine.start();
+        // flush() ends with the same refused flushCapture; the pass before it
+        // already reported the refusal.
+        await engine.flush().catch(() => undefined);
+        expect(outcomes).toEqual(["migration-failed"]);
+        expect(details).toEqual(["migration v2-baseline was applied from a different definition than this build's"]);
+        await expect(engine.stop()).resolves.toBeUndefined();
+      } finally {
+        await liveStore.close();
       }
     } finally {
       vi.useRealTimers();
