@@ -3406,13 +3406,43 @@ struct TableCell {
 
 const GFM_TABLE_CELL_BLOCK_SEPARATOR: &str = "<br>";
 
+/// A resized row's height: a positive integer the TypeScript projector also
+/// accepts (`Number.isSafeInteger`), so both projectors write the same bytes.
+fn table_row_height(attrs: &BTreeMap<String, Value>) -> Option<i64> {
+    const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
+    attr_i64(attrs, "height").filter(|height| (1..=MAX_SAFE_INTEGER).contains(height))
+}
+
+/// A resized row keeps its height in an HTML comment on the line above its
+/// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
+/// the header row. GFM has no row-height syntax, Markdown renderers hide the
+/// comment, and the TypeScript projector writes and parses the same bytes, so
+/// a local close that prunes the Y.Doc and reseeds from the file keeps the
+/// height.
+fn render_table_row_heights(row_heights: &[(usize, i64)]) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    if row_heights.is_empty() {
+        return Ok(output.into_string());
+    }
+    output.push_str("<!-- dohc:table row-heights=")?;
+    for (position, (row, height)) in row_heights.iter().enumerate() {
+        if position != 0 {
+            output.push(',')?;
+        }
+        output.push_str(&format!("{row}:{height}"))?;
+    }
+    output.push_str(" -->")?;
+    Ok(output.into_string())
+}
+
 fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let mut rows = Vec::new();
+    let mut row_heights = Vec::new();
     let mut cell_text_bytes = 0usize;
     for row in children {
         let MarkdownNode::Element {
             tag,
-            attrs: _,
+            attrs,
             children: cells,
         } = row
         else {
@@ -3420,6 +3450,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         };
         if tag != "tableRow" {
             continue;
+        }
+        if let Some(height) = table_row_height(attrs) {
+            row_heights.push((rows.len(), height));
         }
         let mut rendered_cells = Vec::new();
         for cell in cells {
@@ -3482,6 +3515,7 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         }
     }
     let mut output = ProjectionBuffer::new();
+    output.push_str(&render_table_row_heights(&row_heights)?)?;
     output.push_str("\n| ")?;
     for (index, width) in widths.iter().enumerate() {
         if index != 0 {
@@ -4940,6 +4974,74 @@ mod projection_tests {
                 .content,
             "\n| first  | row |\n| ------ | --- |\n| second | row |"
         );
+    }
+
+    fn remote_table_with_row_heights(heights: &[(u32, Any)]) -> Ydoc {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let table = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new(
+                    "table",
+                    (0..4).map(|row| {
+                        xml_element(
+                            "tableRow",
+                            &[],
+                            [xml_element("tableCell", &[], [paragraph(format!("row {row}"))])],
+                        )
+                    }),
+                ),
+            );
+            for (index, height) in heights {
+                let XmlOut::Element(row) = table.get(&txn, *index).expect("row exists") else {
+                    panic!("row {index} is an element");
+                };
+                row.insert_attribute(&mut txn, "height", height.clone());
+            }
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("test update is valid");
+        remote
+    }
+
+    #[test]
+    fn resized_table_rows_project_their_heights_above_the_table() {
+        let doc = remote_table_with_row_heights(&[
+            (1, Any::BigInt(84)),
+            (2, Any::String("120".into())),
+            (3, Any::Number(0.5)),
+        ]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .content,
+            "<!-- dohc:table row-heights=1:84,2:120 -->\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |"
+        );
+    }
+
+    #[test]
+    fn hostile_table_row_heights_are_omitted() {
+        for hostile in [
+            Any::BigInt(0),
+            Any::BigInt(-84),
+            Any::BigInt(1 << 53),
+            Any::Bool(true),
+            Any::String("84px".into()),
+        ] {
+            let doc = remote_table_with_row_heights(&[(1, hostile.clone())]);
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("small projection")
+                    .content,
+                "\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |",
+                "{hostile:?} is not a row height"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { getHTMLFromFragment, getSchema } from '@tiptap/core'
-import { codeBlockFence, serializeRichdocBody } from '@dohc/ydoc-projection'
+import { codeBlockFence, DohcMarkdownTable, serializeRichdocBody } from '@dohc/ydoc-projection'
 import { CodeBlock } from '@tiptap/extension-code-block'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { MarkdownManager } from '@tiptap/markdown'
@@ -53,7 +53,10 @@ const extensions: AnyExtension[] = [
   FenceWideningCodeBlock,
   TaskList,
   DohcTaskItem,
-  TableKit,
+  // The projection's table parses and writes the row-height annotation. The
+  // kit's own table would hand that comment to the HTML parser instead.
+  TableKit.configure({ table: false }),
+  DohcMarkdownTable,
 ]
 const markdownManager = new MarkdownManager({
   marked: new Marked() as unknown as typeof marked,

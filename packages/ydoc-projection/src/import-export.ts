@@ -185,18 +185,82 @@ const MarkdownTaskList = TaskList.extend({
   },
 })
 
-const MarkdownTable = Table.extend({
+// A resized row keeps its height in an HTML comment on the line above its
+// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
+// the header row. GFM has no row-height syntax, Markdown renderers hide the
+// comment, and the Rust projector writes the same bytes, so a local close
+// that prunes the Y.Doc and reseeds from the file keeps the height.
+const TABLE_ROW_HEIGHTS_RE =
+  /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
+const tableParseMarkdown = Table.config.parseMarkdown!
+type TableRowHeightsToken = Parameters<typeof tableParseMarkdown>[0] & {
+  rowHeights?: [number, number][]
+}
+
+// The Rust projector reads the attribute through `attr_i64`, which accepts
+// an integer or a trimmed integer string. Keep the same rule here so both
+// projectors write the same annotation for the same Y.Doc.
+function tableRowHeight(value: unknown): number | null {
+  const height = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\s*[+-]?\d+\s*$/u.test(value)
+      ? Number(value)
+      : Number.NaN
+  return Number.isSafeInteger(height) && height > 0 ? height : null
+}
+
+function tableRowHeightsAnnotation(rows: JSONContent[]): string {
+  const pairs: string[] = []
+  rows.forEach((row, index) => {
+    const height = tableRowHeight(row.attrs?.height)
+    if (height !== null) pairs.push(`${index}:${height}`)
+  })
+  return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
+}
+
+export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
     // Table.start only inspects the first two lines. Avoid splitting the full
     // remaining document while probing ordinary blocks.
     start: (src: string) => {
+      if (TABLE_ROW_HEIGHTS_RE.test(src)) return 0
       const newline = src.indexOf('\n')
       if (newline < 0) return -1
       const second = src.indexOf('\n', newline + 1)
       const prefix = second < 0 ? src : src.slice(0, second)
       return (tableTokenizer.start as (source: string) => number)(prefix)
     },
+    tokenize: (src, tokens, helpers) => {
+      const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
+      if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
+      // The annotation belongs to the table that starts right after it. With
+      // no table there it stays an ordinary HTML comment for marked.
+      const rest = src.slice(annotation[0].length)
+      const blankLineIndex = rest.indexOf('\n\n')
+      const candidate = blankLineIndex >= 0 ? rest.slice(0, blankLineIndex) : rest
+      const table = helpers.blockTokens(candidate)[0]
+      if (table?.type !== 'table' || !table.raw) return undefined
+      const lineCount = table.raw.split('\n').length
+      const raw = annotation[0] + rest.split('\n').slice(0, lineCount).join('\n')
+      const rowHeights: [number, number][] = []
+      for (const pair of annotation[1].split(',')) {
+        const [index, height] = pair.split(':').map(Number)
+        if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
+          rowHeights.push([index, height])
+        }
+      }
+      return { ...table, raw, rowHeights }
+    },
+  },
+  parseMarkdown: (token: TableRowHeightsToken, helpers) => {
+    const table = tableParseMarkdown(token, helpers) as JSONContent
+    const rows = table.content ?? []
+    for (const [index, height] of token.rowHeights ?? []) {
+      const row = rows[index]
+      if (row) row.attrs = { ...row.attrs, height }
+    }
+    return table
   },
   renderMarkdown: (node, helpers) => {
     const tableHelpers: MarkdownRendererHelpers = {
@@ -207,11 +271,12 @@ const MarkdownTable = Table.extend({
     // Tiptap's table renderer includes its own trailing newline, while the
     // document renderer also joins sibling blocks with `\n\n`. Returning both
     // would put two blank lines between a table and its next sibling.
-    return renderTableToMarkdown(
+    const table = renderTableToMarkdown(
       node,
       tableHelpers,
       { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
     ).replace(/\n$/u, '')
+    return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
   },
 })
 
@@ -221,7 +286,7 @@ const extensions: AnyExtension[] = [
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,
-  MarkdownTable,
+  DohcMarkdownTable,
   TableCell,
   TableHeader,
   TableRow,
