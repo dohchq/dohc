@@ -4311,16 +4311,20 @@ export function DesktopWorkspaceShell(props: {
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
   const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
+  const storeDetailFields = useMemo(
+    (): ReadonlyArray<readonly [string, string | null | undefined]> => [
+      ["Problem", engineStoreRefusalSentence("migration-failed")],
+      ["Code", "migration-failed"],
+      ["Engine", syncStatus?.engineStoreRefusedDetail],
+      ["Workspace id", props.workspace.workspaceId],
+      ["Data store", `${props.workspace.rootPath}/.dohc/engine`],
+      ...reportFacts(),
+    ],
+    [syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
+  );
   const storeDetailsText = useMemo(
-    () =>
-      errorDetails([
-        ["Problem", engineStoreRefusalSentence("migration-failed")],
-        ["Code", "migration-failed"],
-        ["Cause", syncStatus?.engineStoreRefusedDetail],
-        ["Data store", ".dohc/engine"],
-        ...reportFacts(),
-      ]),
-    [syncStatus?.engineStoreRefusedDetail, reportFacts],
+    () => errorDetails(storeDetailFields),
+    [storeDetailFields],
   );
   // A store this build could not migrate is intact. Nothing in this
   // workspace can run against it, so the workspace stops here until a build
@@ -5398,29 +5402,41 @@ export function DesktopWorkspaceShell(props: {
                 Open another workspace
               </SecondaryButton>
             ) : null}
-            <CopyDetailsButton
-              data-testid="workspace-update-copy-details"
-              details={() => storeDetailsText}
-              onError={(error) =>
-                reportShellError("Could not copy the details.", error)
-              }
-            />
-          </div>
-          <button
-            type="button"
-            aria-expanded={storeDetailsOpen}
-            onClick={() => setStoreDetailsOpen((open) => !open)}
-            className="text-[12px] text-subtle underline-offset-2 transition-colors hover:text-ink hover:underline"
-          >
-            {storeDetailsOpen ? "Hide details" : "Show details"}
-          </button>
-          {storeDetailsOpen ? (
-            <pre
-              data-testid="workspace-update-details"
-              className="m-0 w-full max-w-md select-text cursor-text whitespace-pre-wrap break-words rounded-lg border border-line bg-panel p-3 text-left font-mono text-[11px] leading-relaxed text-ink"
+            <SecondaryButton
+              aria-expanded={storeDetailsOpen}
+              onClick={() => setStoreDetailsOpen((open) => !open)}
             >
-              {storeDetailsText}
-            </pre>
+              {storeDetailsOpen ? "Hide details" : "Show details"}
+            </SecondaryButton>
+          </div>
+          {storeDetailsOpen ? (
+            <section
+              data-testid="workspace-update-details"
+              aria-label="Details"
+              className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+                <span className="dohc-section-label">Details</span>
+                <CopyDetailsButton
+                  data-testid="workspace-update-copy-details"
+                  label="Copy"
+                  details={() => storeDetailsText}
+                  onError={(error) =>
+                    reportShellError("Could not copy the details.", error)
+                  }
+                />
+              </div>
+              <dl className="m-0 grid select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5 text-[12px] leading-snug">
+                {storeDetailFields.map(([label, value]) =>
+                  value ? (
+                    <Fragment key={label}>
+                      <dt className="text-subtle">{label}</dt>
+                      <dd className="m-0 break-words text-ink">{value}</dd>
+                    </Fragment>
+                  ) : null,
+                )}
+              </dl>
+            </section>
           ) : null}
           {storeUpdateCheck.message ? (
             <p

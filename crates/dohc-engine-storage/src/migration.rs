@@ -2152,15 +2152,20 @@ pub(crate) fn run_migrations(
 
         match ledger_status(conn, migration.id)? {
             LedgerStatus::Complete { checksum } => {
-                if checksum != migration_checksum(migration.sql) {
+                let expected = migration_checksum(migration.sql);
+                if checksum != expected {
                     // A completed migration whose DDL this build defines
                     // differently — a tampered or incompatible ledger. Fail
-                    // closed rather than skip-and-diverge.
+                    // closed rather than skip-and-diverge. The two checksum
+                    // prefixes tell a reader which build wrote the store.
                     return Err(StorageError::MigrationFailed {
                         source: Some(
                             format!(
-                                "migration {} was applied from a different definition than this build's",
-                                migration.id
+                                "migration {} ({}) was applied from a different definition than this build's: the store recorded {}, this build defines {}",
+                                migration.ordinal,
+                                migration.id,
+                                &checksum[..checksum.len().min(12)],
+                                &expected[..12]
                             )
                             .into(),
                         ),

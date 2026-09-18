@@ -7007,17 +7007,21 @@ describe("engine store recovery", () => {
     renderShell(bridge);
 
     const blocked = await screen.findByTestId("workspace-update-required");
-    // Copy details is the report: the code, the engine's cause, and where.
-    await user.click(within(blocked).getByRole("button", { name: "Copy details" }));
+    // Show details reveals the report; Copy inside it copies the same lines.
+    await user.click(within(blocked).getByRole("button", { name: "Show details" }));
+    const details = await screen.findByTestId("workspace-update-details");
+    await user.click(within(details).getByRole("button", { name: "Copy" }));
     const copied = await navigator.clipboard.readText();
     expect(copied).toContain("Code: migration-failed");
-    expect(copied).toContain("Cause: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain("Engine: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain("Workspace id: ");
     expect(copied).toContain("Folder: ");
     expect(copied).toContain("Platform: ");
-    // Show details reveals the same text a person is about to paste.
-    await user.click(within(blocked).getByRole("button", { name: "Show details" }));
-    expect((await screen.findByTestId("workspace-update-details")).textContent).toBe(copied);
-    expect(within(blocked).queryByText("Data store")).toBeNull();
+    for (const line of copied.split("\n")) {
+      const [label, value] = line.split(": ");
+      expect(within(details).getByText(label!)).toBeTruthy();
+      expect(details.textContent).toContain(value!);
+    }
     expect(blocked.textContent).toContain(
       "dohc could not update this workspace's data store to this version.",
     );
