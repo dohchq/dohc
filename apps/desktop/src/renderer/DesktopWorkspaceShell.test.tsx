@@ -7033,9 +7033,7 @@ describe("engine store recovery", () => {
     }));
     await user.click(within(blocked).getByRole("button", { name: "Check for updates" }));
     const result = await screen.findByTestId("workspace-update-check-result");
-    expect(result.textContent).toBe(
-      "No update check was started. Updates are available in packaged builds.",
-    );
+    expect(result.textContent).toBe("Updates are available in packaged builds.");
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await user.click(await screen.findByTestId("notice-center-toggle"));

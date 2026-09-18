@@ -4277,6 +4277,14 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
+  // The updater's state, shown under Check for updates. The shell banner
+  // sits under this overlay, so an answer reported there would never be
+  // seen; a line that is always there also means the check moves nothing.
+  const [storeUpdateCheck, setStoreUpdateCheck] = useState<{
+    phase: "idle" | "checking" | "done";
+    message: string | null;
+    canInstall: boolean;
+  }>({ phase: "idle", message: null, canInstall: false });
   // Facts a person can paste into a report. The version comes from the
   // updater's state; a bridge without it leaves the line out.
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -4285,7 +4293,13 @@ export function DesktopWorkspaceShell(props: {
     bridge()
       .getUpdateState()
       .then((state) => {
-        if (!live || !state.currentVersion) return;
+        if (!live) return;
+        setStoreUpdateCheck({
+          phase: "idle",
+          message: state.message,
+          canInstall: state.canInstall === true,
+        });
+        if (!state.currentVersion) return;
         setAppVersion(
           state.channel
             ? `${state.currentVersion} (${state.channel})`
@@ -4332,22 +4346,13 @@ export function DesktopWorkspaceShell(props: {
   const storeUpdateRequired =
     syncStatus?.engineStoreRefused != null &&
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
-  // The check answers inside the stop state. The shell banner sits under
-  // this overlay, so a result reported there would never be seen.
-  const [storeUpdateCheck, setStoreUpdateCheck] = useState<{
-    phase: "idle" | "checking" | "done";
-    message: string | null;
-    canInstall: boolean;
-  }>({ phase: "idle", message: null, canInstall: false });
   const checkForStoreUpdate = useCallback(async () => {
-    setStoreUpdateCheck({ phase: "checking", message: null, canInstall: false });
+    setStoreUpdateCheck((current) => ({ ...current, phase: "checking" }));
     try {
       const result = await bridge().checkForUpdates();
       setStoreUpdateCheck({
         phase: "done",
-        message: result.checked
-          ? result.state.message
-          : `No update check was started. ${result.state.message}`,
+        message: result.state.message,
         canInstall: result.state.canInstall === true,
       });
     } catch (error) {
@@ -5407,6 +5412,13 @@ export function DesktopWorkspaceShell(props: {
               </SecondaryButton>
             ) : null}
           </div>
+          <p
+            data-testid="workspace-update-check-result"
+            role="status"
+            className="m-0 -mt-2 min-h-4 max-w-sm select-text cursor-text text-[12px] text-subtle"
+          >
+            {storeUpdateCheck.message}
+          </p>
           <button
             type="button"
             aria-expanded={storeDetailsOpen}
@@ -5423,15 +5435,6 @@ export function DesktopWorkspaceShell(props: {
           </button>
           </div>
           <div className="row-start-3 flex w-full max-w-md flex-col items-center gap-4 self-start pt-5">
-          {storeUpdateCheck.message ? (
-            <p
-              data-testid="workspace-update-check-result"
-              role="status"
-              className="m-0 max-w-sm select-text cursor-text text-[12px] text-muted"
-            >
-              {storeUpdateCheck.message}
-            </p>
-          ) : null}
           {storeDetailsOpen ? (
             <section
               data-testid="workspace-update-details"
