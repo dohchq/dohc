@@ -599,6 +599,34 @@ describe("workspaceActivity cloud sync nudge", () => {
     );
   });
 
+  // The engine's own words for a refusal ride along, so a report can carry
+  // them without the log, and leave with the refusal.
+  it("carries the refusal detail on the status", async () => {
+    let hooks: WorkspaceCaptureHooks | null = null;
+    const activity = createWorkspaceActivity(vi.fn(), {
+      captureFor: (_workspace, captureHooks) => {
+        hooks = captureHooks;
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+            stop: vi.fn(async () => undefined),
+          } as never,
+        };
+      },
+    });
+    await activity.open(workspace());
+    hooks!.onCaptureOutcome("migration-failed", "migration v2-baseline was applied from a different definition than this build's");
+    const refused = activity.getStatus("activity-test");
+    expect(refused.engineStoreRefused).toBe("migration-failed");
+    expect(refused.engineStoreRefusedDetail).toBe("migration v2-baseline was applied from a different definition than this build's");
+    hooks!.onCaptureOutcome(null);
+    expect(activity.getStatus("activity-test").engineStoreRefusedDetail).toBeUndefined();
+    await activity.stopAll();
+  });
+
   // A refused engine store rides the capture outcome into the status
   // the notice center reads, transition-only like the capture-failed flag —
   // a persistently refused store re-reports the same code on every pass and

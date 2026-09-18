@@ -1226,12 +1226,15 @@ export const SyncStatusResult = z.union([
     // A failed producer must say whether the engine refused the store. Null
     // means history capture failed for another reason.
     engineStoreRefused: z.enum(ENGINE_STORE_REFUSALS).nullable(),
+    // The engine's own words for the refusal, when it gave them.
+    engineStoreRefusedDetail: z.string().min(1).max(500).optional(),
   }),
   z
     .object({
       ...SYNC_STATUS_BASE_FIELDS,
       historyCaptureFailed: z.literal(false).optional(),
       engineStoreRefused: z.never().optional(),
+      engineStoreRefusedDetail: z.never().optional(),
     })
     .superRefine((status, context) => {
       if (Object.hasOwn(status, "engineStoreRefused")) {

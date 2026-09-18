@@ -92,7 +92,7 @@ interface CaptureOptions {
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
-  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -1725,11 +1725,14 @@ describe("workspaceEngineCapture batch capture", () => {
     vi.useFakeTimers();
     try {
       const root = await createTestScratch("dohc-engine-capture-");
+      // The engine names the cause after the code.
+      const message = "migration-failed: migration v2-baseline was applied from a different definition than this build's";
       const refusal = () =>
-        Object.assign(new Error("migration-failed"), {
-          wireError: { code: "INTERNAL", message: "migration-failed", retry: "no" },
+        Object.assign(new Error(message), {
+          wireError: { code: "INTERNAL", message, retry: "no" },
         });
       const outcomes: WorkspaceEngineCaptureFailure[] = [];
+      const details: Array<string | null> = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
       const liveStore = createCaptureLiveStores(
         { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
@@ -1750,7 +1753,10 @@ describe("workspaceEngineCapture batch capture", () => {
         store: daemonStore,
         rustEngineSessions: sessions,
         onError: () => {},
-        onCaptureOutcome: (outcome) => outcomes.push(outcome),
+        onCaptureOutcome: (outcome, detail) => {
+          outcomes.push(outcome);
+          details.push(detail ?? null);
+        },
       });
       try {
         engine.start();
@@ -1758,6 +1764,7 @@ describe("workspaceEngineCapture batch capture", () => {
         // already reported the refusal.
         await engine.flush().catch(() => undefined);
         expect(outcomes).toEqual(["migration-failed"]);
+        expect(details).toEqual(["migration v2-baseline was applied from a different definition than this build's"]);
         await expect(engine.stop()).resolves.toBeUndefined();
       } finally {
         await liveStore.close();

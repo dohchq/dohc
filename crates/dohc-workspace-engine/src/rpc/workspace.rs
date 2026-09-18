@@ -1172,7 +1172,12 @@ mod tests {
             .await
             .expect_err("the ledger fence must refuse a store from another build");
         assert_eq!(refused.code, ErrorCode::Internal);
-        assert_eq!(refused.message, "migration-failed");
+        assert!(
+            refused.message.starts_with("migration-failed: "),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("v2-baseline"), "{}", refused.message);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

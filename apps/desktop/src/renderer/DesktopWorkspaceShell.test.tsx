@@ -6995,7 +6995,11 @@ describe("engine store recovery", () => {
   // that opens it. The workspace stops instead of offering a rebuild that
   // would lose what the fixed build still opens.
   it("stops the workspace on a migration failure instead of offering the rebuild", async () => {
-    const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
+    const status = {
+      ...refusedStatus,
+      engineStoreRefused: "migration-failed" as const,
+      engineStoreRefusedDetail: "migration v2-baseline was applied from a different definition than this build's",
+    };
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => status);
     bridge.getSyncStatus = vi.fn(async () => status);
@@ -7003,6 +7007,13 @@ describe("engine store recovery", () => {
     renderShell(bridge);
 
     const blocked = await screen.findByTestId("workspace-update-required");
+    // Copy details is the report: the code, the engine's cause, and where.
+    await user.click(within(blocked).getByRole("button", { name: "Copy details" }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Code: migration-failed");
+    expect(copied).toContain("Cause: migration v2-baseline was applied from a different definition than this build's");
+    expect(copied).toContain("Folder: ");
+    expect(copied).toContain("Platform: ");
     expect(blocked.textContent).toContain(
       "dohc could not update this workspace's data store to this version.",
     );

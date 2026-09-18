@@ -2,17 +2,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import {
-  Bot,
-  CircleHelp,
-  Eye,
-  Maximize2,
-  RefreshCw,
-  Search,
-  Send,
-  User,
-  X,
-} from "lucide-react";
+import { Bot, Check, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -84,6 +74,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
+import { CopyDetailsButton, errorDetails, useCopied } from "./shell/copyDetails";
 import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -4286,6 +4277,37 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
+  // Facts a person can paste into a report. The version comes from the
+  // updater's state; a bridge without it leaves the line out.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    bridge()
+      .getUpdateState()
+      .then((state) => {
+        if (!live || !state.currentVersion) return;
+        setAppVersion(
+          state.channel
+            ? `${state.currentVersion} (${state.channel})`
+            : state.currentVersion,
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+  const reportFacts = useCallback(
+    (): ReadonlyArray<readonly [string, string | null | undefined]> => [
+      ["Workspace", workspaceName(props.workspace)],
+      ["Folder", props.workspace.rootPath],
+      ["dohc", appVersion],
+      ["Platform", bridge().platform],
+      ["Time", new Date().toISOString()],
+    ],
+    [appVersion, props.workspace],
+  );
+  const bannerCopy = useCopied();
   // A store this build could not migrate is intact. Nothing in this
   // workspace can run against it, so the workspace stops here until a build
   // that opens it. Other workspaces keep their own stores.
@@ -4351,7 +4373,9 @@ export function DesktopWorkspaceShell(props: {
           data-testid="workspace-shell-error"
           className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
         >
-          <span className="min-w-0 flex-1 truncate">{shellError.message}</span>
+          <span className="min-w-0 flex-1 select-text cursor-text truncate">
+            {shellError.message}
+          </span>
           {shellError.retry ? (
             <button
               type="button"
@@ -4362,6 +4386,23 @@ export function DesktopWorkspaceShell(props: {
               Try again
             </button>
           ) : null}
+          <button
+            type="button"
+            aria-label="Copy error details"
+            data-testid="workspace-shell-error-copy"
+            onClick={() =>
+              void bannerCopy.copy(
+                errorDetails([["Error", shellError.message], ...reportFacts()]),
+              )
+            }
+            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
+          >
+            {bannerCopy.copied ? (
+              <Check size={12} aria-hidden />
+            ) : (
+              <Copy size={12} aria-hidden />
+            )}
+          </button>
           <button
             type="button"
             aria-label="Dismiss workspace error"
@@ -5355,6 +5396,21 @@ export function DesktopWorkspaceShell(props: {
                 Open another workspace
               </SecondaryButton>
             ) : null}
+            <CopyDetailsButton
+              data-testid="workspace-update-copy-details"
+              details={() =>
+                errorDetails([
+                  ["Problem", engineStoreRefusalSentence("migration-failed")],
+                  ["Code", "migration-failed"],
+                  ["Cause", syncStatus?.engineStoreRefusedDetail],
+                  ["Data store", ".dohc/engine"],
+                  ...reportFacts(),
+                ])
+              }
+              onError={(error) =>
+                reportShellError("Could not copy the details.", error)
+              }
+            />
           </div>
           {storeUpdateCheck.message ? (
             <p
@@ -5372,19 +5428,30 @@ export function DesktopWorkspaceShell(props: {
           role="alert"
           className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
         >
-          <div className="max-w-md space-y-1.5">
+          <div className="max-w-md select-text cursor-text space-y-1.5">
             <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
             <p className="text-xs text-muted">{workspaceOpenFailure.message}</p>
             <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
           </div>
-          <PrimaryButton
-            onClick={() => {
-              setWorkspaceOpenFailedFor(null);
-              setWorkspaceOpenAttempt((attempt) => attempt + 1);
-            }}
-          >
-            Try again
-          </PrimaryButton>
+          <div className="flex items-center gap-2">
+            <PrimaryButton
+              onClick={() => {
+                setWorkspaceOpenFailedFor(null);
+                setWorkspaceOpenAttempt((attempt) => attempt + 1);
+              }}
+            >
+              Try again
+            </PrimaryButton>
+            <CopyDetailsButton
+              details={() =>
+                errorDetails([
+                  ["Error", "Couldn't open this workspace"],
+                  ["Detail", workspaceOpenFailure.message],
+                  ...reportFacts(),
+                ])
+              }
+            />
+          </div>
         </div>
       ) : !workspaceIsReady ? (
         <div

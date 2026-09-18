@@ -45,6 +45,9 @@ interface WatchedWorkspace {
   // One failure cause keeps the wire status from describing impossible
   // combinations. "other" means capture failed without a store refusal.
   historyCaptureFailure: "other" | EngineStoreRefusal | null;
+  // The engine's own words for a refusal, for a report. Null when it gave
+  // none or nothing is refused.
+  historyCaptureDetail: string | null;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -110,7 +113,10 @@ export interface WorkspaceCaptureDecision {
 }
 
 export interface WorkspaceCaptureHooks {
-  onCaptureOutcome: (failure: WorkspaceEngineCaptureFailure) => void;
+  onCaptureOutcome: (
+    failure: WorkspaceEngineCaptureFailure,
+    detail?: string | null,
+  ) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -168,6 +174,7 @@ export function createWorkspaceActivity(
     // the notice center shows when history capture is failing or when a
     // workspace records no history at all.
     const historyCaptureFailure = w?.historyCaptureFailure ?? null;
+    const historyCaptureDetail = w?.historyCaptureDetail ?? null;
     const baseStatus = {
       ...status,
       conflictCount,
@@ -184,6 +191,9 @@ export function createWorkspaceActivity(
         historyCaptureFailed: true,
         engineStoreRefused:
           historyCaptureFailure === "other" ? null : historyCaptureFailure,
+        ...(historyCaptureFailure !== "other" && historyCaptureDetail
+          ? { engineStoreRefusedDetail: historyCaptureDetail }
+          : {}),
       };
     }
     return baseStatus;
@@ -210,6 +220,7 @@ export function createWorkspaceActivity(
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyCaptureFailure: null,
+        historyCaptureDetail: null,
         agentRun: null,
       };
       state.entry = entry;
@@ -221,15 +232,21 @@ export function createWorkspaceActivity(
         try {
           const decision =
             await options.captureFor(workspace, {
-              onCaptureOutcome: (failure) => {
+              onCaptureOutcome: (failure, detail = null) => {
                 // Transition-only: the first failure raises the notice, the
                 // first success after a failure clears it, and repeated
                 // failures (a persistently broken store retries every batch)
                 // never re-notify. The refusal classification transitions the
                 // same way: a persistently refused store re-reports
                 // the same code on every pass.
-                if (entry.historyCaptureFailure === failure) return;
+                if (
+                  entry.historyCaptureFailure === failure &&
+                  entry.historyCaptureDetail === detail
+                ) {
+                  return;
+                }
                 entry.historyCaptureFailure = failure;
+                entry.historyCaptureDetail = detail;
                 notify({ workspaceId: workspace.workspaceId });
               },
             });

@@ -251,6 +251,28 @@ function refusalMessageMatchesToken(
   );
 }
 
+// The engine's own words after a store refusal's code, or null when it gave
+// none. The desktop shows them in a report, never in place of the code.
+export function engineStoreRefusalDetailOf(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    const message = refusalMessageOf(current, "INTERNAL");
+    if (message !== null) {
+      const code = ENGINE_STORE_REFUSALS.find((candidate) =>
+        refusalMessageMatchesToken(message, candidate),
+      );
+      if (code !== undefined) {
+        const prefix = `${code}${REFUSAL_DETAIL_DELIMITER}`;
+        return message.startsWith(prefix) ? message.slice(prefix.length) : null;
+      }
+    }
+    seen.add(current);
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
+}
+
 function causeChainHasRefusal(
   error: unknown,
   code: DaemonErrorCode,

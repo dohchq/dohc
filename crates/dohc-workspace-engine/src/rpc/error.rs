@@ -142,7 +142,17 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     ) = &error
     {
         eprintln!("engine: store refused: {}", error_chain(refused));
-        return WireError::new(ErrorCode::Internal, refused.code());
+        // A failed migration names its cause after the code, the way other
+        // refusals carry a detail: the desktop matches the code prefix and
+        // shows the rest. The cause is the storage crate's constant text
+        // plus a migration id, never a path or content.
+        let message = match refused {
+            dohc_engine_storage::StorageError::MigrationFailed { .. } => {
+                format!("{}: {}", refused.code(), error_chain(refused))
+            }
+            _ => refused.code().to_string(),
+        };
+        return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. }) => {
@@ -509,7 +519,11 @@ mod tests {
                 RuntimeError::LiveApplication(ApplicationError::Storage(inner)) => inner.code(),
                 _ => unreachable!(),
             };
-            assert_eq!(map_runtime(error).message, expected);
+            let message = map_runtime(error).message;
+            assert!(
+                message == expected || message.starts_with(&format!("{expected}: ")),
+                "{message} must carry the {expected} code"
+            );
         }
         let error = map_runtime(RuntimeError::LiveApplication(ApplicationError::Collab(
             CollabError::ObjectAliasCollision,
