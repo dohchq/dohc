@@ -52,6 +52,28 @@ An empty state and an error both owe the user a **Next**. A toast usually owes a
 - **Never magical.** No `magically`, `automatically figures out`, `just works`, `powered by AI`. State the mechanism or say nothing.
 - **No marketing words.** `seamless`, `robust`, `powerful`, `effortless`, `intelligent`, `smart`, `cutting-edge`. These are the easy catch, not the point. A string can contain none of them and still be slop.
 
+### Where a message goes
+
+One system, so a person always knows where to look. Do not add a new surface for a new error.
+
+| Situation | Surface |
+| --- | --- |
+| The whole workspace is degraded, so nothing in it can be used | A full-height state over the workbench, which goes inert. Example: the stop state when this build cannot open the workspace's data store |
+| One thing failed and the workspace still works | A toast in the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
+| Something became ready or finished | A toast in the bottom right that fades, and a row in Notices |
+| A control's own input is wrong | Inline, beside the control |
+
+Rules that follow from the table:
+
+- Nothing in the workbench moves when a message arrives. No bar across the top, no shift.
+- A message that names a value the user can see carries **Try again** on the toast and on the row.
+- A message a person might need to report carries a copy control beside the text it copies: an icon on the toast and the row, a **Technical details** disclosure on a full-height state. What the user reads is what they paste, one line per fact, never a log.
+- The same message, or the same kind, replaces its earlier row instead of piling up.
+- Closing a toast keeps the row. Dismissing the row removes it.
+- Restarting or closing the app asks once, in one dialog, wherever the action started.
+
+The shell owns the list and the dialogs. The notice center only shows them. Report through the shell's error hook; do not render an error yourself.
+
 ### Errors
 
 Three parts, in order. Cut any part that is genuinely unknown; never invent it.

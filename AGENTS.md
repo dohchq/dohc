@@ -89,6 +89,7 @@ Do not weaken authorization, ownership, isolation, or explicitly configured cont
 - Sandbox sites, apps, and HTML previews. They receive only explicitly granted capabilities and data; they do not inherit workspace authority.
 - Treat a live document session's Y.Doc as canonical. On settlement, the engine writes the Markdown artifact. Do not make raw full-body Markdown patching the source of truth for live editing.
 - Give every reversible state change a visible reverse path. Warn the user before an irreversible action runs.
+- Put every message where the user expects it. A top bar only when the whole workspace is degraded. Every other error arrives as a bottom-right toast and stays as a row in Notices with Try again and copy. Copy sits beside the text it copies. The rules are in [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md).
 - Guard every asynchronous renderer response with a workspace/request token, abort signal, or equivalent before setting workspace-scoped UI state. A slow response for workspace A must never repaint workspace B.
 
 Within these boundaries, authors decide what their apps do and which web frameworks and external services they use. Authors are responsible for app behavior, including where an app sends data it receives.
