@@ -262,6 +262,9 @@ describe("EditorTabs pointer drag", () => {
   const flushFrames = () => {
     for (const frame of frames.splice(0)) frame(0);
   };
+  // jsdom has no Web Animations: the settle returns an inert animation.
+  const inertAnimation = () =>
+    ({ cancel: vi.fn(), commitStyles: vi.fn(), addEventListener: vi.fn() }) as unknown as Animation;
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", (frame: FrameRequestCallback) =>
       frames.push(frame),
@@ -269,6 +272,7 @@ describe("EditorTabs pointer drag", () => {
     vi.stubGlobal("cancelAnimationFrame", (id: number) => {
       frames.splice(id - 1, 1);
     });
+    Element.prototype.animate = vi.fn(inertAnimation);
   });
   afterEach(() => {
     frames.length = 0;
@@ -375,7 +379,6 @@ describe("EditorTabs pointer drag", () => {
   });
 
   it("settles the moved tab from where it was released into its new slot", () => {
-    Element.prototype.animate = vi.fn();
     const { onMove, reorder } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
     dragTab(first, 4, 260);
@@ -495,6 +498,109 @@ describe("EditorTabs pointer drag", () => {
     expect(onMove).not.toHaveBeenCalled();
     expect(onMoveToGroup).toHaveBeenCalledOnce();
     expect(onMoveToGroup).toHaveBeenCalledWith("left", "right", "a.md", 0);
+  });
+
+  it("reaches the last slot with a tab wider than the room left beside it", () => {
+    const { onMove } = renderGroup();
+    // a is 200px wide in a 316px strip: clamped inside the strip, its centre
+    // never passes c, so the slot comes from the unclamped pointer position.
+    const [first, second, third] = screen.getAllByRole("tab");
+    Object.defineProperty(screen.getByRole("tablist"), "clientWidth", { configurable: true, value: 316 });
+    Object.defineProperty(first, "offsetWidth", { configurable: true, value: 200 });
+    Object.defineProperty(second, "offsetLeft", { configurable: true, value: 200 });
+    Object.defineProperty(third, "offsetLeft", { configurable: true, value: 300 });
+    dragTab(first, 4, 400);
+    expect(first.style.transform).toBe("translateX(116px)");
+    expect(third.style.transform).toBe("translateX(-200px)");
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 400, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
+  });
+
+  it("shows the committed order while the pointer is over another group", () => {
+    const onMove = vi.fn();
+    const onMoveToGroup = vi.fn();
+    render(
+      <>
+        <div data-editor-group-id="left">
+          <EditorTabs
+            groupId="left"
+            groupNumber={1}
+            tabs={tabs}
+            activeTab="a.md"
+            activeTabDirty={false}
+            recoveryPaths={new Set<string>()}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={onMove}
+            onMoveToGroup={onMoveToGroup}
+            onCreateGroupRight={noop}
+          />
+        </div>
+        <div data-editor-group-id="right">
+          <div data-testid="empty-right-editor" />
+        </div>
+      </>,
+    );
+    layOut();
+    const first = screen.getByTestId("tab-a.md");
+    const second = screen.getByTestId("tab-b.md");
+    dragTab(first, 4, 160);
+    expect(second.style.transform).toBe("translateX(-100px)");
+
+    vi.mocked(document.elementFromPoint).mockReturnValue(screen.getByTestId("empty-right-editor"));
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 700, clientY: 200 });
+    flushFrames();
+    expect(second.style.transform).toBe("");
+
+    vi.mocked(document.elementFromPoint).mockReturnValue(first);
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 160, clientY: 10 });
+    flushFrames();
+    expect(second.style.transform).toBe("translateX(-100px)");
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 160, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+    expect(onMoveToGroup).not.toHaveBeenCalled();
+  });
+
+  it("follows the strip when it scrolls under a held pointer", () => {
+    renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 160);
+    expect(first.style.transform).toBe("translateX(150px)");
+    const strip = screen.getByRole("tablist");
+    strip.scrollLeft = 50;
+    fireEvent.scroll(strip);
+    flushFrames();
+    // The pointer stayed put, so the tab moved 50px further into the content.
+    expect(first.style.transform).toBe("translateX(200px)");
+  });
+
+  it("keeps the last painted position when cancelled with a move still queued", () => {
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 160);
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 260, clientY: 10 });
+    fireEvent.pointerCancel(first, { pointerId: 4 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+  });
+
+  it("stops a settling tab where it is when it is grabbed again", () => {
+    const animation = { cancel: vi.fn(), commitStyles: vi.fn(), addEventListener: vi.fn() };
+    Element.prototype.animate = vi.fn(() => animation as unknown as Animation);
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    // A short drag that changes nothing settles in place.
+    dragTab(first, 4, 40);
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 40, clientY: 10 });
+    expect(onMove).not.toHaveBeenCalled();
+    expect(first.animate).toHaveBeenCalledOnce();
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 5, clientX: 10, clientY: 10 });
+    expect(animation.commitStyles).toHaveBeenCalledOnce();
+    expect(animation.cancel).toHaveBeenCalledOnce();
+    // A press that stays a click leaves no frozen transform behind.
+    fireEvent.pointerUp(first, { pointerId: 5, clientX: 10, clientY: 10 });
+    expect(first.style.transform).toBe("");
   });
 
   it("starts a new drag after cancelling an unfinished pointer", () => {

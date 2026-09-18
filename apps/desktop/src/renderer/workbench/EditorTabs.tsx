@@ -273,7 +273,10 @@ function tabInsertionIndex(tabs: Iterable<HTMLElement>, clientX: number): number
 }
 
 // Clears the tab's drag translation and animates it from where the pointer
-// left it into the slot it now occupies.
+// left it into the slot it now occupies. The animation is kept so a grab
+// during those 160ms can stop it in place instead of fighting it.
+const settling = new WeakMap<HTMLElement, Animation>();
+
 function settleTab(tab: HTMLElement, visualLeft: number) {
   tab.style.transform = "";
   const delta = visualLeft - tab.offsetLeft;
@@ -284,10 +287,31 @@ function settleTab(tab: HTMLElement, visualLeft: number) {
   ) {
     return;
   }
-  tab.animate([{ transform: `translateX(${delta}px)` }, { transform: "none" }], {
-    duration: SETTLE_MS,
-    easing: SETTLE_EASING,
-  });
+  const animation = tab.animate(
+    [{ transform: `translateX(${delta}px)` }, { transform: "none" }],
+    { duration: SETTLE_MS, easing: SETTLE_EASING },
+  );
+  settling.set(tab, animation);
+  animation.addEventListener("finish", () => settling.delete(tab));
+}
+
+// Freezes a settling tab where it is: the animated transform becomes its
+// inline transform, so the next drag starts from there.
+function stopSettling(tab: HTMLElement) {
+  const animation = settling.get(tab);
+  if (!animation) return;
+  settling.delete(tab);
+  animation.commitStyles();
+  animation.cancel();
+}
+
+function inlineTranslateX(el: HTMLElement): number {
+  if (!el.style.transform || typeof DOMMatrix === "undefined") return 0;
+  try {
+    return new DOMMatrix(el.style.transform).m41;
+  } catch {
+    return 0;
+  }
 }
 
 interface DragSlot {
@@ -371,45 +395,36 @@ function createTabDrag(host: TabDragHost) {
     const scroller = host.scroller();
     const slot = s.slots[s.index];
     if (!scroller || !slot) return;
-    // Crossing into another group is committed on release. Do not keep
-    // shuffling the source strip while the pointer is over its destination.
+    // Crossing into another group is committed on release. While the
+    // pointer is over its destination, the source shows its committed order
+    // again instead of a stale preview.
     if (s.multiGroup) {
       const target = editorGroupAtPoint(s.pointerX, s.pointerY);
-      if (target && target.groupId !== host.groupId()) return;
+      if (target && target.groupId !== host.groupId()) {
+        placeNeighbours(s, s.index);
+        return;
+      }
     }
     const scrollLeft = scroller.scrollLeft;
+    const wanted = s.pointerX - s.frameLeft + scrollLeft - s.grab;
     // The tab stays inside the visible strip: the scroller would clip it
-    // anyway, and the clamp keeps its joins inside the pane.
+    // anyway, and the clamp keeps its joins inside the pane. The insertion
+    // slot follows the unclamped position, or a tab wider than the room
+    // left beside it could never reach the end.
     const min = scrollLeft;
     const max = Math.max(min, scrollLeft + s.viewWidth - slot.width);
-    const left = Math.min(
-      max,
-      Math.max(min, s.pointerX - s.frameLeft + scrollLeft - s.grab),
-    );
+    const left = Math.min(max, Math.max(min, wanted));
     const dx = left - slot.left;
     if (dx !== s.dx) {
       s.dx = dx;
       s.tab.style.transform = `translateX(${dx}px)`;
     }
-    const center = left + slot.width / 2;
+    const center = wanted + slot.width / 2;
     let toIndex = 0;
     for (const other of s.slots) {
       if (other !== slot && other.left + other.width / 2 < center) toIndex += 1;
     }
-    if (toIndex !== s.toIndex) {
-      s.toIndex = toIndex;
-      s.slots.forEach((other, i) => {
-        const offset =
-          i > s.index && i <= toIndex
-            ? -slot.width
-            : i < s.index && i >= toIndex
-              ? slot.width
-              : 0;
-        if (other === slot || other.offset === offset) return;
-        other.offset = offset;
-        other.el.style.transform = offset === 0 ? "" : `translateX(${offset}px)`;
-      });
-    }
+    placeNeighbours(s, toIndex);
     const distanceLeft = left - scrollLeft;
     const distanceRight = s.paneWidth - (left + slot.width - scrollLeft);
     const [joinLeft, joinRight] = s.joins;
@@ -418,6 +433,26 @@ function createTabDrag(host: TabDragHost) {
     setCornerRadius(cornerLeft, cornerRadius(distanceLeft));
     setCornerRadius(joinRight, cornerRadius(distanceRight));
     setCornerRadius(cornerRight, cornerRadius(distanceRight));
+  };
+
+  // Slides the tabs between the dragged tab's slot and its insertion slot
+  // aside by its width; every other tab returns home.
+  const placeNeighbours = (s: DragSession, toIndex: number) => {
+    if (toIndex === s.toIndex) return;
+    s.toIndex = toIndex;
+    const slot = s.slots[s.index];
+    if (!slot) return;
+    s.slots.forEach((other, i) => {
+      const offset =
+        i > s.index && i <= toIndex
+          ? -slot.width
+          : i < s.index && i >= toIndex
+            ? slot.width
+            : 0;
+      if (other === slot || other.offset === offset) return;
+      other.offset = offset;
+      other.el.style.transform = offset === 0 ? "" : `translateX(${offset}px)`;
+    });
   };
 
   const scheduleFrame = (s: DragSession) => {
@@ -435,7 +470,8 @@ function createTabDrag(host: TabDragHost) {
     if (!scroller || !slot) return false;
     s.active = true;
     s.toIndex = s.index;
-    s.grab = s.startX - s.frameLeft + scroller.scrollLeft - slot.left;
+    s.dx = inlineTranslateX(s.tab);
+    s.grab = s.startX - s.frameLeft + scroller.scrollLeft - (slot.left + s.dx);
     s.multiGroup = document.querySelectorAll("[data-editor-group-id]").length > 1;
     s.joins = [
       s.tab.querySelector('[data-tab-join="left"]'),
@@ -464,10 +500,19 @@ function createTabDrag(host: TabDragHost) {
     if (s.frame !== 0) {
       cancelAnimationFrame(s.frame);
       s.frame = 0;
-      // The release position counts even when its frame never ran.
-      if (s.active) applyFrame(s);
     }
-    if (!s.active) return;
+    if (!s.active) {
+      // A press that never became a drag may still hold a frozen settle.
+      s.tab.style.transform = "";
+      return;
+    }
+    // A release counts where it happened, even when its frame never ran. A
+    // cancel, a missed release, or blur keeps the last painted preview.
+    if (release) {
+      s.pointerX = release.clientX;
+      s.pointerY = release.clientY;
+      applyFrame(s);
+    }
     delete s.tab.dataset.dragging;
     for (const el of decorations(s)) {
       if (el instanceof HTMLElement) el.style.transition = "";
@@ -538,6 +583,7 @@ function createTabDrag(host: TabDragHost) {
       // Finish the previous pointer's drag before arming this one; its
       // listeners would otherwise end the new drag.
       finish(true, null);
+      stopSettling(event.currentTarget);
       session = {
         pointerId: event.pointerId,
         path,
@@ -566,6 +612,11 @@ function createTabDrag(host: TabDragHost) {
     },
     active() {
       return session?.active === true;
+    },
+    // The strip scrolled under the pointer: the tab's position and the
+    // corner radii depend on scrollLeft, so the next frame re-derives them.
+    scrolled() {
+      if (session?.active) scheduleFrame(session);
     },
     // The tab list or the strip's size changed under the drag: re-measure
     // from clean positions and rebuild the preview. A dragged tab that left
@@ -767,6 +818,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
     const thumb = thumbRef.current;
     if (!strip || !thumb) return;
     const measure = () => {
+      drag.scrolled();
       syncCorners.current();
       const maxScroll = strip.scrollWidth - strip.clientWidth;
       if (maxScroll <= 0) {
