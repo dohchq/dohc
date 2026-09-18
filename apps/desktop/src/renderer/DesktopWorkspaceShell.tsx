@@ -5313,7 +5313,7 @@ export function DesktopWorkspaceShell(props: {
         >
           <div className="flex max-w-md select-text cursor-text flex-col items-center gap-3">
             <p className="dohc-section-label m-0 text-danger">Workspace stopped</p>
-            <h2 className="m-0 font-serif text-2xl font-semibold leading-tight tracking-tight text-ink">
+            <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
               This version of dohc can't open this workspace
             </h2>
             <div className="space-y-1">
@@ -5329,15 +5329,15 @@ export function DesktopWorkspaceShell(props: {
           </div>
           <dl className="m-0 grid w-full max-w-sm select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 rounded-lg border border-line bg-panel p-3 text-left text-[11px]">
             <dt className="text-subtle">Workspace</dt>
-            <dd className="m-0 truncate font-mono text-ink">
+            <dd className="m-0 truncate text-ink">
               {workspaceName(props.workspace)}
             </dd>
             <dt className="text-subtle">Folder</dt>
-            <dd className="m-0 truncate font-mono text-ink" title={props.workspace.rootPath}>
+            <dd className="m-0 truncate text-ink" title={props.workspace.rootPath}>
               {props.workspace.rootPath}
             </dd>
             <dt className="text-subtle">Data store</dt>
-            <dd className="m-0 font-mono text-ink">.dohc/engine</dd>
+            <dd className="m-0 text-ink">.dohc/engine</dd>
           </dl>
           <div className="flex items-center gap-2">
             <PrimaryButton
