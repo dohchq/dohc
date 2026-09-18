@@ -5987,8 +5987,15 @@ export function createWorkspaceEngineCapture(
       await chain;
       try {
         if (store) {
-          await store.flushCapture?.();
-          await drainPendingCollectionAdoptions(store);
+          try {
+            await store.flushCapture?.();
+            await drainPendingCollectionAdoptions(store);
+          } catch (error) {
+            // A refused store was never opened, so nothing is pending in
+            // it. Failing the stop here would block the move-aside rebuild,
+            // which closes the capture first.
+            if (engineStoreRefusalOf(error) === null) throw error;
+          }
         }
       } finally {
         await releaseRetainedCollectionAdoptionProviders(new Set());

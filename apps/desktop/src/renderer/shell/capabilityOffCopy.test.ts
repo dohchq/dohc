@@ -6,6 +6,7 @@ describe("refused data store copy", () => {
   it.each([
     ["foreign-database", "dohc cannot read this workspace's data store."],
     ["unsupported-fingerprint", "This workspace's data store is not in the format this version of dohc uses."],
+    ["migration-failed", "dohc could not update this workspace's data store to this version."],
   ] as const)("directs every unavailable surface to recovery for %s", (cause, sentence) => {
     const status: SyncStatusResult = {
       state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,

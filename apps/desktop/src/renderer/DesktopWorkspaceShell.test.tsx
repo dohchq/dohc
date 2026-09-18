@@ -6973,6 +6973,12 @@ describe("engine store recovery", () => {
       otherSentence:
         "This workspace's data store is not in the format this version of dohc uses.",
     },
+    {
+      cause: "migration-failed" as const,
+      sentence:
+        "dohc could not update this workspace's data store to this version.",
+      otherSentence: "dohc cannot read this workspace's data store.",
+    },
   ])("names the $cause refusal in the confirm dialog", async ({
     cause,
     sentence,

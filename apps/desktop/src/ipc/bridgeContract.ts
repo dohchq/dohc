@@ -1144,6 +1144,18 @@ export const ImportToDatabaseResult = z.object({
 });
 export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
 
+// The renderer cannot import the engine client package, so the list lives
+// here and the type check keeps it complete.
+const ENGINE_STORE_REFUSALS = [
+  "unsupported-fingerprint",
+  "foreign-database",
+  "migration-failed",
+] as const satisfies readonly EngineStoreRefusal[];
+type AssertNever<T extends never> = T;
+type _AllEngineStoreRefusalsRepresented = AssertNever<
+  Exclude<EngineStoreRefusal, (typeof ENGINE_STORE_REFUSALS)[number]>
+>;
+
 const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
@@ -1213,9 +1225,7 @@ export const SyncStatusResult = z.union([
     historyCaptureFailed: z.literal(true),
     // A failed producer must say whether the engine refused the store. Null
     // means history capture failed for another reason.
-    engineStoreRefused: z
-      .enum(["unsupported-fingerprint", "foreign-database"])
-      .nullable(),
+    engineStoreRefused: z.enum(ENGINE_STORE_REFUSALS).nullable(),
   }),
   z
     .object({
@@ -1243,6 +1253,8 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "This workspace's data store is not in the format this version of dohc uses.";
     case "foreign-database":
       return "dohc cannot read this workspace's data store.";
+    case "migration-failed":
+      return "dohc could not update this workspace's data store to this version.";
   }
 }
 

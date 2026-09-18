@@ -2156,7 +2156,15 @@ pub(crate) fn run_migrations(
                     // A completed migration whose DDL this build defines
                     // differently — a tampered or incompatible ledger. Fail
                     // closed rather than skip-and-diverge.
-                    return Err(StorageError::MigrationFailed { source: None });
+                    return Err(StorageError::MigrationFailed {
+                        source: Some(
+                            format!(
+                                "migration {} was applied from a different definition than this build's",
+                                migration.id
+                            )
+                            .into(),
+                        ),
+                    });
                 }
                 continue;
             }
@@ -2248,6 +2256,33 @@ mod tests {
     use crate::faults::NoFaults;
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Editing a shipped migration strands every store that already applied
+    /// it: the ledger checksum stops matching and the open fails closed. A
+    /// schema change appends a migration. Change a pin here only to reject
+    /// every existing store on purpose.
+    #[test]
+    fn shipped_migrations_keep_their_checksums() {
+        let pinned = [
+            (
+                "v2-baseline",
+                "fe1e3530330b43dd501800fb8dd66d18b2c32a19b8e158a9d25a243650f510ce",
+            ),
+            (
+                "v2-groups",
+                "5eaec46edc3fec5c729e8cca60c994be2c90299d9f06db842b276872d3e77075",
+            ),
+        ];
+        assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
+        for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
+            assert_eq!(migration.id, id);
+            assert_eq!(
+                migration_checksum(migration.sql),
+                checksum,
+                "the {id} migration changed after it shipped"
+            );
+        }
+    }
 
     /// The shipped list is well-formed. `validate_migration_order` runs before
     /// every migration, so a malformed list already fails closed at runtime,

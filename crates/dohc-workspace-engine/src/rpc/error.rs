@@ -137,9 +137,11 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     // recovery instead of reporting a generic workspace failure.
     if let RuntimeError::Storage(
         refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
-        | dohc_engine_storage::StorageError::ForeignDatabase),
+        | dohc_engine_storage::StorageError::ForeignDatabase
+        | dohc_engine_storage::StorageError::MigrationFailed { .. }),
     ) = &error
     {
+        eprintln!("engine: store refused: {}", error_chain(refused));
         return WireError::new(ErrorCode::Internal, refused.code());
     }
     match &error {
@@ -210,9 +212,26 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
-        _ => ErrorCode::Internal,
+        other => {
+            // The wire carries a constant message. The cause goes to stderr,
+            // which the desktop copies into its log.
+            eprintln!("engine: internal refusal: {}", error_chain(&other));
+            ErrorCode::Internal
+        }
     };
     WireError::new(code, "workspace operation failed")
+}
+
+/// The error followed by each of its sources, for the daemon's stderr.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 fn map_relay_code(error: RelayError) -> ErrorCode {
@@ -481,6 +500,9 @@ mod tests {
                     found: 1,
                     expected: 2,
                 },
+            )),
+            RuntimeError::LiveApplication(ApplicationError::Storage(
+                StorageError::MigrationFailed { source: None },
             )),
         ] {
             let expected = match &error {

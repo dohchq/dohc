@@ -1140,6 +1140,41 @@ mod tests {
         assert_eq!(refused.message, "foreign-database");
     }
 
+    /// A store whose ledger disagrees with this build's migrations is refused
+    /// under its own name, so the desktop can offer the move-aside rebuild
+    /// instead of a generic failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_store_whose_ledger_disagrees_with_this_build_names_the_refusal() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let engine_dir = scratch.path().join(".dohc").join("engine");
+        std::fs::create_dir_all(&engine_dir).expect("engine dir");
+        let db_path = engine_dir.join("engine.db");
+        drop(dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fresh store"));
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open ledger");
+            conn.execute(
+                "UPDATE engine_migrations SET checksum = ?1 WHERE ordinal = 0",
+                ["0".repeat(64)],
+            )
+            .expect("tamper ledger");
+        }
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ledger-mismatch-repro",
+                }),
+            )
+            .await
+            .expect_err("the ledger fence must refuse a store from another build");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(refused.message, "migration-failed");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
         let scratch = ScratchDir::new().expect("scratch");

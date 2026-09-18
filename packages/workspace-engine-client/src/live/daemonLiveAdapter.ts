@@ -206,16 +206,21 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error);
 }
 
-export type EngineStoreRefusal = "unsupported-fingerprint" | "foreign-database";
+// The store refusals the desktop recovers from by moving the store aside.
+// Each is the storage crate's `code()` for the variant.
+export const ENGINE_STORE_REFUSALS = [
+  "unsupported-fingerprint",
+  "foreign-database",
+  "migration-failed",
+] as const;
+export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 
 export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null {
-  if (causeChainHasRefusal(error, "INTERNAL", "unsupported-fingerprint")) {
-    return "unsupported-fingerprint";
-  }
-  if (causeChainHasRefusal(error, "INTERNAL", "foreign-database")) {
-    return "foreign-database";
-  }
-  return null;
+  return (
+    ENGINE_STORE_REFUSALS.find((code) =>
+      causeChainHasRefusal(error, "INTERNAL", code),
+    ) ?? null
+  );
 }
 
 // Remote edits drained under this session's lease while this settle was in

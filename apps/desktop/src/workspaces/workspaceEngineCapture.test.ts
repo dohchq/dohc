@@ -1718,6 +1718,55 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // The move-aside rebuild closes the capture before it moves the store. A
+  // refused store was never opened, so the closing flush can only repeat
+  // the refusal; the stop must finish anyway or the rebuild never starts.
+  it("stops a capture whose store is refused without failing on the closing flush", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await createTestScratch("dohc-engine-capture-");
+      const refusal = () =>
+        Object.assign(new Error("migration-failed"), {
+          wireError: { code: "INTERNAL", message: "migration-failed", retry: "no" },
+        });
+      const outcomes: WorkspaceEngineCaptureFailure[] = [];
+      const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+      const liveStore = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+        sessions,
+      ).store;
+      const daemonStore = new Proxy(liveStore, {
+        get(target, property) {
+          if (property === "watcherStatus" || property === "flushCapture") {
+            return async () => {
+              throw refusal();
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        rustEngineSessions: sessions,
+        onError: () => {},
+        onCaptureOutcome: (outcome) => outcomes.push(outcome),
+      });
+      try {
+        engine.start();
+        // flush() ends with the same refused flushCapture; the pass before it
+        // already reported the refusal.
+        await engine.flush().catch(() => undefined);
+        expect(outcomes).toEqual(["migration-failed"]);
+        await expect(engine.stop()).resolves.toBeUndefined();
+      } finally {
+        await liveStore.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("mutation proof: counts a secret-only daemon version switch", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
