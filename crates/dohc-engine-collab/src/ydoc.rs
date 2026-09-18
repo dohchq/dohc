@@ -1431,7 +1431,7 @@ enum MdBlock {
     Table {
         rows: Vec<Vec<String>>,
         alignments: Vec<Option<TableAlign>>,
-        row_heights: Vec<(usize, i64)>,
+        row_heights: BTreeMap<usize, i64>,
     },
 }
 
@@ -1611,7 +1611,6 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
                 || next == ">"
                 || next.starts_with("> ")
                 || next.starts_with("- ")
-                || next.starts_with(TABLE_ROW_HEIGHTS_PREFIX)
                 || parse_heading(next).is_some()
                 || parse_ordered_item(next).is_some()
             {
@@ -1675,7 +1674,7 @@ fn parse_table_row(line: &str) -> Option<Vec<String>> {
     Some(
         cells
             .into_iter()
-            .map(|cell| cell.trim().replace("\\|", "|"))
+            .map(|cell| trim_js(&cell).replace("\\|", "|"))
             .collect(),
     )
 }
@@ -1712,7 +1711,7 @@ fn parse_annotated_table(lines: &[&str]) -> Option<(MdBlock, usize)> {
         rows.push(row);
         consumed += 1;
     }
-    let row_heights = row_heights
+    let row_heights: BTreeMap<usize, i64> = row_heights
         .into_iter()
         .filter(|(row, _)| *row < rows.len())
         .collect();
@@ -1832,7 +1831,7 @@ fn insert_md_block<F: XmlFragment>(
             let table = parent.insert(txn, index, XmlElementPrelim::empty("table"));
             for (row_index, cells) in rows.iter().enumerate() {
                 let row = table.insert(txn, row_index as u32, XmlElementPrelim::empty("tableRow"));
-                if let Some((_, height)) = row_heights.iter().find(|(row, _)| *row == row_index) {
+                if let Some(height) = row_heights.get(&row_index) {
                     row.insert_attribute(txn, "height", *height);
                 }
                 let tag = if row_index == 0 {
