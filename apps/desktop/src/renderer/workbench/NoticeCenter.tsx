@@ -1,16 +1,4 @@
-import {
-  AlertTriangle,
-  Bell,
-  Bot,
-  Check,
-  CheckCircle2,
-  CloudOff,
-  Download,
-  GitPullRequestArrow,
-  LogIn,
-  MessageSquare,
-  X,
-} from "lucide-react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Copy, Download, GitPullRequestArrow, LogIn, MessageSquare, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -24,6 +12,7 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
+import { CopyDetailsButton, useCopied } from "../shell/copyDetails";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -47,8 +36,22 @@ type Notice = {
   // Agent notices carry when they happened; system notices are stateful
   // ("cloud disconnected") and render no time.
   timeMs?: number;
+  // A report a person can paste: shown as a copy control on the row.
+  copyText?: string;
   Icon: typeof Bell;
 };
+
+// A workspace error the shell reported. `details` is the report Copy puts
+// on the clipboard; `seen` means its toast was closed and only the row in
+// Notices remains.
+export interface WorkspaceErrorNotice {
+  id: string;
+  message: string;
+  details: string;
+  atMs: number;
+  canRetry: boolean;
+  seen: boolean;
+}
 
 // Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
 // cap and the two engine-minted failure reasons a failed claim can carry.
@@ -156,6 +159,13 @@ export function NoticeCenter(props: {
   // Opens the restart confirmation for a ready update. Without it the
   // notice center installs directly.
   onRestartToUpdate?: () => void;
+  // Workspace errors the shell reported. Newest first in the list; the
+  // newest unseen one is also a toast, so an error is noticed without
+  // pushing the workspace around.
+  workspaceErrors?: readonly WorkspaceErrorNotice[];
+  onRetryWorkspaceError?: (id: string) => void;
+  onHideWorkspaceError?: (id: string) => void;
+  onDismissWorkspaceError?: (id: string) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -300,6 +310,30 @@ export function NoticeCenter(props: {
     // Automation failures: durable until dismissed, like the share-refusal
     // banner. Dismissing acknowledges the generation on screen; a failure
     // recorded after this render has a higher generation and comes back.
+    for (const error of [...(props.workspaceErrors ?? [])].sort(
+      (a, b) => b.atMs - a.atMs,
+    )) {
+      next.push({
+        id: error.id,
+        tone: "danger",
+        title: error.message,
+        body: "",
+        ...(error.canRetry && props.onRetryWorkspaceError
+          ? {
+              action: {
+                label: "Try again",
+                onClick: () => props.onRetryWorkspaceError?.(error.id),
+              },
+            }
+          : {}),
+        ...(props.onDismissWorkspaceError
+          ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
+          : {}),
+        timeMs: error.atMs,
+        copyText: error.details,
+        Icon: AlertTriangle,
+      });
+    }
     for (const failure of props.automationFailures ?? []) {
       next.push({
         id: `automation-failure-${failure.automationId}`,
@@ -491,6 +525,9 @@ export function NoticeCenter(props: {
     props.conflictSummaries,
     props.onDismissAgentNotification,
     props.onDismissAutomationFailure,
+    props.workspaceErrors,
+    props.onRetryWorkspaceError,
+    props.onDismissWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,
@@ -517,9 +554,63 @@ export function NoticeCenter(props: {
     [allRecoveryRows, props.workspaceId],
   );
   const count = notices.length + (recoveryRows.length > 0 ? 1 : 0);
+  // The newest error whose toast is still open. One at a time: the rest
+  // wait in Notices with the count.
+  const errorToast = useMemo(
+    () =>
+      [...(props.workspaceErrors ?? [])]
+        .filter((error) => !error.seen)
+        .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
+    [props.workspaceErrors],
+  );
+  const errorToastCopy = useCopied();
 
   return (
     <>
+      {errorToast ? (
+        <div
+          data-testid="workspace-shell-error"
+          role="alert"
+          className="dohc-popover dohc-pop-in fixed right-3 z-30 flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+          style={{ bottom: updateToastVisible ? "5.5rem" : "2.25rem" }}
+        >
+          <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+          <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+            {errorToast.message}
+          </span>
+          {errorToast.canRetry && props.onRetryWorkspaceError ? (
+            <button
+              type="button"
+              data-testid="workspace-shell-error-retry"
+              onClick={() => props.onRetryWorkspaceError?.(errorToast.id)}
+              className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+            >
+              Try again
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Copy error details"
+            data-testid="workspace-shell-error-copy"
+            onClick={() => void errorToastCopy.copy(errorToast.details)}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          >
+            {errorToastCopy.copied ? (
+              <Check size={12} aria-hidden />
+            ) : (
+              <Copy size={12} aria-hidden />
+            )}
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss workspace error"
+            onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      ) : null}
       {updateToastVisible ? (
         <div
           ref={toastRef}
@@ -641,6 +732,14 @@ export function NoticeCenter(props: {
                         >
                           {notice.action.label}
                         </button>
+                      ) : null}
+                      {notice.copyText !== undefined ? (
+                        <CopyDetailsButton
+                          iconOnly
+                          label="Copy error details"
+                          data-testid={`notice-${notice.id}-copy`}
+                          details={() => notice.copyText ?? ""}
+                        />
                       ) : null}
                       {notice.onDismiss ? (
                         <button

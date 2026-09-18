@@ -69,6 +69,10 @@ function renderBar(
         : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
+      {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
+      {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
+      {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
+      {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
@@ -405,6 +409,46 @@ describe("notice center", () => {
     expect(notice.textContent).toContain("Update dohc to continue. Your files are unchanged.");
     expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
     expect(onRebuildEngineStore).not.toHaveBeenCalled();
+  });
+
+  // A workspace error arrives as a toast in the corner and stays as a row in
+  // Notices. Try again and Copy ride with it; closing the toast keeps the row.
+  it("shows a workspace error as a toast and a notice with retry and copy", async () => {
+    const onRetryWorkspaceError = vi.fn();
+    const onHideWorkspaceError = vi.fn();
+    const onDismissWorkspaceError = vi.fn();
+    const user = userEvent.setup();
+    renderBar({
+      workspaceErrors: [
+        {
+          id: "shell-error-1",
+          message: "Could not refresh history. The engine did not answer.",
+          details: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
+          atMs: 1_000,
+          canRetry: true,
+          seen: false,
+        },
+      ],
+      onRetryWorkspaceError,
+      onHideWorkspaceError,
+      onDismissWorkspaceError,
+    });
+
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not refresh history.");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("Workspace: personal");
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    expect(onHideWorkspaceError).toHaveBeenCalledWith("shell-error-1");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-shell-error-1");
+    expect(row.textContent).toContain("Could not refresh history.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-1");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-shell-error-1")).getByRole("button", { name: "Dismiss notice" }));
+    expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {

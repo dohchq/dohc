@@ -74,7 +74,7 @@ import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
-import { CopyDetailsButton, errorDetails, useCopied } from "./shell/copyDetails";
+import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
@@ -752,7 +752,8 @@ export function DesktopWorkspaceShell(props: {
     };
   }
   const {
-    shellError,
+    shellErrors,
+    hideShellError,
     reportShellError,
     reportLaneFailure,
     reportSearchError,
@@ -4306,7 +4307,20 @@ export function DesktopWorkspaceShell(props: {
     ],
     [appVersion, props.workspace],
   );
-  const bannerCopy = useCopied();
+  // Errors as the notice center shows them: the message, whether it can be
+  // asked again, and the report Copy puts on the clipboard.
+  const workspaceErrors = useMemo(
+    () =>
+      shellErrors.map((error) => ({
+        id: error.id,
+        message: error.message,
+        details: errorDetails([["Error", error.message], ...reportFacts()]),
+        atMs: error.atMs,
+        canRetry: error.retry !== null,
+        seen: error.seen,
+      })),
+    [shellErrors, reportFacts],
+  );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
   const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
@@ -4368,51 +4382,6 @@ export function DesktopWorkspaceShell(props: {
           onToggle: () => mutateWb(toggleChats),
         }}
       />
-      {shellError ? (
-        <div
-          data-testid="workspace-shell-error"
-          className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
-        >
-          <span className="min-w-0 flex-1 select-text cursor-text truncate">
-            {shellError.message}
-          </span>
-          {shellError.retry ? (
-            <button
-              type="button"
-              data-testid="workspace-shell-error-retry"
-              onClick={retryShellError}
-              className="h-6 shrink-0 cursor-pointer rounded border border-danger/40 px-2 text-[11px] hover:bg-danger/10"
-            >
-              Try again
-            </button>
-          ) : null}
-          <button
-            type="button"
-            aria-label="Copy error details"
-            data-testid="workspace-shell-error-copy"
-            onClick={() =>
-              void bannerCopy.copy(
-                errorDetails([["Error", shellError.message], ...reportFacts()]),
-              )
-            }
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            {bannerCopy.copied ? (
-              <Check size={12} aria-hidden />
-            ) : (
-              <Copy size={12} aria-hidden />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-label="Dismiss workspace error"
-            onClick={dismissShellError}
-            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
       {shellNotice ? (
         <div
           data-testid="shell-notice"
@@ -5514,6 +5483,10 @@ export function DesktopWorkspaceShell(props: {
           setEngineRebuild({ phase: "confirm", refusal });
         }}
         onRestartToUpdate={openRestartPrompt}
+        workspaceErrors={workspaceErrors}
+        onRetryWorkspaceError={retryShellError}
+        onHideWorkspaceError={hideShellError}
+        onDismissWorkspaceError={dismissShellError}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}

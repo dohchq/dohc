@@ -4,7 +4,7 @@ import type {
   SyncStatusResult,
 } from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
-import { NoticeCenter } from "./NoticeCenter";
+import { NoticeCenter, type WorkspaceErrorNotice } from "./NoticeCenter";
 
 // Extracted shell footer. The sync-status testid + data-state,
 // the "Connect dohc Drive" button name, and the open-settings testid are
@@ -51,6 +51,12 @@ export function StatusBar(props: {
   // Opens the restart confirmation for a ready update; the shell owns the
   // dialog and the install, the notice center offers the way in.
   onRestartToUpdate?: () => void;
+  // Workspace errors the shell reported: a toast on arrival and a row in
+  // Notices until retried or dismissed. The shell owns the list.
+  workspaceErrors?: readonly WorkspaceErrorNotice[];
+  onRetryWorkspaceError?: (id: string) => void;
+  onHideWorkspaceError?: (id: string) => void;
+  onDismissWorkspaceError?: (id: string) => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];
@@ -116,6 +122,16 @@ export function StatusBar(props: {
           onRebuildEngineStore={props.onRebuildEngineStore}
           {...(props.onRestartToUpdate
             ? { onRestartToUpdate: props.onRestartToUpdate }
+            : {})}
+          {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
+          {...(props.onRetryWorkspaceError
+            ? { onRetryWorkspaceError: props.onRetryWorkspaceError }
+            : {})}
+          {...(props.onHideWorkspaceError
+            ? { onHideWorkspaceError: props.onHideWorkspaceError }
+            : {})}
+          {...(props.onDismissWorkspaceError
+            ? { onDismissWorkspaceError: props.onDismissWorkspaceError }
             : {})}
           {...(props.shareChangeNotices
             ? { shareChangeNotices: props.shareChangeNotices }
