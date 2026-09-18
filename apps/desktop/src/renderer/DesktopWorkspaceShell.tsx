@@ -75,6 +75,7 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useShellError } from "./shell/useShellError";
 import { CopyDetailsButton, errorDetails, useCopied } from "./shell/copyDetails";
+import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useShellNotice } from "./shell/useShellNotice";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -4277,40 +4278,20 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
-  // The updater's state, shown under Check for updates. The shell banner
+  // The updater's state, shown under Check for updates and followed live,
+  // so a download reaches "ready" without another click. The shell banner
   // sits under this overlay, so an answer reported there would never be
   // seen; a line that is always there also means the check moves nothing.
-  const [storeUpdateCheck, setStoreUpdateCheck] = useState<{
-    phase: "idle" | "checking" | "done";
-    message: string | null;
-    canInstall: boolean;
-  }>({ phase: "idle", message: null, canInstall: false });
+  const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
+    useDesktopUpdateStateFeed();
+  const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
+  const appVersion = storeUpdateState?.currentVersion
+    ? storeUpdateState.channel
+      ? `${storeUpdateState.currentVersion} (${storeUpdateState.channel})`
+      : storeUpdateState.currentVersion
+    : null;
   // Facts a person can paste into a report. The version comes from the
   // updater's state; a bridge without it leaves the line out.
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    bridge()
-      .getUpdateState()
-      .then((state) => {
-        if (!live) return;
-        setStoreUpdateCheck({
-          phase: "idle",
-          message: state.message,
-          canInstall: state.canInstall === true,
-        });
-        if (!state.currentVersion) return;
-        setAppVersion(
-          state.channel
-            ? `${state.currentVersion} (${state.channel})`
-            : state.currentVersion,
-        );
-      })
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, []);
   const reportFacts = useCallback(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Workspace", workspaceName(props.workspace)],
@@ -4347,22 +4328,14 @@ export function DesktopWorkspaceShell(props: {
     syncStatus?.engineStoreRefused != null &&
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
   const checkForStoreUpdate = useCallback(async () => {
-    setStoreUpdateCheck((current) => ({ ...current, phase: "checking" }));
+    setStoreUpdateCheckError(null);
     try {
       const result = await bridge().checkForUpdates();
-      setStoreUpdateCheck({
-        phase: "done",
-        message: result.state.message,
-        canInstall: result.state.canInstall === true,
-      });
-    } catch (error) {
-      setStoreUpdateCheck({
-        phase: "done",
-        message: `Could not check for updates. ${error instanceof Error ? error.message : ""}`.trim(),
-        canInstall: false,
-      });
+      acceptStoreUpdateResult(result.state);
+    } catch {
+      setStoreUpdateCheckError("Could not check for updates.");
     }
-  }, []);
+  }, [acceptStoreUpdateResult]);
   return (
     <div
       data-testid="workspace-shell"
@@ -5396,12 +5369,15 @@ export function DesktopWorkspaceShell(props: {
           </div>
           <div className="flex items-center gap-2">
             <PrimaryButton
-              disabled={storeUpdateCheck.phase === "checking"}
+              disabled={
+                storeUpdateState?.status === "checking" ||
+                storeUpdateState?.canCheck === false
+              }
               onClick={() => void checkForStoreUpdate()}
             >
-              {storeUpdateCheck.phase === "checking" ? "Checking" : "Check for updates"}
+              {storeUpdateState?.status === "checking" ? "Checking" : "Check for updates"}
             </PrimaryButton>
-            {storeUpdateCheck.canInstall ? (
+            {storeUpdateState?.canInstall ? (
               <SecondaryButton onClick={() => void installDesktopUpdate()}>
                 Restart to update
               </SecondaryButton>
@@ -5417,7 +5393,7 @@ export function DesktopWorkspaceShell(props: {
             role="status"
             className="m-0 -mt-2 min-h-4 max-w-sm select-text cursor-text text-[12px] text-subtle"
           >
-            {storeUpdateCheck.message}
+            {storeUpdateCheckError ?? storeUpdateState?.message}
           </p>
           <button
             type="button"
