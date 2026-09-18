@@ -26,10 +26,16 @@ export function errorDetails(
 // settings does. The caller decides what to copy and what to do on failure.
 export function useCopied(onError?: (error: unknown) => void) {
   const [copied, setCopied] = useState(false);
+  // What the live region says. It is cleared and set again on every
+  // success, in a later task, so a second copy inside the two seconds is
+  // announced again instead of leaving the region's text unchanged.
+  const [announcement, setAnnouncement] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const announce = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
       if (timer.current !== null) clearTimeout(timer.current);
+      if (announce.current !== null) clearTimeout(announce.current);
     },
     [],
   );
@@ -38,15 +44,21 @@ export function useCopied(onError?: (error: unknown) => void) {
       try {
         await navigator.clipboard.writeText(text);
         setCopied(true);
+        setAnnouncement("");
+        if (announce.current !== null) clearTimeout(announce.current);
+        announce.current = setTimeout(() => setAnnouncement("Copied"), 0);
         if (timer.current !== null) clearTimeout(timer.current);
-        timer.current = setTimeout(() => setCopied(false), 2000);
+        timer.current = setTimeout(() => {
+          setCopied(false);
+          setAnnouncement("");
+        }, 2000);
       } catch (error) {
         onError?.(error);
       }
     },
     [onError],
   );
-  return { copied, copy };
+  return { copied, announcement, copy };
 }
 
 export function CopyDetailsButton(props: {
@@ -57,14 +69,14 @@ export function CopyDetailsButton(props: {
   "data-testid"?: string;
   onError?: (error: unknown) => void;
 }) {
-  const { copied, copy } = useCopied(props.onError);
+  const { copied, announcement: announced, copy } = useCopied(props.onError);
   const label = props.label ?? "Copy details";
   const { details } = props;
   // The icon and tooltip change is silent to a screen reader; this polite
-  // status says "Copied" for both variants.
+  // status says "Copied" for both variants, once per success.
   const announcement = (
     <span role="status" aria-live="polite" className="sr-only">
-      {copied ? "Copied" : ""}
+      {announced}
     </span>
   );
   if (props.iconOnly) {
