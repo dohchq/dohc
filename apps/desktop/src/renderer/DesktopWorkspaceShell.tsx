@@ -5368,8 +5368,12 @@ export function DesktopWorkspaceShell(props: {
         <div
           data-testid="workspace-update-required"
           role="alert"
-          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-5 bg-bg px-6 text-center"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 grid grid-rows-[1fr_auto_1fr] justify-items-center overflow-y-auto bg-bg px-6 text-center"
         >
+          {/* The middle row holds what everyone reads. It is centered by the
+              two equal rows around it, so opening the technical details in
+              the bottom row moves nothing above. */}
+          <div className="row-start-2 flex flex-col items-center gap-5">
           <div className="flex max-w-md select-text cursor-text flex-col items-center gap-3">
             <p className="dohc-section-label m-0 text-danger">Workspace stopped</p>
             <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
@@ -5417,6 +5421,17 @@ export function DesktopWorkspaceShell(props: {
             />
             {storeDetailsOpen ? "Hide technical details" : "Show technical details"}
           </button>
+          </div>
+          <div className="row-start-3 flex w-full max-w-md flex-col items-center gap-4 self-start pt-5">
+          {storeUpdateCheck.message ? (
+            <p
+              data-testid="workspace-update-check-result"
+              role="status"
+              className="m-0 max-w-sm select-text cursor-text text-[12px] text-muted"
+            >
+              {storeUpdateCheck.message}
+            </p>
+          ) : null}
           {storeDetailsOpen ? (
             <section
               data-testid="workspace-update-details"
@@ -5447,15 +5462,7 @@ export function DesktopWorkspaceShell(props: {
               </dl>
             </section>
           ) : null}
-          {storeUpdateCheck.message ? (
-            <p
-              data-testid="workspace-update-check-result"
-              role="status"
-              className="m-0 max-w-sm select-text cursor-text text-[12px] text-muted"
-            >
-              {storeUpdateCheck.message}
-            </p>
-          ) : null}
+          </div>
         </div>
       ) : !workspaceIsReady && workspaceOpenFailure ? (
         <div
