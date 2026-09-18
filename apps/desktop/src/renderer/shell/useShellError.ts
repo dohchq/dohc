@@ -19,6 +19,8 @@ export interface ShellError {
 
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
+  const shellErrorsRef = useRef(shellErrors);
+  shellErrorsRef.current = shellErrors;
   const nextId = useRef(0);
 
   // A new error replaces an older one that says the same thing, or one of
@@ -144,14 +146,12 @@ export function useShellError(workspaceId: string) {
     setShellErrors((current) => current.filter((error) => error.id !== id));
   }, []);
   const retryShellError = useCallback((id: string) => {
-    setShellErrors((current) => {
-      const target = current.find((error) => error.id === id);
-      // Clearing first is what shows the control took: the read is
-      // on its way, and a failure that is being retried is no longer
-      // the newest thing this surface knows.
-      target?.retry?.();
-      return current.filter((error) => error.id !== id);
-    });
+    const target = shellErrorsRef.current.find((error) => error.id === id);
+    // Clearing first is what shows the control took: the read is on its
+    // way, and a failure that is being retried is no longer the newest
+    // thing this surface knows. The retry runs once, outside the updater.
+    setShellErrors((current) => current.filter((error) => error.id !== id));
+    target?.retry?.();
   }, []);
 
   return {

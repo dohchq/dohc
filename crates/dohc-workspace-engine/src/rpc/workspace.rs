@@ -1177,7 +1177,23 @@ mod tests {
             "{}",
             refused.message
         );
-        assert!(refused.message.contains("v2-baseline"), "{}", refused.message);
+        // The cause names the migration and both checksums: the store's
+        // recorded one (tampered to zeros here) and this build's.
+        assert!(
+            refused.message.contains("migration 0 (v2-baseline)"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("the store recorded 000000000000"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("this build defines "),
+            "{}",
+            refused.message
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

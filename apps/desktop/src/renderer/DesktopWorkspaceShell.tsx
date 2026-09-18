@@ -612,6 +612,11 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const workspaceId = props.workspace.workspaceId;
+  // Read by callbacks that outlive a render: the global key handler and a
+  // slow update check must not act for a workspace this window has left.
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const storeUpdateRequiredRef = useRef(false);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const {
     callbacksForEditor,
@@ -3401,6 +3406,8 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // A stopped workspace answers no workspace shortcut.
+      if (storeUpdateRequiredRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
       if (event.metaKey && event.ctrlKey) return;
@@ -4324,6 +4331,11 @@ export function DesktopWorkspaceShell(props: {
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
   const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
+  // A switch leaves the other workspace's answer and disclosure behind.
+  useEffect(() => {
+    setStoreUpdateCheckError(null);
+    setStoreDetailsOpen(false);
+  }, [workspaceId]);
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Problem", engineStoreRefusalSentence("migration-failed")],
@@ -4345,15 +4357,22 @@ export function DesktopWorkspaceShell(props: {
   const storeUpdateRequired =
     syncStatus?.engineStoreRefused != null &&
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
+  storeUpdateRequiredRef.current = storeUpdateRequired;
   const checkForStoreUpdate = useCallback(async () => {
+    // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
+    // never repaint workspace B. The updater feed itself is app-wide; only
+    // this window's failure line is per workspace.
+    const askedFor = workspaceId;
     setStoreUpdateCheckError(null);
     try {
       const result = await bridge().checkForUpdates();
+      if (workspaceIdRef.current !== askedFor) return;
       acceptStoreUpdateResult(result.state);
     } catch {
+      if (workspaceIdRef.current !== askedFor) return;
       setStoreUpdateCheckError("Could not check for updates.");
     }
-  }, [acceptStoreUpdateResult]);
+  }, [acceptStoreUpdateResult, workspaceId]);
   return (
     <div
       data-testid="workspace-shell"
@@ -4592,7 +4611,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div
         data-testid="workspace-workbench"
-        inert={!workspaceIsReady ? true : undefined}
+        inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
         className="flex min-h-0 flex-1"
       >
         <ActivityBar
@@ -5342,6 +5361,7 @@ export function DesktopWorkspaceShell(props: {
           </div>
           <div className="flex items-center gap-2">
             <PrimaryButton
+              autoFocus
               disabled={
                 storeUpdateState?.status === "checking" ||
                 storeUpdateState?.canCheck === false
