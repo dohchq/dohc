@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EditorTabs } from "./EditorTabs";
+import { cornerRadius, EditorTabs } from "./EditorTabs";
 import {
   CHATS_TAB_PATH,
   momentDiffTabPath,
@@ -258,15 +258,53 @@ describe("EditorTabs strip scrolling", () => {
 });
 
 describe("EditorTabs pointer drag", () => {
-  it("keeps live reorder inside the source group", () => {
+  const frames: FrameRequestCallback[] = [];
+  const flushFrames = () => {
+    for (const frame of frames.splice(0)) frame(0);
+  };
+  beforeEach(() => {
+    vi.stubGlobal("requestAnimationFrame", (frame: FrameRequestCallback) =>
+      frames.push(frame),
+    );
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.splice(id - 1, 1);
+    });
+  });
+  afterEach(() => {
+    frames.length = 0;
+    vi.unstubAllGlobals();
+  });
+
+  // jsdom has no layout: lay the tabs out as 100px slots and give the strip
+  // a 600px viewport, which is what the drag geometry reads.
+  function layOut(paneWidth = 600) {
+    Object.defineProperty(screen.getByRole("tablist"), "clientWidth", {
+      configurable: true,
+      value: paneWidth,
+    });
+    Object.defineProperty(screen.getByTestId("editor-tabs"), "clientWidth", {
+      configurable: true,
+      value: paneWidth,
+    });
+    screen.getAllByRole("tab").forEach((tab, index) => {
+      Object.defineProperty(tab, "offsetLeft", { configurable: true, value: index * 100 });
+      Object.defineProperty(tab, "offsetWidth", { configurable: true, value: 100 });
+      Object.defineProperty(tab, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: index * 100, width: 100 }),
+      });
+    });
+  }
+
+  function renderGroup(order = tabs) {
     const onMove = vi.fn();
     const onMoveToGroup = vi.fn();
-    render(
+    const strip = (current: typeof tabs) => (
       <div data-editor-group-id="left">
         <EditorTabs
           groupId="left"
           groupNumber={1}
-          tabs={tabs}
+          tabs={current}
           activeTab="a.md"
           activeTabDirty={false}
           recoveryPaths={new Set<string>()}
@@ -277,32 +315,143 @@ describe("EditorTabs pointer drag", () => {
           onMoveToGroup={onMoveToGroup}
           onCreateGroupRight={noop}
         />
-      </div>,
+      </div>
     );
+    const view = render(strip(order));
+    layOut();
+    return {
+      onMove,
+      onMoveToGroup,
+      unmount: view.unmount,
+      reorder: (current: typeof tabs) => view.rerender(strip(current)),
+    };
+  }
+
+  function dragTab(tab: HTMLElement, pointerId: number, toX: number) {
+    vi.mocked(document.elementFromPoint).mockReturnValue(tab);
+    fireEvent.pointerDown(tab, { button: 0, pointerId, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(tab, { pointerId, buttons: 1, clientX: toX, clientY: 10 });
+    flushFrames();
+  }
+
+  it("moves the pressed tab under the pointer and shifts the tabs it passes", () => {
+    const { onMove } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
     const second = screen.getByTestId("tab-b.md");
     const third = screen.getByTestId("tab-c.md");
-    Object.defineProperty(second, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ left: 100, width: 100 }),
-    });
-    Object.defineProperty(third, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ left: 200, width: 100 }),
-    });
+
+    dragTab(first, 4, 260);
+    // Pressed 10px into the tab, so its left edge follows to 250px, and both
+    // tabs whose midpoints it passed slide left by its width.
+    expect(first.style.transform).toBe("translateX(250px)");
+    expect(first.dataset.dragging).toBe("");
+    expect(second.style.transform).toBe("translateX(-100px)");
+    expect(third.style.transform).toBe("translateX(-100px)");
+    // Nothing commits per move.
+    expect(onMove).not.toHaveBeenCalled();
+
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 120, clientY: 10 });
+    flushFrames();
+    expect(first.style.transform).toBe("translateX(110px)");
+    expect(second.style.transform).toBe("translateX(-100px)");
+    expect(third.style.transform).toBe("");
+
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 120, clientY: 10 });
+    expect(onMove).toHaveBeenCalledOnce();
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+    expect(first.dataset.dragging).toBeUndefined();
+    expect(second.style.transform).toBe("");
+    expect(third.style.transform).toBe("");
+  });
+
+  it("counts the release position even when its frame never ran", () => {
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
     vi.mocked(document.elementFromPoint).mockReturnValue(first);
-
-    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10 });
-    fireEvent.pointerMove(first, {
-      pointerId: 4,
-      buttons: 1,
-      clientX: 260,
-      clientY: 10,
-    });
+    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 260, clientY: 10 });
     fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
-
     expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
-    expect(onMoveToGroup).not.toHaveBeenCalled();
+  });
+
+  it("settles the moved tab from where it was released into its new slot", () => {
+    Element.prototype.animate = vi.fn();
+    const { onMove, reorder } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 260);
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
+    // The commit re-renders the strip with the tab in its new slot.
+    Object.defineProperty(first, "offsetLeft", { configurable: true, value: 200 });
+    reorder([{ path: "b.md" }, { path: "c.md" }, { path: "a.md" }]);
+    expect(first.style.transform).toBe("");
+    // Released with its left edge at 250px and now laid out at 200px, it
+    // slides the remaining 50px.
+    expect(first.animate).toHaveBeenCalledWith(
+      [{ transform: "translateX(50px)" }, { transform: "none" }],
+      expect.objectContaining({ duration: 160 }),
+    );
+  });
+
+  it("returns the tab to its slot when a commit never re-renders the strip", () => {
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 260);
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
+    expect(onMove).toHaveBeenCalledOnce();
+    expect(first.style.transform).toBe("translateX(250px)");
+    flushFrames();
+    expect(first.style.transform).toBe("");
+  });
+
+  it("commits the last position when the pointer is cancelled", () => {
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 160);
+    fireEvent.pointerCancel(first, { pointerId: 4 });
+    expect(onMove).toHaveBeenCalledOnce();
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+    expect(screen.getByTestId("tab-b.md").style.transform).toBe("");
+  });
+
+  it("ends a drag whose release was missed", () => {
+    const { onMove } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 160);
+    // A buttons-up move is the first sign the mouse was released elsewhere.
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 0, clientX: 300, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+    expect(first.dataset.dragging).toBeUndefined();
+    // Hovering afterwards reorders nothing.
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 260, clientY: 10 });
+    flushFrames();
+    expect(onMove).toHaveBeenCalledOnce();
+  });
+
+  it("drops the preview when the strip unmounts mid-drag", () => {
+    const { onMove, unmount } = renderGroup();
+    dragTab(screen.getByTestId("tab-a.md"), 4, 260);
+    unmount();
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("re-measures when the tab list changes under the drag", () => {
+    const { onMove, reorder } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 160);
+    const third = screen.getByTestId("tab-c.md");
+    expect(screen.getByTestId("tab-b.md").style.transform).toBe("translateX(-100px)");
+    // b closes: c now lays out in its slot, and the strip re-measures when
+    // the new list renders.
+    Object.defineProperty(third, "offsetLeft", { configurable: true, value: 100 });
+    reorder([{ path: "a.md" }, { path: "c.md" }]);
+    // The pointer is still 150px in; the remaining neighbour derives its
+    // displacement from the fresh layout.
+    fireEvent.pointerMove(first, { pointerId: 4, buttons: 1, clientX: 160, clientY: 10 });
+    flushFrames();
+    expect(screen.getByTestId("tab-c.md").style.transform).toBe("translateX(-100px)");
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 160, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
   });
 
   it("moves a tab to an empty group when released over its editor body", () => {
@@ -331,22 +480,17 @@ describe("EditorTabs pointer drag", () => {
         </div>
       </>,
     );
+    layOut();
     const source = screen.getByTestId("tab-a.md");
     const target = screen.getByTestId("empty-right-editor");
     vi.mocked(document.elementFromPoint).mockReturnValue(target);
 
     fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
-    fireEvent.pointerMove(source, {
-      pointerId: 7,
-      buttons: 1,
-      clientX: 500,
-      clientY: 200,
-    });
-    fireEvent.pointerUp(source, {
-      pointerId: 7,
-      clientX: 500,
-      clientY: 200,
-    });
+    fireEvent.pointerMove(source, { pointerId: 7, buttons: 1, clientX: 500, clientY: 200 });
+    flushFrames();
+    // The source strip previews nothing for a move that belongs elsewhere.
+    expect(source.style.transform).toBe("");
+    fireEvent.pointerUp(source, { pointerId: 7, clientX: 500, clientY: 200 });
 
     expect(onMove).not.toHaveBeenCalled();
     expect(onMoveToGroup).toHaveBeenCalledOnce();
@@ -354,52 +498,82 @@ describe("EditorTabs pointer drag", () => {
   });
 
   it("starts a new drag after cancelling an unfinished pointer", () => {
-    const onMove = vi.fn();
-    render(
-      <div data-editor-group-id="left">
-        <EditorTabs
-          groupId="left"
-          groupNumber={1}
-          tabs={tabs}
-          activeTab="a.md"
-          activeTabDirty={false}
-          recoveryPaths={new Set<string>()}
-          onActivate={noop}
-          onClose={noop}
-          onContextMenu={noop}
-          onMove={onMove}
-          onMoveToGroup={noop}
-          onCreateGroupRight={noop}
-        />
-      </div>,
-    );
+    const { onMove } = renderGroup();
     const first = screen.getByTestId("tab-a.md");
-    const second = screen.getByTestId("tab-b.md");
-    Object.defineProperty(second, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ left: 100, width: 100 }),
-    });
-    vi.mocked(document.elementFromPoint).mockReturnValue(first);
-
-    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10 });
-    fireEvent.pointerMove(first, {
-      pointerId: 4,
-      buttons: 1,
-      clientX: 160,
-      clientY: 10,
-    });
+    dragTab(first, 4, 160);
     onMove.mockClear();
 
-    fireEvent.pointerDown(first, { button: 0, pointerId: 5, clientX: 10 });
-    fireEvent.pointerMove(first, {
-      pointerId: 5,
-      buttons: 1,
-      clientX: 160,
-      clientY: 10,
-    });
+    dragTab(first, 5, 160);
     fireEvent.pointerUp(first, { pointerId: 5, clientX: 160, clientY: 10 });
 
-    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
+  });
+});
+
+describe("EditorTabs corner morph", () => {
+  // The morph is the one rounded corner of each arc; the rest of the
+  // shorthand stays square.
+  function cornerWidths() {
+    const active = screen.getByRole("tab", { selected: true });
+    const radius = (selector: string, root: ParentNode = document) =>
+      (root.querySelector(selector)?.firstElementChild as HTMLElement | null)?.style
+        .borderRadius;
+    return {
+      joinLeft: radius('[data-tab-join="left"]', active),
+      joinRight: radius('[data-tab-join="right"]', active),
+      paneLeft: radius('[data-pane-corner="left"]'),
+      paneRight: radius('[data-pane-corner="right"]'),
+    };
+  }
+
+  function layOut(activeLeft: number) {
+    Object.defineProperty(screen.getByTestId("editor-tabs"), "clientWidth", {
+      configurable: true,
+      value: 600,
+    });
+    const active = screen.getByRole("tab", { selected: true });
+    Object.defineProperty(active, "offsetLeft", { configurable: true, value: activeLeft });
+    Object.defineProperty(active, "offsetWidth", { configurable: true, value: 100 });
+    fireEvent.scroll(screen.getByRole("tablist"));
+  }
+
+  it("squares the pane corner and the join beside a tab at the pane edge", () => {
+    renderTabs("a.md");
+    layOut(0);
+    // A zero radius leaves a one-pixel rounding on the hairline corner.
+    expect(cornerWidths()).toEqual({
+      joinLeft: "0px 0px 1px 0px",
+      joinRight: "0px 0px 0px 9px",
+      paneLeft: "1px 0px 0px 0px",
+      paneRight: "0px 9px 0px 0px",
+    });
+  });
+
+  it("grows both radii over the 20px approach to the edge", () => {
+    renderTabs("b.md");
+    layOut(10);
+    expect(cornerWidths().joinLeft).toBe("0px 0px 5px 0px");
+    expect(cornerWidths().paneLeft).toBe("5px 0px 0px 0px");
+    layOut(100);
+    expect(cornerWidths().joinLeft).toBe("0px 0px 9px 0px");
+    expect(cornerWidths().paneLeft).toBe("9px 0px 0px 0px");
+  });
+
+  it("follows the strip's scroll", () => {
+    renderTabs("b.md");
+    layOut(100);
+    expect(cornerWidths().paneLeft).toBe("9px 0px 0px 0px");
+    screen.getByRole("tablist").scrollLeft = 100;
+    fireEvent.scroll(screen.getByRole("tablist"));
+    expect(cornerWidths().paneLeft).toBe("1px 0px 0px 0px");
+  });
+
+  it("maps distance to radius", () => {
+    expect(cornerRadius(-5)).toBe(0);
+    expect(cornerRadius(0)).toBe(0);
+    expect(cornerRadius(10)).toBe(4);
+    expect(cornerRadius(20)).toBe(8);
+    expect(cornerRadius(500)).toBe(8);
   });
 });
 
