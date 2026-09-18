@@ -5,10 +5,10 @@ import type {
 } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
-import { Marked, type marked, type Tokens } from 'marked'
+import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
-  preprocessTablePipes,
+  escapeTableCellPipes,
   renderTableToMarkdown,
   Table,
   TableCell,
@@ -229,12 +229,28 @@ function tableStart(src: string): number {
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
 
-// Measures the table under an annotation with marked's own rules and no
-// custom tokenizer: lexing the rest of the document with this package's
-// tokenizers would re-enter the annotation branch for every annotation that
-// follows an orphan one. GFM rows are one line each, which Tiptap's raw
-// reconstruction gets wrong when a cell holds a pipe inside inline code.
-const tableExtentLexer = new Marked()
+// Finds the table under an annotation with marked's table rule and nothing
+// else. Lexing the rest of the document would re-enter this tokenizer for
+// every later annotation, and even a plain lexer would parse every block
+// after the table, so a run of annotations would cost quadratic time. GFM
+// rows are one line each, which Tiptap's raw reconstruction gets wrong when
+// a cell holds a pipe inside inline code.
+function tableUnderAnnotation(rest: string): Tokens.Table | undefined {
+  const tokenizer = new Tokenizer()
+  // The lexer gives the tokenizer its GFM rules and the inline queue the
+  // table rule fills.
+  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
+  const table = tokenizer.table(rest)
+  if (table) return table
+  // A header cell with a pipe inside inline code needs Tiptap's escaping
+  // before marked can count its cells. Only that first line can change.
+  const newline = rest.indexOf('\n')
+  const header = newline < 0 ? rest : rest.slice(0, newline)
+  if (!header.includes('`') || !header.includes('|')) return undefined
+  const escaped = escapeTableCellPipes(header)
+  if (escaped === header) return undefined
+  return tokenizer.table(escaped + rest.slice(header.length))
+}
 
 export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
@@ -246,17 +262,21 @@ export const DohcMarkdownTable = Table.extend({
       // The annotation belongs to the table that starts right after it. With
       // no table there it stays an ordinary HTML comment for marked.
       const rest = src.slice(annotation[0].length)
-      const blankLineIndex = rest.indexOf('\n\n')
-      const candidate = blankLineIndex >= 0 ? rest.slice(0, blankLineIndex) : rest
-      const extent = tableExtentLexer.lexer(preprocessTablePipes(candidate))[0]
-      if (extent?.type !== 'table') return undefined
-      const lines = rest.split('\n')
-      const count = 2 + (extent as Tokens.Table).rows.length
-      const text = lines.slice(0, count).join('\n')
+      const extent = tableUnderAnnotation(rest)
+      if (!extent) return undefined
+      // The header, the delimiter, and each row take one line.
+      let end = rest.length
+      for (let line = 2 + extent.rows.length, cursor = 0; line > 0; line -= 1) {
+        const newline = rest.indexOf('\n', cursor)
+        if (newline < 0) break
+        if (line === 1) end = newline
+        cursor = newline + 1
+      }
+      const text = rest.slice(0, end)
       const table = helpers.blockTokens(text)[0]
       if (table?.type !== 'table') return undefined
       // The newline after the last row belongs to the table, as in marked.
-      const raw = annotation[0] + text + (lines.length > count ? '\n' : '')
+      const raw = annotation[0] + text + (end < rest.length ? '\n' : '')
       const rowHeights: [number, number][] = []
       for (const pair of annotation[1].split(',')) {
         const [index, height] = pair.split(':').map(Number)

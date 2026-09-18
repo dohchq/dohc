@@ -1648,37 +1648,62 @@ describe('Y.Doc markdown import/export', () => {
       }
     })
 
-    it('accepts a header row without pipes', () => {
-      const doc = markdownToYDoc('<!-- dohc:table row-heights=1:84 -->\nA\n| --- |\na')
-      expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual(['table'])
-      expect(rowHeight(doc, 1)).toBe(84)
+    it('accepts a header row without pipes and a header cell with a pipe in code', () => {
+      for (const header of ['A', '| `a|b` | B |']) {
+        const doc = markdownToYDoc(
+          `<!-- dohc:table row-heights=1:84 -->\n${header}\n${header === 'A' ? '| --- |\na' : '| --- | --- |\n| c | d |'}\n# After`,
+        )
+        expect(yDocBodyJSON(doc).content?.map(node => node.type), header).toEqual(['table', 'heading'])
+        expect(rowHeight(doc, 1), header).toBe(84)
+      }
     })
 
-    it('rejects orphan annotations without re-lexing the rest of the document', () => {
+    // Regular-expression runs stand in for parser work: every block rule in
+    // marked is one, so re-lexing the rest of the document shows up here.
+    const regExpRuns = (parse: () => void): number => {
       const exec = RegExp.prototype.exec
-      const measure = (annotations: number): number => {
-        let probes = 0
-        const spy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (
-          this: RegExp,
-          value: string,
-        ) {
-          if (this.source.includes('dohc:table')) probes += 1
-          return Reflect.apply(exec, this, [value]) as RegExpExecArray | null
-        })
-        try {
-          const doc = markdownToYDoc(
-            `${Array(annotations).fill('<!-- dohc:table row-heights=1:84 -->').join('\n')}\nNot a table.`,
-          )
-          expect(getDohcYDocBodyFragment(doc).length).toBe(annotations + 1)
-          doc.destroy()
-          return probes
-        } finally {
-          spy.mockRestore()
-        }
+      let runs = 0
+      const spy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (
+        this: RegExp,
+        value: string,
+      ) {
+        runs += 1
+        return Reflect.apply(exec, this, [value]) as RegExpExecArray | null
+      })
+      try {
+        parse()
+        return runs
+      } finally {
+        spy.mockRestore()
       }
-      const small = measure(8)
-      const large = measure(16)
-      expect(large, `annotation probes: ${small} -> ${large}`).toBeLessThan(small * 2.5)
+    }
+
+    it('rejects orphan annotations without lexing the rest of the document', () => {
+      const measure = (annotations: number): number => regExpRuns(() => {
+        const doc = markdownToYDoc(
+          `${Array(annotations).fill('<!-- dohc:table row-heights=1:84 -->').join('\n')}\nNot a table.`,
+        )
+        expect(getDohcYDocBodyFragment(doc).length).toBe(annotations + 1)
+        doc.destroy()
+      })
+      const small = measure(32)
+      const large = measure(64)
+      expect(large, `regular-expression runs: ${small} -> ${large}`).toBeLessThan(small * 2.5)
+    })
+
+    it('parses a run of annotated tables without lexing the rest of the document', () => {
+      const measure = (tables: number): number => regExpRuns(() => {
+        const doc = markdownToYDoc(
+          Array(tables).fill(`<!-- dohc:table row-heights=1:84 -->\n${table}`).join('\n'),
+        )
+        const blocks = yDocBodyJSON(doc).content ?? []
+        expect(blocks.map(node => node.type)).toEqual(Array(tables).fill('table'))
+        expect(blocks.every(block => block.content?.[1]?.attrs?.height === 84)).toBe(true)
+        doc.destroy()
+      })
+      const small = measure(32)
+      const large = measure(64)
+      expect(large, `regular-expression runs: ${small} -> ${large}`).toBeLessThan(small * 2.5)
     })
 
     it('leaves an annotation that no table follows as an ordinary comment', () => {
