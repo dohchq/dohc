@@ -920,9 +920,10 @@ const DohcMathBlock = Node.create({
 })
 
 // Row height is editor layout metadata. It lives on the canonical Y.Doc so a
-// resized table remains stable across collaborative edits and reloads; GFM
-// export intentionally omits it because markdown tables have no row-height
-// syntax. HTML import/export keeps the metadata through data-row-height.
+// resized table remains stable across collaborative edits and reloads. GFM
+// has no row-height syntax, so the Markdown projectors write it in an HTML
+// comment above the table. HTML import/export keeps it through
+// data-row-height.
 export const DohcTableRowHeight = Extension.create({
   name: 'dohcTableRowHeight',
 

@@ -1538,6 +1538,201 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  describe('table row heights', () => {
+    const table = [
+      '| Metric | Value |',
+      '| ------ | ----- |',
+      '| apples | 10    |',
+      '| pears  | 4     |',
+    ].join('\n')
+    const rowHeight = (doc: Y.Doc, index: number): unknown => {
+      const rows = yDocBodyJSON(doc).content?.find(node => node.type === 'table')?.content ?? []
+      return rows[index]?.attrs?.height ?? null
+    }
+    const resizeRow = (doc: Y.Doc, index: number, height: unknown): void => {
+      const table = getDohcYDocBodyFragment(doc)
+        .toArray()
+        .find(node => node instanceof Y.XmlElement && node.nodeName === 'table') as Y.XmlElement
+      ;(table.get(index) as Y.XmlElement).setAttribute('height', height as string)
+    }
+
+    it('writes a resized row above its table and reads it back byte-stable', () => {
+      const doc = markdownToYDoc(`# Sizes\n\n${table}\n\nAfter.\n`)
+      resizeRow(doc, 1, 84)
+      resizeRow(doc, 2, 120)
+      const once = yDocToMarkdown(doc)
+      expect(once).toBe(
+        `# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n${table}\n\nAfter.`,
+      )
+      const reopened = markdownToYDoc(once)
+      expect([0, 1, 2].map(index => rowHeight(reopened, index))).toEqual([null, 84, 120])
+      expect(yDocToMarkdown(reopened)).toBe(once)
+    })
+
+    it('writes no annotation for a table nobody resized', () => {
+      expect(yDocToMarkdown(markdownToYDoc(table))).not.toContain('<!--')
+    })
+
+    it('accepts the attribute forms the Rust projector accepts and omits the rest', () => {
+      for (const [height, expected] of [
+        ['120', 'row-heights=1:120'],
+        [' 7 ', 'row-heights=1:7'],
+        [84.5, null],
+        [0, null],
+        [-84, null],
+        [2 ** 53, null],
+        ['84px', null],
+        [true, null],
+      ] as const) {
+        const doc = markdownToYDoc(table)
+        resizeRow(doc, 1, height)
+        const once = yDocToMarkdown(doc)
+        if (expected) {
+          expect(once, String(height)).toContain(expected)
+        } else {
+          expect(once, String(height)).not.toContain('<!--')
+        }
+      }
+    })
+
+    it('keeps an external cell edit beside the heights it was written with', () => {
+      const edited = markdownToYDoc(
+        `<!-- dohc:table row-heights=1:84 -->\n${table.replace('apples', 'plums ')}`,
+      )
+      expect(rowHeight(edited, 1)).toBe(84)
+      expect(yDocToMarkdown(edited)).toContain('| plums  | 10    |')
+    })
+
+    it('skips rows the table does not have and heights that are not positive', () => {
+      const doc = markdownToYDoc(`<!-- dohc:table row-heights=9:84,1:0,2:5 -->\n${table}`)
+      expect([1, 2].map(index => rowHeight(doc, index))).toEqual([null, 5])
+      expect(yDocToMarkdown(doc)).toBe(`<!-- dohc:table row-heights=2:5 -->\n${table}`)
+    })
+
+    it('accepts a blank line between the annotation and its table', () => {
+      const doc = markdownToYDoc(`<!-- dohc:table row-heights=1:84 -->\n\n${table}`)
+      expect(rowHeight(doc, 1)).toBe(84)
+    })
+
+    it('applies inside a blockquote and stays literal inside a code fence', () => {
+      const quoted = markdownToYDoc(
+        `> <!-- dohc:table row-heights=1:84 -->\n${table.replaceAll(/^/gmu, '> ')}`,
+      )
+      const quote = yDocBodyJSON(quoted).content?.[0]
+      expect(quote?.type).toBe('blockquote')
+      expect(quote?.content?.[0]?.content?.[1]?.attrs?.height).toBe(84)
+      expect(yDocToMarkdown(quoted)).toContain(
+        '> <!-- dohc:table row-heights=1:84 -->\n> | Metric',
+      )
+
+      const fenced = '```\n<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n```'
+      const fencedDoc = markdownToYDoc(fenced)
+      expect(yDocBodyJSON(fencedDoc).content?.map(node => node.type)).toEqual(['codeBlock'])
+      expect(yDocToMarkdown(fencedDoc)).toBe(fenced)
+    })
+
+    it.each([
+      ['# After', 'heading', 'After'],
+      ['<!-- ordinary -->', 'paragraph', '<!-- ordinary -->'],
+      ['```\nfenced\n```', 'codeBlock', 'fenced'],
+      ['- item', 'bulletList', 'item'],
+    ])('keeps the block right after an annotated table: %j', (following, type, text) => {
+      for (const cell of ['apples', '`a|b`']) {
+        const doc = markdownToYDoc(
+          `<!-- dohc:table row-heights=1:84 -->\n${table.replace('apples', cell)}\n${following}`,
+        )
+        const blocks = yDocBodyJSON(doc).content ?? []
+        expect(blocks.map(node => node.type), cell).toEqual(['table', type])
+        expect(JSON.stringify(blocks[1]), cell).toContain(text)
+        expect(rowHeight(doc, 1), cell).toBe(84)
+      }
+    })
+
+    it('accepts a header row without pipes and a header cell with a pipe in code', () => {
+      for (const header of ['A', '| `a|b` | B |']) {
+        const doc = markdownToYDoc(
+          `<!-- dohc:table row-heights=1:84 -->\n${header}\n${header === 'A' ? '| --- |\na' : '| --- | --- |\n| c | d |'}\n# After`,
+        )
+        expect(yDocBodyJSON(doc).content?.map(node => node.type), header).toEqual(['table', 'heading'])
+        expect(rowHeight(doc, 1), header).toBe(84)
+      }
+    })
+
+    // Regular-expression runs stand in for parser work: every block rule in
+    // marked is one, so re-lexing the rest of the document shows up here.
+    const regExpRuns = (parse: () => void): number => {
+      const exec = RegExp.prototype.exec
+      let runs = 0
+      const spy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (
+        this: RegExp,
+        value: string,
+      ) {
+        runs += 1
+        return Reflect.apply(exec, this, [value]) as RegExpExecArray | null
+      })
+      try {
+        parse()
+        return runs
+      } finally {
+        spy.mockRestore()
+      }
+    }
+
+    it('rejects orphan annotations without lexing the rest of the document', () => {
+      const measure = (annotations: number): number => regExpRuns(() => {
+        const doc = markdownToYDoc(
+          `${Array(annotations).fill('<!-- dohc:table row-heights=1:84 -->').join('\n')}\nNot a table.`,
+        )
+        expect(getDohcYDocBodyFragment(doc).length).toBe(annotations + 1)
+        doc.destroy()
+      })
+      const small = measure(32)
+      const large = measure(64)
+      expect(large, `regular-expression runs: ${small} -> ${large}`).toBeLessThan(small * 2.5)
+    })
+
+    it('parses a run of annotated tables without lexing the rest of the document', () => {
+      const measure = (tables: number): number => regExpRuns(() => {
+        const doc = markdownToYDoc(
+          Array(tables).fill(`<!-- dohc:table row-heights=1:84 -->\n${table}`).join('\n'),
+        )
+        const blocks = yDocBodyJSON(doc).content ?? []
+        expect(blocks.map(node => node.type)).toEqual(Array(tables).fill('table'))
+        expect(blocks.every(block => block.content?.[1]?.attrs?.height === 84)).toBe(true)
+        doc.destroy()
+      })
+      const small = measure(32)
+      const large = measure(64)
+      expect(large, `regular-expression runs: ${small} -> ${large}`).toBeLessThan(small * 2.5)
+    })
+
+    it('keeps a list item whose first block is an annotated table', () => {
+      const input = [
+        '- <!-- dohc:table row-heights=1:84 -->',
+        '  | A | B |',
+        '  | --- | --- |',
+        '  | a | b |',
+        '- second item',
+      ].join('\n')
+      const doc = markdownToYDoc(input)
+      const list = yDocBodyJSON(doc).content?.[0]
+      expect(list?.type).toBe('bulletList')
+      expect(list?.content?.map(item => item.content?.map(block => block.type))).toEqual([
+        ['paragraph', 'table'],
+        ['paragraph'],
+      ])
+      expect(list?.content?.[0]?.content?.[1]?.content?.[1]?.attrs?.height).toBe(84)
+    })
+
+    it('leaves an annotation that no table follows as an ordinary comment', () => {
+      const doc = markdownToYDoc('<!-- dohc:table row-heights=1:84 -->\nNot a table.')
+      expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual([
+        'paragraph',
+        'paragraph',
+      ])
+    })
+  })
+
   it('keeps one blank separator between a table and a following nested list', () => {
     const input = [
       '---',

@@ -480,6 +480,16 @@ describe('desktop editor markdown round-trip', () => {
     )
   })
 
+  it('keeps a resized row through the source view', () => {
+    const annotated = [
+      '<!-- dohc:table row-heights=1:84 -->',
+      '| Metric | Value |',
+      '| ------ | ----- |',
+      '| apples | 10    |',
+    ].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(annotated))).toBe(annotated)
+  })
+
   it('round-trips per-column GFM alignment (left/center/right) losslessly', () => {
     // Phase 1 assumed per-column alignment was inexpressible; it is not. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to

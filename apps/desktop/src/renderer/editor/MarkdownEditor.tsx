@@ -11,7 +11,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Extension, type Editor } from "@tiptap/core";
-import { serializeRichdocBody } from "@dohc/ydoc-projection";
+import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -281,26 +281,26 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
     return "Type '/' for commands";
   },
 });
-// TableKit ships column resizing but leaves it off by default — turned on
-// here so the grip/menu UI (tableControls.tsx) has resizing to coexist
-// with. Purely a runtime option: it does not change the schema TableKit
-// contributes, so import-export.ts's unconfigured TableKit (parsing only,
-// never rendered) stays in parity — see schema-parity.test.ts.
-const TABLE_KIT_EXTENSION = TableKit.configure({
-  table: {
-    resizable: true,
-    // A useful default column measure makes appended columns grow the table
-    // past the reading column instead of compressing every cell indefinitely.
-    // The tableWrapper owns horizontal scrolling in styles.css.
-    cellMinWidth: 120,
-  },
+// The projection's table parses and writes the row-height annotation, so a
+// source-view edit keeps resized rows. Column resizing is off by default in
+// Tiptap; it is turned on here so the grip/menu UI (tableControls.tsx) has
+// resizing to coexist with. These are runtime options: they do not change
+// the schema, so import-export.ts's unconfigured table (parsing only, never
+// rendered) stays in parity. See schema-parity.test.ts.
+const TABLE_EXTENSION = DohcMarkdownTable.configure({
+  resizable: true,
+  // A useful default column measure makes appended columns grow the table
+  // past the reading column instead of compressing every cell indefinitely.
+  // The tableWrapper owns horizontal scrolling in styles.css.
+  cellMinWidth: 120,
 });
 const STATIC_EDITOR_EXTENSIONS = [
   ...dohcMarkdownExtensions,
   TaskList,
   DohcTaskItem,
   FenceWideningCodeBlock,
-  TABLE_KIT_EXTENSION,
+  TableKit.configure({ table: false }),
+  TABLE_EXTENSION,
 ];
 
 function BubbleButton(props: {

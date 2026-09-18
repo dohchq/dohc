@@ -6,6 +6,7 @@
 // engine.db, no sqlite, no storage. That keeps it importable from both the
 // node-side engine driver and the browser-side editor.
 export {
+  DohcMarkdownTable,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,

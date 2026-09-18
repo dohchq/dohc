@@ -67,6 +67,15 @@ describe("buildStandaloneDocumentHtml", () => {
     expect(html).toContain("Callout body text.");
   });
 
+  it("renders a resized table row at its height and hides the annotation", () => {
+    const exported = buildStandaloneDocumentHtml(
+      "<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n",
+      "fallback",
+    );
+    expect(exported).toContain('<tr data-row-height="84" style="height: 84px;">');
+    expect(exported).not.toContain("dohc:table");
+  });
+
   it("renders task list items as checkboxes with their checked state", () => {
     expect(html).toContain('data-type="taskItem"');
     expect(html).toMatch(/data-checked="false"[^>]*>[\s\S]*?todo one/);

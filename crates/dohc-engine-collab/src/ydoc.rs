@@ -1407,14 +1407,32 @@ fn encode_state_vector_canonical(state_vector: &StateVector) -> Vec<u8> {
 /// refuses the resolution if it cannot reproduce the chosen bytes exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MdBlock {
-    Heading { level: i64, text: String },
+    Heading {
+        level: i64,
+        text: String,
+    },
     Paragraph(String),
     Quote(Vec<MdBlock>),
     BulletList(Vec<String>),
-    OrderedList { start: i64, items: Vec<String> },
+    OrderedList {
+        start: i64,
+        items: Vec<String>,
+    },
     TaskList(Vec<(bool, String)>),
-    CodeBlock { language: String, content: String },
+    CodeBlock {
+        language: String,
+        content: String,
+    },
     Rule,
+    /// A GFM table under a row-height annotation. A table without one stays
+    /// paragraph text, which the projector reproduces verbatim; an annotated
+    /// one cannot, because the projector entity-encodes `<` in text, so the
+    /// fold rebuilds the table the projector wrote.
+    Table {
+        rows: Vec<Vec<String>>,
+        alignments: Vec<Option<TableAlign>>,
+        row_heights: BTreeMap<usize, i64>,
+    },
 }
 
 /// Split a leading `---` YAML frontmatter block off the chosen markdown.
@@ -1575,6 +1593,11 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
             blocks.push(MdBlock::OrderedList { start, items });
             continue;
         }
+        if let Some((block, consumed)) = parse_annotated_table(&lines[index..]) {
+            blocks.push(block);
+            index += consumed;
+            continue;
+        }
         // Paragraph: consecutive lines until a blank line or a structural
         // line. Interior single newlines stay inside one text run, which the
         // projector re-emits verbatim.
@@ -1599,6 +1622,132 @@ fn parse_markdown_blocks_at(body: &str, depth: usize) -> Vec<MdBlock> {
         blocks.push(MdBlock::Paragraph(para.join("\n")));
     }
     blocks
+}
+
+const TABLE_ROW_HEIGHTS_PREFIX: &str = "<!-- dohc:table row-heights=";
+
+/// The pairs of a row-height annotation the projector wrote, or `None` for any
+/// other line. Pairs the TypeScript importer would drop are dropped here too.
+fn parse_table_row_heights(line: &str) -> Option<Vec<(usize, i64)>> {
+    let pairs = line
+        .strip_prefix(TABLE_ROW_HEIGHTS_PREFIX)?
+        .strip_suffix(" -->")?;
+    let mut heights = Vec::new();
+    for pair in pairs.split(',') {
+        let (row, height) = pair.split_once(':')?;
+        if row.is_empty()
+            || height.is_empty()
+            || !row.bytes().all(|byte| byte.is_ascii_digit())
+            || !height.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let (Ok(row), Ok(height)) = (row.parse::<usize>(), height.parse::<i64>()) else {
+            return None;
+        };
+        if table_row_height_in_range(height) {
+            heights.push((row, height));
+        }
+    }
+    Some(heights)
+}
+
+/// Undoes one layer of the projector's entity encoding in one pass, so the
+/// text the projector wrote as `&amp;lt;` comes back as `&lt;`, never `<`.
+fn decode_html_entities_once(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(ampersand) = rest.find('&') {
+        output.push_str(&rest[..ampersand]);
+        rest = &rest[ampersand..];
+        let (decoded, encoded_len) = if rest.starts_with("&amp;") {
+            ("&", "&amp;".len())
+        } else if rest.starts_with("&lt;") {
+            ("<", "&lt;".len())
+        } else if rest.starts_with("&gt;") {
+            (">", "&gt;".len())
+        } else {
+            ("&", 1)
+        };
+        output.push_str(decoded);
+        rest = &rest[encoded_len..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Splits one `| a | b |` line into trimmed cells, with the projector's pipe
+/// escaping and entity encoding undone.
+fn parse_table_row(line: &str) -> Option<Vec<String>> {
+    let inner = line.strip_prefix('|')?.strip_suffix('|')?;
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut backslashes = 0usize;
+    for character in inner.chars() {
+        if character == '|' && backslashes % 2 == 0 {
+            cells.push(std::mem::take(&mut cell));
+        } else {
+            cell.push(character);
+        }
+        backslashes = if character == '\\' {
+            backslashes + 1
+        } else {
+            0
+        };
+    }
+    cells.push(cell);
+    Some(
+        cells
+            .into_iter()
+            .map(|cell| decode_html_entities_once(&trim_js(&cell).replace("\\|", "|")))
+            .collect(),
+    )
+}
+
+fn parse_table_delimiter(line: &str) -> Option<Vec<Option<TableAlign>>> {
+    parse_table_row(line)?
+        .into_iter()
+        .map(|cell| {
+            let left = cell.starts_with(':');
+            let right = cell.ends_with(':');
+            let dashes = cell.trim_matches(':');
+            if dashes.is_empty() || !dashes.bytes().all(|byte| byte == b'-') {
+                return None;
+            }
+            Some(match (left, right) {
+                (true, true) => Some(TableAlign::Center),
+                (true, false) => Some(TableAlign::Left),
+                (false, true) => Some(TableAlign::Right),
+                (false, false) => None,
+            })
+        })
+        .collect()
+}
+
+/// An annotation line followed by a GFM table, with the number of lines the
+/// table took. An annotation with no table under it stays ordinary text.
+fn parse_annotated_table(lines: &[&str]) -> Option<(MdBlock, usize)> {
+    let row_heights = parse_table_row_heights(lines.first()?)?;
+    let header = parse_table_row(lines.get(1)?)?;
+    let alignments = parse_table_delimiter(lines.get(2)?)?;
+    let mut rows = vec![header];
+    let mut consumed = 3;
+    while let Some(row) = lines.get(consumed).and_then(|line| parse_table_row(line)) {
+        rows.push(row);
+        consumed += 1;
+    }
+    let row_heights: BTreeMap<usize, i64> = row_heights
+        .into_iter()
+        .filter(|(row, _)| *row < rows.len())
+        .collect();
+    Some((
+        MdBlock::Table {
+            rows,
+            alignments,
+            row_heights,
+        },
+        consumed,
+    ))
 }
 
 fn parse_heading(line: &str) -> Option<(i64, String)> {
@@ -1698,6 +1847,31 @@ fn insert_md_block<F: XmlFragment>(
         }
         MdBlock::Rule => {
             parent.insert(txn, index, XmlElementPrelim::empty("horizontalRule"));
+        }
+        MdBlock::Table {
+            rows,
+            alignments,
+            row_heights,
+        } => {
+            let table = parent.insert(txn, index, XmlElementPrelim::empty("table"));
+            for (row_index, cells) in rows.iter().enumerate() {
+                let row = table.insert(txn, row_index as u32, XmlElementPrelim::empty("tableRow"));
+                if let Some(height) = row_heights.get(&row_index) {
+                    row.insert_attribute(txn, "height", *height);
+                }
+                let tag = if row_index == 0 {
+                    "tableHeader"
+                } else {
+                    "tableCell"
+                };
+                for (cell_index, text) in cells.iter().enumerate() {
+                    let cell = row.insert(txn, cell_index as u32, XmlElementPrelim::empty(tag));
+                    if let Some(Some(align)) = alignments.get(cell_index) {
+                        cell.insert_attribute(txn, "align", align.attribute());
+                    }
+                    insert_md_paragraph(txn, &cell, 0, text);
+                }
+            }
         }
     }
 }
@@ -3392,11 +3566,21 @@ fn normalize_callout_title(value: &str) -> String {
     trim_js(&normalized).to_string()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TableAlign {
     Left,
     Right,
     Center,
+}
+
+impl TableAlign {
+    fn attribute(self) -> &'static str {
+        match self {
+            TableAlign::Left => "left",
+            TableAlign::Right => "right",
+            TableAlign::Center => "center",
+        }
+    }
 }
 
 struct TableCell {
@@ -3406,13 +3590,47 @@ struct TableCell {
 
 const GFM_TABLE_CELL_BLOCK_SEPARATOR: &str = "<br>";
 
+/// A resized row's height: a positive integer the TypeScript projector also
+/// accepts (`Number.isSafeInteger`), so both projectors write the same bytes.
+fn table_row_height(attrs: &BTreeMap<String, Value>) -> Option<i64> {
+    attr_i64(attrs, "height").filter(|height| table_row_height_in_range(*height))
+}
+
+fn table_row_height_in_range(height: i64) -> bool {
+    const MAX_SAFE_INTEGER: i64 = (1_i64 << 53) - 1;
+    (1..=MAX_SAFE_INTEGER).contains(&height)
+}
+
+/// A resized row keeps its height in an HTML comment on the line above its
+/// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
+/// the header row. GFM has no row-height syntax, Markdown renderers hide the
+/// comment, and the TypeScript projector writes and parses the same bytes, so
+/// a local close that prunes the Y.Doc and reseeds from the file keeps the
+/// height.
+fn render_table_row_heights(row_heights: &[(usize, i64)]) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    if row_heights.is_empty() {
+        return Ok(output.into_string());
+    }
+    output.push_str("<!-- dohc:table row-heights=")?;
+    for (position, (row, height)) in row_heights.iter().enumerate() {
+        if position != 0 {
+            output.push(',')?;
+        }
+        output.push_str(&format!("{row}:{height}"))?;
+    }
+    output.push_str(" -->")?;
+    Ok(output.into_string())
+}
+
 fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let mut rows = Vec::new();
+    let mut row_heights = Vec::new();
     let mut cell_text_bytes = 0usize;
     for row in children {
         let MarkdownNode::Element {
             tag,
-            attrs: _,
+            attrs,
             children: cells,
         } = row
         else {
@@ -3420,6 +3638,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         };
         if tag != "tableRow" {
             continue;
+        }
+        if let Some(height) = table_row_height(attrs) {
+            row_heights.push((rows.len(), height));
         }
         let mut rendered_cells = Vec::new();
         for cell in cells {
@@ -3482,6 +3703,7 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
         }
     }
     let mut output = ProjectionBuffer::new();
+    output.push_str(&render_table_row_heights(&row_heights)?)?;
     output.push_str("\n| ")?;
     for (index, width) in widths.iter().enumerate() {
         if index != 0 {
@@ -4942,6 +5164,78 @@ mod projection_tests {
         );
     }
 
+    fn remote_table_with_row_heights(heights: &[(u32, Any)]) -> Ydoc {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let table = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new(
+                    "table",
+                    (0..4).map(|row| {
+                        xml_element(
+                            "tableRow",
+                            &[],
+                            [xml_element(
+                                "tableCell",
+                                &[],
+                                [paragraph(format!("row {row}"))],
+                            )],
+                        )
+                    }),
+                ),
+            );
+            for (index, height) in heights {
+                let XmlOut::Element(row) = table.get(&txn, *index).expect("row exists") else {
+                    panic!("row {index} is an element");
+                };
+                row.insert_attribute(&mut txn, "height", height.clone());
+            }
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("test update is valid");
+        remote
+    }
+
+    #[test]
+    fn resized_table_rows_project_their_heights_above_the_table() {
+        let doc = remote_table_with_row_heights(&[
+            (1, Any::BigInt(84)),
+            (2, Any::String("120".into())),
+            (3, Any::Number(0.5)),
+        ]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .content,
+            "<!-- dohc:table row-heights=1:84,2:120 -->\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |"
+        );
+    }
+
+    #[test]
+    fn hostile_table_row_heights_are_omitted() {
+        for hostile in [
+            Any::BigInt(0),
+            Any::BigInt(-84),
+            Any::BigInt(1 << 53),
+            Any::Bool(true),
+            Any::String("84px".into()),
+        ] {
+            let doc = remote_table_with_row_heights(&[(1, hostile.clone())]);
+            assert_eq!(
+                doc.project(ContentKind::Richdoc)
+                    .expect("small projection")
+                    .content,
+                "\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |",
+                "{hostile:?} is not a row height"
+            );
+        }
+    }
+
     #[test]
     fn hostile_remote_heading_level_is_clamped_before_allocation() {
         let doc = remote_doc_with_body([xml_element(
@@ -5635,6 +5929,112 @@ mod projection_tests {
                 victim.encode_full_state(),
                 before,
                 "the refusal is state-unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_fold_reconstructs_an_annotated_table() {
+        // The projector writes this for a table whose two body rows were
+        // resized and whose second column is right-aligned.
+        let chosen = "# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n| Metric | Value |\n| ------ | -----: |\n| apples | 10    |\n| pears  | 4     |\n\nAfter.";
+        let doc = Ydoc::wire();
+        doc.richdoc_append_paragraph("old content");
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            chosen,
+            "the folded document projects the chosen bytes back"
+        );
+        let body = doc.canonical_content()["body"].clone();
+        let table = &body["children"][1];
+        assert_eq!(table["tag"], "table");
+        let rows = table["children"].as_array().expect("table rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["children"][0]["tag"], "tableHeader");
+        assert_eq!(rows[1]["children"][0]["tag"], "tableCell");
+        assert_eq!(rows[1]["attrs"]["height"], 84);
+        assert_eq!(rows[2]["attrs"]["height"], 120);
+        assert_eq!(rows[2]["children"][1]["attrs"]["align"], "right");
+        assert!(
+            rows[0]["attrs"].get("height").is_none(),
+            "an unannotated row has no height"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_decodes_one_entity_layer_in_table_cells() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element("tableHeader", &[], [paragraph("Text")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[("height", "84")],
+                    [xml_element("tableCell", &[], [paragraph("a & b | c")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableCell",
+                        &[],
+                        [paragraph("<tag> &amp; x<br>y")],
+                    )],
+                ),
+            ],
+        )]);
+        let chosen = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        assert!(
+            chosen.contains("a &amp; b \\| c") && chosen.contains("&lt;tag&gt; &amp;amp; x<br>y"),
+            "{chosen}"
+        );
+        let folded = Ydoc::wire();
+        folded
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
+            .expect("richdoc rewrite");
+        assert_eq!(
+            folded
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            chosen
+        );
+        let body = serde_json::to_string(&folded.canonical_content()["body"]).expect("body json");
+        assert!(
+            body.contains("a & b | c") && body.contains("<tag> &amp; x<br>y"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_keeps_other_tables_and_comments_as_text() {
+        for chosen in [
+            // A plain table reproduces as text, as before.
+            "| a | b |\n|---|---|\n| c | d |",
+            // An annotation with nothing under it is an ordinary comment.
+            "<!-- dohc:table row-heights=1:84 -->\n\nNot a table.",
+            // A malformed annotation is an ordinary comment.
+            "<!-- dohc:table row-heights=1:84px -->\n| a |\n| --- |\n| b |",
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+                .expect("richdoc rewrite");
+            let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
+            assert!(
+                !body.contains("\"table\""),
+                "{chosen:?} folded a table: {body}"
             );
         }
     }

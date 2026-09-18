@@ -5,9 +5,10 @@ import type {
 } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
-import { Marked, type marked } from 'marked'
+import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
 import {
+  escapeTableCellPipes,
   renderTableToMarkdown,
   Table,
   TableCell,
@@ -185,18 +186,115 @@ const MarkdownTaskList = TaskList.extend({
   },
 })
 
-const MarkdownTable = Table.extend({
+// A resized row keeps its height in an HTML comment on the line above its
+// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
+// the header row. GFM has no row-height syntax, Markdown renderers hide the
+// comment, and the Rust projector writes the same bytes, so a local close
+// that prunes the Y.Doc and reseeds from the file keeps the height.
+const TABLE_ROW_HEIGHTS_RE =
+  /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
+const tableParseMarkdown = Table.config.parseMarkdown!
+type TableRowHeightsToken = Parameters<typeof tableParseMarkdown>[0] & {
+  rowHeights?: [number, number][]
+}
+
+// The Rust projector reads the attribute through `attr_i64`, which accepts
+// an integer or a trimmed integer string. Keep the same rule here so both
+// projectors write the same annotation for the same Y.Doc.
+function tableRowHeight(value: unknown): number | null {
+  const height = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\s*[+-]?\d+\s*$/u.test(value)
+      ? Number(value)
+      : Number.NaN
+  return Number.isSafeInteger(height) && height > 0 ? height : null
+}
+
+function tableRowHeightsAnnotation(rows: JSONContent[]): string {
+  const pairs: string[] = []
+  rows.forEach((row, index) => {
+    const height = tableRowHeight(row.attrs?.height)
+    if (height !== null) pairs.push(`${index}:${height}`)
+  })
+  return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
+}
+
+// Table.start only inspects the first two lines. Avoid splitting the full
+// remaining document while probing ordinary blocks.
+function tableStart(src: string): number {
+  const newline = src.indexOf('\n')
+  if (newline < 0) return -1
+  const second = src.indexOf('\n', newline + 1)
+  const prefix = second < 0 ? src : src.slice(0, second)
+  return (tableTokenizer.start as (source: string) => number)(prefix)
+}
+
+// Finds the table under an annotation with marked's table rule and nothing
+// else. Lexing the rest of the document would re-enter this tokenizer for
+// every later annotation, and even a plain lexer would parse every block
+// after the table, so a run of annotations would cost quadratic time. GFM
+// rows are one line each, which Tiptap's raw reconstruction gets wrong when
+// a cell holds a pipe inside inline code.
+function tableUnderAnnotation(rest: string): Tokens.Table | undefined {
+  const tokenizer = new Tokenizer()
+  // The lexer gives the tokenizer its GFM rules and the inline queue the
+  // table rule fills.
+  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
+  const table = tokenizer.table(rest)
+  if (table) return table
+  // A header cell with a pipe inside inline code needs Tiptap's escaping
+  // before marked can count its cells. Only that first line can change.
+  const newline = rest.indexOf('\n')
+  const header = newline < 0 ? rest : rest.slice(0, newline)
+  if (!header.includes('`') || !header.includes('|')) return undefined
+  const escaped = escapeTableCellPipes(header)
+  if (escaped === header) return undefined
+  return tokenizer.table(escaped + rest.slice(header.length))
+}
+
+export const DohcMarkdownTable = Table.extend({
   markdownTokenizer: {
     ...tableTokenizer,
-    // Table.start only inspects the first two lines. Avoid splitting the full
-    // remaining document while probing ordinary blocks.
-    start: (src: string) => {
-      const newline = src.indexOf('\n')
-      if (newline < 0) return -1
-      const second = src.indexOf('\n', newline + 1)
-      const prefix = second < 0 ? src : src.slice(0, second)
-      return (tableTokenizer.start as (source: string) => number)(prefix)
+    start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
+    tokenize: (src, tokens, helpers) => {
+      const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
+      if (!annotation) return tableTokenizer.tokenize(src, tokens, helpers)
+      // The annotation belongs to the table that starts right after it. With
+      // no table there it stays an ordinary HTML comment for marked.
+      const rest = src.slice(annotation[0].length)
+      const extent = tableUnderAnnotation(rest)
+      if (!extent) return undefined
+      // The header, the delimiter, and each row take one line.
+      let end = rest.length
+      for (let line = 2 + extent.rows.length, cursor = 0; line > 0; line -= 1) {
+        const newline = rest.indexOf('\n', cursor)
+        if (newline < 0) break
+        if (line === 1) end = newline
+        cursor = newline + 1
+      }
+      const text = rest.slice(0, end)
+      const table = helpers.blockTokens(text)[0]
+      if (table?.type !== 'table') return undefined
+      // The newline after the last row belongs to the table, as in marked.
+      const raw = annotation[0] + text + (end < rest.length ? '\n' : '')
+      const rowHeights: [number, number][] = []
+      for (const pair of annotation[1].split(',')) {
+        const [index, height] = pair.split(':').map(Number)
+        if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
+          rowHeights.push([index, height])
+        }
+      }
+      return { ...table, raw, rowHeights }
     },
+  },
+  parseMarkdown: (token: TableRowHeightsToken, helpers) => {
+    const table = tableParseMarkdown(token, helpers) as JSONContent
+    const rows = table.content ?? []
+    for (const [index, height] of token.rowHeights ?? []) {
+      const row = rows[index]
+      if (row) row.attrs = { ...row.attrs, height }
+    }
+    return table
   },
   renderMarkdown: (node, helpers) => {
     const tableHelpers: MarkdownRendererHelpers = {
@@ -207,11 +305,12 @@ const MarkdownTable = Table.extend({
     // Tiptap's table renderer includes its own trailing newline, while the
     // document renderer also joins sibling blocks with `\n\n`. Returning both
     // would put two blank lines between a table and its next sibling.
-    return renderTableToMarkdown(
+    const table = renderTableToMarkdown(
       node,
       tableHelpers,
       { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
     ).replace(/\n$/u, '')
+    return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
   },
 })
 
@@ -221,7 +320,7 @@ const extensions: AnyExtension[] = [
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,
-  MarkdownTable,
+  DohcMarkdownTable,
   TableCell,
   TableHeader,
   TableRow,
@@ -308,11 +407,21 @@ function parseRichdocMarkdown(markdown: string): JSONContent {
       ([sentinel, entity]) => [sentinel, decodeBlockEntity(entity)] as const,
     ),
   )
-  return restoreBlockEntityParseSentinels(
-    parsed,
-    decodedEntities,
-    encodedEntities,
+  return ensureListItemParagraphs(
+    restoreBlockEntityParseSentinels(parsed, decodedEntities, encodedEntities),
   )
+}
+
+// A list item's schema starts with a paragraph. Tiptap hands an item whose
+// first block is a table straight through, and the Y.Doc conversion then
+// drops the item. An annotated table is the first block of an item whose
+// paragraph was empty, so give such an item its paragraph back.
+function ensureListItemParagraphs(node: JSONContent): JSONContent {
+  const content = node.content?.map(ensureListItemParagraphs)
+  if (!content) return node
+  const needsParagraph = (node.type === 'listItem' || node.type === 'taskItem')
+    && content[0]?.type !== 'paragraph'
+  return { ...node, content: needsParagraph ? [{ type: 'paragraph' }, ...content] : content }
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {
