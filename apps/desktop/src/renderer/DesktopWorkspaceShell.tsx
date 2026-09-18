@@ -2,7 +2,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, Maximize2, RefreshCw, Search, Send, User, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -5402,13 +5402,21 @@ export function DesktopWorkspaceShell(props: {
                 Open another workspace
               </SecondaryButton>
             ) : null}
-            <SecondaryButton
-              aria-expanded={storeDetailsOpen}
-              onClick={() => setStoreDetailsOpen((open) => !open)}
-            >
-              {storeDetailsOpen ? "Hide details" : "Show details"}
-            </SecondaryButton>
           </div>
+          <button
+            type="button"
+            aria-expanded={storeDetailsOpen}
+            onClick={() => setStoreDetailsOpen((open) => !open)}
+            className="flex items-center gap-1 rounded text-[12px] text-subtle transition-colors hover:text-ink"
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-100 ${storeDetailsOpen ? "rotate-90" : ""}`}
+            />
+            {storeDetailsOpen ? "Hide details" : "Show details"}
+          </button>
           {storeDetailsOpen ? (
             <section
               data-testid="workspace-update-details"
