@@ -60,29 +60,42 @@ export function CopyDetailsButton(props: {
   const { copied, copy } = useCopied(props.onError);
   const label = props.label ?? "Copy details";
   const { details } = props;
+  // The icon and tooltip change is silent to a screen reader; this polite
+  // status says "Copied" for both variants.
+  const announcement = (
+    <span role="status" aria-live="polite" className="sr-only">
+      {copied ? "Copied" : ""}
+    </span>
+  );
   if (props.iconOnly) {
     return (
-      <button
-        type="button"
-        data-testid={props["data-testid"]}
-        aria-label={label}
-        title={copied ? "Copied" : label}
-        onClick={() => void copy(details())}
-        className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
-      >
-        {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-      </button>
+      <>
+        <button
+          type="button"
+          data-testid={props["data-testid"]}
+          aria-label={label}
+          title={copied ? "Copied" : label}
+          onClick={() => void copy(details())}
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+        >
+          {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+        </button>
+        {announcement}
+      </>
     );
   }
   return (
-    <SecondaryButton
-      type="button"
-      data-testid={props["data-testid"]}
-      aria-label={label}
-      onClick={() => void copy(details())}
-    >
-      {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-      {copied ? "Copied" : label}
-    </SecondaryButton>
+    <>
+      <SecondaryButton
+        type="button"
+        data-testid={props["data-testid"]}
+        aria-label={label}
+        onClick={() => void copy(details())}
+      >
+        {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+        {copied ? "Copied" : label}
+      </SecondaryButton>
+      {announcement}
+    </>
   );
 }

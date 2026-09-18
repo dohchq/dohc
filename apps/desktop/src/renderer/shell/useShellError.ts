@@ -3,6 +3,10 @@ import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 
 type ShellErrorKind = "singleton-tab-split" | "tab-limit" | "workspace-search";
 
+// A message the toast and the Notices row can hold. A protocol response or a
+// validation reason can run long; the report Copy makes keeps the rest.
+export const SHELL_ERROR_MAX_CHARS = 500;
+
 // One workspace error the notice center shows: a toast when it arrives, a
 // row in Notices until it is retried or dismissed. An error that names a
 // value the user can see owes them a way to ask again (AGENTS.md), so a
@@ -30,6 +34,10 @@ export function useShellError(workspaceId: string) {
       nextId.current += 1;
       const next: ShellError = {
         ...error,
+        message:
+          error.message.length > SHELL_ERROR_MAX_CHARS
+            ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
+            : error.message,
         id: `shell-error-${nextId.current}`,
         atMs: Date.now(),
         seen: false,

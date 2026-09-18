@@ -12,7 +12,7 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
-import { CopyDetailsButton, useCopied } from "../shell/copyDetails";
+import { CopyDetailsButton } from "../shell/copyDetails";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -563,7 +563,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  const errorToastCopy = useCopied();
 
   return (
     <>
@@ -588,27 +587,23 @@ export function NoticeCenter(props: {
               Try again
             </button>
           ) : null}
-          <button
-            type="button"
-            aria-label="Copy error details"
+          <CopyDetailsButton
+            key={errorToast.id}
+            iconOnly
+            label="Copy error details"
             data-testid="workspace-shell-error-copy"
-            onClick={() => void errorToastCopy.copy(errorToast.details)}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
-          >
-            {errorToastCopy.copied ? (
-              <Check size={12} aria-hidden />
-            ) : (
-              <Copy size={12} aria-hidden />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-label="Dismiss workspace error"
-            onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
-          >
-            <X size={12} aria-hidden />
-          </button>
+            details={() => errorToast.details}
+          />
+          {props.onHideWorkspaceError ? (
+            <button
+              type="button"
+              aria-label="Dismiss workspace error"
+              onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
+              className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+            >
+              <X size={12} aria-hidden />
+            </button>
+          ) : null}
         </div>
       ) : null}
       {updateToastVisible ? (

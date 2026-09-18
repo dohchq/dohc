@@ -4293,6 +4293,9 @@ export function DesktopWorkspaceShell(props: {
   const { updateState: storeUpdateState, acceptUpdateResult: acceptStoreUpdateResult } =
     useDesktopUpdateStateFeed();
   const [storeUpdateCheckError, setStoreUpdateCheckError] = useState<string | null>(null);
+  // One request at a time: the feed says "checking" only after main answers,
+  // so a second click before that would send the request twice.
+  const [storeUpdateCheckPending, setStoreUpdateCheckPending] = useState(false);
   // One confirmation for every Restart: the stop state, the update notice,
   // and the update toast. Restarting closes the app, so it is asked once.
   const [restartPrompt, setRestartPrompt] = useState<"closed" | "open" | "restarting">("closed");
@@ -4358,12 +4361,24 @@ export function DesktopWorkspaceShell(props: {
     syncStatus?.engineStoreRefused != null &&
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
   storeUpdateRequiredRef.current = storeUpdateRequired;
+  // Dialogs float above the stop state and could still write to the
+  // stopped workspace. A stop closes them; a running workspace is unchanged.
+  useEffect(() => {
+    if (!storeUpdateRequired) return;
+    setNewFileOpen(false);
+    setNewCollectionFolder(null);
+    setQuickOpenOpen(false);
+    setPaletteOpen(false);
+    setShareTarget(null);
+    setOpenShareOpen(false);
+  }, [storeUpdateRequired]);
   const checkForStoreUpdate = useCallback(async () => {
     // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
     // never repaint workspace B. The updater feed itself is app-wide; only
     // this window's failure line is per workspace.
     const askedFor = workspaceId;
     setStoreUpdateCheckError(null);
+    setStoreUpdateCheckPending(true);
     try {
       const result = await bridge().checkForUpdates();
       if (workspaceIdRef.current !== askedFor) return;
@@ -4371,6 +4386,8 @@ export function DesktopWorkspaceShell(props: {
     } catch {
       if (workspaceIdRef.current !== askedFor) return;
       setStoreUpdateCheckError("Could not check for updates.");
+    } finally {
+      setStoreUpdateCheckPending(false);
     }
   }, [acceptStoreUpdateResult, workspaceId]);
   return (
@@ -5363,12 +5380,15 @@ export function DesktopWorkspaceShell(props: {
             <PrimaryButton
               autoFocus
               disabled={
+                storeUpdateCheckPending ||
                 storeUpdateState?.status === "checking" ||
                 storeUpdateState?.canCheck === false
               }
               onClick={() => void checkForStoreUpdate()}
             >
-              {storeUpdateState?.status === "checking" ? "Checking" : "Check for updates"}
+              {storeUpdateCheckPending || storeUpdateState?.status === "checking"
+                ? "Checking"
+                : "Check for updates"}
             </PrimaryButton>
             {storeUpdateState?.canInstall ? (
               <SecondaryButton onClick={openRestartPrompt}>

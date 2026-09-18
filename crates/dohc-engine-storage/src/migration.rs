@@ -2164,7 +2164,7 @@ pub(crate) fn run_migrations(
                                 "migration {} ({}) was applied from a different definition than this build's: the store recorded {}, this build defines {}",
                                 migration.ordinal,
                                 migration.id,
-                                &checksum[..checksum.len().min(12)],
+                                checksum.chars().take(12).collect::<String>(),
                                 &expected[..12]
                             )
                             .into(),
@@ -2287,6 +2287,29 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    /// The ledger is raw TEXT. A tampered checksum that is not ASCII must
+    /// refuse like any other mismatch, not panic on a byte boundary.
+    #[test]
+    fn a_non_ascii_ledger_checksum_is_refused_not_a_panic() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("baseline");
+        conn.execute(
+            "UPDATE engine_migrations SET checksum = ?1 WHERE ordinal = 0",
+            ["aaaaaaaaaaaé"],
+        )
+        .expect("tamper");
+        let refused = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect_err("a mismatched ledger refuses");
+        assert!(matches!(refused, StorageError::MigrationFailed { .. }));
+        assert!(
+            std::error::Error::source(&refused).is_some(),
+            "the cause names the migration"
+        );
     }
 
     /// The shipped list is well-formed. `validate_migration_order` runs before

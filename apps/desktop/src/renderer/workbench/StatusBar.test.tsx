@@ -49,10 +49,8 @@ afterEach(() => {
   pushUpdate = null;
 });
 
-function renderBar(
-  props: Partial<Parameters<typeof StatusBar>[0]> = {},
-) {
-  return render(
+function barElement(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
+  return (
     <StatusBar
       workspaceId="ws-status-test"
       workspaceName="my-notes"
@@ -75,8 +73,12 @@ function renderBar(
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
-    />,
+    />
   );
+}
+
+function renderBar(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
+  return render(barElement(props));
 }
 
 function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
@@ -415,31 +417,33 @@ describe("notice center", () => {
   // Notices. Try again and Copy ride with it; closing the toast keeps the row.
   it("shows a workspace error as a toast and a notice with retry and copy", async () => {
     const onRetryWorkspaceError = vi.fn();
-    const onHideWorkspaceError = vi.fn();
     const onDismissWorkspaceError = vi.fn();
     const user = userEvent.setup();
-    renderBar({
-      workspaceErrors: [
-        {
-          id: "shell-error-1",
-          message: "Could not refresh history. The engine did not answer.",
-          details: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
-          atMs: 1_000,
-          canRetry: true,
-          seen: false,
-        },
-      ],
+    const error = {
+      id: "shell-error-1",
+      message: "Could not refresh history. The engine did not answer.",
+      details: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
+      atMs: 1_000,
+      canRetry: true,
+      seen: false,
+    };
+    const barProps = (seen: boolean) => ({
+      workspaceErrors: [{ ...error, seen }],
       onRetryWorkspaceError,
-      onHideWorkspaceError,
+      onHideWorkspaceError: vi.fn(),
       onDismissWorkspaceError,
     });
+    const { rerender } = renderBar(barProps(false));
 
     const toast = screen.getByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("Could not refresh history.");
     await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
     expect(await navigator.clipboard.readText()).toContain("Workspace: personal");
+    expect(screen.getAllByRole("status").some((el) => el.textContent === "Copied")).toBe(true);
+    // Closing the toast marks the error seen: the toast goes, the row stays.
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-    expect(onHideWorkspaceError).toHaveBeenCalledWith("shell-error-1");
+    rerender(barElement(barProps(true)));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = screen.getByTestId("notice-shell-error-1");
