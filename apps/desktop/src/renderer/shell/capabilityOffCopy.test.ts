@@ -6,7 +6,6 @@ describe("refused data store copy", () => {
   it.each([
     ["foreign-database", "dohc cannot read this workspace's data store."],
     ["unsupported-fingerprint", "This workspace's data store is not in the format this version of dohc uses."],
-    ["migration-failed", "dohc could not update this workspace's data store to this version."],
   ] as const)("directs every unavailable surface to recovery for %s", (cause, sentence) => {
     const status: SyncStatusResult = {
       state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
@@ -22,6 +21,24 @@ describe("refused data store copy", () => {
     expect(historyOffPlaceholderCopy(status, { ended: true, granterEmail: "alex@example.com" })).toBe(
       "A shared view records no history. alex@example.com ended this share. You can still open the files it shared.",
     );
+  });
+});
+
+// A store this build could not migrate is intact. No surface may send the
+// user to a rebuild that would lose what a fixed build still opens.
+describe("migration failure copy", () => {
+  it("directs every unavailable surface to an update, not a rebuild", () => {
+    const status: SyncStatusResult = {
+      state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      liveSessionsGeneration: 0, historyRecordingUnavailable: false, historyShareView: false,
+      historyCaptureFailed: true, engineStoreRefused: "migration-failed",
+    };
+    for (const copy of [historyOffPlaceholderCopy(status, null), versionCompareOffCopy(status), chatsOffCopy(status)]) {
+      expect(copy).toBe(
+        "dohc could not update this workspace's data store to this version. Update dohc to continue. Your files are unchanged.",
+      );
+      expect(copy).not.toContain("Rebuild");
+    }
   });
 });
 

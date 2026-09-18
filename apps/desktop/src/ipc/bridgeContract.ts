@@ -1258,6 +1258,27 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
   }
 }
 
+// What the refusal needs. A store from another format, or a file that is not
+// a dohc database, is rebuilt from the workspace files. A store this build
+// could not migrate is intact and waits for a build that can open it.
+export function engineStoreRefusalRecovery(
+  cause: EngineStoreRefusal,
+): "rebuild" | "update" {
+  return cause === "migration-failed" ? "update" : "rebuild";
+}
+
+export const ENGINE_STORE_UPDATE_NEXT_STEP =
+  "Update dohc to continue. Your files are unchanged.";
+
+// The sentence and its next step, for surfaces that show no control.
+export function engineStoreRefusalCopy(cause: EngineStoreRefusal): string {
+  const next =
+    engineStoreRefusalRecovery(cause) === "rebuild"
+      ? "Open Notices and choose Rebuild to review recovery options."
+      : ENGINE_STORE_UPDATE_NEXT_STEP;
+  return `${engineStoreRefusalSentence(cause)} ${next}`;
+}
+
 export const RebuildEngineStorePayload = z.object({
   workspaceId: WORKSPACE_ID,
 });

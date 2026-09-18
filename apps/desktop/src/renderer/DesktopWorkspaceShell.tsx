@@ -47,6 +47,7 @@ import type {
 import {
   activityPathsAffectWorkspaceListing,
   ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
@@ -4285,6 +4286,12 @@ export function DesktopWorkspaceShell(props: {
     );
   }
 
+  // A store this build could not migrate is intact. Nothing in this
+  // workspace can run against it, so the workspace stops here until a build
+  // that opens it. Other workspaces keep their own stores.
+  const storeUpdateRequired =
+    syncStatus?.engineStoreRefused != null &&
+    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
   return (
     <div
       data-testid="workspace-shell"
@@ -5272,7 +5279,30 @@ export function DesktopWorkspaceShell(props: {
           </ChatsPanel>
         ) : null}
       </div>
-      {!workspaceIsReady && workspaceOpenFailure ? (
+      {storeUpdateRequired ? (
+        <div
+          data-testid="workspace-update-required"
+          role="alert"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+        >
+          <div className="max-w-md space-y-1.5">
+            <p className="text-sm font-medium text-ink">
+              This version of dohc can't open this workspace
+            </p>
+            <p className="text-xs text-muted">
+              {engineStoreRefusalSentence("migration-failed")} Your files are
+              unchanged.
+            </p>
+            <p className="text-xs text-muted">
+              Update dohc to continue, or choose another workspace from the
+              title bar.
+            </p>
+          </div>
+          <PrimaryButton onClick={() => void checkForDesktopUpdates()}>
+            Check for updates
+          </PrimaryButton>
+        </div>
+      ) : !workspaceIsReady && workspaceOpenFailure ? (
         <div
           data-testid="workspace-open-failed"
           role="alert"
@@ -5322,7 +5352,7 @@ export function DesktopWorkspaceShell(props: {
         onOpenSettings={() => openSettings()}
         onRebuildEngineStore={(returnFocus) => {
           const refusal = syncStatus?.engineStoreRefused;
-          if (!refusal) return;
+          if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;
           engineRebuildReturnFocusRef.current = returnFocus;
           setEngineRebuild({ phase: "confirm", refusal });
         }}

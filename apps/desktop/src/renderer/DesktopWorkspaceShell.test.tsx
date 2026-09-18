@@ -6973,12 +6973,6 @@ describe("engine store recovery", () => {
       otherSentence:
         "This workspace's data store is not in the format this version of dohc uses.",
     },
-    {
-      cause: "migration-failed" as const,
-      sentence:
-        "dohc could not update this workspace's data store to this version.",
-      otherSentence: "dohc cannot read this workspace's data store.",
-    },
   ])("names the $cause refusal in the confirm dialog", async ({
     cause,
     sentence,
@@ -6995,6 +6989,30 @@ describe("engine store recovery", () => {
     expect(dialog.textContent).not.toContain(otherSentence);
     expect(dialog.textContent).not.toContain("older");
     expect(dialog.textContent).not.toContain("not created by dohc");
+  });
+
+  // A store this build could not migrate is intact and waits for a build
+  // that opens it. The workspace stops instead of offering a rebuild that
+  // would lose what the fixed build still opens.
+  it("stops the workspace on a migration failure instead of offering the rebuild", async () => {
+    const status = { ...refusedStatus, engineStoreRefused: "migration-failed" as const };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const blocked = await screen.findByTestId("workspace-update-required");
+    expect(blocked.textContent).toContain(
+      "dohc could not update this workspace's data store to this version.",
+    );
+    expect(blocked.textContent).toContain("Update dohc to continue");
+    expect(within(blocked).getByRole("button", { name: "Check for updates" })).toBeTruthy();
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-engine-store-refused");
+    expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
   it(

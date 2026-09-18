@@ -14,6 +14,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
+  ENGINE_STORE_UPDATE_NEXT_STEP,
+  engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
   type AutomationFailureNotice,
   type SyncStatusResult,
@@ -371,17 +373,27 @@ export function NoticeCenter(props: {
     }
 
     if (props.syncStatus?.engineStoreRefused) {
+      const refusal = props.syncStatus.engineStoreRefused;
+      // A store this build could not migrate is intact and offers no
+      // action here: the workspace itself says what to do.
+      const rebuild = engineStoreRefusalRecovery(refusal) === "rebuild";
       next.push({
         id: "engine-store-refused",
         tone: "danger",
-        title: engineStoreRefusalSentence(props.syncStatus.engineStoreRefused),
-        body: `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`,
-        action: {
-          label: "Rebuild",
-          onClick: () => {
-            if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
-          },
-        },
+        title: engineStoreRefusalSentence(refusal),
+        body: rebuild
+          ? `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`
+          : ENGINE_STORE_UPDATE_NEXT_STEP,
+        ...(rebuild
+          ? {
+              action: {
+                label: "Rebuild",
+                onClick: () => {
+                  if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
+                },
+              },
+            }
+          : {}),
         Icon: AlertTriangle,
       });
     } else if (props.syncStatus?.historyCaptureFailed) {

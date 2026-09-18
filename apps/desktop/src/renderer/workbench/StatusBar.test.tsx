@@ -345,12 +345,6 @@ describe("notice center", () => {
       otherSentence:
         "This workspace's data store is not in the format this version of dohc uses.",
     },
-    {
-      cause: "migration-failed" as const,
-      sentence:
-        "dohc could not update this workspace's data store to this version.",
-      otherSentence: "dohc cannot read this workspace's data store.",
-    },
   ])("explains the $cause refusal and offers the rebuild", async ({
     cause,
     sentence,
@@ -383,6 +377,34 @@ describe("notice center", () => {
 
     await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
     expect(onRebuildEngineStore).toHaveBeenCalledOnce();
+  });
+
+  // A store this build could not migrate is intact. The notice names the
+  // failure and the next step, and offers no rebuild that would lose it.
+  it("names a migration failure without offering the rebuild", async () => {
+    const onRebuildEngineStore = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyCaptureFailed: true,
+        engineStoreRefused: "migration-failed",
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      },
+      onRebuildEngineStore,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-engine-store-refused");
+    expect(notice.textContent).toContain(
+      "dohc could not update this workspace's data store to this version.",
+    );
+    expect(notice.textContent).toContain("Update dohc to continue. Your files are unchanged.");
+    expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
+    expect(onRebuildEngineStore).not.toHaveBeenCalled();
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {

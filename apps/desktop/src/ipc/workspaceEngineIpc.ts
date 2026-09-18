@@ -6,7 +6,7 @@ import {
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
   RestoreEngineMomentFileResult, WorkspaceIdPayload, SyncStatusResult,
-  RebuildEngineStorePayload, RebuildEngineStoreResult,
+  RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc } from "./engineHistoryIpc";
@@ -221,10 +221,16 @@ export function createWorkspaceEngineIpc<
           const sessions = requireEngineSessions();
           return RebuildEngineStoreResult.parse(
             await rebuildEngineStoreRequest(workspace.rootPath, {
-              isStoreRefused: () =>
-                Boolean(
-                  activity.getStatus(workspace.workspaceId).engineStoreRefused,
-                ),
+              // A store this build could not migrate is intact; only a
+              // refusal the rebuild can repair admits the move.
+              isStoreRefused: () => {
+                const refusal =
+                  activity.getStatus(workspace.workspaceId).engineStoreRefused;
+                return (
+                  refusal != null &&
+                  engineStoreRefusalRecovery(refusal) === "rebuild"
+                );
+              },
               hasActiveAgentRun: () =>
                 activity.hasAgentRun(workspace.workspaceId, workspace.rootPath),
               previousResult: () =>
