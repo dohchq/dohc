@@ -5285,7 +5285,7 @@ export function DesktopWorkspaceShell(props: {
           role="alert"
           className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
         >
-          <div className="max-w-md space-y-1.5">
+          <div className="max-w-md select-text cursor-text space-y-1.5">
             <p className="text-sm font-medium text-ink">
               This version of dohc can't open this workspace
             </p>
