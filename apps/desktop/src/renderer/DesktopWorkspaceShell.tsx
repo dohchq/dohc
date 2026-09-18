@@ -5309,21 +5309,34 @@ export function DesktopWorkspaceShell(props: {
         <div
           data-testid="workspace-update-required"
           role="alert"
-          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-4 bg-bg px-6 text-center"
         >
-          <div className="max-w-md select-text cursor-text space-y-1.5">
-            <p className="text-sm font-medium text-ink">
+          <DohcMark size={30} className="text-line" />
+          <div className="max-w-sm select-text cursor-text space-y-1.5">
+            <p className="m-0 text-sm font-semibold text-ink">
               This version of dohc can't open this workspace
             </p>
-            <p className="text-xs text-muted">
+            <p className="m-0 text-[12px] text-muted">
               {engineStoreRefusalSentence("migration-failed")} Your files are
               unchanged.
             </p>
-            <p className="text-xs text-muted">
+            <p className="m-0 text-[12px] text-muted">
               Update dohc to continue, or choose another workspace from the
               title bar.
             </p>
           </div>
+          <dl className="m-0 grid w-full max-w-sm select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 rounded-lg border border-line bg-panel p-3 text-left text-[11px]">
+            <dt className="text-subtle">Workspace</dt>
+            <dd className="m-0 truncate font-mono text-ink">
+              {workspaceName(props.workspace)}
+            </dd>
+            <dt className="text-subtle">Folder</dt>
+            <dd className="m-0 truncate font-mono text-ink" title={props.workspace.rootPath}>
+              {props.workspace.rootPath}
+            </dd>
+            <dt className="text-subtle">Data store</dt>
+            <dd className="m-0 font-mono text-ink">.dohc/engine</dd>
+          </dl>
           <div className="flex items-center gap-2">
             <PrimaryButton
               disabled={storeUpdateCheck.phase === "checking"}
@@ -5341,7 +5354,7 @@ export function DesktopWorkspaceShell(props: {
             <p
               data-testid="workspace-update-check-result"
               role="status"
-              className="m-0 max-w-md select-text cursor-text text-xs text-muted"
+              className="m-0 max-w-sm select-text cursor-text text-[12px] text-muted"
             >
               {storeUpdateCheck.message}
             </p>
