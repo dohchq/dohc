@@ -4292,6 +4292,32 @@ export function DesktopWorkspaceShell(props: {
   const storeUpdateRequired =
     syncStatus?.engineStoreRefused != null &&
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update";
+  // The check answers inside the stop state. The shell banner sits under
+  // this overlay, so a result reported there would never be seen.
+  const [storeUpdateCheck, setStoreUpdateCheck] = useState<{
+    phase: "idle" | "checking" | "done";
+    message: string | null;
+    canInstall: boolean;
+  }>({ phase: "idle", message: null, canInstall: false });
+  const checkForStoreUpdate = useCallback(async () => {
+    setStoreUpdateCheck({ phase: "checking", message: null, canInstall: false });
+    try {
+      const result = await bridge().checkForUpdates();
+      setStoreUpdateCheck({
+        phase: "done",
+        message: result.checked
+          ? result.state.message
+          : `No update check was started. ${result.state.message}`,
+        canInstall: result.state.canInstall === true,
+      });
+    } catch (error) {
+      setStoreUpdateCheck({
+        phase: "done",
+        message: `Could not check for updates. ${error instanceof Error ? error.message : ""}`.trim(),
+        canInstall: false,
+      });
+    }
+  }, []);
   return (
     <div
       data-testid="workspace-shell"
@@ -5298,9 +5324,28 @@ export function DesktopWorkspaceShell(props: {
               title bar.
             </p>
           </div>
-          <PrimaryButton onClick={() => void checkForDesktopUpdates()}>
-            Check for updates
-          </PrimaryButton>
+          <div className="flex items-center gap-2">
+            <PrimaryButton
+              disabled={storeUpdateCheck.phase === "checking"}
+              onClick={() => void checkForStoreUpdate()}
+            >
+              {storeUpdateCheck.phase === "checking" ? "Checking" : "Check for updates"}
+            </PrimaryButton>
+            {storeUpdateCheck.canInstall ? (
+              <SecondaryButton onClick={() => void installDesktopUpdate()}>
+                Restart to update
+              </SecondaryButton>
+            ) : null}
+          </div>
+          {storeUpdateCheck.message ? (
+            <p
+              data-testid="workspace-update-check-result"
+              role="status"
+              className="m-0 max-w-md select-text cursor-text text-xs text-muted"
+            >
+              {storeUpdateCheck.message}
+            </p>
+          ) : null}
         </div>
       ) : !workspaceIsReady && workspaceOpenFailure ? (
         <div

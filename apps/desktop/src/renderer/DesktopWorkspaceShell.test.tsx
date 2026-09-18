@@ -7007,7 +7007,17 @@ describe("engine store recovery", () => {
       "dohc could not update this workspace's data store to this version.",
     );
     expect(blocked.textContent).toContain("Update dohc to continue");
-    expect(within(blocked).getByRole("button", { name: "Check for updates" })).toBeTruthy();
+    // The check answers inside the stop state, where the user can see it.
+    bridge.checkForUpdates = vi.fn(async () => ({
+      checked: false,
+      state: { status: "idle" as const, message: "Updates are available in packaged builds." },
+    }));
+    await user.click(within(blocked).getByRole("button", { name: "Check for updates" }));
+    const result = await screen.findByTestId("workspace-update-check-result");
+    expect(result.textContent).toBe(
+      "No update check was started. Updates are available in packaged builds.",
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const notice = await screen.findByTestId("notice-engine-store-refused");
