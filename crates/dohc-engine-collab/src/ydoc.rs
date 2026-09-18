@@ -1652,7 +1652,32 @@ fn parse_table_row_heights(line: &str) -> Option<Vec<(usize, i64)>> {
     Some(heights)
 }
 
-/// Splits one `| a | b |` line into trimmed cells, honoring `\|`.
+/// Undoes one layer of the projector's entity encoding in one pass, so the
+/// text the projector wrote as `&amp;lt;` comes back as `&lt;`, never `<`.
+fn decode_html_entities_once(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(ampersand) = rest.find('&') {
+        output.push_str(&rest[..ampersand]);
+        rest = &rest[ampersand..];
+        let (decoded, encoded_len) = if rest.starts_with("&amp;") {
+            ("&", "&amp;".len())
+        } else if rest.starts_with("&lt;") {
+            ("<", "&lt;".len())
+        } else if rest.starts_with("&gt;") {
+            (">", "&gt;".len())
+        } else {
+            ("&", 1)
+        };
+        output.push_str(decoded);
+        rest = &rest[encoded_len..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Splits one `| a | b |` line into trimmed cells, with the projector's pipe
+/// escaping and entity encoding undone.
 fn parse_table_row(line: &str) -> Option<Vec<String>> {
     let inner = line.strip_prefix('|')?.strip_suffix('|')?;
     let mut cells = Vec::new();
@@ -1674,7 +1699,7 @@ fn parse_table_row(line: &str) -> Option<Vec<String>> {
     Some(
         cells
             .into_iter()
-            .map(|cell| trim_js(&cell).replace("\\|", "|"))
+            .map(|cell| decode_html_entities_once(&trim_js(&cell).replace("\\|", "|")))
             .collect(),
     )
 }
@@ -5937,6 +5962,59 @@ mod projection_tests {
         assert!(
             rows[0]["attrs"].get("height").is_none(),
             "an unannotated row has no height"
+        );
+    }
+
+    #[test]
+    fn resolution_fold_decodes_one_entity_layer_in_table_cells() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element("tableHeader", &[], [paragraph("Text")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[("height", "84")],
+                    [xml_element("tableCell", &[], [paragraph("a & b | c")])],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableCell",
+                        &[],
+                        [paragraph("<tag> &amp; x<br>y")],
+                    )],
+                ),
+            ],
+        )]);
+        let chosen = doc
+            .project(ContentKind::Richdoc)
+            .expect("projection")
+            .content;
+        assert!(
+            chosen.contains("a &amp; b \\| c") && chosen.contains("&lt;tag&gt; &amp;amp; x<br>y"),
+            "{chosen}"
+        );
+        let folded = Ydoc::wire();
+        folded
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
+            .expect("richdoc rewrite");
+        assert_eq!(
+            folded
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            chosen
+        );
+        let body = serde_json::to_string(&folded.canonical_content()["body"]).expect("body json");
+        assert!(
+            body.contains("a & b | c") && body.contains("<tag> &amp; x<br>y"),
+            "{body}"
         );
     }
 
