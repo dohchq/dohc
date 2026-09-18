@@ -7007,8 +7007,8 @@ describe("engine store recovery", () => {
     renderShell(bridge);
 
     const blocked = await screen.findByTestId("workspace-update-required");
-    // Show details reveals the report; Copy inside it copies the same lines.
-    await user.click(within(blocked).getByRole("button", { name: "Show details" }));
+    // Technical details reveals the report; Copy inside it copies the same lines.
+    await user.click(within(blocked).getByRole("button", { name: "Show technical details" }));
     const details = await screen.findByTestId("workspace-update-details");
     await user.click(within(details).getByRole("button", { name: "Copy" }));
     const copied = await navigator.clipboard.readText();

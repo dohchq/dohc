@@ -5415,16 +5415,16 @@ export function DesktopWorkspaceShell(props: {
               aria-hidden
               className={`transition-transform duration-100 ${storeDetailsOpen ? "rotate-90" : ""}`}
             />
-            {storeDetailsOpen ? "Hide details" : "Show details"}
+            {storeDetailsOpen ? "Hide technical details" : "Show technical details"}
           </button>
           {storeDetailsOpen ? (
             <section
               data-testid="workspace-update-details"
-              aria-label="Details"
+              aria-label="Technical details"
               className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
             >
               <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
-                <span className="dohc-section-label">Details</span>
+                <span className="dohc-section-label">Technical details</span>
                 <CopyDetailsButton
                   data-testid="workspace-update-copy-details"
                   label="Copy"
