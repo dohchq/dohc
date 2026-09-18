@@ -38,6 +38,11 @@ extraResources:
     to: app-compiler
     filter:
       - "**/*"
+  # electron-builder skips node_modules at each resource's root.
+  - from: resources/app-compiler/node_modules
+    to: app-compiler/node_modules
+    filter:
+      - "**/*"
   - from: build/icon.png
     to: tray-icon.png
   - from: build/icon.png
