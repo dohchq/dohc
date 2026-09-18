@@ -407,11 +407,21 @@ function parseRichdocMarkdown(markdown: string): JSONContent {
       ([sentinel, entity]) => [sentinel, decodeBlockEntity(entity)] as const,
     ),
   )
-  return restoreBlockEntityParseSentinels(
-    parsed,
-    decodedEntities,
-    encodedEntities,
+  return ensureListItemParagraphs(
+    restoreBlockEntityParseSentinels(parsed, decodedEntities, encodedEntities),
   )
+}
+
+// A list item's schema starts with a paragraph. Tiptap hands an item whose
+// first block is a table straight through, and the Y.Doc conversion then
+// drops the item. An annotated table is the first block of an item whose
+// paragraph was empty, so give such an item its paragraph back.
+function ensureListItemParagraphs(node: JSONContent): JSONContent {
+  const content = node.content?.map(ensureListItemParagraphs)
+  if (!content) return node
+  const needsParagraph = (node.type === 'listItem' || node.type === 'taskItem')
+    && content[0]?.type !== 'paragraph'
+  return { ...node, content: needsParagraph ? [{ type: 'paragraph' }, ...content] : content }
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {

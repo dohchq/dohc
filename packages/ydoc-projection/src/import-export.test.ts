@@ -1706,6 +1706,24 @@ describe('Y.Doc markdown import/export', () => {
       expect(large, `regular-expression runs: ${small} -> ${large}`).toBeLessThan(small * 2.5)
     })
 
+    it('keeps a list item whose first block is an annotated table', () => {
+      const input = [
+        '- <!-- dohc:table row-heights=1:84 -->',
+        '  | A | B |',
+        '  | --- | --- |',
+        '  | a | b |',
+        '- second item',
+      ].join('\n')
+      const doc = markdownToYDoc(input)
+      const list = yDocBodyJSON(doc).content?.[0]
+      expect(list?.type).toBe('bulletList')
+      expect(list?.content?.map(item => item.content?.map(block => block.type))).toEqual([
+        ['paragraph', 'table'],
+        ['paragraph'],
+      ])
+      expect(list?.content?.[0]?.content?.[1]?.content?.[1]?.attrs?.height).toBe(84)
+    })
+
     it('leaves an annotation that no table follows as an ordinary comment', () => {
       const doc = markdownToYDoc('<!-- dohc:table row-heights=1:84 -->\nNot a table.')
       expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual([
