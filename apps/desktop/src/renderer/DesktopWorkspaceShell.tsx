@@ -5322,8 +5322,7 @@ export function DesktopWorkspaceShell(props: {
                 unchanged.
               </p>
               <p className="m-0 text-[13px] leading-relaxed text-muted">
-                Update dohc to continue, or choose another workspace from the
-                title bar.
+                Update dohc to continue, or keep working in another workspace.
               </p>
             </div>
           </div>
@@ -5349,6 +5348,11 @@ export function DesktopWorkspaceShell(props: {
             {storeUpdateCheck.canInstall ? (
               <SecondaryButton onClick={() => void installDesktopUpdate()}>
                 Restart to update
+              </SecondaryButton>
+            ) : null}
+            {props.onManageWorkspaces ? (
+              <SecondaryButton onClick={manageWorkspaces}>
+                Open another workspace
               </SecondaryButton>
             ) : null}
           </div>
