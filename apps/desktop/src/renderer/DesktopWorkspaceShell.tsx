@@ -4308,6 +4308,20 @@ export function DesktopWorkspaceShell(props: {
     [appVersion, props.workspace],
   );
   const bannerCopy = useCopied();
+  // What Copy details copies, shown on request so a person can read what
+  // they are about to paste. One string for both, so they never differ.
+  const [storeDetailsOpen, setStoreDetailsOpen] = useState(false);
+  const storeDetailsText = useMemo(
+    () =>
+      errorDetails([
+        ["Problem", engineStoreRefusalSentence("migration-failed")],
+        ["Code", "migration-failed"],
+        ["Cause", syncStatus?.engineStoreRefusedDetail],
+        ["Data store", ".dohc/engine"],
+        ...reportFacts(),
+      ]),
+    [syncStatus?.engineStoreRefusedDetail, reportFacts],
+  );
   // A store this build could not migrate is intact. Nothing in this
   // workspace can run against it, so the workspace stops here until a build
   // that opens it. Other workspaces keep their own stores.
@@ -5367,18 +5381,6 @@ export function DesktopWorkspaceShell(props: {
               </p>
             </div>
           </div>
-          <dl className="m-0 grid w-full max-w-sm select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 rounded-lg border border-line bg-panel p-3 text-left text-[11px]">
-            <dt className="text-subtle">Workspace</dt>
-            <dd className="m-0 truncate text-ink">
-              {workspaceName(props.workspace)}
-            </dd>
-            <dt className="text-subtle">Folder</dt>
-            <dd className="m-0 truncate text-ink" title={props.workspace.rootPath}>
-              {props.workspace.rootPath}
-            </dd>
-            <dt className="text-subtle">Data store</dt>
-            <dd className="m-0 text-ink">.dohc/engine</dd>
-          </dl>
           <div className="flex items-center gap-2">
             <PrimaryButton
               disabled={storeUpdateCheck.phase === "checking"}
@@ -5398,20 +5400,28 @@ export function DesktopWorkspaceShell(props: {
             ) : null}
             <CopyDetailsButton
               data-testid="workspace-update-copy-details"
-              details={() =>
-                errorDetails([
-                  ["Problem", engineStoreRefusalSentence("migration-failed")],
-                  ["Code", "migration-failed"],
-                  ["Cause", syncStatus?.engineStoreRefusedDetail],
-                  ["Data store", ".dohc/engine"],
-                  ...reportFacts(),
-                ])
-              }
+              details={() => storeDetailsText}
               onError={(error) =>
                 reportShellError("Could not copy the details.", error)
               }
             />
           </div>
+          <button
+            type="button"
+            aria-expanded={storeDetailsOpen}
+            onClick={() => setStoreDetailsOpen((open) => !open)}
+            className="text-[12px] text-subtle underline-offset-2 transition-colors hover:text-ink hover:underline"
+          >
+            {storeDetailsOpen ? "Hide details" : "Show details"}
+          </button>
+          {storeDetailsOpen ? (
+            <pre
+              data-testid="workspace-update-details"
+              className="m-0 w-full max-w-md select-text cursor-text whitespace-pre-wrap break-words rounded-lg border border-line bg-panel p-3 text-left font-mono text-[11px] leading-relaxed text-ink"
+            >
+              {storeDetailsText}
+            </pre>
+          ) : null}
           {storeUpdateCheck.message ? (
             <p
               data-testid="workspace-update-check-result"

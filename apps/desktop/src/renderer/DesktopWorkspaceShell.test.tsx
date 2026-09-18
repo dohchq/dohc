@@ -7014,6 +7014,10 @@ describe("engine store recovery", () => {
     expect(copied).toContain("Cause: migration v2-baseline was applied from a different definition than this build's");
     expect(copied).toContain("Folder: ");
     expect(copied).toContain("Platform: ");
+    // Show details reveals the same text a person is about to paste.
+    await user.click(within(blocked).getByRole("button", { name: "Show details" }));
+    expect((await screen.findByTestId("workspace-update-details")).textContent).toBe(copied);
+    expect(within(blocked).queryByText("Data store")).toBeNull();
     expect(blocked.textContent).toContain(
       "dohc could not update this workspace's data store to this version.",
     );
