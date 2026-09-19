@@ -56,7 +56,7 @@ function path(value: unknown, directory: boolean): string {
 }
 
 /** Operator configuration only. Incoming document fields never supply these paths. */
-function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
+export function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
     ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation"]);
   if (value.version !== 1 || !Array.isArray(value.workspaces) || !value.workspaces.length) throw new TypeError("Invalid service host configuration.");
@@ -284,6 +284,10 @@ export async function startServiceLiveHost(options: {
     }
     finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
+      isDocumentReady(document: LiveDocumentKey): boolean {
+        try { check(); return consumerFor(parseLiveDocumentKey(document)) !== undefined; }
+        catch { return false; }
+      },
       async prepareOrdinary(workspaceId: string, callerSignal?: AbortSignal) {
         if(config.activation)throw new Error("The activation driver owns ordinary replication on this host.");
         const driver = ordinary.get(workspaceId);

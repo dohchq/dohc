@@ -12,6 +12,22 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("uses the supported self-host live profile while retaining explicit deployment requirements", () => {
+    const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
+    const config = loadShareWebConfig(env);
+    expect(config.publicEditRelease).toEqual({version: 1});
+    expect(config.namedBrowserSessionLimits).toBeDefined();
+    expect(config.namedLiveGatewayLimits).toBeDefined();
+    expect(config.namedRecipientBrowserLimits).toBeDefined();
+    expect(config.linkLive).toBeDefined();
+    expect(env).not.toHaveProperty("DOHC_PUBLIC_EDIT_RELEASE");
+    expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_AUTH_URL: undefined})).toThrow();
+    expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: undefined})).toThrow();
+    expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: "{}"})).toThrow();
+    expect(() => loadShareWebConfig({...env, DOHC_SELF_HOST_LIVE: "yes"})).toThrow("DOHC_SELF_HOST_LIVE");
+    expect(loadShareWebConfig({...accountEnvironment, DOHC_SELF_HOST_LIVE: "0"}).linkLive).toBeUndefined();
+  });
+
   it("requires the explicit link live profile before accepting a release marker", () => {
     expect(loadShareWebConfig(accountEnvironment).publicEditRelease).toBeUndefined();
     expect(() => loadShareWebConfig({...accountEnvironment, DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}'})).toThrow(/Public Edit release requires/);

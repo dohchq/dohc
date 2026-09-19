@@ -23,7 +23,9 @@ export function createWorkspaceBlobRoutes(
   async function respondToWorkspaceBlobs(
     request: Request,
     route: WorkspaceBlobRoute,
+    guard: () => void = () => {},
   ): Promise<Response> {
+    guard();
     if (route.route === "gc" && request.method === "POST") {
       const result = await storage.collectUnreferencedBlobs(route.workspaceId, {
         nowMs: nowMs(),
@@ -39,6 +41,7 @@ export function createWorkspaceBlobRoutes(
       if (actual !== route.sha256) {
         throw badRequest("blob content does not match sha256 path");
       }
+      guard();
       const put = storage.putBlob({
         workspaceId: route.workspaceId,
         sha256: route.sha256,
@@ -77,6 +80,7 @@ export function createWorkspaceBlobRoutes(
         assertSha256(value);
         return value;
       });
+      guard();
       return jsonResponse({
         ok: true,
         missing: storage.missingBlobs(route.workspaceId, sha256s),

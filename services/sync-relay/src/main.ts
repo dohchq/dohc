@@ -41,6 +41,10 @@ import {createNamedDesktopLive} from "./namedDesktopLive";
 import {parseNamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {selfHostLiveProfile} from "./selfHostLiveProfile";
+import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
+import {createServiceHostReplication} from "./serviceHostReplication";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
@@ -60,6 +64,12 @@ const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
   relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
+const selfHostedLive = process.env.DOHC_SELF_HOST_LIVE === "1";
+if (process.env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_SELF_HOST_LIVE)) fatal("FATAL: DOHC_SELF_HOST_LIVE must be 0 or 1.");
+const liveProfile = selfHostedLive ? selfHostLiveProfile() : undefined;
+if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
+  fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
+}
 
 function isLoopbackHostname(hostname: string): boolean {
   return (
@@ -166,7 +176,7 @@ if (!testAuthSeam && secret.length < 32) {
   );
 }
 
-const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
+const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? (selfHostedLive ? {version: 1} : undefined) : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
 const appPublicationLimits = (() => {
   try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
   catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
@@ -180,7 +190,7 @@ if (appCollectionPolicy && !appPublicationLimits) {
 }
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const namedLiveConfig = (() => {
-  const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG;
+  const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG ?? (liveProfile && JSON.stringify(liveProfile.namedLive));
   if (value === undefined) return undefined;
   if (!namedBrowserSessionLimits || !shareWebOrigin || !relayExchangeKey || !linkKey || !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS) {
     fatal("FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.");
@@ -189,11 +199,11 @@ const namedLiveConfig = (() => {
   catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
 })();
 const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
-const linkLiveEnabled = process.env.DOHC_RELAY_LINK_LIVE === "1";
+const linkLiveEnabled = process.env.DOHC_RELAY_LINK_LIVE === "1" || (selfHostedLive && process.env.DOHC_RELAY_LINK_LIVE === undefined);
 if (process.env.DOHC_RELAY_LINK_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_RELAY_LINK_LIVE)) fatal("FATAL: DOHC_RELAY_LINK_LIVE must be 0 or 1.");
 if (linkLiveEnabled && !namedLiveConfig) fatal("FATAL: Link live routes require configured live admission limits.");
 const desktopEditorLimits = (() => {
-  const value = process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS;
+  const value = process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS ?? (liveProfile && JSON.stringify(liveProfile.editor));
   if (value === undefined) return undefined;
   if (!namedLiveConfig || !namedBrowserSessionLimits) fatal("FATAL: Desktop live editing requires configured named live routes.");
   try {
@@ -226,7 +236,7 @@ let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string
 let lookupUserDisplayName: (
   userId: string,
 ) => Promise<string | null> | string | null;
-const resolveActor: ResolveActor = testAuthSeam
+const resolveAccountActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
   : (() => {
       pool = new Pool({
@@ -245,7 +255,11 @@ const resolveActor: ResolveActor = testAuthSeam
         secret,
       });
       return createSessionActorResolver(auth);
-    })();
+  })();
+
+const resolveActor = resolveAccountActor;
+const serviceReplication = selfHostedLive && deployment && linkKey
+  ? createServiceHostReplication({storage, key: Buffer.from(linkKey), namespace: deployment.history.namespace}) : undefined;
 
 function createTestActorResolver(): ResolveActor {
   return (request, workspaceId) => {
@@ -311,15 +325,23 @@ let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
+let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
 const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]);
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
+  if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (linkLivePaths.has(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
+  if (new URL(request.url).pathname === "/ready") {
+    const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
+    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready},
+      {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
+  }
   if (new URL(request.url).pathname === "/health") {
     // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
@@ -339,7 +361,7 @@ const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
 const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
 
 function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined {
-  const value = process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS;
+  const value = process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS ?? (liveProfile && JSON.stringify(liveProfile.browserSessions));
   if (value === undefined) return undefined;
   if (!shareWebOrigin || !shareWebOrigin.startsWith("https://")) {
     fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin when named browser sessions are enabled.");
@@ -384,6 +406,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 const server = serveFetchHandler({
   handler: fetchHandler,
   maxBodyBytes: (url) =>
+    /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
@@ -447,24 +470,33 @@ process.once("SIGINT",() => ownerAdmissionRun?.close());
 process.once("SIGTERM",() => ownerAdmissionRun?.close());
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
-const serviceHost = serviceHostConfig && deployment
+const configuredServiceHost = serviceHostConfig && deployment
   ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
+if (selfHostedLive && (!deployment || !frameChanges || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
+  fatal("FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+}
+const selfHost = selfHostedLive ? await startSelfHostedLiveHost({storage, history: deployment!.history, frameChanges: frameChanges!,
+  root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
+  relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
+  onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
+const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
+if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
-  return mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+  return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
 };
 if (publicEditRelease) {
   const mode = storage.getLiveHostControl()?.configuredMode;
-  if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? !serviceHost : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {
+  if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? (!configuredServiceHost && !selfHost) : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {
     fatal("FATAL: Public Edit release requires link live routes and the configured service host or device delivery with owner admission.");
   }
 }
 if (namedLiveConfig) {
-  if (!serviceHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
+  if (!configuredServiceHost && !selfHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
   const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {
     const mode = storage.getLiveHostControl()?.configuredMode;
-    const host = mode === "service" ? serviceHost : mode === "device" ? deviceControl : undefined;
+    const host = mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
     if (!host) throw new Error("Named live host is unavailable.");
     return host.captureNative(binding, signal);
   };
@@ -520,7 +552,8 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
-    await serviceHost?.close();
+    await selfHost?.close();
+    await configuredServiceHost?.close();
     await liveValidation.close();
     storage.close();
     try {

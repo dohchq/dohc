@@ -5,6 +5,7 @@ import type { AccountAuthConfig } from "./accountAuth";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
 import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
 
 export interface ShareWebConfig {
   appLaunch?: AppLaunchConfig;
@@ -39,6 +40,18 @@ function exactList(value: string, errorMessage: string): string[] {
 }
 
 export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
+  if (env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(env.DOHC_SELF_HOST_LIVE)) throw new Error("DOHC_SELF_HOST_LIVE must be 0 or 1.");
+  if (env.DOHC_SELF_HOST_LIVE === "1") {
+    const profile = selfHostLiveProfile();
+    env = {
+      DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify(profile.requests),
+      DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify(profile.gateway),
+      DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(profile.editor),
+      DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({requests: profile.requests, gateway: profile.gateway, editor: profile.editor}),
+      DOHC_PUBLIC_EDIT_RELEASE: JSON.stringify({version: 1}),
+      ...Object.fromEntries(Object.entries(env).filter(([, value]) => value !== undefined)),
+    };
+  }
   const relayValue = required(env, "DOHC_SHARE_WEB_RELAY_URL");
   let relayUrl: URL;
   try {

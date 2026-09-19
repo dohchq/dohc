@@ -1,5 +1,6 @@
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
+import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -333,6 +334,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
+
+  enrollServiceHostDocument(input: serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput) {
+    return serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+  }
+  enrollServiceHostDocuments(inputs: readonly serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput[]) {
+    return serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+  }
+  listServiceHostEnrollments(workspaceId?: string) {
+    return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
+  }
+  listCurrentServiceHostEnrollments(workspaceId: string) {
+    return serviceHostEnrollmentStorage.listCurrentServiceHostEnrollments(this, workspaceId);
+  }
+  listServiceHostCandidateShares(limit?: number) {
+    return serviceHostEnrollmentStorage.listServiceHostCandidateShares(this, limit);
+  }
+  setServiceHostEnrollmentEnabled(input: serviceHostEnrollmentStorage.SetServiceHostEnrollmentEnabledInput) {
+    return serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);
+  }
 
   readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
     return liveRestoreOperationStorage.readStopRestorePlan(this, input);
