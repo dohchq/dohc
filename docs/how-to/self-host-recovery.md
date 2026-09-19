@@ -23,6 +23,9 @@ Never replace current continuity with an older archived copy.
 An archive does not prove that its server accepted no later work.
 Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
+An interrupted write can reserve a continuity stamp before the relay transaction commits.
+That state also refuses startup and cannot be repaired from an older snapshot.
+Preserve its volumes and use offline salvage for recoverable files.
 
 ## Save a relay snapshot
 
@@ -40,6 +43,11 @@ It resumes only services that were running before a successful snapshot.
 A failed operation leaves services stopped for inspection.
 The snapshot contains `relay.sqlite` and `manifest.json`.
 Keep both files together.
+Protect snapshot storage against unauthorized writes as well as reads.
+Anyone who can rewrite a snapshot can define the relay contents restored from it.
+If SQLite journals remain after an unclean shutdown, backup refuses before copying data.
+Try a normal start and clean stop only if continuity permits it.
+Otherwise, preserve a private deployment archive for further recovery work.
 
 Use `--env-file PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
@@ -66,7 +74,7 @@ Start the deployment through its normal launcher after inspecting the result.
 If the operation is interrupted, preserve the reported recovery directory and all volumes.
 Do not move a saved WAL file beside a different database.
 Do not remove continuity to make startup succeed.
-The restore command never replaces authentication or live-host data.
+The restore command never replaces the authentication store or live-host volume.
 Those stores can advance independently and need separate recovery guarantees.
 
 ## Preserve a complete private archive

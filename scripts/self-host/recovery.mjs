@@ -19,7 +19,9 @@ function docker(args) {
   const result = spawnSync("docker", args, { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
     // Compose config contains secrets. Never include captured output in exceptions.
-    throw new Error(`Docker command failed (${args[0]} ${args[1] ?? ""}). Check Docker and the selected deployment.`);
+    const maintenance = args.includes("/app/services/sync-relay/dist/relay-deployment.js");
+    const detail = maintenance ? ` ${result.stderr?.trim() ?? ""}` : "";
+    throw new Error(`Docker command failed (${args[0]} ${args[1] ?? ""}). Check Docker and the selected deployment.${detail}`);
   }
   return result.stdout;
 }

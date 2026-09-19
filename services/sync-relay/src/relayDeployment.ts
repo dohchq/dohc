@@ -164,10 +164,15 @@ function acquireDeployment(configPath: string) {
 export async function withRelayDeploymentMaintenance<T>(configPath: string,
   operation: (deployment: { config: Readonly<DeploymentConfig>; stamp: number }) => Promise<T>): Promise<T> {
   const deployment = acquireDeployment(configPath);
+  let operationFailed = false;
   try { return await operation({ config: deployment.config, stamp: deployment.stamp }); }
+  catch (error) { operationFailed = true; throw error; }
   finally {
-    deployment.side.close();
-    try { deployment.lock.exec("ROLLBACK"); } finally { deployment.lock.close(); }
+    const failures: unknown[] = [];
+    try { deployment.side.close(); } catch (error) { failures.push(error); }
+    try { deployment.lock.exec("ROLLBACK"); } catch (error) { failures.push(error); }
+    try { deployment.lock.close(); } catch (error) { failures.push(error); }
+    if (!operationFailed && failures.length) throw new AggregateError(failures, "Relay maintenance could not release deployment storage.");
   }
 }
 

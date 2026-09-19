@@ -17,10 +17,12 @@ async function canonical(path: string): Promise<void> {
     throw new Error("Recovery paths must be absolute, canonical paths without symbolic links.");
   }
 }
-async function directoryOutsideDeployment(directory: string, deployment: Deployment, creating: boolean): Promise<void> {
+async function directoryOutsideDeployment(directory: string, deployment: Deployment, creating: boolean, configPath?: string): Promise<void> {
   await canonical(creating ? dirname(directory) : directory);
   if (!isAbsolute(directory) || resolve(directory) !== directory) throw new Error("Use an absolute backup directory.");
-  for (const protectedDirectory of [dirname(deployment.config.relayPath), deployment.config.continuityDirectory]) {
+  const protectedDirectories = [dirname(deployment.config.relayPath), deployment.config.continuityDirectory];
+  if (configPath) protectedDirectories.push(dirname(configPath));
+  for (const protectedDirectory of protectedDirectories) {
     if (contains(protectedDirectory, directory) || contains(directory, protectedDirectory)) {
       throw new Error("Keep backups outside relay data and independent continuity directories.");
     }
@@ -59,8 +61,13 @@ async function inspectSnapshot(path: string, deployment: Deployment): Promise<vo
 /** A cold snapshot contains relay data only. Independent continuity remains on the original host. */
 export async function backupRelayDeployment(configPath: string, directory: string): Promise<void> {
   await withRelayDeploymentMaintenance(configPath, async deployment => {
-    await directoryOutsideDeployment(directory, deployment, true);
+    await directoryOutsideDeployment(directory, deployment, true, configPath);
     await canonical(deployment.config.relayPath);
+    for (const suffix of ["-wal", "-journal"]) {
+      if (await stat(deployment.config.relayPath + suffix).then(() => true, error => { if (error.code === "ENOENT") return false; throw error; })) {
+        throw new Error("Stop the relay cleanly before backup. SQLite has an outstanding journal; no snapshot was taken.");
+      }
+    }
     const source = new DatabaseSync(deployment.config.relayPath, { readOnly: true });
     try {
       validateRelayDeploymentMarker(source, deployment.config, deployment.stamp);
@@ -127,14 +134,18 @@ export async function restoreRelayDeployment(configPath: string, directory: stri
     }
     // Interruption preserves every original byte. Startup either sees the verified
     // snapshot or refuses a missing database; maintenance never opens the listener.
-    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-      try { await rename(relayPath + suffix, join(preservedDirectory, `original.sqlite${suffix}`)); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+        try { await rename(relayPath + suffix, join(preservedDirectory, `original.sqlite${suffix}`)); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+      await syncDirectory(preservedDirectory);
+      await syncDirectory(parent);
+      await rename(candidate, relayPath);
+      await syncDirectory(parent);
+    } catch (error) {
+      throw new Error(`Relay files were moved to ${preservedDirectory} before the install failed. ${error instanceof Error ? error.message : String(error)}`);
     }
-    await syncDirectory(preservedDirectory);
-    await syncDirectory(parent);
-    await rename(candidate, relayPath);
-    await syncDirectory(parent);
     return { preservedDirectory };
   });
 }

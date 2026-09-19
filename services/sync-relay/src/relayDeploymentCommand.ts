@@ -19,8 +19,10 @@ restore --config PATH --directory PATH
 Stop the application services first. Paths must be absolute and have no symbolic links.
 Backups contain relay data only. Protect the directory as private workspace data.
 Restore requires unchanged independent continuity on the original host.
-Restore preserves replaced files and never changes auth, service-host data or continuity.
+Restore replaces only relay storage; authentication, the live-host volume and continuity remain untouched.
 Old snapshots and lost continuity require a separate recovery procedure; no reset is provided.
+An interrupted write can advance continuity without committing relay data. Snapshot repair cannot resolve that state.
+Anyone who can write a snapshot can define restored relay contents. Protect backups like the relay volume.
 
 salvage --directory PATH --output NEW_PATH
 Export settled tracked files from a completed snapshot into a new private directory.

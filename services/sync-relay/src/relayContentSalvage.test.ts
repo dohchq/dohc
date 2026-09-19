@@ -14,7 +14,7 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "dohc-content-salvage-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const input = { configPath: join(root, "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
+  const input = { configPath: join(root, "control", "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
   initializeRelayDeployment(input);
   return { ...input, root };
 }

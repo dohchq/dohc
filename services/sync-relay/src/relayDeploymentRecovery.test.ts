@@ -13,7 +13,7 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "dohc-relay-recovery-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const input = { configPath: join(root, "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
+  const input = { configPath: join(root, "control", "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
   initializeRelayDeployment(input);
   return { ...input, root };
 }
@@ -103,6 +103,14 @@ describe("relay recovery snapshots", () => {
     await expect(restoreRelayDeployment(b.configPath, backup)).rejects.toThrow(/continuity/);
     await expect(backupRelayDeployment(a.configPath, join(a.continuityDirectory, "backup"))).rejects.toThrow(/outside/);
     await expect(backupRelayDeployment(a.configPath, join(a.root, "relay", "backup"))).rejects.toThrow(/outside/);
+    await expect(backupRelayDeployment(a.configPath, join(a.root, "control", "backup"))).rejects.toThrow(/outside/);
+  });
+
+  it("reports an outstanding SQLite journal before taking a snapshot", async () => {
+    const f = fixture(), backup = join(f.root, "backup");
+    writeFileSync(f.relayPath + "-journal", "unfinished journal");
+    await expect(backupRelayDeployment(f.configPath, backup)).rejects.toThrow(/Stop the relay cleanly/);
+    expect(existsSync(backup)).toBe(false);
   });
 
   it("does not accept a changed manifest", async () => {
