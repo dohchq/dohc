@@ -4389,12 +4389,18 @@ export function createWorkspaceEngineCapture(
             const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
             if (snapshot) {
               const disk = await digestSettledFile(rootPath, input.path);
-              drifted = disk.kind !== "sha256" || disk.sha256 !== snapshot.sha256;
+              drifted =
+                disk.kind === "changed" ||
+                (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
             }
           } catch {
-            drifted = true;
+            // A failed read does not prove drift. Keep the existing state and
+            // let the next ordinary settle report a retryable read failure.
           }
           if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
+            // The retained Y.Doc text is not a History moment yet, so the
+            // existing error state is the honest recovery surface. It carries
+            // no settle token because this report did not come from a settle.
             reportSaveState("error", 0);
           }
         }
