@@ -65,6 +65,11 @@ export function ShareHandoffSurface(props: {
     kind: "idle",
   });
   const lookupRequest = useRequestSequence();
+  // The acceptance card has no Back control; Cancel is its way out, so the
+  // mouse's back button follows Cancel there.
+  useMouseBackButton(
+    props.status.status === "waiting-for-acceptance" ? props.onBack : undefined,
+  );
 
   useEffect(() => {
     const request = lookupRequest.next();
