@@ -101,6 +101,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
         );
       }
       const response = await options.auth.handler(request);
+      response.headers.set("cache-control", "no-store");
       for (const [name, value] of Object.entries(cors)) response.headers.set(name, value);
       return response;
     }

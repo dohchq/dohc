@@ -131,6 +131,10 @@ test("anonymous mail failures do not reveal which accounts exist", async ({ requ
     expect(existing.status()).toBe(200);
     expect(missing.status()).toBe(existing.status());
     expect(await missing.json()).toEqual(await existing.json());
+    const stableHeaders = (headers: Record<string, string>) => Object.fromEntries(
+      Object.entries(headers).filter(([name]) => name !== "date"),
+    );
+    expect(stableHeaders(missing.headers())).toEqual(stableHeaders(existing.headers()));
     expect((await request.get(`${server.origin}/ready`)).status()).toBe(200);
     expect(server.logs()).toContain("Account email could not be delivered");
   }
