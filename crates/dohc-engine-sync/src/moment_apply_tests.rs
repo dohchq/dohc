@@ -59,6 +59,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         },
     };
     let (scratch, mut store) = test_store();
+    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
     let fixture: Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
     ))
@@ -312,7 +313,6 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &future_text,
         ),
     );
-    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 6, &NoFaults).unwrap();
     hydrate_texts(&mut store, &["unrelated ordinary file"]);
     let unrelated = envelope(
         "host",
