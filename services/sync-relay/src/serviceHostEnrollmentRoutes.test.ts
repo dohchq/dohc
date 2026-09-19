@@ -57,6 +57,14 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
   expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments().every(row => row.enabled)).toBe(true);
+  await f.handle(f.request("DELETE", {path: binding.currentPath}));
+  await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true}));
+  f.seed("docs/retry.md", "retry-object");
+  expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
+  expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({retired: true, enabled: false});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/retry.md")).toMatchObject({enabled: true});
+  expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true, path: binding.currentPath}))).status).toBe(400);
 });
 
 it("reports ready only with completed retained activation and the current native runtime", async () => {

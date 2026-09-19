@@ -115,12 +115,14 @@ export function createServiceHostEnrollmentRoutes(options: {
         if (!row) throw notFound();
         host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, status: "retired"} : state(row))});
       }
-      if (Object.keys(input).some(key => !["path", "shareId"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
-        (input.path !== undefined && typeof input.path !== "string") || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
+      if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
+        (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||
+        (input.retry === true && (input.path !== undefined || input.shareId === undefined)) || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
       const retained = input.shareId === undefined ? storage.readServiceHostEnrollment(workspaceId, input.path as string) : undefined;
       if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
-      const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId}) : [input.path as string];
+      const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId})
+        .filter(path => input.retry !== true || !storage.readServiceHostEnrollment(workspaceId, path)) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
       host.reconcile();
       const documents = rows.map(state);
