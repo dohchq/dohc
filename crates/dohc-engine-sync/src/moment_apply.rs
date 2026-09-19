@@ -544,7 +544,7 @@ fn apply_moment_append(
             )?
             .ok_or(SyncError::LiveDocumentBindingActive)?;
             if cursor > owner.accepted_cursor {
-                pending::enqueue(tx, envelope, &payload, &owner, cursor)?;
+                pending::enqueue(tx, envelope, payload, &owner, cursor)?;
                 return Ok(MomentApplyResult {
                     conflicts_opened: 0,
                     materialization_changes: Vec::new(),
