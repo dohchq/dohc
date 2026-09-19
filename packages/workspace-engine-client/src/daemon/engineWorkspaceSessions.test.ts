@@ -14,7 +14,7 @@ import {
   DaemonRefusalError,
   type DaemonErrorCode,
 } from "../live/daemonLiveAdapter";
-import type { Request, Response, WorkspaceHandle } from "../protocol";
+import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import { EngineClientError } from "./engineClient";
 import {
   EngineDaemonUnavailableError,
@@ -65,6 +65,7 @@ function deferred<T>() {
 
 class MockClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
+  private readonly eventHandlers = new Set<(event: Event) => void>();
 
   constructor(private readonly handle: string) {}
 
@@ -80,6 +81,19 @@ class MockClient implements EngineDaemonClient {
   }
 
   close(): void {}
+
+  onEvent(handler: (event: Event) => void): () => void {
+    this.eventHandlers.add(handler);
+    return () => this.eventHandlers.delete(handler);
+  }
+
+  emit(event: Event): void {
+    for (const handler of [...this.eventHandlers]) handler(event);
+  }
+
+  get eventSubscriberCount(): number {
+    return this.eventHandlers.size;
+  }
 }
 
 // The daemon's retryable refusals, which seven ladder tests below raise. The
@@ -94,6 +108,197 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it.each(["other workspace", "other event", "malformed payload", "retired client", "retired binding", "unavailable client"] as const)(
+    "does not wake initial capture from an %s notification",
+    async (scenario) => {
+      const workspace = await tempWorkspace();
+      const client = new MockClient("initial-capture"), replacement = new MockClient("replacement");
+      const sleeping = deferred<void>(), timer = deferred<void>();
+      let current: EngineDaemonClient = client, unavailable = false, attempts = 0;
+      const sessions = new EngineWorkspaceSessions({
+        currentClient: () => {
+          if (unavailable) throw new Error("daemon unavailable");
+          return current;
+        },
+      }, { sleep: async () => { sleeping.resolve(); await timer.promise; } });
+      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
+        if (++attempts === 1) throw refusal;
+        return "ready";
+      }, { retryInitialCapture: true }));
+      try {
+        await sleeping.promise;
+        if (scenario === "retired client") current = replacement;
+        if (scenario === "unavailable client") unavailable = true;
+        if (scenario === "retired binding") {
+          await expect(sessions.run(workspace, async () => { throw transportFailure(); }))
+            .rejects.toMatchObject({ code: "transport-error" });
+        }
+        client.emit({
+          seq: 1, sessionGeneration: 1,
+          name: scenario === "other event" ? "capture.momentRecorded" : "capture.initialSettled",
+          payload: scenario === "malformed payload" ? null : {
+            workspaceId: scenario === "other workspace" ? "foreign" : workspace.workspaceId,
+          },
+        });
+        // Drain this event-loop turn: the notification's promise continuations
+        // would have started the retry before the fallback timer is released.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(attempts).toBe(1);
+        current = client;
+        unavailable = false;
+        timer.resolve();
+        await expect(run).resolves.toBe("ready");
+        expect(client.eventSubscriberCount).toBe(0);
+      } finally {
+        current = client;
+        unavailable = false;
+        timer.resolve();
+        await run.catch(() => undefined);
+        await sessions.closeAll();
+      }
+    },
+  );
+
+  it.each(["deadline", "shutdown"] as const)(
+    "preserves the %s gate after a capture notification wakes the wait",
+    async (outcome) => {
+      const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
+      let now = 0, attempts = 0;
+      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+        now: () => now,
+        sleep: async () => {
+          if (outcome === "deadline") now = 6_000;
+          else sessions.beginShutdown();
+          client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+          await new Promise<void>(() => undefined);
+        },
+      });
+      try {
+        const result = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
+          attempts += 1;
+          throw refusal;
+        }, { retryInitialCapture: true }));
+        if (outcome === "deadline") await expect(result).rejects.toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+        else await expect(result).rejects.toBe(refusal);
+        expect(attempts).toBe(1);
+        expect(client.eventSubscriberCount).toBe(0);
+      } finally {
+        await sessions.closeAll();
+      }
+    },
+  );
+
+  it("cancels the production backoff timer after the capture event wakes it", async () => {
+    const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    let attempts = 0;
+    await sessions.run(workspace, async () => undefined);
+    vi.useFakeTimers();
+    try {
+      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
+        if (++attempts === 1) throw daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+        return "ready";
+      }, { retryInitialCapture: true }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      await expect(run).resolves.toBe("ready");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      await sessions.closeAll();
+    }
+  });
+
+  it("wakes an initial-capture retry on the scoped settled event", async () => {
+    const workspace = await tempWorkspace("workspace-initial-settled-wake");
+    const client = new MockClient("initial-settled-wake");
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+          await new Promise<void>(() => undefined);
+        },
+      },
+    );
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    try {
+      const result = await sessions.withRetryBudget(6_000, () =>
+        sessions.run(
+          workspace,
+          async () => {
+            attempts += 1;
+            if (attempts === 1) {
+              queueMicrotask(() =>
+                client.emit({
+                  seq: 1,
+                  sessionGeneration: 1,
+                  name: "capture.initialSettled",
+                  payload: { workspaceId: workspace.workspaceId },
+                }),
+              );
+              throw refusal;
+            }
+            return "ready";
+          },
+          { retryInitialCapture: true },
+        ),
+      );
+      expect(result).toBe("ready");
+      expect(attempts).toBe(2);
+      expect(sleeps).toEqual([100]);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      await sessions.closeAll();
+    }
+  });
+
+  it("keeps the timer fallback and cleans up when no settled event arrives", async () => {
+    const workspace = await tempWorkspace("workspace-initial-settled-fallback");
+    const client = new MockClient("initial-settled-fallback");
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { sleep: async (delayMs) => { sleeps.push(delayMs); } },
+    );
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    try {
+      await expect(
+        sessions.withRetryBudget(6_000, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              if (attempts === 1) throw refusal;
+              return "ready";
+            },
+            { retryInitialCapture: true },
+          ),
+        ),
+      ).resolves.toBe("ready");
+      expect(attempts).toBe(2);
+      expect(sleeps).toEqual([100]);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      await sessions.closeAll();
+    }
+  });
+
   it.each(["no opt-in", "no budget", "deadline", "terminal", "other overload"] as const)(
     "does not replay an operation for initial capture without safe admission: %s",
     async (scenario) => {
@@ -116,6 +321,7 @@ describe("EngineWorkspaceSessions", () => {
           .rejects.toBe(refusal);
         expect(operation).toHaveBeenCalledTimes(1);
         expect(sleep).not.toHaveBeenCalled();
+        expect(client.eventSubscriberCount).toBe(0);
       } finally {
         await sessions.closeAll();
       }

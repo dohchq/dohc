@@ -27,7 +27,7 @@ use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
     StoreCaptureSinkParams,
 };
-use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
+use crate::{CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -1868,6 +1868,10 @@ impl DriverEnv for RealEnv {
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        let initial_start = matches!(
+            self.status.snapshot().phase,
+            CapturePhase::Starting | CapturePhase::Importing
+        );
         let _apply_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(()),
@@ -2001,6 +2005,10 @@ impl DriverEnv for RealEnv {
                 () = &mut initial_deadline, if early_import => {
                     initial_cancel.cancel();
                     self.status.mark_initial_apply_timed_out();
+                    self.events.emit(
+                        CAPTURE_INITIAL_SETTLED_EVENT,
+                        serde_json::json!({ "workspaceId": self.workspace_id }),
+                    );
                     // `workspace.open` already received this edge for an early
                     // import. Re-sending is harmless and makes the timeout's
                     // observable transition explicit if that contract changes.
@@ -2026,6 +2034,12 @@ impl DriverEnv for RealEnv {
             self.status.mark_initial_ready();
         } else {
             self.status.mark_initial_degraded();
+        }
+        if initial_start && !initial_settle_timed_out {
+            self.events.emit(
+                CAPTURE_INITIAL_SETTLED_EVENT,
+                serde_json::json!({ "workspaceId": self.workspace_id }),
+            );
         }
         // Unsafe starts release only here, after the bounded settle attempt.
         // An early import already sent this edge; watch::Sender coalesces it.

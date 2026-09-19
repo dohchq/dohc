@@ -15,7 +15,7 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
 } from "../workspace/workspaceWireContract";
-import type { WorkspaceHandle } from "../protocol";
+import type { Event, WorkspaceHandle } from "../protocol";
 import { YdocOpenTimedOutError } from "../ydoc/ydocLiveAdapter";
 import {
   DOHC_ENGINE_GUARD,
@@ -58,6 +58,17 @@ export interface EngineWorkspaceBinding {
 
 export interface EngineDaemonClientSource {
   currentClient(): EngineDaemonClient;
+}
+
+const INITIAL_CAPTURE_SETTLED_EVENT = "capture.initialSettled";
+
+function isInitialCaptureSettledEvent(
+  event: Event,
+  workspaceId: string,
+): boolean {
+  if (event.name !== INITIAL_CAPTURE_SETTLED_EVENT) return false;
+  if (typeof event.payload !== "object" || event.payload === null) return false;
+  return (event.payload as { workspaceId?: unknown }).workspaceId === workspaceId;
 }
 
 interface SessionEntry {
@@ -428,6 +439,31 @@ export class EngineWorkspaceSessions {
         // The second door: the operation is daemon work this class does not
         // issue itself, and the rebind above can take the whole window with it.
         this.assertRegionLive(workspace.workspaceId);
+        let initialCaptureWake: Promise<void> | undefined;
+        let unsubscribeInitialCapture: (() => void) | undefined;
+        if (
+          options.retryInitialCapture === true &&
+          this.activeBudget() !== undefined &&
+          binding.client.onEvent
+        ) {
+          // Subscribe before the operation: settlement can occur while the
+          // daemon's refusal is travelling back to this client.
+          initialCaptureWake = new Promise<void>((resolve) => {
+            unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
+              if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
+              let current = false;
+              try {
+                current =
+                  entry.binding === binding &&
+                  this.source.currentClient() === binding.client;
+              } catch {
+                // A retired client is not allowed to wake a retry. The
+                // existing timer remains the fallback for a replacement.
+              }
+              if (current) resolve();
+            });
+          });
+        }
         try {
           return await operation(binding);
         } catch (error) {
@@ -484,9 +520,14 @@ export class EngineWorkspaceSessions {
             lastAttempt: !retryAfterInitialCapture && attempt >= maxAttempts,
             backoff: retryAfterTransport || retryAfterBackoff || retryAfterInitialCapture,
             cause: error,
+            initialCaptureWake: retryAfterInitialCapture
+              ? initialCaptureWake
+              : undefined,
           });
           if (next === "stop") throw error;
           if (!retryAfterInitialCapture) attempt += 1;
+        } finally {
+          unsubscribeInitialCapture?.();
         }
       }
       throw new EngineWorkspaceRebindError(workspace.workspaceId, lastError);
@@ -652,6 +693,7 @@ export class EngineWorkspaceSessions {
     // all, and used to skip these gates entirely because of it.
     backoff: boolean;
     cause: unknown;
+    initialCaptureWake?: Promise<void>;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
       this.throwPastRetryDeadline(gate.workspaceId, gate.cause);
@@ -696,6 +738,7 @@ export class EngineWorkspaceSessions {
     await this.interruptibleSleep(
       transportBackoffMs(gate.attempt),
       abandonable,
+      gate.initialCaptureWake,
     );
     // Same scope as before the wait: quit ends a bounded region's retries, and
     // only a bounded region's.
@@ -712,6 +755,7 @@ export class EngineWorkspaceSessions {
   private async interruptibleSleep(
     delayMs: number,
     cancellable: boolean,
+    wake?: Promise<void>,
   ): Promise<void> {
     if (!cancellable) {
       await this.sleep(delayMs);
@@ -722,9 +766,18 @@ export class EngineWorkspaceSessions {
       cancel = resolveCancel;
     });
     this.sleepCancels.add(cancel);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([this.sleep(delayMs), cancelled]);
+      const sleep = this.sleep === defaultSleep
+        ? new Promise<void>((resolve) => { timer = setTimeout(resolve, delayMs); })
+        : this.sleep(delayMs);
+      await Promise.race([
+        sleep,
+        cancelled,
+        ...(wake === undefined ? [] : [wake]),
+      ]);
     } finally {
+      if (timer !== undefined) clearTimeout(timer);
       this.sleepCancels.delete(cancel);
     }
   }

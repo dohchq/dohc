@@ -9,6 +9,7 @@ import {
   YdocOpenTimedOutError,
   type Request,
   type Response,
+  type Event,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
@@ -108,6 +109,78 @@ function captureWith(
 }
 
 describe("the document open's capture-chain hold", () => {
+  it("wakes the opening document on capture settlement and still checks the active version", async () => {
+    const root = await createTestScratch("dohc-ydoc-capture-wake-");
+    await write(root, "note.md", "hello\n");
+    const loopback = new VersionedLoopbackEngine();
+    const handlers = new Set<(event: Event) => void>();
+    const waits = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const fallback = Promise.withResolvers<void>();
+    let importing = false;
+    let activeReads = 0;
+    let sleeps = 0;
+    const providerOpen = vi.fn();
+    const client = {
+      close: () => undefined,
+      onEvent(handler: (event: Event) => void) {
+        handlers.add(handler);
+        return () => { handlers.delete(handler); };
+      },
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: WORKSPACE_ID } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        if (importing && request.method === "versions.active") {
+          activeReads += 1;
+          throw new EngineRequestError(request.id, {
+            code: "OVERLOADED",
+            message: "Workspace is still updating. Try again.",
+            retry: "afterBackoff",
+          });
+        }
+        return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+      sleep: () => {
+        waits[sleeps++]?.resolve();
+        return fallback.promise;
+      },
+    });
+    const engine = captureWith(root, sessions, providerOpen);
+    const notify = () => {
+      for (const handler of [...handlers]) handler({
+        name: "capture.initialSettled", payload: { workspaceId: WORKSPACE_ID },
+        seq: 1, sessionGeneration: 1,
+      });
+    };
+    engine.start();
+    await engine.flush();
+    importing = true;
+    const opening = engine.openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined });
+    try {
+      await waits[0]!.promise;
+      notify();
+      await waits[1]!.promise;
+      expect(providerOpen).not.toHaveBeenCalled();
+      expect(activeReads).toBe(2);
+      importing = false;
+      notify();
+      await opening;
+      expect(providerOpen).toHaveBeenCalledOnce();
+      expect(sleeps).toBe(2);
+      expect(handlers.size).toBe(0);
+    } finally {
+      importing = false;
+      fallback.resolve();
+      await opening.catch(() => undefined);
+      await engine.stop();
+    }
+  });
+
   it.each(["ready", "deadline", "shutdown"] as const)(
     "waits for the initial capture before opening the provider: %s",
     async (outcome) => {

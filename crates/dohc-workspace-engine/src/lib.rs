@@ -15,6 +15,7 @@ mod rpc;
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 pub use events::AUTOMATION_CLAIMED_EVENT;
+pub use events::CAPTURE_INITIAL_SETTLED_EVENT;
 pub use events::CAPTURE_MOMENT_RECORDED_EVENT;
 pub use events::EngineEventNotice;
 pub use events::EngineEvents;
