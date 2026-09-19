@@ -815,6 +815,22 @@ export function DesktopWorkspaceShell(props: {
       bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
     [],
   );
+  // The dialog maps refusal codes to app-owned copy and filters diagnostics.
+  const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
+    const page = await bridge().listOwnerLiveRefusals({
+      workspaceId: id,
+      ...(after === undefined ? {} : { after }),
+    });
+    return {
+      refusals: page.refusals,
+      nextCursor: page.nextCursor,
+    };
+  }, []);
+  const retryLiveShare = useCallback(
+    (id: string, shareId: string) =>
+      bridge().retryOwnerLiveShare({ workspaceId: id, shareId }),
+    [],
+  );
   // A refused read or action becomes the shell's own notice, which outlives
   // the dialog. Its Try again runs the dialog's retry while the dialog is
   // open, and reopens the dialog once it is not — but only for the workspace
@@ -5867,6 +5883,8 @@ export function DesktopWorkspaceShell(props: {
           load={loadLiveDocuments}
           stop={stopLiveDocument}
           resume={resumeLiveDocument}
+          loadRefusals={loadLiveRefusals}
+          retryRefusal={retryLiveShare}
           onError={reportLiveDocumentsError}
           onClose={() => setLiveDocumentsWorkspaceId(null)}
         />

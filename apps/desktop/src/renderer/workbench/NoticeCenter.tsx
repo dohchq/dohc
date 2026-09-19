@@ -168,6 +168,12 @@ function liveDeliveryCopy(
   };
 }
 
+// Owner live enrollment refusals: one workspace fact, however many shares it
+// covers. Only the list can name them, so the notice sends the user there.
+const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
+const OWNER_LIVE_REFUSALS_BODY =
+  "Open Live documents to see which files are affected and try again.";
+
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
@@ -342,6 +348,32 @@ export function NoticeCenter(props: {
   const liveDeliveryToastVisible =
     liveDeliveryKey !== null && liveDeliveryKey !== dismissedLiveDeliveryKey;
 
+  // One status bit gives one workspace-keyed notice.
+  const refusalsKey = props.syncStatus?.hasOwnerLiveRefusals
+    ? `${props.workspaceId}:live-refusals`
+    : null;
+  const [dismissedRefusalsKey, setDismissedRefusalsKey] = useState<string | null>(
+    null,
+  );
+  if (refusalsKey === null && dismissedRefusalsKey !== null) {
+    setDismissedRefusalsKey(null);
+  }
+  const refusalsToastVisible =
+    refusalsKey !== null && refusalsKey !== dismissedRefusalsKey;
+  // The row and toast copy the same safe report.
+  const refusalsDetails = useMemo(
+    () =>
+      refusalsKey
+        ? errorDetails([
+            ["Live editing", OWNER_LIVE_REFUSALS_TITLE],
+            ["Detail", OWNER_LIVE_REFUSALS_BODY],
+            ["Workspace id", props.workspaceId],
+            ["Time", new Date().toISOString()],
+          ])
+        : "",
+    [refusalsKey, props.workspaceId],
+  );
+
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
@@ -484,6 +516,22 @@ export function NoticeCenter(props: {
         ...(liveDeliveryAction ? { action: liveDeliveryAction } : {}),
         copyText: liveDeliveryDetails,
         Icon: RefreshCw,
+      });
+    }
+
+    // Enrollment refused for at least one share. Live documents lists them
+    // with their files; nothing here promises a retry will succeed.
+    if (refusalsKey) {
+      next.push({
+        id: "owner-live-refusals",
+        tone: "warning",
+        title: OWNER_LIVE_REFUSALS_TITLE,
+        body: OWNER_LIVE_REFUSALS_BODY,
+        ...(onOpenLiveDocuments
+          ? { action: { label: "Live documents", onClick: onOpenLiveDocuments } }
+          : {}),
+        copyText: refusalsDetails,
+        Icon: AlertTriangle,
       });
     }
 
@@ -673,6 +721,9 @@ export function NoticeCenter(props: {
     liveDelivery,
     liveDeliveryAction,
     liveDeliveryDetails,
+    onOpenLiveDocuments,
+    refusalsDetails,
+    refusalsKey,
     installPending,
     installUpdate,
     updateActionError,
@@ -780,6 +831,45 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label="Dismiss live editing notice"
                 onClick={() => setDismissedLiveDeliveryKey(liveDeliveryKey)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          {refusalsToastVisible ? (
+            <div
+              data-testid="owner-live-refusals-toast"
+              role="status"
+              aria-live="polite"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
+              </span>
+              {onOpenLiveDocuments ? (
+                <button
+                  type="button"
+                  data-testid="owner-live-refusals-toast-action"
+                  onClick={onOpenLiveDocuments}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  Live documents
+                </button>
+              ) : null}
+              <CopyDetailsButton
+                key={refusalsKey}
+                iconOnly
+                label="Copy share details"
+                data-testid="owner-live-refusals-toast-copy"
+                details={() => refusalsDetails}
+              />
+              {/* Closing ends the announcement; the row stays in Notices. */}
+              <button
+                type="button"
+                aria-label="Dismiss live editing refusals notice"
+                onClick={() => setDismissedRefusalsKey(refusalsKey)}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
               >
                 <X size={12} aria-hidden />

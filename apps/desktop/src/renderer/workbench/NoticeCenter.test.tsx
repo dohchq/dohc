@@ -1088,6 +1088,135 @@ describe("notice center", () => {
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 
+  // Enrollment refusals are one boolean on the status: however many shares it
+  // covers, the user gets one announcement and one row, and the list is the
+  // only surface that can name the files.
+  describe("owner live refusals", () => {
+    function refusalsStatus(hasOwnerLiveRefusals: boolean): SyncStatusResult {
+      return {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        hasOwnerLiveRefusals,
+      };
+    }
+
+    it("raises one toast and one row that open the live documents list", async () => {
+      const onOpenLiveDocuments = vi.fn();
+      const user = userEvent.setup();
+      const { rerender } = renderNotices({
+        syncStatus: refusalsStatus(true),
+        onOpenLiveDocuments,
+      });
+
+      const toast = screen.getByTestId("owner-live-refusals-toast");
+      expect(toast.textContent).toContain("Some shares could not start live editing");
+      // A repeated status read is the same fact, not a second one.
+      rerender(
+        noticeElement({ syncStatus: refusalsStatus(true), onOpenLiveDocuments }),
+      );
+      expect(screen.getAllByTestId("owner-live-refusals-toast")).toHaveLength(1);
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const notice = screen.getByTestId("notice-owner-live-refusals");
+      expect(screen.getAllByTestId("notice-owner-live-refusals")).toHaveLength(1);
+      await user.click(within(notice).getByRole("button", { name: "Live documents" }));
+      expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+    });
+
+    // The toast and the row are the same fact, so they must paste the same
+    // generic report — no share id, no engine code, no engine message.
+    it("copies matching safe details from the toast and the row", async () => {
+      const user = userEvent.setup();
+      renderNotices({ syncStatus: refusalsStatus(true), onOpenLiveDocuments: vi.fn() });
+
+      await user.click(screen.getByTestId("owner-live-refusals-toast-copy"));
+      const fromToast = await navigator.clipboard.readText();
+      expect(fromToast).toContain(
+        "Live editing: Some shares could not start live editing",
+      );
+      expect(fromToast).toContain("Workspace id: ws-status-test");
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      await user.click(screen.getByTestId("notice-owner-live-refusals-copy"));
+      expect(await navigator.clipboard.readText()).toBe(fromToast);
+    });
+
+    it("keeps the row after the toast is closed, and stays closed for a repeat", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+
+      await user.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(true) }));
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-owner-live-refusals")).toBeTruthy();
+    });
+
+    it("clears the toast and the row once the workspace reports no refusals", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(false) }));
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-owner-live-refusals")).toBeNull();
+      expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+    });
+
+    // Recovery forgets the dismissal: the next refusal is news again.
+    it("announces a refusal again after a recovery", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(false) }));
+      rerender(noticeElement({ syncStatus: refusalsStatus(true) }));
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+    });
+
+    // A dismissal answers one workspace. The next workspace's refusals are a
+    // fact this user has not seen yet.
+    it("announces the same refusal in another workspace", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      rerender(
+        noticeElement({
+          workspaceId: "ws-status-other",
+          syncStatus: refusalsStatus(true),
+        }),
+      );
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+    });
+
+    // A share view has no live-document list to open, so the notice must not
+    // offer a way in that cannot exist.
+    it("states the refusal without an action when no list is available", async () => {
+      renderNotices({ syncStatus: refusalsStatus(true) });
+
+      expect(screen.queryByTestId("owner-live-refusals-toast-action")).toBeNull();
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notice = screen.getByTestId("notice-owner-live-refusals");
+      expect(
+        within(notice).queryByRole("button", { name: "Live documents" }),
+      ).toBeNull();
+    });
+  });
+
   // Where the bell is decides where the rest of this center may sit. The rail
   // hosts it on the left; a surface with no rail hosts it in the corner the
   // toasts would otherwise take, so neither may cover the toggle.

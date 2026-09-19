@@ -589,7 +589,7 @@ export function CloudLogin(props: {
                 <Pill>Coming soon</Pill>
               </p>
               <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
-                A server dohc runs for you. Connect your own server for now.
+                Hosting, setup, and maintenance managed by dohc.
               </p>
             </div>
           )}

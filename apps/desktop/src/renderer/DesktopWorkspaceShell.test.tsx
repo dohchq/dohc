@@ -48,10 +48,13 @@ import type {
   ListCollectionsPayload,
   ListCollectionsResult,
   ListOwnerLiveDocumentsPayload,
+  ListOwnerLiveRefusalsPayload,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   OwnerLiveDocumentActionPayload,
   OwnerLiveDocumentsResult,
+  OwnerLiveRefusalsResult,
+  RetryOwnerLiveSharePayload,
   QueryCollectionRecordsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
@@ -386,6 +389,17 @@ function makeBaseBridge(
         documents: [],
         nextCursor: null,
       }),
+    ),
+    listOwnerLiveRefusals: vi.fn(
+      async (
+        _payload: ListOwnerLiveRefusalsPayload,
+      ): Promise<OwnerLiveRefusalsResult> => ({
+        refusals: [],
+        nextCursor: null,
+      }),
+    ),
+    retryOwnerLiveShare: vi.fn(
+      async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
     ),
     stopOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,

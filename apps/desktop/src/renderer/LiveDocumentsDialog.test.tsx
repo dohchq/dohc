@@ -8,6 +8,8 @@ import {
   LiveDocumentsDialog,
   type LiveDocumentPage,
   type LiveDocumentRow,
+  type LiveRefusalPage,
+  type LiveRefusalRow,
 } from "./LiveDocumentsDialog";
 
 function row(path: string, overrides: Partial<LiveDocumentRow> = {}): LiveDocumentRow {
@@ -21,11 +23,26 @@ function page(
   return { documents, nextCursor };
 }
 
+function refusal(shareId: string, paths: string[] = [`${shareId}.md`]): LiveRefusalRow {
+  return { shareId, paths, code: "quota_exceeded", message: "Service host enrollment capacity is full." };
+}
+
+function refusalPage(
+  refusals: LiveRefusalRow[],
+  nextCursor: string | null = null,
+): LiveRefusalPage {
+  return { refusals, nextCursor };
+}
+
 function harness() {
   return {
     load: vi.fn((workspaceId: string, retiredAfter?: string) => Promise.resolve(page([]))),
     stop: vi.fn((workspaceId: string, path: string) => Promise.resolve()),
     resume: vi.fn((workspaceId: string, path: string) => Promise.resolve()),
+    loadRefusals: vi.fn((workspaceId: string, after?: string) =>
+      Promise.resolve(refusalPage([])),
+    ),
+    retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
     onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
   };
@@ -482,5 +499,336 @@ describe("LiveDocumentsDialog", () => {
     expect(h.onClose).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(h.onClose).toHaveBeenCalledTimes(2);
+  });
+
+  // A share whose live editing never started is not a live document. It gets
+  // its own section, its own words, and one Try again per share.
+  describe("refused shares", () => {
+    it("says nothing about refusals when the page is proven empty", async () => {
+      const h = harness();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByText("No live documents in this workspace.");
+      expect(h.loadRefusals).toHaveBeenCalledWith("ws-1", undefined);
+      expect(screen.queryByTestId("live-refusals")).toBeNull();
+    });
+
+    it("names the files and maps a known server limit to recovery steps", async () => {
+      const h = harness();
+      h.loadRefusals.mockResolvedValueOnce(
+        refusalPage([
+          refusal("share-1", [
+            "a.md",
+            "b.md",
+            "c.md",
+            "d.md",
+            "e.md",
+            "f.md",
+            "g.md",
+          ]),
+        ]),
+      );
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      const rowEl = await screen.findByTestId("live-refusal-row-share-1");
+      expect(rowEl.textContent).toContain(
+        "This share could not start live editing automatically.",
+      );
+      // Bounded: five files identify the share, the rest are counted.
+      expect(within(rowEl).getByText("a.md")).toBeTruthy();
+      expect(within(rowEl).getByText("e.md")).toBeTruthy();
+      expect(within(rowEl).queryByText("f.md")).toBeNull();
+      expect(within(rowEl).getByText("and 2 more files")).toBeTruthy();
+
+      await user.click(
+        within(rowEl).getByRole("button", { name: "Copy details for a.md" }),
+      );
+      const copied = await navigator.clipboard.readText();
+      expect(copied).toContain("Files: a.md, b.md");
+      expect(copied).toContain("Workspace id: ws-1");
+      expect(rowEl.textContent).toContain("A server limit is preventing live editing.");
+      expect(copied).toContain("Reason code: quota_exceeded");
+      expect(copied).toContain("Server detail: Service host enrollment capacity is full.");
+    });
+
+    it("does not display or copy arbitrary server text", async () => {
+      const h = harness();
+      h.loadRefusals.mockResolvedValueOnce(refusalPage([{
+        ...refusal("share-1"), code: "bad_request", message: "Authorization: Bearer private-token",
+      }]));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+      const rowEl = await screen.findByTestId("live-refusal-row-share-1");
+      expect(rowEl.textContent).toContain("The server could not accept this share for live editing.");
+      expect(rowEl.textContent).not.toContain("private-token");
+      await user.click(within(rowEl).getByRole("button", { name: "Copy details for share-1.md" }));
+      const copied = await navigator.clipboard.readText();
+      expect(copied).toContain("Reason code: bad_request");
+      expect(copied).not.toContain("private-token");
+    });
+
+    // The cursor is the only word on whether more pages exist. An empty page
+    // proves nothing about the next one.
+    it("keeps Load more for an empty page that still has a cursor", async () => {
+      const h = harness();
+      h.loadRefusals
+        .mockResolvedValueOnce(refusalPage([], "share-2"))
+        .mockResolvedValueOnce(refusalPage([refusal("share-3")]));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      expect(
+        await screen.findByText("No refused shares on this page. Load more to keep looking."),
+      ).toBeTruthy();
+      await user.click(screen.getByTestId("live-refusals-more"));
+
+      expect(h.loadRefusals).toHaveBeenNthCalledWith(2, "ws-1", "share-2");
+      expect(await screen.findByTestId("live-refusal-row-share-3")).toBeTruthy();
+      expect(screen.queryByTestId("live-refusals-more")).toBeNull();
+    });
+
+    it("replaces the page it shows instead of growing the list", async () => {
+      const h = harness();
+      h.loadRefusals
+        .mockResolvedValueOnce(refusalPage([refusal("share-1")], "share-1"))
+        .mockResolvedValueOnce(refusalPage([refusal("share-2")], "share-2"));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByTestId("live-refusal-row-share-1");
+      await user.click(screen.getByTestId("live-refusals-more"));
+
+      expect(await screen.findByTestId("live-refusal-row-share-2")).toBeTruthy();
+      expect(screen.queryByTestId("live-refusal-row-share-1")).toBeNull();
+    });
+
+    it("retries one share and refreshes the page that share came from", async () => {
+      const h = harness();
+      h.loadRefusals
+        .mockResolvedValueOnce(refusalPage([refusal("share-1")], "share-1"))
+        .mockResolvedValueOnce(refusalPage([refusal("share-2", ["docs/b.md"])]))
+        .mockResolvedValueOnce(refusalPage([]));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByTestId("live-refusal-row-share-1");
+      await user.click(screen.getByTestId("live-refusals-more"));
+      await screen.findByTestId("live-refusal-row-share-2");
+
+      await user.click(
+        screen.getByRole("button", { name: "Retry live editing for docs/b.md" }),
+      );
+      expect(h.retryRefusal).toHaveBeenCalledWith("ws-1", "share-2");
+      // The same page is read again, not the first one.
+      await vi.waitFor(() =>
+        expect(h.loadRefusals).toHaveBeenNthCalledWith(3, "ws-1", "share-1"),
+      );
+      await vi.waitFor(() => expect(screen.queryByTestId("live-refusals")).toBeNull());
+      expect(h.onError).not.toHaveBeenCalled();
+    });
+
+    // Enrolling a share changes the live documents too, so the retry is not
+    // finished until both lists have been read again.
+    it("refreshes the live documents after a successful retry", async () => {
+      const h = harness();
+      h.load
+        .mockResolvedValueOnce(page([row("docs/old.md")]))
+        .mockResolvedValueOnce(page([row("docs/new.md")]));
+      h.loadRefusals
+        .mockResolvedValueOnce(refusalPage([refusal("share-1", ["docs/new.md"])]))
+        .mockResolvedValueOnce(refusalPage([]));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByTestId("live-document-row-docs/old.md");
+      await user.click(
+        screen.getByRole("button", { name: "Retry live editing for docs/new.md" }),
+      );
+
+      expect(h.retryRefusal).toHaveBeenCalledWith("ws-1", "share-1");
+      expect(await screen.findByTestId("live-document-row-docs/new.md")).toBeTruthy();
+      expect(screen.queryByTestId("live-document-row-docs/old.md")).toBeNull();
+      expect(h.load).toHaveBeenNthCalledWith(2, "ws-1", undefined);
+      expect(screen.queryByTestId("live-refusals")).toBeNull();
+      expect(h.onError).not.toHaveBeenCalled();
+    });
+
+    it("drops a retry and its refresh when the workspace changes mid-flight", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md")]));
+      h.loadRefusals.mockResolvedValueOnce(
+        refusalPage([refusal("share-1", ["docs/a.md"])]),
+      );
+      const retrying = deferred();
+      h.retryRefusal.mockReturnValueOnce(retrying.promise);
+      const user = userEvent.setup();
+      const view = render(<LiveDocumentsDialog workspaceId="ws-a" {...h} />);
+
+      await screen.findByTestId("live-refusal-row-share-1");
+      await user.click(
+        screen.getByRole("button", { name: "Retry live editing for docs/a.md" }),
+      );
+      view.rerender(<LiveDocumentsDialog workspaceId="ws-b" {...h} />);
+      await act(async () => {
+        retrying.resolve();
+        await retrying.promise;
+      });
+
+      expect(h.retryRefusal).toHaveBeenCalledWith("ws-a", "share-1");
+      // Only the two mounts read: the refresh for the workspace that left
+      // never ran, and nothing it would have painted is on screen.
+      expect(h.load).toHaveBeenCalledTimes(2);
+      expect(h.load).toHaveBeenNthCalledWith(2, "ws-b", undefined);
+      expect(h.loadRefusals).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId("live-refusal-row-share-1")).toBeNull();
+      expect(h.onError).not.toHaveBeenCalled();
+    });
+
+    // The share was already asked. Its recovery re-reads both lists and must
+    // never enrol it a second time.
+    it("recovers read-only when the refresh fails after a successful retry", async () => {
+      const h = harness();
+      h.load
+        .mockResolvedValueOnce(page([row("docs/a.md")]))
+        .mockRejectedValueOnce(new Error("the engine did not answer"))
+        .mockResolvedValueOnce(page([row("docs/b.md")]));
+      h.loadRefusals.mockResolvedValue(
+        refusalPage([refusal("share-1", ["docs/a.md"])]),
+      );
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByTestId("live-refusal-row-share-1");
+      await user.click(
+        screen.getByRole("button", { name: "Retry live editing for docs/a.md" }),
+      );
+
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+      expect(h.onError.mock.calls[0]![0]).toBe(
+        "dohc could not load the live documents for this workspace.",
+      );
+      // A half-finished refresh claims neither list.
+      expect(
+        screen.getByText(
+          "This list is not current. Reload to see this workspace's live documents.",
+        ),
+      ).toBeTruthy();
+      expect(
+        screen.getByText("This list is not current. Reload to check these shares again."),
+      ).toBeTruthy();
+
+      await act(async () => {
+        expect(h.onError.mock.calls[0]![2]()).toBe(true);
+      });
+      expect(h.retryRefusal).toHaveBeenCalledTimes(1);
+      expect(h.load).toHaveBeenCalledTimes(3);
+      expect(await screen.findByTestId("live-document-row-docs/b.md")).toBeTruthy();
+    });
+
+    // Two lists in one dialog: the panel is what scrolls, so the footer and
+    // both Load more controls stay reachable however long either list is.
+    it("bounds the whole dialog to the viewport with one scroller", async () => {
+      const h = harness();
+      h.load.mockResolvedValueOnce(page([row("docs/a.md")]));
+      h.loadRefusals.mockResolvedValueOnce(refusalPage([refusal("share-1")]));
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      const dialog = await screen.findByTestId("live-documents-dialog");
+      await screen.findByTestId("live-refusal-row-share-1");
+      expect(dialog.className).toContain("max-h-[calc(100vh-112px)]");
+      expect(dialog.className).toContain("overflow-y-auto");
+      for (const list of [
+        screen.getByRole("list", { name: "Live documents" }),
+        screen.getByRole("list", { name: "Shares that could not start live editing" }),
+      ]) {
+        expect(list.className).not.toMatch(/max-h-\[|overflow-y-auto/);
+      }
+    });
+
+    it("reports a refused retry, keeps the page, and retries it in place", async () => {
+      const h = harness();
+      h.loadRefusals.mockResolvedValue(refusalPage([refusal("share-1", ["docs/a.md"])]));
+      const failure = new Error("the relay refused the request");
+      h.retryRefusal.mockRejectedValueOnce(failure);
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await screen.findByTestId("live-refusal-row-share-1");
+      await user.click(
+        screen.getByRole("button", { name: "Retry live editing for docs/a.md" }),
+      );
+
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+      expect(h.onError.mock.calls[0]![0]).toBe(
+        "dohc could not retry live editing for docs/a.md.",
+      );
+      expect(h.onError.mock.calls[0]![1]).toBe(failure);
+      // A refused ask leaves the page it was read from on screen.
+      expect(screen.getByTestId("live-refusal-row-share-1")).toBeTruthy();
+
+      await act(async () => {
+        expect(h.onError.mock.calls[0]![2]()).toBe(true);
+      });
+      expect(h.retryRefusal).toHaveBeenCalledTimes(2);
+    });
+
+    it("reports a failed refusal read and offers the list as not current", async () => {
+      const h = harness();
+      const failure = new Error("the engine did not answer");
+      h.loadRefusals
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce(refusalPage([refusal("share-1")]));
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+      expect(h.onError.mock.calls[0]![0]).toBe(
+        "dohc could not load the shares that could not start live editing.",
+      );
+      expect(h.onError.mock.calls[0]![1]).toBe(failure);
+      expect(
+        screen.getByText("This list is not current. Reload to check these shares again."),
+      ).toBeTruthy();
+
+      await act(async () => {
+        expect(h.onError.mock.calls[0]![2]()).toBe(true);
+      });
+      expect(await screen.findByTestId("live-refusal-row-share-1")).toBeTruthy();
+    });
+
+    it("never paints refusals that answered after the workspace changed", async () => {
+      const h = harness();
+      const first = deferred<LiveRefusalPage>();
+      const second = deferred<LiveRefusalPage>();
+      h.loadRefusals.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+      const view = render(<LiveDocumentsDialog workspaceId="ws-a" {...h} />);
+
+      view.rerender(<LiveDocumentsDialog workspaceId="ws-b" {...h} />);
+      expect(h.loadRefusals).toHaveBeenNthCalledWith(2, "ws-b", undefined);
+      await act(async () => {
+        first.resolve(refusalPage([refusal("share-a-only")]));
+        await first.promise;
+      });
+      expect(screen.queryByTestId("live-refusal-row-share-a-only")).toBeNull();
+
+      await act(async () => {
+        second.resolve(refusalPage([refusal("share-b-only")]));
+        await second.promise;
+      });
+      expect(screen.getByTestId("live-refusal-row-share-b-only")).toBeTruthy();
+    });
+
+    it("refuses a stale refusal retry after the workspace changed", async () => {
+      const h = harness();
+      h.loadRefusals.mockRejectedValueOnce(new Error("old failure"));
+      const view = render(<LiveDocumentsDialog workspaceId="ws-a" {...h} />);
+
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+      const staleRetry = h.onError.mock.calls[0]![2];
+      view.rerender(<LiveDocumentsDialog workspaceId="ws-b" {...h} />);
+
+      expect(staleRetry()).toBe(false);
+      expect(h.loadRefusals).toHaveBeenCalledTimes(2);
+    });
   });
 });
