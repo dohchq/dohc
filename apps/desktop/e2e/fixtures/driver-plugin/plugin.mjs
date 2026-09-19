@@ -1,6 +1,6 @@
 // A driver plugin in miniature: it declares one agent driver, probes for its
 // harness, and runs that harness as a real supervised child process, mapping
-// the harness's own line protocol to dohc's agent events.
+// the harness's own line protocol to agent events in dohc.
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 

@@ -403,6 +403,7 @@ describe("CLI socket server", () => {
         return {
           displayName: "Ice",
           authorUserId: "verified-user-id",
+          agentName: "Nova",
           reactionAuthorId: "verified-user-id",
         };
       },
@@ -691,7 +692,8 @@ describe("CLI socket server", () => {
     expect(opening.messages).toMatchObject([{
       threadId: startedThread.id,
       authorKind: "agent",
-      authorDisplayName: "Ice",
+      authorDisplayName: "Nova",
+      authorOwnerDisplayName: "Ice",
       body: "Opening through the engine channel id",
     }]);
     const openingMessageId = opening.messages[0]!.id;
@@ -761,7 +763,7 @@ describe("CLI socket server", () => {
     }))).toEqual([
       {
         kind: "agent",
-        displayName: "Ice",
+        displayName: "Nova",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -1042,6 +1044,7 @@ describe("CLI socket server", () => {
       return {
         displayName: "Ice",
         authorUserId: userId,
+        agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
       };
     };
@@ -1130,6 +1133,7 @@ describe("CLI socket server", () => {
       return {
         displayName: "Ice",
         authorUserId: userId,
+        agentName: "Nova",
         reactionAuthorId: userId,
       };
     };
@@ -2011,7 +2015,7 @@ describe("CLI socket server", () => {
       {
         id: replied.messageId,
         kind: "agent",
-        displayName: "Ice",
+        displayName: "Nova",
         body: "Agent response from the terminal",
         parentMessageId: opened.messageId,
         decisionState: undefined,
@@ -2041,7 +2045,7 @@ describe("CLI socket server", () => {
       },
       {
         kind: "agent",
-        displayName: "Ice",
+        displayName: "Nova",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -3286,6 +3290,7 @@ describe("CLI socket server", () => {
       calls.identity += 1;
       return {
         displayName: "Ice",
+        agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
       };
     };
@@ -3307,6 +3312,7 @@ describe("CLI socket server", () => {
       return {
         displayName: "Ice",
         authorUserId: "verified-user-id",
+        agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
       };
     };
@@ -3346,6 +3352,7 @@ describe("CLI socket server", () => {
       return {
         displayName: "Ice",
         authorUserId: userId,
+        agentName: "Nova",
         reactionAuthorId: userId,
       };
     };

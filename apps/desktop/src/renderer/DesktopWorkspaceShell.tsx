@@ -1,3 +1,4 @@
+import { AgentSettingsContext } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
@@ -778,18 +779,19 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
+  const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
       {
         id: "agent:default",
         kind: "agent",
         handle: "agent",
-        label: `${LOCAL_USER_LABEL}'s agent`,
+        label: localAgentName,
         description: "your agent",
       },
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
-    [],
+    [localAgentName],
   );
   const userMentionCandidates = useMemo(
     () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
@@ -798,7 +800,7 @@ export function DesktopWorkspaceShell(props: {
   const agentNotifs = useAgentNotifications({
     workspaceId,
     workspaceName: workspaceName(props.workspace),
-    agentName: `${LOCAL_USER_LABEL}'s agent`,
+    agentName: localAgentName,
     userCandidates: userMentionCandidates,
   });
   const addressedToMe = useMemo(
@@ -2941,7 +2943,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const openNewFileDialog = useCallback(() => setNewFileOpen(true), []);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -4166,7 +4167,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onNewFileDialog={openNewFileDialog}
+        onError={showShellError}
         onNewCollection={setNewCollectionFolder}
       />
     </>
@@ -4237,10 +4238,10 @@ export function DesktopWorkspaceShell(props: {
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     isChatsTabPath(group.activeTab),
   );
-  // The panel owns chat: it navigates in place and reports its destination
-  // and drafts, the same seam the page uses, so expanding to a tab picks up
-  // where the panel is. While a Chats tab is live the page owns the surface;
-  // the panel goes back to being a navigator that hands clicks to that tab.
+  // The panel is a navigator, like the Explorer: it lists Home, the groups,
+  // people and agents, and every click opens that conversation in the Chats
+  // tab. It never shows a conversation itself, so it holds no presence lease
+  // and never seeds or reports a destination.
   const chatsNavigatorProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -4248,25 +4249,14 @@ export function DesktopWorkspaceShell(props: {
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
     dmReadRevision: chatsDmReadRevision,
-    ...(chatsTabIsLive
-      ? { onOpenInTab: openChatsNavInTab }
-      : {
-          initialNav: chatsNav.current ?? undefined,
-          initialDrafts: chatsDrafts.current ?? undefined,
-          onNavChange: onChatsNav,
-          onNavCommand: onChatsNavCommand,
-          onDraftsChange: onChatsDrafts,
-          onThreadRead: onChatsThreadRead,
-          onThreadStarted: onChatsThreadStarted,
-          onDmRead: onChatsDmRead,
-        }),
+    onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: chatsTabIsLive ? null : chatCollaboration,
+    collaboration: null,
     suspendPolling: chatsTabIsLive,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -4391,6 +4381,7 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [acceptStoreUpdateResult, workspaceId]);
   return (
+    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <div
       data-testid="workspace-shell"
       // Flips to "true" only once openWorkspace has resolved — which in main
@@ -5339,12 +5330,7 @@ export function DesktopWorkspaceShell(props: {
                 </Suspense>
               ) : (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    // The panel re-seeds from the shell's destination each
-                    // time ownership of chat moves between it and a tab.
-                    key={`${workspaceId}:${chatsTabIsLive ? "tab" : "panel"}`}
-                    {...chatsNavigatorProps}
-                  />
+                  <LazyChatsView key={workspaceId} {...chatsNavigatorProps} />
                 </Suspense>
               )}
             </ErrorBoundary>
@@ -5875,5 +5861,6 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
+    </AgentSettingsContext.Provider>
   );
 }

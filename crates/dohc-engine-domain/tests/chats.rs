@@ -43,6 +43,7 @@ fn start_thread(
         lane: ChatThreadLane::Posts,
         author_kind: kind,
         author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
         author_user_id: Some("user-ada".to_owned()),
         origin: None,
         body: body.to_owned(),
@@ -67,6 +68,7 @@ fn send_msg(
         message_id: message_id.to_owned(),
         author_kind: ChatActorKind::Human,
         author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
         author_user_id: Some("user-ada".to_owned()),
         parent_message_id: parent.map(str::to_owned),
         origin: None,
@@ -3457,4 +3459,49 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .code(),
         "invalid-input"
     );
+}
+
+#[test]
+fn agent_owner_name_survives_both_writes_and_reopen() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    {
+        let mut store = open(&db, 1);
+        let mut chats = LinkedChatStore::new(&mut store);
+        let channel = chats
+            .ensure_general_channel(WS, "general", 1, &NO_FAULTS)
+            .expect("channel");
+        let mut input = start_thread(
+            &channel.channel_id,
+            "thread-owner",
+            "first-owner",
+            "Hello",
+            ChatActorKind::Agent,
+            2,
+        );
+        input.author_display_name = "Nova".to_owned();
+        input.author_owner_display_name = Some("  Ada  ".to_owned());
+        let (_, first) = chats
+            .start_channel_thread(&input, &NO_FAULTS)
+            .expect("start");
+        assert_eq!(first.author_owner_display_name.as_deref(), Some("Ada"));
+        let mut reply = send_msg("thread-owner", "reply-owner", None, "Done", 3);
+        reply.author_kind = ChatActorKind::Agent;
+        reply.author_display_name = "Nova".to_owned();
+        reply.author_owner_display_name = Some("Ada".to_owned());
+        chats.send_message(&reply, &NO_FAULTS).expect("reply");
+        reply.message_id = "human-owner".to_owned();
+        reply.author_kind = ChatActorKind::Human;
+        assert!(chats.send_message(&reply, &NO_FAULTS).is_err());
+    }
+    let mut store = open(&db, 4);
+    let chats = LinkedChatStore::new(&mut store);
+    let page = chats
+        .list_messages(WS, "thread-owner", 10, None)
+        .expect("messages");
+    assert_eq!(page.messages.len(), 2);
+    for message in page.messages {
+        assert_eq!(message.author_display_name, "Nova");
+        assert_eq!(message.author_owner_display_name.as_deref(), Some("Ada"));
+    }
 }

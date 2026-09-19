@@ -260,7 +260,7 @@ export interface JoinedSharedChannel {
 
 // A share MOUNTED into a host workspace: the received share materializes
 // under shared-with-me/<label>/ inside the host root — ordinary read-only
-// files the user's agent can read with normal tools — refreshed from the
+// files the configured agent can read with normal tools — refreshed from the
 // share's filtered op log, never pushed. `ended` marks a revoked share:
 // the mounted copy stays readable but stops refreshing.
 export interface ShareMountRecord {

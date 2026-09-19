@@ -2,8 +2,9 @@
 // extension gets ".md" appended. An explicit extension ("notes.txt") is
 // respected exactly, dotfiles (".env") stay literal — a leading dot is not
 // an extension — and a trailing dot reads as "extension not typed yet", so
-// "notes." becomes "notes.md". Renames never go through this helper: they
-// stay literal so users can strip or change extensions deliberately.
+// "notes." becomes "notes.md". Renames use it too: an explicit extension
+// still changes the file's type, but leaving it off never makes a file
+// without one.
 export function withMarkdownDefault(relativePath: string): string {
   // Backend validation accepts "\" as a separator too and drops empty
   // segments (workspace-core paths.ts), so a trailing separator is noise:

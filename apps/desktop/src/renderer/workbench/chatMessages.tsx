@@ -1,3 +1,4 @@
+import { AgentBadge } from "./AgentBadge";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
@@ -39,13 +40,11 @@ import type { ChatFileReferenceToken } from "./chatFileMentions";
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both
 // panels can be mounted at once.
 
-// Authorship display rule (plan non-negotiable): agent-authored messages
-// render as "<User Name>'s agent"; human messages show the author's name.
+// Names are stored verbatim for both human and agent authors.
 export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
-  if (author.authorKind !== "agent") return author.authorDisplayName;
-  return `${author.authorDisplayName}'s agent`;
+  return author.authorDisplayName;
 }
 
 // Reaction toggle (WS-MU-C2), shared by both chat surfaces (the file-rail
@@ -343,7 +342,7 @@ export interface ChatReactionControls {
   readOnly?: boolean;
 }
 
-// "Alice, Bob's agent reacted" — agent reactors read as "<name>'s agent".
+// Reaction labels use the stored human or agent name.
 function reactionerNames(records: readonly ChatReactionRecord[]): string {
   return records.map((record) => chatAuthorLabel(record)).join(", ");
 }
@@ -480,7 +479,7 @@ export function MessageReactions(props: {
           disabled={props.controls.readOnly}
           // The emoji glyph is aria-hidden, so without this the button announces
           // as just its count. Expose emoji + count + reactor names, e.g.
-          // "👍 3 — Ice, Ice's agent".
+          // "👍 3 — Ice, Nova".
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
@@ -739,6 +738,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 >
                   {chatAuthorLabel(message)}
                 </span>
+                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
                 <time
                   dateTime={time.iso}
                   title={time.iso}

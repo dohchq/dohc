@@ -58,7 +58,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
     onRefresh: vi.fn(),
-    onNewFileDialog: vi.fn(),
+    onError: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };

@@ -207,6 +207,7 @@ export class ChatsLiveAdapter {
     title?: string;
     lane?: ChatThreadLane;
     author: ChatActor;
+    authorOwnerDisplayName?: string;
     authorUserId?: string;
     origin?: "cli";
     body: string;
@@ -227,6 +228,9 @@ export class ChatsLiveAdapter {
         ...(input.lane !== undefined ? { lane: input.lane } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
+        ...(input.author.kind === "agent" && input.authorOwnerDisplayName !== undefined
+          ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
+          : {}),
         ...(input.authorUserId !== undefined
           ? { authorUserId: input.authorUserId }
           : {}),
@@ -327,6 +331,7 @@ export class ChatsLiveAdapter {
     workspaceId: string;
     threadId: string;
     author: ChatActor;
+    authorOwnerDisplayName?: string;
     authorUserId?: string;
     parentMessageId?: string;
     origin?: "cli";
@@ -344,6 +349,9 @@ export class ChatsLiveAdapter {
         messageId,
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
+        ...(input.author.kind === "agent" && input.authorOwnerDisplayName !== undefined
+          ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
+          : {}),
         ...(input.authorUserId !== undefined
           ? { authorUserId: input.authorUserId }
           : {}),

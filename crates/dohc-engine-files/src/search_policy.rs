@@ -319,7 +319,7 @@ pub fn policy_glob_matches(pattern: &str, path: &str) -> bool {
 /// property enumeration order (`OrdinaryOwnPropertyKeys`): every ARRAY INDEX key
 /// first in ascending numeric order, then every remaining key in insertion order.
 /// TOML allows bare integer keys, so a policy file can reach that rule, and the
-/// first error is what a user's agent reads back from a rejected policy file.
+/// first error is what an agent acting for a user reads back from a rejected policy file.
 fn js_property_order(table: &toml::Table) -> Vec<&str> {
     let mut indexed: Vec<(u32, &str)> = Vec::new();
     let mut named: Vec<&str> = Vec::new();

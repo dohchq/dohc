@@ -225,7 +225,8 @@ describe("ChatsView panel navigator unread badges", () => {
       }),
     );
     const user = userEvent.setup();
-    const view = render(navigator(0));
+    const openInTab = vi.fn();
+    const view = render(navigatorView(0, { onOpenInTab: openInTab, threadRevision: 0 }));
     await screen.findByTestId("chats-channel-unread");
 
     // Start creating a channel and leave the IPC in flight.
@@ -238,7 +239,7 @@ describe("ChatsView panel navigator unread badges", () => {
       channels: [channel({ unreadCount: 0 })],
       fileThreads: [],
     });
-    view.rerender(navigator(1));
+    view.rerender(navigatorView(1, { onOpenInTab: openInTab, threadRevision: 0 }));
     await waitFor(() => {
       expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
     });
@@ -250,10 +251,13 @@ describe("ChatsView panel navigator unread badges", () => {
       });
       await Promise.resolve();
     });
-    // Straight into the new channel, and the create form is gone — neither
+    // The new group opens in the tab, and the create form is gone. Neither
     // happens if the refresh invalidated the creation.
-    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
-      "launch",
+    await waitFor(() =>
+      expect(openInTab).toHaveBeenCalledWith({
+        level: "channel",
+        channel: expect.objectContaining({ id: "channel-9", name: "launch" }),
+      }),
     );
     expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
   });

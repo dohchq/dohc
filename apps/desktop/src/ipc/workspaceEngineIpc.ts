@@ -44,7 +44,7 @@ export function createWorkspaceEngineIpc<
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
-  localUserDisplayName(): string;
+  localAgentDisplayName(): string;
   notifyRenderer(target: { workspaceId: string }): void;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
@@ -67,7 +67,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localUserDisplayName,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -142,11 +142,10 @@ export function createWorkspaceEngineIpc<
     // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
     // unit-tested); main only injects the display-name rule below.
     // The same display-name rule the chat rail uses. AgentIntegration
-    // stamps onBehalfOf "local" for the desktop's own user, which displays as
-    // the cloud email (or "You" when signed out); any other onBehalfOf is
-    // already a user-facing label and displays as-is.
+    // stamps onBehalfOf "local" for local runs, which use the configured
+    // agent name. Other labels display as stored.
     function agentAuthorDisplayName(author: Extract<NonNullable<VersionedTextMomentSummary["author"]>, {kind: "agent"}>): string {
-      return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
+      return author.onBehalfOf === "local" ? localAgentDisplayName() : author.onBehalfOf;
     }
 
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {

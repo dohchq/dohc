@@ -60,7 +60,7 @@ export interface PluginCommandSpawnOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   /** The name the plugin asked for, before Windows shim resolution. Failures
-   * report this, because it is the name the plugin's agent has to correct. */
+   * report this, because it is the name the agent running the plugin has to correct. */
   requestedCommand: string;
   windowsVerbatimArguments?: boolean;
 }
@@ -929,7 +929,7 @@ export class PluginChildProcessBroker {
     const child = this.children.get(childId);
     if (!child) {
       // A handle can go missing because retention evicted it, which is a
-      // configured limit the calling plugin's agent has to be able to read
+      // configured limit the agent running the calling plugin has to be able to read
       // off the error itself.
       const evicted = this.evictedExitedChildren.get(
         this.spawnKey(context.pluginId, context.spawnId),

@@ -86,7 +86,7 @@ await unregisterTsx();
 // One vector per rejection branch of `validatePolicyGlob`, plus the accepted
 // shapes the matcher vectors below rely on. The pairs that could trip two
 // branches at once (`/bad?`, `!bad[`) pin the branch ORDER, which decides which
-// reason a user's agent reads back.
+// reason an agent acting for a user reads back.
 const globValidationPatterns = [
   "",
   "/rooted/x.md",

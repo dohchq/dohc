@@ -201,7 +201,7 @@ fn generated_ts_glob_matching_matches_the_rust_port() {
 }
 
 /// Both ports must collect the same errors in the same order: the first error is
-/// what a user's agent reads back from a rejected policy file.
+/// what an agent acting for a user reads back from a rejected policy file.
 fn assert_parse_case<R, T>(
     case: &ParseCase<R>,
     actual: Result<Vec<T>, Vec<String>>,

@@ -44,6 +44,7 @@ struct ChatMessageSendParams {
     message_id: String,
     author_kind: String,
     author_display_name: String,
+    author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
     parent_message_id: Option<String>,
     origin: Option<String>,
@@ -156,6 +157,9 @@ pub(super) fn message_json(message: &ChatMessage) -> Value {
         "attachments": message.attachments.iter().map(attachment_json).collect::<Vec<_>>(),
     });
     let object = value.as_object_mut().expect("message is an object");
+    if let Some(owner_name) = &message.author_owner_display_name {
+        object.insert("authorOwnerDisplayName".to_owned(), json!(owner_name));
+    }
     if let Some(author_user_id) = &message.author_user_id {
         object.insert("authorUserId".to_owned(), json!(author_user_id));
     }
@@ -491,6 +495,7 @@ impl EngineService {
                     message_id: params.message_id,
                     author_kind,
                     author_display_name: params.author_display_name,
+                    author_owner_display_name: params.author_owner_display_name,
                     author_user_id: params.author_user_id,
                     parent_message_id: params.parent_message_id,
                     origin: params.origin,

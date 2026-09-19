@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -177,6 +177,37 @@ describe("ShareHandoffSurface", () => {
       expect(onBack).toHaveBeenCalledOnce();
     },
   );
+
+  it("binds the mouse's back button to Cancel while waiting for acceptance", () => {
+    const onBack = vi.fn();
+    const { unmount } = render(
+      <ShareHandoffSurface
+        status={{
+          status: "waiting-for-acceptance",
+          statusId: "accept-current",
+          email: "current-account@dohc.test",
+        }}
+        onWorkspaceReady={() => {}}
+        onBack={onBack}
+        onOpened={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["Agree and open", "Cancel"]);
+
+    fireEvent.mouseUp(window, { button: 0 });
+    expect(onBack).not.toHaveBeenCalled();
+
+    fireEvent.mouseUp(window, { button: 3 });
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(bridgeMock.acceptShareHandoff).not.toHaveBeenCalled();
+
+    unmount();
+    fireEvent.mouseUp(window, { button: 3 });
+    expect(onBack).toHaveBeenCalledOnce();
+  });
 
   it.each(["first-run", "workspace"] as const)(
     "shows the exact wrong-server refusal with only Back in the %s placement",

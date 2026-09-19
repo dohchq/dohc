@@ -87,7 +87,7 @@ function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotificat
     kind: "finished",
     workspaceId: "ws-a",
     workspaceName: "Personal",
-    agentName: "You's agent",
+    agentName: "You",
     runId: "run-1",
     title: "Your agent finished",
     body: "Reorganized /notes into three folders.",

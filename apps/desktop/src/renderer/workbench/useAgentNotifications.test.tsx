@@ -70,7 +70,7 @@ afterEach(() => {
 
 const baseProps = {
   workspaceName: "Workspace",
-  agentName: "You's agent",
+  agentName: "You",
   userCandidates: [],
   // Large interval so only the immediate poll runs in the test window.
   pollIntervalMs: 1_000_000,

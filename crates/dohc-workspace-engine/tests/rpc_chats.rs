@@ -4641,7 +4641,7 @@ async fn polls_and_lanes_cross_the_rpc_boundary() {
             "threadId": "poll-thread",
             "messageId": "poll",
             "authorKind": "agent",
-            "authorDisplayName": "Ada's agent",
+            "authorDisplayName": "Nova",
             "body": "Which day do we ship?",
             "needsDecision": true,
             "options": ["Friday", "Monday"],

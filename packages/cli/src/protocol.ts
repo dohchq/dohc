@@ -537,6 +537,7 @@ const rawChatMessageSchema = z
     threadId: rawThreadIdSchema,
     authorKind: cliActorSchema,
     authorDisplayName: z.string().min(1),
+    authorOwnerDisplayName: z.string().min(1).optional(),
     body: z.string(),
     createdAtMs: z.number().int().nonnegative(),
     parentMessageId: rawMessageIdSchema.optional(),

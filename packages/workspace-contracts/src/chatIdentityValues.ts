@@ -19,8 +19,3 @@ export function preferredNameFromInput(value: string): string | undefined {
   }
   return preferredName;
 }
-
-export function agentDisplayLabel(ownerDisplayName: string): string {
-  const owner = ownerDisplayName.trim();
-  return /['’]s agent$/i.test(owner) ? owner : `${owner}'s agent`;
-}

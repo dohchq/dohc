@@ -185,6 +185,22 @@ table {
   cursor: default;
 }
 
+/* Dialogs and error messages read like documents: a person copies what they
+   say. Controls inside them stay chrome. */
+[data-dohc-modal="true"],
+[role="dialog"],
+[role="alertdialog"],
+[role="alert"] {
+  user-select: text;
+}
+
+[data-dohc-modal="true"] :is(button, [role="button"], [role="menuitem"], [role="option"], [role="tab"]),
+[role="dialog"] :is(button, [role="button"], [role="menuitem"], [role="option"], [role="tab"]),
+[role="alertdialog"] :is(button, [role="button"], [role="menuitem"], [role="option"], [role="tab"]),
+[role="alert"] :is(button, [role="button"]) {
+  user-select: none;
+}
+
 /* Native feel: no rubber-band overscroll — panels end where they end. */
 html,
 body {

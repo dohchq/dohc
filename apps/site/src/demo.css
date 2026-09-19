@@ -1190,6 +1190,7 @@ button {
 
 .demo-statusbar {
   display: flex;
+  contain: layout;
   align-items: center;
   gap: 9px;
   border-top: 1px solid var(--dohc-line);
@@ -1208,6 +1209,10 @@ button {
   align-items: center;
   gap: 13px;
   margin-left: auto;
+}
+
+.demo-status-details {
+  display: contents;
 }
 
 @media (max-width: 1050px) {
@@ -1246,7 +1251,7 @@ button {
     display: none;
   }
 
-  .demo-status-right {
+  .demo-status-details {
     display: none;
   }
 

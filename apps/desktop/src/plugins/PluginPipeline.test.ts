@@ -6350,7 +6350,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const liveRoot = join(pluginsDataRoot(fixture), "example-plugin");
       const liveBefore = await fileHashes(liveRoot);
 
-      // A half-written manifest is an ordinary state while a user's agent
+      // A half-written manifest is an ordinary state while an agent acting for a user
       // edits the plugin. The root never left; only its manifest did.
       await writeFile(manifestPath, "{ half written\n");
       pipeline.handleWatcherEvents([{

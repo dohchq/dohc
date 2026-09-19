@@ -12,12 +12,12 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
     FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution,
     attachment_id_for, channel_slug_for_name, encode_poll_options, has_projection_control_char,
-    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
-    normalize_channel_group, normalize_channel_name, normalize_display_name,
-    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_addressable_plaintext_path,
+    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_agent_owner_name,
+    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
+    normalize_display_name, normalize_feed_identity, normalize_poll_options,
+    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
+    replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
+    resolve_thread_message, validate_addressable_plaintext_path,
 };
 
 use crate::error::local_corruption;
@@ -664,6 +664,7 @@ struct MessageAppend {
     thread_id: String,
     author_kind: String,
     author_display_name: String,
+    author_owner_display_name: Option<String>,
     body: String,
     created_at_ms: i64,
     #[serde(default, deserialize_with = "deserialize_present_string")]
@@ -1423,6 +1424,13 @@ fn apply_message(
             reason: "chat message payload is invalid",
         });
     }
+    let owner_name = normalize_agent_owner_name(
+        payload.author_kind == "agent",
+        payload.author_owner_display_name.as_deref(),
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "chat message owner display name is invalid",
+    })?;
     let author_display_name = normalize_display_name(&payload.author_display_name)
         .map_err(|error| map_chat_rule(error, "chat message display name is invalid"))?;
     let author_user_id = normalize_author_user_id(payload.author_user_id.as_deref())
@@ -1471,9 +1479,9 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms],
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

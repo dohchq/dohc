@@ -59,7 +59,7 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 }
 
 // A moment authored by a dohc-tracked agent run displays as
-// "<User Name>'s agent" (the same formatting rule the chat rail uses via
+// "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel); everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
   moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor">,

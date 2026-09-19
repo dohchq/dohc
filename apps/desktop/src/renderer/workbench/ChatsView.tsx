@@ -90,7 +90,6 @@ import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type {
@@ -120,6 +119,7 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
+  agentName?: string;
   preferredName?: string;
   runnerConfigured: boolean;
   runnerEnabled: boolean;
@@ -361,7 +361,7 @@ export function ChatsView(props: {
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
   // Main-derived settings/status summary. The Agents section reads it to
-  // say whether the user's agent is set up.
+  // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
   // The user settings the add-agent form writes, and the save that persists
@@ -1356,6 +1356,8 @@ export function ChatsView(props: {
                       id: preview.id,
                       authorKind: preview.authorKind,
                       authorDisplayName: preview.authorDisplayName,
+                      authorOwnerDisplayName: preview.authorOwnerDisplayName,
+                      authorUserId: preview.authorUserId,
                       createdAtMs: preview.createdAtMs,
                       bodySnippet: preview.bodySnippet,
                     }
@@ -2531,7 +2533,7 @@ export function ChatsView(props: {
     overview.status === "ready"
       ? overview.channels.find((channel) => channel.kind === "agent") ?? null
       : null;
-  // Other people's agents that reach this workspace: an agent that posted in
+  // Agents shared by other people that reach this workspace: an agent that posted in
   // a channel shared to the user belongs to whoever shared it. Derived from
   // the Home items already read, so it costs nothing and lists exactly the
   // agents whose work the user has seen arrive. Read-only: nothing here runs
@@ -3009,15 +3011,14 @@ export function ChatsView(props: {
           answerLocally(joinedOrder.current, workspaceId, result.channel.wireId);
         }
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
-        // The completion is the user's command landing (see openConversation).
-        props.onNavCommand?.({ level: "channel", channel: result.channel });
-        void openChannel(result.channel);
+        // The new group opens where any click on it would.
+        openConversation({ level: "channel", channel: result.channel });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [newGroupPurpose, newGroupType, resetGroupForm, openChannel, props.onError, props.onNavCommand, workspaceId],
+    [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -3040,7 +3041,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
-      // Home's rows stay: the nav lists other people's agents from them, and
+      // Home's rows stay: the nav lists agents shared by other people from them, and
       // opening Home again reloads them before it paints.
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
@@ -3981,7 +3982,7 @@ export function ChatsView(props: {
   }
 
   // An agent is set up when it has a name to post as and something runs it.
-  const agentReady = Boolean(props.agentSetup?.preferredName && props.agentSetup.runnerEnabled);
+  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
@@ -4372,9 +4373,7 @@ export function ChatsView(props: {
       : null;
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
-  const agentLabel = props.agentSetup?.preferredName
-    ? agentDisplayLabel(props.agentSetup.preferredName)
-    : "Your agent";
+  const agentLabel = props.agentSetup?.agentName ?? "Your agent";
 
   return (
     <div
@@ -4520,6 +4519,10 @@ export function ChatsView(props: {
                     // recipient/draft left over from a previous compose.
                     setDmRecipients("");
                     setDmDraft("");
+                    if (variant === "panel" && props.onOpenInTab) {
+                      props.onOpenInTab({ level: "dm-new" });
+                      return;
+                    }
                     // A command like any conversation click (see
                     // openConversation): report it synchronously, or a DM
                     // answer queued in this tick remounts over the compose.
@@ -4657,7 +4660,8 @@ export function ChatsView(props: {
                   onDone={() => setAddingAgent(false)}
                   onCancel={() => setAddingAgent(false)}
                 />
-              ) : props.userSettings && props.onSaveUserSettings ? (
+              ) : null}
+              {props.userSettings && props.onSaveUserSettings ? (
                 <button
                   type="button"
                   data-testid={agentReady ? "chats-manage-agent" : "chats-add-agent-open"}

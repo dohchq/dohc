@@ -79,7 +79,7 @@ describe("ChatsView decisions", () => {
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
     const user = userEvent.setup();
-    const opening = message({ authorKind: "agent", authorDisplayName: "You's agent", body: "Ship on which day?" });
+    const opening = message({ authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
     const poll = {
       threadId: "thread-1",
       messageId: opening.id,

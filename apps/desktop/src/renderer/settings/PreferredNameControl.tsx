@@ -1,7 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
-  agentDisplayLabel,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
 
@@ -18,7 +17,7 @@ export function PreferredNameControl(props: {
   useEffect(() => setDraft(props.value ?? ""), [props.value]);
 
   const candidate = draft.trim();
-  const preview = candidate.length > 0 ? agentDisplayLabel(candidate) : "Your agent";
+  const preview = candidate || "You";
 
   const commit = async () => {
     let preferredName: string | undefined;
@@ -72,7 +71,7 @@ export function PreferredNameControl(props: {
         className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-60"
       />
       <span data-testid={`${prefix}-preview`} className="text-[10px] text-subtle">
-        Messages will appear as <span className="font-medium text-ink">{preview}</span>.
+        Your messages appear as <span className="font-medium text-ink">{preview}</span>.
       </span>
       {error ? (
         <span data-testid={`${prefix}-error`} role="alert" className="text-[10px] text-danger">

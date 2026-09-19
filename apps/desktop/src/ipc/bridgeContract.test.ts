@@ -3811,7 +3811,7 @@ describe("engine history and linked Chats IPC contract", () => {
     });
     expect(result.message.authorKind).toBe("human");
     // The agent author kind is a first-class wire value (rendered as
-    // "<User Name>\'s agent" in the UI).
+    // "the agent name" in the UI).
     expect(
       SendChatMessageResult.parse({
         message: {

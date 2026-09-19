@@ -91,6 +91,7 @@ describe("ChatsView My agent", () => {
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
         preferredName: "Ice",
+        agentName: "Nova",
         runnerConfigured: true,
         runnerEnabled: true,
         mcpEnabled: false,
@@ -101,7 +102,7 @@ describe("ChatsView My agent", () => {
       workspacePath: "C:\\people\\ice\\work",
     });
 
-    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe("Ice's agent");
+    expect((await screen.findByTestId("chats-my-agent-name")).textContent).toBe("Nova");
     expect(screen.queryByTestId("chats-my-agent-state")).toBeNull();
     await user.click(screen.getByTestId("chats-manage-agent"));
     expect(onSetupAgent).toHaveBeenCalledOnce();
@@ -127,7 +128,7 @@ describe("ChatsView My agent", () => {
     expect(runnerProgram("")).toBe("");
   });
 
-  it("lists other people's agents from joined channels, read-only, under who shared them", async () => {
+  it("lists agents shared by other people from joined channels, read-only, under who shared them", async () => {
     const user = userEvent.setup();
     const shared = channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), shared], fileThreads: [] });
@@ -176,7 +177,7 @@ describe("ChatsView My agent", () => {
     await user.click(screen.getByTestId("chats-feed-back"));
     const rows = await screen.findAllByTestId("chats-other-agent");
     expect(rows).toHaveLength(1);
-    expect(screen.getByTestId("chats-other-agent-name").textContent).toBe("Owner's agent");
+    expect(screen.getByTestId("chats-other-agent-name").textContent).toBe("Owner");
     expect(rows[0]!.dataset.owner).toBe("owner@example.com");
     expect(rows[0]!.textContent).toContain("via owner@example.com");
     // Opening one goes to its latest work; there is nothing here to configure.
@@ -204,8 +205,9 @@ describe("ChatsView My agent", () => {
 
     await user.click(await screen.findByTestId("chats-add-agent-open"));
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Your agent");
+    await user.type(screen.getByTestId("chats-add-agent-agent-name"), "Nova");
     await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
-    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Ice's agent");
+    expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Nova");
     await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
     await user.click(screen.getByTestId("chats-add-agent-check"));
     await waitFor(() =>
@@ -219,7 +221,7 @@ describe("ChatsView My agent", () => {
     expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
     expect(onSaveUserSettings).toHaveBeenLastCalledWith({
       ...DEFAULT_USER_SETTINGS,
-      profile: { preferredName: "Ice" },
+      profile: { preferredName: "Ice", agentName: "Nova" },
       runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
     });
   });
@@ -334,7 +336,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     const authors = await screen.findAllByTestId("chats-message-author");
     expect(authors.map((el) => el.textContent)).toEqual([
       "You",
-      "ice@dohc.ai's agent",
+      "ice@dohc.ai",
     ]);
 
     await user.type(screen.getByTestId("chats-composer"), "Great, thanks!{Enter}");
@@ -538,7 +540,7 @@ describe("ChatsView mentions", () => {
       kind: "asked" as const,
       workspaceId: "workspace-a",
       workspaceName: "Personal",
-      agentName: "You's agent",
+      agentName: "You",
       runId: "run-1",
       title: "Your agent has a question",
       body: "Which draft should I keep?",
@@ -607,7 +609,7 @@ describe("group details", () => {
         : { threads: [] },
     );
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
-      message({ id: "m-lane", threadId: "lane", authorKind: "agent", authorDisplayName: "Owner's agent", authorUserId: "agent-owner" }),
+      message({ id: "m-lane", threadId: "lane", authorKind: "agent", authorDisplayName: "Owner", authorUserId: "agent-owner" }),
     ] });
     renderView();
     await waitFor(() => expect(screen.getAllByTestId("chats-other-agent")).toHaveLength(1));

@@ -361,7 +361,7 @@ describe("ChatsView presence (MU-C1)", () => {
         {
           userId: "me",
           clientId: "agent:workspace-a",
-          state: { displayName: "Me's agent", agent: true, activity: "busy" },
+          state: { displayName: "Me", agent: true, activity: "busy" },
           updatedAtMs: 0,
         },
       ]);
@@ -377,7 +377,7 @@ describe("ChatsView presence (MU-C1)", () => {
         {
           userId: "me",
           clientId: "agent:workspace-a",
-          state: { displayName: "Me's agent", agent: true, activity: "working" },
+          state: { displayName: "Me", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
       ]);
@@ -391,7 +391,7 @@ describe("ChatsView presence (MU-C1)", () => {
         {
           userId: "me",
           clientId: "agent:workspace-a",
-          state: { displayName: "Me's agent", agent: true, activity: "idle" },
+          state: { displayName: "Me", agent: true, activity: "idle" },
           updatedAtMs: 0,
         },
       ]);
@@ -414,7 +414,7 @@ describe("ChatsView presence (MU-C1)", () => {
         {
           userId: "me",
           clientId: "agent:workspace-a",
-          state: { displayName: "Me's agent", agent: true, activity: "working" },
+          state: { displayName: "Me", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
       ]);

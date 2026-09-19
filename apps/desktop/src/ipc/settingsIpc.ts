@@ -19,7 +19,7 @@ export function createSettingsIpc<
   assertTrustedSender(event: Event): void;
   stateDir(): string;
   enqueueUserSettingsWrite: ReturnType<typeof createUserSettingsWriteQueue>;
-  setCachedPreferredName(preferredName: string | undefined): void;
+  setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
   refreshDispatchTray(): Promise<unknown>;
   openDispatchWorkspaces(): readonly { workspaceId: string }[];
@@ -52,7 +52,7 @@ export function createSettingsIpc<
       const input = SetUserSettingsPayload.parse(payload);
       const result = await enqueueUserSettingsWrite(async () => {
         await writeUserSettingsFile(stateDir(), input.settings);
-        setCachedPreferredName(input.settings.profile.preferredName);
+        setCachedPreferredName(input.settings.profile.preferredName, input.settings.profile.agentName);
         // The windows must match whatever zoom level was just persisted, however
         // it got into the saved object.
         applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
@@ -77,7 +77,7 @@ export function createSettingsIpc<
       assertTrustedSender(event);
       const result = await enqueueUserSettingsWrite(async () => {
         await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
-        setCachedPreferredName(undefined);
+        setCachedPreferredName(undefined, undefined);
         applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
         return DesktopUserSettingsResult.parse({
           settings: DEFAULT_USER_SETTINGS,

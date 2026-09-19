@@ -36,6 +36,8 @@ export function AgentsMcpSettings(props: {
   workspaceId: string;
   workspacePath: string;
   preferredName?: string;
+  agentName?: string;
+  onAgentNameChange?: (name: string) => Promise<void>;
   onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
   runner: RunnerSettings;
   sharedView?: boolean;
@@ -153,7 +155,7 @@ export function AgentsMcpSettings(props: {
   // have a trusted session signal proving that an external client copied the
   // configuration and connected, so only the in-app runner can make this
   // guide ready.
-  const setupReady = Boolean(preferredName) && runner.enabled;
+  const setupReady = Boolean(preferredName && props.agentName) && runner.enabled;
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current();
@@ -345,6 +347,8 @@ export function AgentsMcpSettings(props: {
       <RunnerSettingsCard
         workspaceId={workspaceId}
         runner={runner}
+        agentName={props.agentName}
+        onAgentNameChange={props.onAgentNameChange}
         sharedView={sharedView}
         sessionRecorderOn={sessionRecorderOn}
         onRunnerChange={onRunnerChange}

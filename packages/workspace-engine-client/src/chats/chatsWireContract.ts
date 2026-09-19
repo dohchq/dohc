@@ -142,6 +142,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   lane?: ChatThreadLane;
   authorKind: "human" | "agent";
   authorDisplayName: string;
+  authorOwnerDisplayName?: string;
   authorUserId?: string;
   origin?: "cli";
   body: string;
@@ -170,6 +171,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   messageId: string;
   authorKind: "human" | "agent";
   authorDisplayName: string;
+  authorOwnerDisplayName?: string;
   authorUserId?: string;
   parentMessageId?: string;
   origin?: "cli";
@@ -488,6 +490,7 @@ const ChatMessageSchema = mutableStruct({
   workspaceId: Schema.String,
   threadId: Schema.String,
   author: ChatActorSchema,
+  authorOwnerDisplayName: Schema.optionalKey(Schema.String),
   authorUserId: Schema.optionalKey(Schema.String),
   parentMessageId: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),
@@ -660,6 +663,8 @@ const ChatMentionSchema = mutableStruct({
 const ChatChannelOpeningMessageSchema = mutableStruct({
   id: Schema.String,
   author: ChatActorSchema,
+  authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+  authorUserId: Schema.optionalKey(Schema.String),
   createdAtMs: AnyInt,
   bodySnippet: Schema.String,
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),

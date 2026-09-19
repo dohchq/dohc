@@ -19,7 +19,7 @@ import {
 import { replyToChat } from "../../../packages/mcp/src/tools";
 
 // PR 0N-1 agent loop E2E: a dohc-tracked agent run's file edits appear in
-// History as "<User Name>'s agent" (signed out => "You's agent"), edits after
+// History as "the agent name" (signed out => "Agent"), edits after
 // the run ends go back to actor-neutral, and an MCP chat reply lands in the
 // file rail attributed to the agent.
 
@@ -53,7 +53,7 @@ async function endAgentRun(
   }, { id: workspaceId, run: runId });
 }
 
-test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits are neutral", async () => {
+test("a dohc-tracked run's edits show as \"Agent\" in History; later edits are neutral", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -77,15 +77,15 @@ test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
     await expect(agentRow.first()).toBeVisible();
-    // Signed out, run active: History attributes the edit to "You's agent".
+    // Signed out, run active: History attributes the edit to "Agent".
     await expect(
       agentRow.first().getByTestId("engine-moment-source"),
-    ).toHaveText("You's agent");
+    ).toHaveText("Agent");
 
     // The diff page carries the same attribution.
     await agentRow.first().click();
     await expect(page.getByTestId("engine-moment-diff-page")).toBeVisible();
-    await expect(page.getByTestId("engine-diff-source")).toHaveText("You's agent");
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Agent");
 
     // End the run: later edits are the local user's, actor-neutral.
     await endAgentRun(page, workspace.workspaceId, runId);
@@ -105,7 +105,7 @@ test("a dohc-tracked run's edits show as \"You's agent\" in History; later edits
   }
 });
 
-test("an MCP chat reply reaches the file rail as \"You's agent\"", async () => {
+test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-chat-reply";
@@ -189,13 +189,15 @@ test("an MCP chat reply reaches the file rail as \"You's agent\"", async () => {
     });
 
     // Re-open the thread (back -> open) to fetch the fresh message list and
-    // assert the agent reply renders as "You's agent".
+    // assert the agent reply renders as "Agent".
     await page.getByTestId("linked-chat-back").click();
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-message-body").nth(1)).toContainText(
       "Done — here is the summary you asked for.",
     );
-    await expect(agentAuthor).toHaveText("You's agent");
+    await expect(agentAuthor).toHaveText("Agent");
+    await page.getByTestId("linked-chat-agent-badge").focus();
+    await expect(page.getByRole("tooltip")).toContainText("Owned by You");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

@@ -561,7 +561,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelGetWireId: return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
-        "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName",
+        "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
@@ -575,7 +575,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadGetProjection: return ["threadId", "linkedFileAccess"];
     case CHATS_METHOD.messageSend:
       return [
-        "threadId", "messageId", "authorKind", "authorDisplayName", "authorUserId",
+        "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
@@ -1488,6 +1488,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
       createdAtMs: atMs,
       attachments: [],
     };
+    const ownerName = optionalString(params, "authorOwnerDisplayName");
+    if (ownerName !== undefined) {
+      if (authorKind !== "agent") throw new Error("invalid-sender");
+      message.authorOwnerDisplayName = normalizeNonempty(ownerName, "invalid-sender");
+    }
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
     if (authorUserId !== undefined) message.authorUserId = authorUserId;
@@ -1619,6 +1624,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
                 openingMessage: {
                   id: opening.id,
                   author: opening.author,
+                  ...(opening.authorOwnerDisplayName ? { authorOwnerDisplayName: opening.authorOwnerDisplayName } : {}),
+                  ...(opening.authorUserId ? { authorUserId: opening.authorUserId } : {}),
                   createdAtMs: opening.createdAtMs,
                   bodySnippet:
                     opening.body.length > 500

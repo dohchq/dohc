@@ -65,6 +65,7 @@ export const DesktopUserSettings = z.object({
   // resetting unrelated preferences.
   profile: z.object({
     preferredName: PreferredNameForIpc.optional(),
+    agentName: PreferredNameForIpc.optional(),
   }).strict().default({}),
   appearance: z.object({
     themeMode: z.enum(THEME_MODES),
@@ -83,7 +84,10 @@ export const DesktopUserSettings = z.object({
     agentRuns: z.boolean(),
   }).strict(),
   runner: RunnerSettings.default(DEFAULT_RUNNER_SETTINGS),
-}).strict();
+}).strict().refine((settings) => !settings.runner.enabled || Boolean(settings.profile.agentName), {
+  message: "Enter an agent name before enabling dispatch.",
+  path: ["profile", "agentName"],
+});
 export type DesktopUserSettings = z.infer<typeof DesktopUserSettings>;
 
 export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {

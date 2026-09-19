@@ -1,3 +1,4 @@
+import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft } from "lucide-react";
@@ -39,6 +40,7 @@ export function JoinSyncedWorkspace(props: {
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  useMouseBackButton(warning === null && !joining ? props.onBack : undefined);
   const joinedRef = useRef<Workspace | null>(null);
   const sessionRef = useRequestSequence();
   // Guards the async join against unmount: if the parent swaps this view

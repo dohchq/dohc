@@ -844,6 +844,28 @@ describe("chat-channel share op filter", () => {
     if (message.allowed) expect(message.blobSha256s).toEqual([]);
   });
 
+  it("shares the agent owner while stripping local runner configuration", () => {
+    const result = decide("chat.message.append", {
+      messageId: "m-agent", threadId: "thread-in", authorKind: "agent",
+      authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Done", createdAtMs: 2, runnerCommand: "PRIVATE-COMMAND", tool: "PRIVATE-TOOL",
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1" });
+    expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
+    expect(decide("chat.message.append", {
+      messageId: "m-agent-out",
+      threadId: "thread-out",
+      authorKind: "agent",
+      authorDisplayName: "Nova",
+      authorOwnerDisplayName: "Ada",
+      authorUserId: "u1",
+      body: "Done",
+      createdAtMs: 2,
+    }).allowed).toBe(false);
+  });
+
   it("serves parentMessageId on a granted-channel message", () => {
     const decision = decide("chat.message.append", {
       messageId: "m-child",

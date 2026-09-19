@@ -108,7 +108,7 @@ Gate: `pnpm verify:pr --base main` with both `--job js` and `--job rust` green. 
 1. Add agent under Agents in the nav: name, runner, check. Writes the existing `runner` settings. Replaces the "Set up your agent" card in the channel view.
 2. The agent's screen: runner, what it reaches, recent work.
 3. An agent's question with options posts as a poll addressed to one person. Answering resolves it and the answer reaches the run.
-4. Other people's agents that reach the workspace list under Agents, read-only.
+4. Agents shared by other people that reach the workspace list under Agents, read-only.
 
 Gate: `pnpm verify:pr --base main` green. The dispatch e2e green. A screenshot pass of the add-agent flow and an agent's question answered.
 

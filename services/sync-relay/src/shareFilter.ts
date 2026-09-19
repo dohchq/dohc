@@ -893,6 +893,7 @@ const SERVED_CHAT_FIELDS = {
     "threadId",
     "authorKind",
     "authorDisplayName",
+    "authorOwnerDisplayName",
     "authorUserId",
     "parentMessageId",
     "body",

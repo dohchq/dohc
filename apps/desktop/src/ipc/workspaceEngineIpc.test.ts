@@ -140,7 +140,7 @@ async function harness() {
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
     },
-    requireEngineCapture, localUserDisplayName: displayName, notifyRenderer: notify,
+    requireEngineCapture, localAgentDisplayName: displayName, notifyRenderer: notify,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,

@@ -15,7 +15,7 @@ import {
 
 // PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
 // survive a relaunch and a rename (stable engine object id), and render
-// agent-authored messages as "<User Name>'s agent".
+// agent-authored messages as "their stored name".
 
 async function waitForFileObjectId(
   page: import("@playwright/test").Page,
@@ -147,7 +147,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
   }
 });
 
-test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
+test("agent-authored messages render as \"their stored name\"", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "chats-agent-render";
@@ -186,7 +186,8 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
         await chats.sendMessage({
           workspaceId,
           threadId: thread.id,
-          author: { kind: "agent", displayName: "Ice de Vera" },
+          author: { kind: "agent", displayName: "Nova" },
+          authorOwnerDisplayName: "Ice de Vera",
           body: "Done — trimmed it to three items.",
         });
       },
@@ -206,10 +207,10 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
     const authors = page.getByTestId("linked-chat-message-author");
     await expect(authors).toHaveCount(2);
     await expect(authors.nth(0)).toHaveText("Ice de Vera");
-    await expect(authors.nth(1)).toHaveText("Ice de Vera's agent");
+    await expect(authors.nth(1)).toHaveText("Nova");
     await expect(
       page.locator('[data-testid="linked-chat-message-author"][data-author-kind="agent"]'),
-    ).toHaveText("Ice de Vera's agent");
+    ).toHaveText("Nova");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

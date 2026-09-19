@@ -93,10 +93,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await page.getByTestId("chats-new-channel-name").press("Enter");
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
-    // Creating a channel opens it inside the panel. Expand hands the
-    // conversation to the editor; collapse the navigator so this spec asserts
-    // on one surface — panel/editor handoff is workspace-chats.spec.ts's subject.
-    await page.getByTestId("chats-open-tab").click();
+    // Creating a channel opens it in the Chats tab. Collapse the navigator
+    // so this spec asserts on one surface.
     await expect(view.getByTestId("chats-channel-view")).toBeVisible();
     await page.getByTestId("chats-panel-collapse").click();
     await expect(page.getByTestId("chats-panel")).toHaveCount(0);
@@ -193,7 +191,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const agentComment = commentWithBody(view, decisionBody);
     await expect(agentComment).toHaveAttribute("data-author-kind", "agent");
     await expect(ownBubble(agentComment).getByTestId("chats-message-author")).toHaveText(
-      "You's agent",
+      "Agent",
     );
     await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
@@ -341,7 +339,6 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     await expect(panel).toBeVisible();
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();
-    await page.getByTestId("chats-open-tab").click();
     await expect(channelView).toBeVisible();
     await expect(channelView.getByTestId("chats-thread")).toHaveCount(0);
 
@@ -368,7 +365,7 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // merely rendering an arrival.
     await agentThreadRow.click();
     await expect(threadView.getByTestId("chats-message-author")).toHaveText(
-      "You's agent",
+      "Agent",
     );
     await expect(threadView.getByTestId("chats-message-body")).toContainText(
       agentBody,

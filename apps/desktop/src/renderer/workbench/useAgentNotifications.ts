@@ -10,7 +10,7 @@ import {
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 // Shell-level poller behind Agent -> user notifications. It watches the active
-// workspace's agent session so a run that finishes / blocks / asks / fails
+// agent session in the workspace so a run that finishes / blocks / asks / fails
 // surfaces in the NoticeCenter even while the user is editing something else
 // (the whole point: a background run finishing while you're in a doc).
 //

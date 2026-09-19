@@ -20,6 +20,7 @@ export function useAgentSetup(
     if (!userSettings || !agentRunStatus) return null;
     return {
       preferredName: userSettings.settings.profile.preferredName,
+      agentName: userSettings.settings.profile.agentName,
       runnerConfigured:
         userSettings.settings.runner.command.trim().length > 0,
       runnerEnabled: userSettings.settings.runner.enabled,
@@ -28,7 +29,7 @@ export function useAgentSetup(
   }, [agentRunStatus, userSettings]);
 
   // The workspace-scoped half of the setup snapshot is also the initial
-  // history lane's agent-status answer. Both consumers share this promise.
+  // agent-status answer for the history lane. Both consumers share this promise.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;

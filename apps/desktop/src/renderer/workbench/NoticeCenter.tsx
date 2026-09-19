@@ -250,11 +250,10 @@ export function NoticeCenter(props: {
     if (!open) return;
 
     const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (centerRef.current?.contains(target)) return;
-      if (toggleRef.current?.contains(target)) return;
-      if (toastRef.current?.contains(target)) return;
+      const path = event.composedPath();
+      if (centerRef.current && path.includes(centerRef.current)) return;
+      if (toggleRef.current && path.includes(toggleRef.current)) return;
+      if (toastRef.current && path.includes(toastRef.current)) return;
       setOpen(false);
     };
 

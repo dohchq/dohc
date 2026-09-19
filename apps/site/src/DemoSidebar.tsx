@@ -80,6 +80,7 @@ export function DemoSidebar(props: {
   onOpenDocument: (path: string) => void;
   onCreateDocument: () => void;
   onBeforeChanges: () => Promise<void>;
+  onError: (message: string) => void;
 }) {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
@@ -222,7 +223,7 @@ export function DemoSidebar(props: {
           onUnmountShare={() => undefined}
           onShare={() => undefined}
           onRefresh={() => undefined}
-          onNewFileDialog={props.onCreateDocument}
+          onError={props.onError}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

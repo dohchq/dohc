@@ -81,11 +81,12 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
 
     await page.getByTestId("chats-add-agent-open").click();
     await expect(page.getByTestId("chats-add-agent")).toBeVisible();
+    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await page.getByTestId("chats-add-agent-name").fill("Ice");
     await page
       .getByTestId("chats-add-agent-command")
       .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
-    await expect(page.getByTestId("chats-add-agent-preview")).toContainText("Ice's agent");
+    await expect(page.getByTestId("chats-add-agent-preview")).toContainText("Nova");
     await shoot(page, "add-agent-form");
 
     await page.getByTestId("chats-add-agent-submit").click();

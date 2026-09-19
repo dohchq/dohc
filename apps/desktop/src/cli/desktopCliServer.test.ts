@@ -331,9 +331,9 @@ describe("desktop CLI server callbacks", () => {
     const pending = f.options().identity("workspace");
     try { await entered.promise; f.setCredentials(credentials); }
     finally { held.release(); await pending; }
-    expect(await pending).toEqual({ displayName: "Local name", authorUserId: "owner", reactionAuthorId: "local:device" });
+    expect(await pending).toEqual({ displayName: "Local name", agentName: "Agent", authorUserId: "owner", reactionAuthorId: "local:device" });
     expect(await f.options().identity("workspace", { threadId: "thread" })).toEqual({
-      displayName: "Local name", authorUserId: "recipient", reactionAuthorId: "local:device" });
+      displayName: "Local name", agentName: "Agent", authorUserId: "recipient", reactionAuthorId: "local:device" });
     expect(f.dependencies.chatRelayIdentityFor).toHaveBeenCalledWith("workspace", { threadId: "thread" }, f.store);
     f.setCredentials({ ...credentials, userId: "other" });
     expect(await f.options().identity("workspace")).not.toHaveProperty("authorUserId");

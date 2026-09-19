@@ -2,8 +2,9 @@ use super::{
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, ThreadMessageResolution,
     bump_chat_conversation_revision, index_replicated_chat_message_search_rows,
-    mark_live_bookmarks_pending, normalize_author_user_id, normalize_body, normalize_display_name,
-    parse_mention_handles, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    mark_live_bookmarks_pending, normalize_agent_owner_name, normalize_author_user_id,
+    normalize_body, normalize_display_name, parse_mention_handles, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message,
 };
 use crate::error::DomainError;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -48,6 +49,7 @@ struct PendingMessageAppend {
     thread_id: String,
     author_kind: String,
     author_display_name: String,
+    author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
     parent_message_id: Option<String>,
     origin: Option<String>,
@@ -502,6 +504,13 @@ fn apply_pending_message(
     workspace_id: &str,
     payload: PendingMessageAppend,
 ) -> Result<(), DomainError> {
+    let owner_name = normalize_agent_owner_name(
+        payload.author_kind == "agent",
+        payload.author_owner_display_name.as_deref(),
+    )
+    .map_err(|_| DomainError::StateCorrupt {
+        reason: "chat message owner display name is invalid",
+    })?;
     let author_display_name =
         normalize_display_name(&payload.author_display_name).map_err(|_| {
             DomainError::StateCorrupt {
@@ -553,8 +562,8 @@ fn apply_pending_message(
         .execute(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
-              author_user_id,parent_message_id,origin,body,created_at_ms) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+              author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -566,7 +575,8 @@ fn apply_pending_message(
                 stored_parent,
                 payload.origin,
                 body,
-                payload.created_at_ms
+                payload.created_at_ms,
+                owner_name
             ],
         )
         .map_err(DomainError::sql_persist)?;
