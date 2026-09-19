@@ -386,7 +386,7 @@ if (page === "account") {
 
 function hashed(name: string, extension: string, content: string): string {
   const digest = createHash("sha256").update(content).digest("base64url").slice(0, 12);
-  return `/${name}.${digest}.${extension}`;
+  return `/account/assets/${name}.${digest}.${extension}`;
 }
 
 export const ACCOUNT_CSS_PATH = hashed("account", "css", ACCOUNT_CSS);

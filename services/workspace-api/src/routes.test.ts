@@ -78,6 +78,11 @@ describe("health and readiness", () => {
 });
 
 describe("server descriptor", () => {
+  it("serves hashed account assets under the account route", async () => {
+    expect((await router()(get(ACCOUNT_CSS_PATH))).status).toBe(200);
+    expect((await router()(get(ACCOUNT_JS_PATH))).status).toBe(200);
+  });
+
   it("publishes the three public origins", async () => {
     const response = await router()(get("/.well-known/dohc-server"));
     expect(response.status).toBe(200);
