@@ -854,7 +854,16 @@ describe("chat-channel share op filter", () => {
     if (!result.allowed) return;
     expect(result.payload).toMatchObject({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1" });
     expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
-    expect(decide("chat.message.append", { ...result.payload, threadId: "thread-out" }).allowed).toBe(false);
+    expect(decide("chat.message.append", {
+      messageId: "m-agent-out",
+      threadId: "thread-out",
+      authorKind: "agent",
+      authorDisplayName: "Nova",
+      authorOwnerDisplayName: "Ada",
+      authorUserId: "u1",
+      body: "Done",
+      createdAtMs: 2,
+    }).allowed).toBe(false);
   });
 
   it("serves parentMessageId on a granted-channel message", () => {
