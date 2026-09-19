@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     "./betterAuth": "./src/betterAuth.ts",
-    "./session": "./src/session.ts"
+    "./session": "./src/session.ts",
+    "./smtp": "./src/smtp.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -12,10 +13,12 @@
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*",
-    "better-auth": "^1.6.26"
+    "better-auth": "^1.6.26",
+    "nodemailer": "10.0.10"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "@types/nodemailer": "8.0.2",
     "@types/pg": "^8.20.4",
     "pg": "^8.22.0",
     "typescript": "^7.0.2",

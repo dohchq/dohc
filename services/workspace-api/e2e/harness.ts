@@ -22,7 +22,7 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
     cwd: fileURLToPath(new URL("../", import.meta.url)),
     env: {
       ...process.env,
-      NODE_ENV: "test",
+      NODE_ENV: "production",
       DOHC_TEST_AUTH: undefined,
       BETTER_AUTH_SECRET: ACCOUNT_TEST_SECRET,
       WORKSPACE_API_PORT: String(port),

@@ -615,10 +615,16 @@ importers:
       better-auth:
         specifier: ^1.6.26
         version: 1.6.26(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.4)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))
+      nodemailer:
+        specifier: 10.0.10
+        version: 10.0.10
     devDependencies:
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
+      '@types/nodemailer':
+        specifier: 8.0.2
+        version: 8.0.2
       '@types/pg':
         specifier: ^8.20.4
         version: 8.20.4
@@ -981,6 +987,9 @@ importers:
       better-auth:
         specifier: ^1.6.26
         version: 1.6.26(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.4)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))
+      nodemailer:
+        specifier: 10.0.10
+        version: 10.0.10
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -1000,6 +1009,9 @@ importers:
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0))
 
 packages:
 
@@ -3359,6 +3371,9 @@ packages:
   '@types/node@24.13.3':
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
 
+  '@types/nodemailer@8.0.2':
+    resolution: {integrity: sha512-c7M5ox8p0nEOfbJ2E9Qcmt8/QCu/VzsiAhzBiZbvky2PhKZDHpKB3sQHBM5MEZNkCfBOaS6S9//AGPRTNB7IaA==}
+
   '@types/pg@8.20.4':
     resolution: {integrity: sha512-Jz7UDOlIiFJuacC0TlBoLyNtmwlA/wpIyPDd3tvUqlRM+HzkWy2xUgpFpaXtbfTAFF6sIGq5lsCDBdJnhky1Xg==}
 
@@ -5653,6 +5668,10 @@ packages:
   node-releases@2.0.45:
     resolution: {integrity: sha512-iIbHXV9eBB2nB0wa7oTsrrXq+qQt+9SIlx9AX3T96YgobtEQfis5n6TJ6vV+3QP8DwdriEAcGhARaFCu37peBg==}
     engines: {node: '>=18'}
+
+  nodemailer@10.0.10:
+    resolution: {integrity: sha512-He9XskOFms62SyAKkLu8CcGcYHAo+BSHSsORI8s4PJH8qZgZY4L4lDfvyN0twvmbpyG+eGrxpyBlskj9d9rJ8A==}
+    engines: {node: '>=20.0.0'}
 
   nopt@9.0.0:
     resolution: {integrity: sha512-Zhq3a+yFKrYwSBluL4H9XP3m3y5uvQkB/09CwDruCiRmR/UJYnn9W4R48ry0uGC70aeTPKLynBtscP9efFFcPw==}
@@ -9230,6 +9249,10 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
+  '@types/nodemailer@8.0.2':
+    dependencies:
+      '@types/node': 24.13.3
+
   '@types/pg@8.20.4':
     dependencies:
       '@types/node': 24.13.3
@@ -11739,6 +11762,8 @@ snapshots:
   node-int64@0.4.0: {}
 
   node-releases@2.0.45: {}
+
+  nodemailer@10.0.10: {}
 
   nopt@9.0.0:
     dependencies:
