@@ -9,7 +9,7 @@ type ChatEditor = {
   drafts: ChatsDrafts | undefined;
   revision: number;
   generation: number;
-  restored: boolean;
+  restoreAttempted: boolean;
   onNavChange: (nav: ChatsNav) => void;
   onNavCommand: (nav: ChatsNav) => void;
   onDraftsChange: (drafts: ChatsDrafts) => void;
@@ -28,10 +28,15 @@ export function useChatEditorTabs(input: {
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
-  const store = useRef({ workspaceId: input.workspaceId, entries: new Map<string, ChatEditor>() });
+  const store = useRef({ workspaceId: input.workspaceId, active: true, entries: new Map<string, ChatEditor>() });
   if (store.current.workspaceId !== input.workspaceId) {
-    store.current = { workspaceId: input.workspaceId, entries: new Map() };
+    store.current = { workspaceId: input.workspaceId, active: true, entries: new Map() };
   }
+  useEffect(() => {
+    const owner = store.current;
+    owner.active = true;
+    return () => { owner.active = false; };
+  }, [input.workspaceId]);
   const [revision, render] = useState(0);
   const session = useRef({ key: undefined as string | null | undefined, generation: 0, ready: true });
   const [sessionRevision, refreshSession] = useState(0);
@@ -48,6 +53,11 @@ export function useChatEditorTabs(input: {
         }
         render((value) => value + 1);
       }
+      if (phase === "ready") {
+        for (const entry of store.current.entries.values()) {
+          if (!entry.nav) entry.restoreAttempted = false;
+        }
+      }
       refreshSession((value) => value + 1);
     });
   }, [input.workspaceId]);
@@ -60,7 +70,7 @@ export function useChatEditorTabs(input: {
       drafts: undefined,
       revision: 0,
       generation: session.current.generation,
-      restored: false,
+      restoreAttempted: false,
       onNavChange(nav) {
         if (store.current !== owner || owner.entries.get(path) !== entry || entry.nav === nav) return;
         entry.nav = nav;
@@ -101,37 +111,39 @@ export function useChatEditorTabs(input: {
     if (!input.enabled || !session.current.ready) return;
     const owner = store.current;
     const generation = session.current.generation;
-    let cancelled = false;
     const paths: string[] = JSON.parse(pathsKey);
     const targets = paths
-      .filter((path) => !get(path).nav && !get(path).restored)
-      .map((path) => ({ path, target: parseChatTabPath(path) }));
-    const remember = (path: string, nav?: ChatsNav) => {
-      if (cancelled || store.current !== owner || !session.current.ready || session.current.generation !== generation || get(path).nav) return;
-      get(path).restored = true;
+      .filter((path) => !get(path).nav && !get(path).restoreAttempted)
+      .map((path) => {
+        const entry = get(path);
+        entry.restoreAttempted = true;
+        return { path, entry, target: parseChatTabPath(path) };
+      });
+    const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
+      if (!owner.active || store.current !== owner || !session.current.ready ||
+        session.current.generation !== generation || owner.entries.get(path) !== entry || entry.nav) return;
       if (!nav) return;
-      get(path).nav = nav;
+      entry.nav = nav;
       render((value) => value + 1);
     };
     if (targets.some(({ target }) => target?.kind === "channel")) {
       void bridge().listChatChannels({ workspaceId: input.workspaceId }).then(({ channels }) => {
-        for (const { path, target } of targets) {
+        for (const { path, entry, target } of targets) {
           if (target?.kind !== "channel") continue;
           const channel = channels.find((entry) => entry.id === target.id);
-          remember(path, channel ? { level: "channel", channel } : undefined);
+          remember(path, entry, channel ? { level: "channel", channel } : undefined);
         }
       }).catch(() => undefined);
     }
     if (targets.some(({ target }) => target?.kind === "dm")) {
       void bridge().syncDms({ workspaceId: input.workspaceId }).then(({ dms }) => {
-        for (const { path, target } of targets) {
+        for (const { path, entry, target } of targets) {
           if (target?.kind !== "dm") continue;
           const dm = dms.find((entry) => entry.channelId === target.id);
-          remember(path, dm ? { level: "dm", dm } : undefined);
+          remember(path, entry, dm ? { level: "dm", dm } : undefined);
         }
       }).catch(() => undefined);
     }
-    return () => { cancelled = true; };
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   const titles = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>

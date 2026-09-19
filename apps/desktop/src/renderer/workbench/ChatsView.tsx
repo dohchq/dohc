@@ -396,11 +396,11 @@ export function ChatsView(props: {
   // user command, so the shell cancels a pending cross-surface navigation
   // (the DM lookup) unconditionally — even when the click repeats the current
   // destination, which still re-loads and re-scrolls. The passive onNavChange
-  // report only says where the view already is and stays conditional.
+  // report only records where the view already is.
   onNavCommand?: (nav: ChatsNav) => void;
   // The compact panel is a navigator: selecting a conversation can hand its
   // destination to the shell so it opens in the editor instead of replacing
-  // the panel's list. The page variant always navigates in place.
+  // the panel's list. Pages hand other conversations to their own tabs.
   onOpenInTab?: (nav: ChatsNav) => void;
   // Active editor destination, used by a persistent panel navigator to mark
   // the selected channel or DM without navigating the panel itself.

@@ -29,6 +29,36 @@ beforeEach(() => vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("chat editor tabs", () => {
+  it("keeps one slow hidden restore across tab switches", async () => {
+    const pending = deferred<{ available: boolean; dms: typeof dm.dm[] }>();
+    const syncDms = vi.fn(() => pending.promise);
+    vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms });
+    const path = chatEditorPath(dm);
+    const home = chatEditorPath({ level: "feed" });
+    const { result, rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
+    }), { initialProps: { activePaths: [home] } });
+    rerender({ activePaths: [path] });
+    rerender({ activePaths: [home] });
+    expect(syncDms).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve({ available: true, dms: [dm.dm] }));
+    expect(result.current.titles.get(path)).toBe("Alice");
+  });
+
+  it("does not retry failed hidden restores when the active tab changes", async () => {
+    const syncDms = vi.fn().mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms });
+    const path = chatEditorPath(dm);
+    const home = chatEditorPath({ level: "feed" });
+    const { rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
+    }), { initialProps: { activePaths: [home] } });
+    await act(async () => {});
+    rerender({ activePaths: [path] });
+    rerender({ activePaths: [home] });
+    expect(syncDms).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves active destinations to their mounted pages", () => {
     const syncDms = vi.fn();
     const listChatChannels = vi.fn();
@@ -72,7 +102,7 @@ describe("chat editor tabs", () => {
       workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths, enabled: true,
     }), { initialProps: { paths } });
     await act(async () => {});
-    expect(result.current.get(paths[0]!).restored).toBe(true);
+    expect(result.current.get(paths[0]!).restoreAttempted).toBe(true);
     rerender({ paths: [...paths] });
     rerender({ paths: [...paths, chatEditorPath({ level: "feed" })] });
     await act(async () => {});
