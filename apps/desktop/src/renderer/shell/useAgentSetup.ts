@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
@@ -22,7 +23,7 @@ export function useAgentSetup(
       preferredName: userSettings.settings.profile.preferredName,
       agentName: userSettings.settings.profile.agentName,
       runnerConfigured:
-        userSettings.settings.runner.command.trim().length > 0,
+        configuredRunnerCommand(userSettings.settings.runner).length > 0,
       runnerEnabled: userSettings.settings.runner.enabled,
       mcpEnabled: agentRunStatus.mcpEnabled,
     };

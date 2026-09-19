@@ -8,6 +8,15 @@ import { fileURLToPath } from "node:url";
 // a real harness does, before branching on the mode, so both modes pin the
 // delivery.
 const mode = process.argv[2];
+const profileTool = mode?.startsWith("profile-") ? mode.slice("profile-".length) : null;
+if (profileTool && process.argv[3] === "--version") {
+  console.log(profileTool === "claude" ? "2.1.278 (Claude Code)" : "codex-cli 0.155.1");
+  process.exit(0);
+}
+if (profileTool && (process.argv[3] === "auth" || process.argv[3] === "login")) {
+  console.log(profileTool === "claude" ? '{"loggedIn":true}' : "Logged in using ChatGPT");
+  process.exit(0);
+}
 const threadId = process.env.DOHC_CHAT_THREAD;
 const runId = process.env.DOHC_RUN_ID;
 
@@ -29,6 +38,29 @@ if (!threadId || !runId || prompt.trim().length === 0) {
 if (mode === "silent-fail") {
   process.exit(3);
 }
+
+if (profileTool) {
+  const expected = profileTool === "claude"
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
+    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+  if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
+    console.error("Unexpected profile arguments", process.argv.slice(3));
+    process.exit(2);
+  }
+  const report = prompt.includes("This is a dohc runner self-test.")
+    ? `dohc-runner-self-test:${runId}` : "done: checked the exports";
+  if (!/^[\w-]+$/u.test(threadId) || !/^[\w-]+$/u.test(runId)) process.exit(2);
+  // Resolve dohc from the runner's PATH, as installed tools must do.
+  const windows = process.platform === "win32";
+  const child = spawn(windows ? (process.env.ComSpec ?? "cmd.exe") : "dohc", windows
+    ? ["/d", "/s", "/c", `"dohc chat reply ${threadId} --as-agent "${report}""`]
+    : ["chat", "reply", threadId, "--as-agent", report], {
+    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true,
+    ...(windows ? { windowsVerbatimArguments: true } : {}),
+  });
+  child.on("error", (error) => { console.error(error); process.exit(1); });
+  child.on("exit", (code) => process.exit(code ?? 1));
+} else {
 
 if (mode !== "report" && mode !== "ask") {
   console.error(`unknown fake chat runner mode: ${mode ?? "missing"}`);
@@ -76,3 +108,4 @@ child.once("exit", (code, signal) => {
   }
   process.exit(code ?? 1);
 });
+}

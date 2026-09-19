@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentLaunchProfile, configuredRunnerCommand } from "../agents/agentToolCatalog";
 import type { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 import {
   MAX_PREFERRED_NAME_LENGTH,
@@ -41,10 +42,11 @@ export type ZoomStep = (typeof ZOOM_STEPS)[number];
 
 export const RunnerSettings = z.object({
   command: z.string().max(4096),
+  profile: AgentLaunchProfile.optional(),
   enabled: z.boolean(),
   timeoutMinutes: z.number().int().min(1).max(1440),
 }).strict().refine(
-  (runner) => !runner.enabled || runner.command.trim().length > 0,
+  (runner) => !runner.enabled || configuredRunnerCommand(runner).length > 0,
   {
     message: "Runner command is required when dispatch is enabled.",
     path: ["command"],

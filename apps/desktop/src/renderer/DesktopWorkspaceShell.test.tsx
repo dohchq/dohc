@@ -445,6 +445,7 @@ function makeBaseBridge(
       },
       source: "stored" as const,
     })),
+    detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
     probeAgentDrivers: vi.fn(async () => ({
       drivers: [],
       session: null,

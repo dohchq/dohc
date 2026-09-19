@@ -134,7 +134,9 @@ async function harness(shared = false) {
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   const routed: unknown[] = [];
   let missingAdapter = false;
+  const detection = vi.fn(async () => []);
   const registrations = createAgentRunsIpc({
+    detectAgentTools: detection,
     registerHandler: (channel, handler) => { if (handlers.has(channel)) throw new Error("duplicate registration"); handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
     withRendererWorkspaceOperation, receivedShareEngine,
@@ -170,7 +172,7 @@ async function harness(shared = false) {
     workspace, registry, physical, sender, authority, renderers, events, integration, manager, lazyManager, inputs,
     provider, driver, ended, setAgentRun, failure, adapter, acknowledge, notify, requireWorkspace, requireCapture,
     ensureOpen, records, runnable, idle, start, warm, writable, activity, dispatch, shareAccess, config,
-    handlers, groupSizes, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
+    detection, handlers, groupSizes, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
     durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
     switchWorkspace: async () => {
       const other = { ...physical, workspaceId: "workspace-b", attachmentId: Symbol("other") };
@@ -181,7 +183,7 @@ async function harness(shared = false) {
 
 const channels = [
   CHANNELS.listAutomationFailures, CHANNELS.dismissAutomationFailure, CHANNELS.chatRunRecordsForThread,
-  CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
+  CHANNELS.detectAgentTools, CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus, CHANNELS.getMcpConfig,
   CHANNELS.probeAgentDrivers, CHANNELS.getAgentSessionState, CHANNELS.answerAgentPermission,
   CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.runnerSelfTest,
 ];
@@ -191,12 +193,24 @@ const dismissPayload = { workspaceId: "workspace-a", automationId: "automation-1
 describe("agent run IPC registrations", () => {
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
-    expect(h.groupSizes).toEqual([2, 3, 14]);
+    expect(h.groupSizes).toEqual([2, 3, 15]);
     expect([...h.handlers.keys()]).toEqual(channels);
     for (const channel of channels) await expect(h.invoke(channel, null, new Sender(-1))).rejects.toThrow("untrusted");
     expect(h.requireWorkspace).not.toHaveBeenCalled();
     expect(h.routed).toEqual([]);
     expect(h.lazyManager).not.toHaveBeenCalled();
+  });
+
+  it("detects tools only for the active workspace without starting a session", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
+    expect(h.detection).toHaveBeenCalledOnce();
+    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath);
+    expect(h.lazyManager).not.toHaveBeenCalled();
+    expect(h.activity).not.toHaveBeenCalled();
+    await h.switchWorkspace();
+    await expect(h.invoke(CHANNELS.detectAgentTools)).rejects.toThrow();
+    expect(h.detection).toHaveBeenCalledOnce();
   });
 
   it("rejects malformed payloads before workspace, session, or engine work", async () => {

@@ -581,6 +581,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.chatDispatchStateForThread, payload),
   runnerSelfTest: (payload) =>
     ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
+  detectAgentTools: (payload) => ipcRenderer.invoke(CHANNELS.detectAgentTools, payload),
   getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
   setUserSettings: (payload: SetUserSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),

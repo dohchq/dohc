@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
+import { installFakeAgentTools } from "./helpers/agentTools";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -14,6 +15,36 @@ import {
 
 const REPORT = "done: checked the exports";
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
+
+test("installed tool cards save profiles, Check replies through PATH, and a group mention dispatches", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-profile-e2e");
+    const env = await installFakeAgentTools(temp);
+    desktop = await launchDesktopApp({ workspace: temp, env });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    await openMyAgent(page);
+    await page.getByTestId("chats-channel-back").click();
+    await page.getByTestId("chats-add-agent-open").click();
+    await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
+    await page.getByTestId("chats-add-agent-name").fill("Profile test");
+    for (const name of ["Claude Code", "Codex"]) {
+      await page.getByRole("button", { name, exact: true }).click();
+      await page.getByTestId("chats-add-agent-check").click();
+      await expect(page.getByTestId("chats-add-agent-check-result")).toHaveAttribute("data-state", "ok");
+    }
+    await page.getByTestId("chats-add-agent-submit").click();
+    await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
+    await page.getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
 function runnerCommand(mode: "report" | "silent-fail" | "ask"): string {
   return `node "${fakeRunner.replaceAll('"', '\\"')}" ${mode}`;
@@ -26,6 +57,7 @@ async function seedRunnerSettings(
   const command = runnerCommand(mode);
   const settings = {
     ...DEFAULT_USER_SETTINGS,
+    profile: { agentName: "Nova", preferredName: "Ice" },
     runner: {
       command,
       enabled: true,

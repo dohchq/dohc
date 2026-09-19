@@ -341,6 +341,7 @@ export const CHANNELS = {
   resumeThreadDispatch: "desktop:resume-thread-dispatch",
   chatDispatchStateForThread: "desktop:chat-dispatch-state-for-thread",
   runnerSelfTest: "desktop:runner-self-test",
+  detectAgentTools: "desktop:detect-agent-tools",
   getUserSettings: "desktop:get-user-settings",
   setUserSettings: "desktop:set-user-settings",
   resetUserSettings: "desktop:reset-user-settings",

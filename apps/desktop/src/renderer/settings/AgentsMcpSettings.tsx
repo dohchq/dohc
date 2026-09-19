@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, Check, Copy, RefreshCw } from "lucide-react";
@@ -34,6 +35,7 @@ const USAGE_EXAMPLES = [
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
+  onError?: (message: string) => void;
   workspacePath: string;
   preferredName?: string;
   agentName?: string;
@@ -150,7 +152,7 @@ export function AgentsMcpSettings(props: {
   }, [clearCopyResetTimer, isCurrentRequest, probeDrivers, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
-  const runnerConfigured = runner.command.trim().length > 0;
+  const runnerConfigured = configuredRunnerCommand(runner).length > 0;
   // An enabled MCP server only means it is available to connect to. We do not
   // have a trusted session signal proving that an external client copied the
   // configuration and connected, so only the in-app runner can make this
@@ -345,6 +347,8 @@ export function AgentsMcpSettings(props: {
       </section>
 
       <RunnerSettingsCard
+        key={workspaceId}
+        onError={props.onError}
         workspaceId={workspaceId}
         runner={runner}
         agentName={props.agentName}

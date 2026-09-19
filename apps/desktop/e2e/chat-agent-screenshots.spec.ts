@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
+import { installFakeAgentTools } from "./helpers/agentTools";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -25,8 +26,11 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve)),
     );
+    await Promise.allSettled(document.getAnimations()
+      .filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)))
+      .map((animation) => animation.finished));
   }, theme);
-  await page.waitForTimeout(150);
+
 }
 
 async function shoot(page: Page, name: string): Promise<void> {
@@ -67,7 +71,8 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
 
   try {
     await seedWorkspaceManifest(temp, "agent-screens");
-    desktop = await launchDesktopApp({ workspace: temp });
+    const env = await installFakeAgentTools(temp);
+    desktop = await launchDesktopApp({ workspace: temp, env });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await waitForAgentChannel(page);
@@ -83,6 +88,16 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-add-agent")).toBeVisible();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await page.getByTestId("chats-add-agent-name").fill("Ice");
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await shoot(page, "agent-tool-cards");
+    for (const tool of ["Claude Code", "Codex"]) {
+      const card = page.getByRole("button", { name: tool, exact: true });
+      await expect(card).toBeEnabled();
+      await card.click();
+      await expect(page.getByText("Conversation through stdin")).toBeVisible();
+      await shoot(page, `agent-profile-${tool.toLowerCase().replaceAll(" ", "-")}`);
+    }
+    await page.getByText("Advanced", { exact: true }).click();
     await page
       .getByTestId("chats-add-agent-command")
       .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);

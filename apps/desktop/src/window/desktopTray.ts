@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import { join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
 import type { DesktopUserSettingsResult } from "../settings/userSettings";
@@ -49,7 +50,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   let dispatchTray: DesktopTrayInstance<Image, Menu> | null = null;
 
   function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
-    return settings.runner.enabled && settings.runner.command.trim().length > 0;
+    return settings.runner.enabled && configuredRunnerCommand(settings.runner).length > 0;
   }
 
   function desktopIconDirectory(): string {

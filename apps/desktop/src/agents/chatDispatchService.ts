@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "./agentToolCatalog";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -726,7 +727,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId: claim.run.threadId,
         runId: claim.run.runId,
         logPath,
-        command: runner.command.trim(),
+        command: configuredRunnerCommand(runner),
+        profile: runner.profile,
         prompt: buildRunnerPrompt(markdown, claim.run.threadId),
       });
       const timeout = setTimeout(() => {
@@ -811,7 +813,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       return;
     }
     const runner = await options.readRunnerSettings();
-    const command = runner.command.trim();
+    const command = configuredRunnerCommand(runner);
     const dispatch = options.dispatchStoreFor(workspace);
     if (!runner.enabled || !command) {
       const threadIds = new Set(
@@ -1373,7 +1375,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
       const runner = await options.readRunnerSettings();
-      const command = runner.command.trim();
+      const command = configuredRunnerCommand(runner);
       if (!command) return { ok: false, detail: "Configure a runner command first." };
 
       // A self-test spawns a real runner and writes a scratch thread, so it
@@ -1460,6 +1462,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           runId,
           logPath,
           command,
+          profile: runner.profile,
           prompt,
         });
         return await new Promise<{ ok: boolean; detail: string }>((resolveResult) => {

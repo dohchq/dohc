@@ -10,6 +10,7 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
@@ -6416,6 +6417,7 @@ export interface DohcDesktopBridge {
     payload: ChatDispatchStateForThreadPayload,
   ): Promise<ChatDispatchStateForThreadResult>;
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
+  detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   getUserSettings(): Promise<DesktopUserSettingsResult>;
   setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
   resetUserSettings(): Promise<DesktopUserSettingsResult>;

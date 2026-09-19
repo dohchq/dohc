@@ -14,6 +14,7 @@ import {
   registerDevToolsIpcHandlers,
 } from "./ipc/devToolsIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
+import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -2775,7 +2776,7 @@ const chatDispatchService = createChatDispatchService({
       };
     }),
   stateDir,
-  appRoot: () => app.getAppPath(),
+  appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
@@ -3647,7 +3648,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
       return refreshLinuxStableCliBin({
         resourcesCliBinDir: resolveDohcCliBinDirectory({
-          appRoot: app.getAppPath(),
+          appRoot: desktopPackageRootInDev(),
           isPackaged: app.isPackaged,
           resourcesPath: process.resourcesPath,
         }),
@@ -4151,6 +4152,7 @@ function registerIpcHandlers(): void {
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
+    detectAgentTools,
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
     acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,

@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import {
   DesktopUserSettingsResult, SetUserSettingsPayload, WorkspaceSettingsPayload,
   SetWorkspaceSettingsPayload, WorkspaceSettingsResult, WorkspaceIdPayload,
@@ -63,7 +64,7 @@ export function createSettingsIpc<
       });
       broadcastUserSettings(result);
       await refreshDispatchTray();
-      if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
+      if (input.settings.runner.enabled && configuredRunnerCommand(input.settings.runner)) {
         for (const workspace of openDispatchWorkspaces()) {
           void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
             console.error("[desktop] runner-settings dispatch scan:", error);

@@ -208,6 +208,7 @@ describe("ChatsView My agent", () => {
     await user.type(screen.getByTestId("chats-add-agent-agent-name"), "Nova");
     await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Nova");
+    await user.click(screen.getByText("Advanced", { selector: "summary" }));
     await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
     await user.click(screen.getByTestId("chats-add-agent-check"));
     await waitFor(() =>

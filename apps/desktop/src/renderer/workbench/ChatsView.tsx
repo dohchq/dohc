@@ -1,3 +1,4 @@
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
 import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
@@ -4086,11 +4087,11 @@ export function ChatsView(props: {
             <span
               data-testid="chats-agent-screen-runner"
               className="min-w-0 flex-1 truncate"
-              title={agentReady ? props.userSettings?.runner.command.trim() : undefined}
+              title={agentReady ? (props.userSettings ? configuredRunnerCommand(props.userSettings.runner) : undefined) : undefined}
             >
               {agentReady
-                ? props.userSettings?.runner.command.trim()
-                  ? `Runs ${runnerProgram(props.userSettings.runner.command)}`
+                ? props.userSettings && configuredRunnerCommand(props.userSettings.runner)
+                  ? `Runs ${runnerProgram(configuredRunnerCommand(props.userSettings.runner))}`
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
@@ -4654,6 +4655,8 @@ export function ChatsView(props: {
               ) : null}
               {addingAgent && props.userSettings && props.onSaveUserSettings ? (
                 <AddAgentForm
+                  key={workspaceId}
+                  onError={props.onError}
                   workspaceId={workspaceId}
                   settings={props.userSettings}
                   onSave={props.onSaveUserSettings}
