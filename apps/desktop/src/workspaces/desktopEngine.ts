@@ -178,7 +178,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active", reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
-                if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) setOwnerDeliveryStatus(workspaceId, "retrying");
+                if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {
+                  setOwnerDeliveryStatus(workspaceId, "retrying", ownerDeliveryReason.get(workspaceId));
+                }
                 throw error;
               }
             });} finally {activeOwnerWorkspace = undefined;}
