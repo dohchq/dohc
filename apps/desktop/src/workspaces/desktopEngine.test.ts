@@ -726,3 +726,77 @@ describe("private owner peer lifecycle", () => {
     finally {await f.close(); ownerHostMock.read.mockReset(); ownerDeliveryMock.read.mockReset();}
   });
 });
+
+describe("server owner peer lifecycle", () => {
+  it("reports preparing and retrying once, and an explicit retry clears the failed document after recovery", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-status-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+    let status = "preparing";
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    const changed = vi.fn();
+    f.dependencies.notifyOwnerDeliveryChanged = changed;
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"],
+      connect: async () => ({bearer: "token", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        documents: async () => ({ok: true, documents: [{path: "a.md", status, document}]})})};
+    ownerDeliveryMock.pass.mockResolvedValue("retry");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("preparing"));
+      status = "ready"; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(2));
+      expect(changed).toHaveBeenCalledTimes(2);
+      ownerDeliveryMock.pass.mockResolvedValue("empty"); f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(changed).toHaveBeenCalledTimes(3);
+      credentials.abort(); expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
+    } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  it.each(["credentials", "daemon", "workspace"])("discovers ready documents and holds the session until %s cancellation settles", async mode => {
+    const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-peer-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
+    f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"],
+      connect: async () => ({bearer: "actual-token", relayUrl: "https://relay.test", signal: credentials.signal,
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents})};
+    let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
+    ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      expect(f.options().privateOwnerHost).toEqual({configPath: "native-config", client: config.nativeClient});
+      await entered.promise;
+      expect(passOptions.document).toEqual(document);
+      expect(passOptions.bearer).toBe("actual-token");
+      if (mode === "credentials") credentials.abort();
+      let closed = false;
+      const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!() : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
+      expect(passOptions.signal.aborted).toBe(true);
+      expect(() => passOptions.assertCurrent()).toThrow();
+      await Promise.resolve(); expect(closed).toBe(false);
+      settled.resolve(); await closing;
+      expect(closed).toBe(true);
+      if (mode === "daemon") {
+        ownerDeliveryMock.pass.mockResolvedValue("empty");
+        f.options().onLaunch!();
+        await vi.waitFor(() => expect(documents).toHaveBeenCalledTimes(2));
+      }
+    } finally {settled.resolve(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+});
