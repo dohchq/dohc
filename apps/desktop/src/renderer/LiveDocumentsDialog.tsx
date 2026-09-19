@@ -441,7 +441,8 @@ export function LiveDocumentsDialog({
   const refusalsShown =
     refusalState.kind === "unknown" ||
     refusalRows.length > 0 ||
-    refusalNextCursor !== null;
+    refusalNextCursor !== null ||
+    (refusalState.kind === "ready" && refusalCursor.current !== undefined);
   // An enrollment retry owns the document list too, so its controls rest.
   const listBusy = busy !== null || (refusalBusy !== null && refusalBusy.kind !== "page");
 
@@ -562,7 +563,9 @@ export function LiveDocumentsDialog({
             </p>
           ) : refusalRows.length === 0 ? (
             <p className="mt-2 text-[13px] text-muted">
-              No refused shares on this page. Load more to keep looking.
+              {refusalNextCursor !== null
+                ? "No refused shares on this page. Continue to the next page."
+                : "No refused shares on this page. Reload to return to the first page."}
             </p>
           ) : (
             <ul
@@ -624,11 +627,12 @@ export function LiveDocumentsDialog({
               <SecondaryButton
                 disabled={refusalBusy !== null}
                 data-testid="live-refusals-more"
+                aria-label="Next page of shares that could not start live editing"
                 onClick={() =>
                   performRefusals({ kind: "page", cursor: refusalNextCursor })
                 }
               >
-                Load more
+                Next page
               </SecondaryButton>
             </div>
           ) : null}

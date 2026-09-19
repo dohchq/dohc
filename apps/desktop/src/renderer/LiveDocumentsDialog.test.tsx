@@ -597,7 +597,7 @@ describe("LiveDocumentsDialog", () => {
       render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
 
       expect(
-        await screen.findByText("No refused shares on this page. Load more to keep looking."),
+        await screen.findByText("No refused shares on this page. Continue to the next page."),
       ).toBeTruthy();
       await user.click(screen.getByTestId("live-refusals-more"));
 
@@ -621,6 +621,25 @@ describe("LiveDocumentsDialog", () => {
       expect(screen.queryByTestId("live-refusal-row-share-1")).toBeNull();
     });
 
+    it("keeps an empty final page visible and Reload returns to the first page", async () => {
+      const h = harness();
+      h.loadRefusals.mockResolvedValueOnce(refusalPage([refusal("share-1")], "share-1"))
+        .mockResolvedValueOnce(refusalPage([]))
+        .mockResolvedValueOnce(refusalPage([refusal("share-1")], "share-1"));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+      await user.click(await screen.findByRole("button", {
+        name: "Next page of shares that could not start live editing",
+      }));
+      expect(await screen.findByText(
+        "No refused shares on this page. Reload to return to the first page.",
+      )).toBeTruthy();
+      expect(screen.queryByTestId("live-refusals-more")).toBeNull();
+      await user.click(screen.getByTestId("live-documents-reload"));
+      expect(await screen.findByTestId("live-refusal-row-share-1")).toBeTruthy();
+      expect(h.loadRefusals).toHaveBeenLastCalledWith("ws-1", undefined);
+    });
+
     it("retries one share and refreshes the page that share came from", async () => {
       const h = harness();
       h.loadRefusals
@@ -642,7 +661,7 @@ describe("LiveDocumentsDialog", () => {
       await vi.waitFor(() =>
         expect(h.loadRefusals).toHaveBeenNthCalledWith(3, "ws-1", "share-1"),
       );
-      await vi.waitFor(() => expect(screen.queryByTestId("live-refusals")).toBeNull());
+      await screen.findByText("No refused shares on this page. Reload to return to the first page.");
       expect(h.onError).not.toHaveBeenCalled();
     });
 
