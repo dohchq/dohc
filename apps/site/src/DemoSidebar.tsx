@@ -222,6 +222,7 @@ export function DemoSidebar(props: {
           onUnmountShare={() => undefined}
           onShare={() => undefined}
           onRefresh={() => undefined}
+          onError={() => undefined}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">
