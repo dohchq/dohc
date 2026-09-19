@@ -15,6 +15,11 @@ installer has passed the [release rehearsal](../how-to/desktop-release.md).
 | Run the bundled MCP launcher | Node.js 22.13+, 23.4+, or 24+ on `PATH`. The desktop runtime does not supply Node to MCP. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 
+The supported self-host bundle supplies the session host and live-editing limits.
+Live editing covers existing Markdown documents on the main version.
+Moving, deleting, or replacing an enrolled document pauses its live editing.
+The server preserves its accepted state; it does not silently bind that state to a different file.
+
 The release workflow builds Windows x64, macOS x64, macOS arm64, and Linux x64.
 App publishing has a narrower platform boundary because its installed compiler
 currently ships a Windows x64 runtime. Reading a shared app in a browser does
