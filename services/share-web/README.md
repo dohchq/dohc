@@ -160,51 +160,28 @@ Desktop share codes remain available when browser invitations are unconfigured.
 
 ## Storage and recovery
 
-The Phase 2 Compose deployment runs one `share-web` instance. Its viewer
-sessions live only in memory. Restarting it signs viewers out. A viewer can
-open the original share URL again to exchange the fragment secret and recover
-access, unless the owner reset or ended the link. Do not run more than one
-instance or enable horizontal scaling in v1 because the instances do not
-share session state.
+The supported Compose deployment runs one `share-web` instance.
+Its viewer sessions live in memory. Restarting it signs viewers out.
+A viewer can open the original share URL again unless the owner reset or ended the link.
+Do not run multiple instances because they do not share viewer session state.
 
-The sync relay stores its database in `dohc_self_host_sync_relay`. A separate
-`dohc_self_host_relay_continuity` volume holds deployment configuration, the
-writer lock, and continuity metadata. Keep that volume outside relay backups.
-The configured paths belong to one physical deployment host. Cross-host takeover
-and network filesystems are unsupported.
+The relay stores its database in `dohc_self_host_sync_relay`.
+The separate `dohc_self_host_relay_continuity` volume holds configuration, the writer lock and independent continuity.
+These paths belong to one physical host. Cross-host takeover and network filesystems are unsupported.
+The deployment's initializer creates a fresh configuration only when its required storage is empty.
+Ordinary relay startup never initializes missing continuity.
+Preserve partial state if fresh initialization is interrupted; do not delete established volumes to retry setup.
 
-Before the first start, initialize a fresh deployment explicitly:
+Use the [self-host recovery procedure](../../docs/how-to/self-host-recovery.md) for snapshots, checks, repair and private archives.
+Exact-stamp repair retains the original continuity, authentication and live-host data.
+It preserves replaced relay files and refuses snapshots older than accepted work.
+Offline salvage can export settled tracked files from older snapshots into a new directory.
+It does not restore permissions, live-edit authority or a running deployment.
 
-```sh
-docker compose --env-file .env.self-host -f docker-compose.self-host.yml run --rm --no-deps sync-relay sh -c 'corepack enable && corepack prepare pnpm@11.20.0 --activate && pnpm install --frozen-lockfile && pnpm --filter @dohc/sync-relay deployment initialize --config /continuity/deployment.json --database /data/sync-relay.sqlite --continuity-directory /continuity/history'
-```
-
-Initialization refuses existing data. Ordinary startup never initializes missing
-continuity metadata. Outside development and tests, `DOHC_RELAY_DEPLOYMENT_CONFIG`
-must name the external configuration file. That file owns the database path;
-`SYNC_RELAY_DB_PATH` cannot override it.
-
-If fresh initialization is interrupted, preserve its partial configuration, relay
-database, and continuity directory. Initialize with new, empty paths after inspecting
-that failure. Do not reuse this procedure to replace an established deployment.
-Set `DOHC_RELAY_DEPLOYMENT_CONFIG` in the Compose service to the new configuration path.
-
-The relay can retire its storage handle at runtime and report HTTP 503 from `/health`.
-Restart the service once. A confirmed rollback permits reopening; a continuity
-refusal requires preserving both volumes and following the recovery limits below.
-
-Stop `share-web` and `sync-relay` before backup or restore. Back up the complete
-relay volume, including SQLite side files. Keep the original volume before
-restoring into an empty replacement. The relay refuses startup if the restored
-database is behind its independent continuity record, including a lost grant
-revocation. Missing continuity also refuses startup.
-
-This implementation does not provide automatic reconciliation of an older
-backup. Keep the service stopped and preserve both volumes when continuity
-refuses. Do not copy an older continuity record alongside a backup to make its
-markers match. Host reprovisioning does not restore grant authority. Recovery
-that discards or reconstructs intervening accepted work requires a separate
-verified procedure; no reset or marker-repair command is provided here.
+The relay can retire storage and return HTTP 503 from `/health`.
+Restart once. If continuity still refuses, keep the service stopped and preserve all volumes.
+Never replace current continuity with an older archived copy.
+Losing continuity or rolling back after a migration requires further recovery work, not a marker reset.
 
 The relay does not persist viewer IP addresses. It keeps share and grant rows
 until the owner deletes their containing share or grant. Retired link
