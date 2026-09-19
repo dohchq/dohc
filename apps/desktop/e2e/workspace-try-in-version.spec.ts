@@ -224,7 +224,7 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
       "2 files changed",
     );
 
-    // History attributes the agent's edits (0N-1, signed out => "You's agent").
+    // History attributes the agent's edits (0N-1, signed out => "Agent").
     // History lives in the left History view (the right panel is Chats now).
     await openHistoryView(page);
     const agentRow = page.locator(
@@ -233,7 +233,7 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
     await expect(agentRow.first()).toBeVisible();
     await expect(
       agentRow.first().getByTestId("engine-moment-source"),
-    ).toHaveText("You's agent");
+    ).toHaveText("Agent");
 
     // Review changes opens the existing compare tab; the card stays.
     await page.getByTestId("try-review-open-compare").click();

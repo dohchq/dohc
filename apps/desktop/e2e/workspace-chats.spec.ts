@@ -106,7 +106,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
         await chats.startChannelThread({
           workspaceId,
           channelId: general.id,
-          author: { kind: "agent", displayName: "Ice" },
+          author: { kind: "agent", displayName: "Nova" },
+          authorOwnerDisplayName: "Ice",
           body: "The zeppelin-cadence report is ready.",
         });
       },
@@ -151,7 +152,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // Opening the thread marks it read; the badges clear at both levels.
     await panel.getByTestId("chats-channel").click();
     await agentThreadRow.click();
-    await expect(view.getByTestId("chats-message-author")).toHaveText("Ice's agent");
+    await expect(view.getByTestId("chats-message-author")).toHaveText("Nova");
     await view.getByTestId("chats-thread-back").click();
     await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
     await view.getByTestId("chats-channel-back").click();

@@ -1,3 +1,4 @@
+import { AgentSettingsContext } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { hasBlockingModal } from "./modalFocus";
 import { PanelLoading } from "./workbench/PanelLoading";
@@ -778,18 +779,19 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
+  const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
       {
         id: "agent:default",
         kind: "agent",
         handle: "agent",
-        label: `${LOCAL_USER_LABEL}'s agent`,
+        label: localAgentName,
         description: "your agent",
       },
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
-    [],
+    [localAgentName],
   );
   const userMentionCandidates = useMemo(
     () => mentionCandidates.filter((candidate) => candidate.kind === "user"),
@@ -798,7 +800,7 @@ export function DesktopWorkspaceShell(props: {
   const agentNotifs = useAgentNotifications({
     workspaceId,
     workspaceName: workspaceName(props.workspace),
-    agentName: `${LOCAL_USER_LABEL}'s agent`,
+    agentName: localAgentName,
     userCandidates: userMentionCandidates,
   });
   const addressedToMe = useMemo(
@@ -4379,6 +4381,7 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [acceptStoreUpdateResult, workspaceId]);
   return (
+    <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <div
       data-testid="workspace-shell"
       // Flips to "true" only once openWorkspace has resolved — which in main
@@ -5858,5 +5861,6 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
+    </AgentSettingsContext.Provider>
   );
 }

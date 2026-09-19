@@ -436,12 +436,12 @@ describe("SettingsDialog", () => {
     expect((input as HTMLInputElement).value).toBe("");
     expect(input.getAttribute("placeholder")).toBe("Enter your name");
     expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
-      "Your agent",
+      "You",
     );
     expect(screen.queryByText("Launch behavior")).toBeNull();
     await user.type(input, "Ice");
     expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
-      "Ice's agent",
+      "Ice",
     );
     await user.tab();
 
@@ -581,6 +581,9 @@ describe("SettingsDialog", () => {
       />,
     );
 
+    const agentName = await screen.findByTestId("runner-agent-name-input");
+    await user.type(agentName, "Nova");
+    await user.tab();
     const command = await screen.findByTestId("runner-command-input");
     expect(command.getAttribute("placeholder")).toBe(
       "Enter the command that starts your agent",
@@ -624,12 +627,15 @@ describe("SettingsDialog", () => {
       />,
     );
 
+    const agentName = await screen.findByTestId("runner-agent-name-input");
+    await user.type(agentName, "Nova");
+    await user.tab();
     const command = await screen.findByTestId("runner-command-input");
     const enable = screen.getByRole("switch", { name: "Enable chat runner" });
     expect(enable.getAttribute("disabled")).not.toBeNull();
     await user.type(command, "   ");
     expect(enable.getAttribute("disabled")).not.toBeNull();
-    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    bridge.setUserSettings.mockClear();
 
     await user.type(command, "codex exec");
     expect(enable.getAttribute("disabled")).toBeNull();
@@ -661,6 +667,8 @@ describe("SettingsDialog", () => {
       />,
     );
 
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
     await user.type(
       await screen.findByTestId("runner-command-input"),
       "claude -p",
@@ -705,6 +713,8 @@ describe("SettingsDialog", () => {
 
     // Configured, and the engine setting is ON (the schema default) — so the
     // live-setting gate alone would enable this button.
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
@@ -759,6 +769,8 @@ describe("SettingsDialog", () => {
       />,
     );
 
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     await screen.findByTestId("runner-self-test-engine-note");
     const button = await screen.findByTestId("runner-self-test-button");
@@ -782,6 +794,8 @@ describe("SettingsDialog", () => {
       />,
     );
 
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
     await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
     await user.click(screen.getByTestId("runner-self-test-button"));
 

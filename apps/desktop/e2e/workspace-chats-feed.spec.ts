@@ -191,7 +191,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const agentComment = commentWithBody(view, decisionBody);
     await expect(agentComment).toHaveAttribute("data-author-kind", "agent");
     await expect(ownBubble(agentComment).getByTestId("chats-message-author")).toHaveText(
-      "You's agent",
+      "Agent",
     );
     await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
@@ -365,7 +365,7 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // merely rendering an arrival.
     await agentThreadRow.click();
     await expect(threadView.getByTestId("chats-message-author")).toHaveText(
-      "You's agent",
+      "Agent",
     );
     await expect(threadView.getByTestId("chats-message-body")).toContainText(
       agentBody,

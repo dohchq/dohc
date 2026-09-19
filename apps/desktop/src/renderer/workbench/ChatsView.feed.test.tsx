@@ -383,7 +383,7 @@ describe("ChatsView hybrid feed", () => {
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");
     expect(screen.getAllByTestId("chats-post-author")[1]?.textContent).toBe(
-      "You's agent",
+      "You",
     );
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(1);
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledWith({

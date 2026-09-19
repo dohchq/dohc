@@ -549,10 +549,12 @@ export function SettingsDialog(props: {
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
               preferredName={userSettings.profile.preferredName}
+              agentName={userSettings.profile.agentName}
+              onAgentNameChange={(agentName) => saveUserSettings({ ...userSettings, profile: { ...userSettings.profile, agentName } })}
               onPreferredNameChange={(preferredName) =>
                 saveUserSettings({
                   ...userSettings,
-                  profile: preferredName ? { preferredName } : {},
+                  profile: { ...userSettings.profile, preferredName },
                 })
               }
               runner={userSettings.runner}
@@ -840,7 +842,7 @@ export function SettingsDialog(props: {
               onReset={() =>
                 void saveUserSettings({
                   ...userSettings,
-                  profile: {},
+                  profile: { ...userSettings.profile, preferredName: undefined },
                 })
               }
               testId="settings-row-preferred-name"
@@ -850,7 +852,7 @@ export function SettingsDialog(props: {
                 onChange={(preferredName) =>
                   saveUserSettings({
                     ...userSettings,
-                    profile: preferredName ? { preferredName } : {},
+                    profile: { ...userSettings.profile, preferredName },
                   })
                 }
                 testIdPrefix="general-preferred-name"

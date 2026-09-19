@@ -1,3 +1,4 @@
+import { AgentNameControl } from "./AgentNameControl";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
@@ -58,6 +59,8 @@ function runnerEngineNote(
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   runner: RunnerSettings;
+  agentName?: string;
+  onAgentNameChange?: (name: string) => Promise<void>;
   // Mirrors SettingsDialog's shared-view fact.
   sharedView?: boolean;
   // Whether main built a recorder for this workspace in this app session.
@@ -158,7 +161,7 @@ export function RunnerSettingsCard(props: {
     }
   }, [commitDrafts, workspaceId]);
 
-  const configured = commandDraft.trim().length > 0;
+  const configured = commandDraft.trim().length > 0 && Boolean(props.agentName?.trim());
   const selfTestRunning = selfTest.status === "running";
   const engineNote = runnerEngineNote(Boolean(sharedView), sessionRecorderOn);
 
@@ -195,6 +198,7 @@ export function RunnerSettingsCard(props: {
         </div>
       </div>
 
+      {props.onAgentNameChange ? <div className="px-4 pt-3"><AgentNameControl value={props.agentName} onChange={props.onAgentNameChange} /></div> : null}
       <div className="px-4 py-3">
         <label
           htmlFor="runner-command"

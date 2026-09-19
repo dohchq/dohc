@@ -1,3 +1,4 @@
+import { AgentBadge } from "./AgentBadge";
 import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
 import { memo, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import type {
@@ -57,16 +58,6 @@ function RunLine(props: { run: ChatRunRecord }) {
   );
 }
 
-function AgentBadge(props: { testIdPrefix: string }) {
-  return (
-    <span
-      data-testid={`${props.testIdPrefix}-agent-badge`}
-      className="rounded border border-agent/40 px-1 font-mono text-[10px] text-agent"
-    >
-      agent
-    </span>
-  );
-}
 
 // A poll's choices, stacked. Picking one is the answer. An answered poll
 // keeps its choices and marks the one taken.
@@ -571,7 +562,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             >
               {isSystem ? "dohc" : chatAuthorLabel(comment)}
             </span>
-            {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            {isAgent && !isSystem ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
             <time
               data-testid="chats-message-time"
               dateTime={commentTime.iso}
@@ -720,7 +711,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               >
                 {chatAuthorLabel(openingMessage)}
               </span>
-              {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" /> : null}
+              {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">
               <span className="truncate font-mono text-[11px]">

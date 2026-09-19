@@ -1,3 +1,4 @@
+import { AgentBadge } from "./AgentBadge";
 import { CircleHelp, FileText, MessageSquare, Save, SmilePlus } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime } from "../time";
@@ -192,12 +193,7 @@ export function PostCard(props: {
                 {message ? chatAuthorLabel(message) : "Unknown author"}
               </span>
               {isAgent ? (
-                <span
-                  data-testid="chats-post-agent-badge"
-                  className="font-mono text-[10px] text-agent"
-                >
-                  agent
-                </span>
+                <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} />
               ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">

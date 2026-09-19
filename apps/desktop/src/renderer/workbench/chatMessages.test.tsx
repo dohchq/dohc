@@ -110,10 +110,10 @@ describe("chat authorship display", () => {
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
   });
 
-  it("renders agent messages as \"<Name>'s agent\" and humans by name", () => {
+  it("renders agent messages as \"their stored name\" and humans by name", () => {
     expect(
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice" }),
-    ).toBe("Ice's agent");
+    ).toBe("Ice");
     expect(
       chatAuthorLabel({ authorKind: "human", authorDisplayName: "Ice" }),
     ).toBe("Ice");
@@ -136,7 +136,7 @@ describe("chat authorship display", () => {
       />,
     );
     expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
-      "Ice's agent",
+      "Ice",
     );
   });
 
