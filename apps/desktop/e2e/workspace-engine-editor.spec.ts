@@ -139,55 +139,67 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
   }
 });
 
-// WS-G2-C-2 gate fix 1 — a genuine external edit to a live doc must not be
-// silently dropped. The old blanket live-path skip discarded every watcher event
-// for a live path, so an agent/other editor writing the .md while the editor was
-// open lost its change (the next settle overwrote it from the CRDT). Now only the
-// settle's own sha-matched self-write is suppressed; a genuine external write is
-// captured as a moment (on a shared workspace it would surface as a real
-// conflict — correct, not silent loss). Folding it into the live doc as CRDT
-// deltas is G2-C-3; here the bar is not-dropping.
-test("an external edit to a live engine doc is captured (moment.append), not silently dropped", async () => {
+async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>) {
+  const exited = new Promise<void>(resolve => desktop.app.process().once("exit", () => resolve()));
+  await desktop.app.evaluate(({app}) => {app.quit();});
+  await exited;
+  await desktop.close();
+}
+
+test("an external edit to an idle open document is imported after restart", async () => {
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n"}]);
+    desktop = await launchDesktopApp({workspace: temp});
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "notes/rich.md");
+    await openEngineDoc(desktop.page, "notes/rich.md");
+    await writeWorkspaceFiles(temp, [{path: "notes/rich.md", contents: "# Rich\n\nWritten outside dohc.\n"}]);
+    await quitDesktop(desktop);
+    desktop = await launchDesktopApp({workspace: temp});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Written outside dohc.");
+    await expect.poll(() => momentTextsForPath(temp.rootPath, "notes/rich.md")).toEqual(expect.arrayContaining([expect.stringContaining("Written outside dohc.")]));
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
+test("an external edit to an open document remains recoverable after overlapping typing and restart", async () => {
+  test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const external = "External agent wrote this straight to disk while the editor was open.";
-
+  const human = "Human continued typing in the open document.";
+  const path = "notes/rich.md";
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
-    ]);
-
-    desktop = await launchDesktopApp({ workspace: temp });
-    const { page } = desktop;
-
+    await writeWorkspaceFiles(temp, [{path, contents: "# Rich\n\nBase paragraph.\n"}]);
+    desktop = await launchDesktopApp({workspace: temp});
+    const {page} = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/rich.md");
-    // Open the doc so its engine Y.Doc session goes live (the path enters the
-    // live-session registry). Do not type: a quiescent live session issues no
-    // settle, so nothing re-projects the CRDT over the external write — the
-    // deterministic form of the loss the old blanket live-path skip caused.
-    await openEngineDoc(page, "notes/rich.md");
-
-    // An external writer (agent / other editor) replaces the .md while the
-    // session is live. The old code dropped every watcher event for a live path;
-    // now this genuine edit (a sha that matches no settle self-write) is captured.
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/rich.md", contents: `# Rich\n\n${external}\n` },
-    ]);
-
-    // Proof it was not silently dropped: the external content was captured as an
-    // engine moment (its text lands in a moment blob). The old blanket live-path
-    // skip discarded the watcher event outright, so this moment never existed.
-    // (moment.append payloads reference the text by blob sha — never inline — so
-    // the moment→blob join, not a payload_json scan, is how the content is read.)
-    await expect
-      .poll(() => momentTextsForPath(temp.rootPath, "notes/rich.md").some((t) => t.includes(external)), {
-        timeout: 20_000,
-      })
-      .toBe(true);
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
+    await waitForWorkspaceFile(page, workspace.workspaceId, path);
+    await openEngineDoc(page, path);
+    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
+    await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
+    // The live lease defers capture. Settlement must preserve the outside bytes.
+    await page.getByTestId("markdown-editor").click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(human);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
+    await expect(page.getByTestId("markdown-editor")).toContainText(human);
+    await quitDesktop(desktop);
+    desktop = await launchDesktopApp({workspace: temp});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
+    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
+    await desktop.page.getByTestId("markdown-source-toggle").click();
+    await desktop.page.getByTestId("markdown-source-copy").click();
+    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
 // WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +

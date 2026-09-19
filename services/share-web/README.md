@@ -352,6 +352,22 @@ live editing ships.
 
 ## Development
 
+### Check shared-link MCP against the native engine
+
+Run `pnpm qa:prepare` from the repository root. Set these environment variables:
+
+- `DOHC_SERVICE_HOST_PROOF_BINARY`: absolute path to the prepared `target/debug/dohc-workspace-engine` executable, with `.exe` on Windows.
+- `DOHC_SERVICE_HOST_PROOF_SHA256`: SHA-256 digest of that executable.
+- `DOHC_SERVICE_HOST_PROOF_OUTPUT`: absolute path to a disposable evidence directory.
+
+Run `pnpm --filter @dohc/share-web exec vitest run --config vitest.mcp-native.config.ts`.
+The test starts its own loopback HTTP listeners, relay store, workspace, and native service host.
+It checks file reads, discussion, durable live edits, View restrictions, revoked access, and reads while the host is offline.
+The owner identity is a test fixture. This does not verify account login, a desktop-host connection, ordinary file replication, TLS deployment, or production capacity.
+The test stops its processes and retains its stores and result under the output directory for inspection.
+
+### Run the viewer
+
 Set `DOHC_SHARE_WEB_DEV=1` only with `NODE_ENV=development` or
 `NODE_ENV=test`. Production startup fails when the viewer build is missing.
 Run `pnpm --filter @dohc/share-web build` before production startup.

@@ -8,6 +8,6 @@
     "viewer/src/**/*.ts",
     "viewer/src/**/*.tsx",
     "viewer/vite.config.ts",
-    "vitest.config.ts"
+    "vitest*.config.ts"
   ]
 }

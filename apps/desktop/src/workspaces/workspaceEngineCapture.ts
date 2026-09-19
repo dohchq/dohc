@@ -4380,6 +4380,30 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
+        // A retained document can reopen over an outside edit. Check the file
+        // without settling: opening a document must not trigger a write retry.
+        if (head === "present" && lineage === "existing") {
+          const openingUpdates = updatesSeen;
+          let drifted = false;
+          try {
+            const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
+            if (snapshot) {
+              const disk = await digestSettledFile(rootPath, input.path);
+              drifted =
+                disk.kind === "changed" ||
+                (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
+            }
+          } catch {
+            // A failed read does not prove drift. Keep the existing state and
+            // let the next ordinary settle report a retryable read failure.
+          }
+          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
+            // The retained Y.Doc text is not a History moment yet, so the
+            // existing error state is the honest recovery surface. It carries
+            // no settle token because this report did not come from a settle.
+            reportSaveState("error", 0);
+          }
+        }
         return {
           get nativeOwner() { return session.nativeOwner; },
           get doc() {
