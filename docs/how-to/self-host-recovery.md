@@ -31,12 +31,16 @@ Preserve its volumes and use offline salvage for recoverable files.
 
 Choose a private backup parent directory outside the deployment's data volumes.
 The maintenance container runs as UID 1000 and needs write access to that parent.
-On Linux, create a dedicated directory owned by UID 1000 when needed:
+The operator running these commands also needs access because archival writes files on the host.
+If the operator's UID is 1000, create a private directory:
 
 ```sh
 sudo install -d -m 0700 -o 1000 -g 1000 /srv/dohc-backups
 node scripts/self-host/recovery.mjs backup /srv/dohc-backups/relay-before-upgrade
 ```
+
+For a different operator UID, grant both identities access through a private group or ACL.
+Do not make the backup directory publicly readable or writable.
 
 The command stops the selected Compose project before taking the snapshot.
 It resumes only services that were running before a successful snapshot.
