@@ -2063,6 +2063,8 @@ CREATE TABLE owner_pending_settlements (
     relay_namespace TEXT NOT NULL,
     binding_json TEXT NOT NULL,
     terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    checked_sequence INTEGER NOT NULL DEFAULT 0 CHECK (checked_sequence >= 0),
+    record_facts_json TEXT CHECK (record_facts_json IS NULL OR json_valid(record_facts_json)),
     applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
     report_id TEXT,
     PRIMARY KEY (workspace_id, origin_id, origin_seq),
@@ -2071,7 +2073,7 @@ CREATE TABLE owner_pending_settlements (
       ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 CREATE INDEX owner_pending_settlements_ready ON owner_pending_settlements(
-    workspace_id, applied, main_version_id, object_id, lineage_claim_id, terminal_cursor
+    workspace_id, checked_sequence, terminal_cursor
 );
 CREATE INDEX owner_pending_settlements_report ON owner_pending_settlements(workspace_id, report_id);
 CREATE TABLE owner_pending_settlement_blobs (
@@ -2359,7 +2361,7 @@ mod tests {
             ),
             (
                 "v2-owner-pending-settlements",
-                "e90fabd6cdd3154d9aa982ff9aa14a873ea32d3159e505ccee4944658091261d",
+                "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -2726,6 +2728,18 @@ mod tests {
              COMMIT;",
         )
         .expect("pins and queue can precede the imported envelope");
+        for sql in [
+            "UPDATE owner_pending_settlements SET checked_sequence=-1",
+            "UPDATE owner_pending_settlements SET record_facts_json='invalid'",
+        ] {
+            conn.execute(sql, [])
+                .expect_err("pending settlement rejects invalid drain state");
+        }
+        conn.execute(
+            "UPDATE owner_pending_settlements SET checked_sequence=1, record_facts_json='[]'",
+            [],
+        )
+        .expect("persist valid drain state");
         for sql in [
             "DELETE FROM blobs",
             "DELETE FROM binary_blobs",
