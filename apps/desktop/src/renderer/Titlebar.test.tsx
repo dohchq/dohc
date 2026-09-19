@@ -25,6 +25,15 @@ describe("workspaceName", () => {
 });
 
 describe("Titlebar", () => {
+  it("describes agent activity without nesting the status inside the chats button", () => {
+    render(<Titlebar agentActive chatsSidebar={{ visible: true, onToggle: vi.fn() }} />);
+    const toggle = screen.getByRole("button", { name: "Toggle chats sidebar" });
+    const status = screen.getByRole("status", { name: "Agent running" });
+    expect(toggle.contains(status)).toBe(false);
+    expect(toggle.getAttribute("aria-describedby")).toBe(status.id);
+    expect(status.textContent).toBe("Agent running");
+  });
+
   it("shows the macOS quick-open shortcut on macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
 

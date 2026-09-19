@@ -23,6 +23,7 @@ describe("sync status surface", () => {
     });
     const status = screen.getByTestId("sync-status");
     expect(status.getAttribute("data-state")).toBe("synced");
+    expect(screen.getByText("Local · saved").classList.contains("sr-only")).toBe(false);
     expect(status.textContent).not.toContain("(");
   });
 
@@ -41,4 +42,3 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("sync-status").textContent).toContain("Conflict (2)");
   });
 });
-

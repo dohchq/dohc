@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
@@ -23,31 +23,36 @@ function LayoutToggle(props: {
   Icon: typeof PanelLeft;
   agentActive?: boolean;
 }) {
+  const statusId = useId();
   return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      aria-label={props.label}
-      aria-pressed={props.pressed}
-      title={props.label}
-      onClick={props.onClick}
-      className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
-        props.pressed
-          ? "bg-line/70 text-ink"
-          : "text-subtle hover:bg-line/50 hover:text-ink"
-      }`}
-    >
-      <props.Icon size={15} strokeWidth={1.8} aria-hidden />
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        data-testid={props.testId}
+        aria-label={props.label}
+        aria-pressed={props.pressed}
+        aria-describedby={props.agentActive ? statusId : undefined}
+        title={props.label}
+        onClick={props.onClick}
+        className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
+          props.pressed
+            ? "bg-line/70 text-ink"
+            : "text-subtle hover:bg-line/50 hover:text-ink"
+        }`}
+      >
+        <props.Icon size={15} strokeWidth={1.8} aria-hidden />
+      </button>
       {props.agentActive ? (
         <span
+          id={statusId}
           data-testid="agent-run-indicator"
           role="status"
           aria-label="Agent running"
           title="Agent running"
-          className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-agent"
-        />
+          className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-agent"
+        ><span className="sr-only">Agent running</span></span>
       ) : null}
-    </button>
+    </span>
   );
 }
 
