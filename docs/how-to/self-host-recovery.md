@@ -25,7 +25,8 @@ Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
 An interrupted write can reserve a continuity stamp before the relay transaction commits.
 That state also refuses startup and cannot be repaired from an older snapshot.
-Preserve its volumes and use offline salvage for recoverable files.
+Preserve its volumes.
+Offline salvage requires an earlier completed relay snapshot; it cannot read the failed deployment or its archive directly.
 
 ## Save a relay snapshot
 
