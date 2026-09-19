@@ -504,6 +504,24 @@ describe("LiveDocumentsDialog", () => {
   // A share whose live editing never started is not a live document. It gets
   // its own section, its own words, and one Try again per share.
   describe("refused shares", () => {
+    it("disables Reload until a refusal page finishes", async () => {
+      const h = harness();
+      const pending = deferred<LiveRefusalPage>();
+      h.loadRefusals.mockResolvedValueOnce(refusalPage([refusal("share-1")], "share-1"))
+        .mockReturnValueOnce(pending.promise);
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+      await user.click(await screen.findByTestId("live-refusals-more"));
+      const reload = screen.getByTestId("live-documents-reload") as HTMLButtonElement;
+      expect(reload.disabled).toBe(true);
+      await user.click(reload);
+      expect(h.load).toHaveBeenCalledTimes(1);
+      await act(async () => pending.resolve(refusalPage([refusal("share-2")])));
+      expect(reload.disabled).toBe(false);
+      await user.click(reload);
+      expect(h.loadRefusals).toHaveBeenLastCalledWith("ws-1", undefined);
+    });
+
     it("says nothing about refusals when the page is proven empty", async () => {
       const h = harness();
       render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);

@@ -469,7 +469,7 @@ export function LiveDocumentsDialog({
         </div>
         <SecondaryButton
           size="compact"
-          disabled={listBusy}
+          disabled={listBusy || refusalBusy !== null}
           data-testid="live-documents-reload"
           onClick={() => {
             perform({ kind: "reload" });
