@@ -46,7 +46,11 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
 export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspaceId: string, ownerUserId: string, after?: string) {
   const page = storage.scanServiceHostCandidateShares(after === undefined ? undefined : {workspaceId, shareId: after}, workspaceId);
   const refusals: Array<{shareId: string; paths: string[]; code: string; message: string}> = [];
+  // 100 paths × 1024 UTF-16 units × 6 JSON bytes fits; reserve 24 KiB for the envelope and cursor.
+  const byteBudget = 1000 * 1024;
+  let bytes = 0, cursor = after;
   for (const share of page.shares) {
+    const previous = cursor; cursor = share.shareId;
     if (share.granterUserId !== ownerUserId) continue;
     const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = parsed && effectiveShareSelector(parsed, "edit");
@@ -56,7 +60,14 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
       storage.checkServiceHostDocuments({workspaceId, ownerUserId, shareId: share.shareId, paths});
     } catch (error) {
       if (!(error instanceof RelayError)) throw error;
-      refusals.push({shareId: share.shareId, paths: [...selector.paths], code: error.code, message: error.message});
+      const refusal = {shareId: share.shareId, paths: [...selector.paths], code: error.code, message: error.message};
+      const size = Buffer.byteLength(JSON.stringify(refusal)) + 1;
+      if (size > byteBudget) throw new Error("A live enrollment refusal exceeds its response budget.");
+      if (bytes + size > byteBudget) {
+        if (previous === undefined) throw new Error("A refusal page cannot advance its cursor.");
+        return {refusals, nextCursor: previous};
+      }
+      bytes += size; refusals.push(refusal);
     }
   }
   return {refusals, nextCursor: page.nextCursor?.shareId ?? null};

@@ -5,6 +5,7 @@ import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {deriveServiceHostBearer} from "./serviceHostCredential";
+import {relayError} from "./errors";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -170,6 +171,27 @@ it("counts only missing documents when a share contains more than 64 stopped doc
   expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(200);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+});
+
+it("keeps full Unicode refusal selectors within the client byte budget and resumes at the unreturned share", async () => {
+  const f = await fixture();
+  const paths = Array.from({length: 100}, (_, index) => `${String(index).padStart(3, "0")}/${"界".repeat(1016)}`);
+  for (let index = 0; index < 5; index++) {
+    const shareId = `large-selector-${index}`;
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,1)").run(shareId, scope.workspaceId, JSON.stringify({paths, versionId: null}));
+    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(`large-grant-${index}`, shareId, scope.grantId);
+  }
+  vi.spyOn(f.storage, "checkServiceHostDocuments").mockImplementation(input => {
+    if (input.shareId.startsWith("large-selector-")) throw relayError("quota_exceeded", "No room for live documents.");
+  });
+  const firstResponse = await f.handle(f.request("GET", undefined, {}, "?refusals=1"));
+  const text = await firstResponse.text(); expect(Buffer.byteLength(text)).toBeLessThan(1024 * 1024);
+  const first = JSON.parse(text);
+  expect(first.refusals).toHaveLength(3); expect(first.refusals[0].paths).toEqual(paths);
+  expect(first.nextCursor).toBe("large-selector-2");
+  const second = await (await f.handle(f.request("GET", undefined, {}, `?refusals=1&after=${first.nextCursor}`))).json();
+  expect(second.refusals.map((row: {shareId: string}) => row.shareId)).toEqual(["large-selector-3", "large-selector-4"]);
+  expect(second.nextCursor).toBeNull();
 });
 
 it("rolls back every folder enrollment when a later current file lacks a live document", async () => {
