@@ -51,7 +51,7 @@ const auth = createWorkspaceAuth({
 });
 
 const gateway: AuthGateway = {
-  handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded)),
+  handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
   api: {
     getSession: ({ headers }) => auth.api.getSession({ headers }),
     deviceVerify: ({ query, headers }) => auth.api.deviceVerify({ query, headers }),

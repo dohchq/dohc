@@ -68,6 +68,8 @@ main {
   color: var(--subtle);
 }
 
+ .server { overflow-wrap: anywhere; font-size: 12px; }
+
 h1 {
   margin: 0 0 0.5rem;
   font-size: 18px;
@@ -198,6 +200,7 @@ a:hover { color: var(--ink); }
 
 export const ACCOUNT_JS = `const page = document.body.dataset.page || "";
 const byId = (id) => document.getElementById(id);
+if (byId("server-host")) byId("server-host").textContent = location.host;
 
 function setStatus(kind, text) {
   const status = byId("status");

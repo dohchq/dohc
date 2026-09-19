@@ -85,6 +85,7 @@ test("account pages fit mobile and support keyboard use in both themes", async (
     await page.setViewportSize({ width: 375, height: 812 });
     await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
     await page.goto(`${server.origin}/account/sign-up`);
+    await expect(page.locator(".server")).toHaveText(`This account belongs to ${new URL(server.origin).host}.`);
     await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(page.getByLabel("Email", { exact: true })).toBeFocused();
@@ -115,4 +116,22 @@ test("failed SMTP shows a recoverable error after signup and password reset", as
   await page.getByRole("button", { name: "Send the reset link" }).click();
   await expect(page.getByRole("status")).toContainText("could not send the email");
   await expect(page.getByRole("button", { name: "Send the reset link" })).toBeEnabled();
+});
+
+
+test("anonymous mail failures do not reveal which accounts exist", async ({ request }) => {
+  const email = `mail-privacy-${Date.now()}@example.test`;
+  const signup = await request.post(`${server.origin}/api/auth/sign-up/email`, { headers: { origin: server.origin }, data: { name: "Privacy", email, password: "mail-privacy-password-123" } });
+  expect(signup.status()).toBe(200);
+  await request.post(`${server.origin}/api/auth/sign-out`, { headers: { origin: server.origin }, data: {} });
+  for (const route of ["request-password-reset", "send-verification-email"]) {
+    server.mail.refuseNextMessage();
+    const existing = await request.post(`${server.origin}/api/auth/${route}`, { headers: { origin: server.origin }, data: { email } });
+    const missing = await request.post(`${server.origin}/api/auth/${route}`, { headers: { origin: server.origin }, data: { email: `missing-${Date.now()}@example.test` } });
+    expect(existing.status()).toBe(200);
+    expect(missing.status()).toBe(existing.status());
+    expect(await missing.json()).toEqual(await existing.json());
+    expect((await request.get(`${server.origin}/ready`)).status()).toBe(200);
+    expect(server.logs()).toContain("Account email could not be delivered");
+  }
 });

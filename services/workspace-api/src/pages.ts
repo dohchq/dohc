@@ -42,6 +42,7 @@ function shell({ title, page, data = {}, main }: Shell): string {
 <body${attributes}>
 <main>
 <p class="brand">dohc</p>
+<p class="server">This account belongs to <span id="server-host">this server</span>.</p>
 ${main}
 </main>
 <script src="${ACCOUNT_JS_PATH}" defer></script>
