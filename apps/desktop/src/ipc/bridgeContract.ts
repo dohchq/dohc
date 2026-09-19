@@ -363,6 +363,25 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const OwnerLiveDocument = z.object({
+  path: SAFE_RELATIVE_PATH,
+  status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+  reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
+  canResume: z.boolean(),
+}).strict();
+export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
+export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
+  retiredAfter: SAFE_RELATIVE_PATH.optional(),
+}).strict();
+export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
+export const OwnerLiveDocumentsResult = z.object({
+  documents: z.array(OwnerLiveDocument).max(128),
+  nextCursor: SAFE_RELATIVE_PATH.nullable(),
+}).strict();
+export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
+export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
+export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
+
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
@@ -5992,6 +6011,9 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
+  listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
+  stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
+  resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;

@@ -1,4 +1,8 @@
 import {
+  ListOwnerLiveDocumentsPayload,
+  OwnerLiveDocument,
+  OwnerLiveDocumentsResult,
+  OwnerLiveDocumentActionPayload,
   CreateRelaySharePayload,
   CreateRelayShareResult,
   GetRelayReceivedSharePayload,
@@ -55,6 +59,7 @@ import {
   UnblockRelayShareDiscussionPrincipalPayload,
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
+import { z } from "zod";
 import { CHANNELS } from "./channels";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
@@ -68,6 +73,13 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
+const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
+const activeLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
+  status: z.enum(["ready", "preparing", "paused", "unavailable"]),
+})).max(64)});
+const retiredLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
+  status: z.literal("retired"),
+})).max(64), nextCursor: OwnerLiveDocumentsResult.shape.nextCursor});
 
 interface RelayShareRequest {
   <Result>(credentials: CloudCredentials, path: string, init: RequestInit | undefined, options: {retainRestoreConflict: true}): Promise<Result>;
@@ -158,6 +170,48 @@ export function registerRelaySharesIpcHandlers<
       );
     }
   };
+
+  registerHandler(CHANNELS.listOwnerLiveDocuments, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListOwnerLiveDocumentsPayload.parse(payload);
+    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+      const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
+      const after = input.retiredAfter === undefined ? "" : `&after=${encodeURIComponent(input.retiredAfter)}`;
+      const [active, retired] = await session.run(() => Promise.all([
+        relayShareJsonWithCredentials<unknown>(credentials, path),
+        relayShareJsonWithCredentials<unknown>(credentials, `${path}?retired=1${after}`),
+      ]));
+      const current = activeLiveDocuments.parse(active);
+      const stopped = retiredLiveDocuments.parse(retired);
+      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.documents.at(-1)?.path ||
+        stopped.nextCursor === input.retiredAfter)) {
+        throw new Error("The live document list changed. Refresh the list and try again.");
+      }
+      // Concurrent list reads may see a document in both sets. The current
+      // enrollment wins; all bindings and server-only credentials stay in main.
+      const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
+        ...document, canResume: !document.reason && (document.status === "retired" || document.status === "paused"),
+      }]));
+      return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
+    }, assertOriginalWorkspace);
+  });
+
+  for (const [channel, stop] of [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]] as const) {
+    registerHandler(channel, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = OwnerLiveDocumentActionPayload.parse(payload);
+      return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+        const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
+          `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
+            method: stop ? "DELETE" : "POST",
+            body: JSON.stringify(stop ? {path: input.path, retire: true} : {path: input.path}),
+          }));
+        const response = z.object({ok: z.literal(true), path: z.literal(input.path),
+          status: stop ? z.literal("retired") : z.enum(["ready", "preparing", "unavailable"])}).parse(result);
+        if (response.status === "unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
+      }, assertOriginalWorkspace);
+    });
+  }
 
   registerHandler(CHANNELS.ownerRestore, async (event, payload) => {
     assertTrustedSender(event);

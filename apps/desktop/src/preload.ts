@@ -33,6 +33,9 @@ import type {
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  ListOwnerLiveDocumentsPayload,
+  OwnerLiveDocumentsResult,
+  OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   EngineYDocLineageReplacementEvent,
   EngineYDocRemoteUpdateEvent,
@@ -378,6 +381,14 @@ const bridge: DohcDesktopBridge = {
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
+  listOwnerLiveDocuments: async payload => OwnerLiveDocumentsResult.parse(await ipcRenderer.invoke(
+    CHANNELS.listOwnerLiveDocuments, ListOwnerLiveDocumentsPayload.parse(payload))),
+  stopOwnerLiveDocument: async payload => {
+    await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
+  },
+  resumeOwnerLiveDocument: async payload => {
+    await ipcRenderer.invoke(CHANNELS.resumeOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
+  },
   listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
   getRelayReceivedShare: (payload) =>
     ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
