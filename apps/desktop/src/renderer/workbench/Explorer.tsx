@@ -139,7 +139,6 @@ export interface ExplorerProps {
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
   onRefresh: () => void;
-  onNewFileDialog: () => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -1860,7 +1859,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               {empty ? (
                 <button
                   type="button"
-                  onClick={props.onNewFileDialog}
+                  onClick={() => beginCreate("file", "")}
                   className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
                 >
                   <FilePlus2 size={13} aria-hidden />

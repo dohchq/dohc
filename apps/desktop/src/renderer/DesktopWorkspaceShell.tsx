@@ -2941,7 +2941,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const openNewFileDialog = useCallback(() => setNewFileOpen(true), []);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -4166,7 +4165,6 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onNewFileDialog={openNewFileDialog}
         onNewCollection={setNewCollectionFolder}
       />
     </>
