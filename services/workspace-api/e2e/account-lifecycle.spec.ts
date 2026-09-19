@@ -92,3 +92,27 @@ test("account pages fit mobile and support keyboard use in both themes", async (
     await page.screenshot({ path: testInfo.outputPath(`account-mobile-${colorScheme}.png`), fullPage: true });
   }
 });
+
+
+test("failed SMTP shows a recoverable error after signup and password reset", async ({ page }) => {
+  const email = `delivery-failure-${Date.now()}@example.test`;
+  server.mail.refuseNextMessage();
+  await page.goto(`${server.origin}/account/sign-up`);
+  await page.getByLabel("Name", { exact: true }).fill("Mail failure proof");
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  await page.getByLabel("Password", { exact: true }).fill("mail-failure-password-123");
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByRole("status")).toContainText("could not send the email");
+  await page.getByRole("link", { name: "Send a verification link" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  const beforeResend = server.mail.messages.length;
+  await page.getByRole("button", { name: "Send a new link" }).click();
+  await expect.poll(() => server.mail.messages.length).toBe(beforeResend + 1);
+  await expect(page.getByRole("status")).toContainText("sent a new link");
+  server.mail.refuseNextMessage();
+  await page.goto(`${server.origin}/account/forgot-password`);
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  await page.getByRole("button", { name: "Send the reset link" }).click();
+  await expect(page.getByRole("status")).toContainText("could not send the email");
+  await expect(page.getByRole("button", { name: "Send the reset link" })).toBeEnabled();
+});

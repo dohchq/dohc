@@ -68,7 +68,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
   return async function handle(request: Request): Promise<Response> {
     try {
       return await route(request);
-    } catch (error) {
+    } catch {
       // Never the URL: a verification or reset link in a log is a live credential.
       console.error(`[workspace-api] ${request.method} request failed.`);
       return json({ ok: false, error: "internal error" }, 500);
@@ -94,7 +94,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
           {
             code: "EMAIL_DELIVERY_UNCONFIGURED",
             message:
-              "This dohc server cannot send email, so it will not start an account action that depends on it. Set DOHC_SMTP_HOST, DOHC_SMTP_PORT, DOHC_SMTP_FROM and any credentials, then restart.",
+              "This server cannot send email yet. Contact the server owner.",
           },
           503,
           cors,

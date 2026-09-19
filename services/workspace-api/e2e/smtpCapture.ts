@@ -3,6 +3,7 @@ import { createServer, type Socket } from "node:net";
 /** A loopback SMTP sink for account acceptance tests. It never forwards mail. */
 export async function startSmtpCapture() {
   const messages: string[] = [];
+  let refuseNext = false;
   const sockets = new Set<Socket>();
   const server = createServer((socket) => {
     sockets.add(socket);
@@ -19,10 +20,11 @@ export async function startSmtpCapture() {
         pending = pending.slice(end + 2);
         if (data) {
           if (line === ".") {
-            messages.push(message.join("\r\n"));
+            if (!refuseNext) messages.push(message.join("\r\n"));
             data = false;
             message = [];
-            socket.write("250 accepted by local test sink\r\n");
+            socket.write(refuseNext ? "550 test sink refused delivery\r\n" : "250 accepted by local test sink\r\n");
+            refuseNext = false;
           } else message.push(line.startsWith("..") ? line.slice(1) : line);
         } else if (/^(EHLO|HELO) /i.test(line)) socket.write("250-localhost\r\n250 8BITMIME\r\n");
         else if (/^(MAIL FROM:|RCPT TO:|RSET|NOOP)/i.test(line)) socket.write("250 OK\r\n");
@@ -41,6 +43,7 @@ export async function startSmtpCapture() {
   return {
     port: address.port,
     messages,
+    refuseNextMessage() { refuseNext = true; },
     async close() {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

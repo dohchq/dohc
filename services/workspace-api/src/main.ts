@@ -8,6 +8,7 @@ import {
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
+import { accountEmailDelivery } from "./emailDelivery";
 import { sanitizeAuthHeaders } from "./clientAddress";
 import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
 import { createReadinessProbe } from "./readiness";
@@ -30,7 +31,7 @@ try {
 // Every other environment sends over SMTP or refuses: a server with no
 // transport must not pretend a verification email went out.
 const captured: EmailMessage[] = [];
-const sendEmail: SendEmail = config.smtp
+const deliverEmail: SendEmail = config.smtp
   ? createSmtpSender(config.smtp)
   : config.emailTransport === "capture"
     ? async (message) => {
@@ -38,18 +39,19 @@ const sendEmail: SendEmail = config.smtp
       }
     : refuseEmail;
 
+const email = accountEmailDelivery(deliverEmail);
 const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
 pool.on("error", () => console.error("[workspace-api] An idle database connection failed."));
 const auth = createWorkspaceAuth({
   pool,
   baseURL: config.baseURL,
   secret: config.secret,
-  sendEmail,
+  sendEmail: email.sendEmail,
   ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
 });
 
 const gateway: AuthGateway = {
-  handler: (request) => auth.handler(request),
+  handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded)),
   api: {
     getSession: ({ headers }) => auth.api.getSession({ headers }),
     deviceVerify: ({ query, headers }) => auth.api.deviceVerify({ query, headers }),

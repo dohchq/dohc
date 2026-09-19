@@ -221,7 +221,7 @@ async function call(path, payload, method) {
     response = await fetch(path, {
       method: verb,
       credentials: "same-origin",
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(60000),
       redirect: "error",
       headers: verb === "POST" ? { "content-type": "application/json" } : { accept: "application/json" },
       body: verb === "POST" ? JSON.stringify(payload || {}) : undefined,

@@ -42,7 +42,7 @@ export function createReadinessProbe(
     let rows: Array<Record<string, unknown>>;
     try {
       rows = (await withTimeout(client.query(PRESENT_TABLES, [[...REQUIRED_TABLES]]), timeoutMs)).rows;
-    } catch (error) {
+    } catch {
       return {
         ok: false,
         database: "unreachable",
