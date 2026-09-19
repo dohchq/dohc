@@ -54,7 +54,7 @@ try {
   delete env.ELECTRON_RUN_AS_NODE;
   const commit = git(["rev-parse", "HEAD"]);
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
-    args: [`--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
+    args: [`--user-data-dir=${profile}`, "--dohc-isolated-test", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
   processHandle = app.process();
   const stopped = new Promise((done) => {
     stop = () => {

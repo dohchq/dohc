@@ -10,7 +10,7 @@ import { parseUpdateManifest } from "./merge-update-manifests.mjs";
 const platforms = {
   mac: { suffix: "-mac", extensions: ["dmg", "zip"], updateExtension: "zip", arches: ["x64", "arm64"] },
   win: { suffix: "", extensions: ["exe"], updateExtension: "exe", arches: ["x64"] },
-  linux: { suffix: "-linux", extensions: ["AppImage"], updateExtension: "AppImage", arches: ["x64"] },
+  linux: { suffix: "-linux", extensions: ["AppImage"], updateExtension: "AppImage", arches: ["x64"], artifactArch: "x86_64" },
 };
 
 async function inspectFile(root, name) {
@@ -58,7 +58,7 @@ export async function verifyDesktopReleaseArtifacts({ directory, platform, arch,
     throw new Error("Manifest path and SHA-512 must match a listed artifact.");
   }
   for (const extension of target.extensions) {
-    const name = `dohc-${version}-${platform}-${arch}.${extension}`;
+    const name = `dohc-${version}-${platform}-${target.artifactArch ?? arch}.${extension}`;
     await inspect(name);
     if (extension === target.updateExtension && !seen.has(name)) {
       throw new Error(`Update manifest does not list the ${arch} update artifact: ${name}`);

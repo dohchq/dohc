@@ -538,7 +538,8 @@ async function artifactFixture(platform = "win", arch = "x64") {
   const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-test-"));
   const version = "0.1.0";
   const extension = platform === "win" ? "exe" : platform === "mac" ? "zip" : "AppImage";
-  const name = `dohc-${version}-${platform}-${arch}.${extension}`;
+  const artifactArch = platform === "linux" && arch === "x64" ? "x86_64" : arch;
+  const name = `dohc-${version}-${platform}-${artifactArch}.${extension}`;
   const bytes = Buffer.from("packaged artifact fixture");
   const sha512 = createHash("sha512").update(bytes).digest("base64");
   await writeFile(join(directory, name), bytes);
