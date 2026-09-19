@@ -16,6 +16,11 @@ use std::sync::Mutex;
 /// announces these writes.
 pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 
+/// Advisory wake-up after initial capture leaves Starting or Importing.
+/// The payload identifies the workspace; callers must retry their fenced read.
+/// Delivery can be dropped, so subscribers retain their retry timer.
+pub const CAPTURE_INITIAL_SETTLED_EVENT: &str = "capture.initialSettled";
+
 /// Record events fire on every device as that device's engine applies an
 /// update — local `ydoc.recordUpdate` and pulled replication alike. One
 /// applied update emits together: `record.created` first, then
@@ -55,10 +60,8 @@ pub struct EngineEventNotice {
 }
 
 /// How many undelivered notices the service-to-transport queue holds before
-/// new ones are DROPPED. Notices are repaint pings, so any queued backlog
-/// already guarantees the consumer will re-list on drain — dropping under a
-/// stalled transport loses nothing while keeping capture activity from
-/// growing the daemon without bound.
+/// new ones are DROPPED. Subscribers recover through reads or retry timers;
+/// a stalled transport must not grow the daemon without bound.
 pub(super) const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
 
 /// Cloneable emitter handle shared between the service and its background

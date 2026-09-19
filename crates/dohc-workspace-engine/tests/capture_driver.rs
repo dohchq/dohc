@@ -14,8 +14,9 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
-    EngineEventNotice, EngineService, root_binding::write_root_binding,
+    CAPTURE_INITIAL_SETTLED_EVENT, CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe,
+    EARLY_IMPORT_MIN_ADDED_FILES, EngineEventNotice, EngineService,
+    root_binding::write_root_binding,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -255,14 +256,39 @@ async fn wait_for_moment_event(
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for a capture event carrying {path}"))
             .expect("event channel stays open");
-        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
         assert_eq!(notice.payload["workspaceId"], WORKSPACE_ID);
+        if notice.name == CAPTURE_INITIAL_SETTLED_EVENT {
+            continue;
+        }
+        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
         if notice.payload["paths"]
             .as_array()
             .is_some_and(|paths| paths.iter().any(|entry| entry == path))
         {
             return notice;
         }
+    }
+}
+
+async fn wait_for_initial_settled_event(
+    events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let notice = events.recv().await.expect("event channel stays open");
+            if notice.name == CAPTURE_INITIAL_SETTLED_EVENT {
+                assert_eq!(notice.payload, json!({ "workspaceId": WORKSPACE_ID }));
+                return;
+            }
+        }
+    })
+    .await
+    .expect("initial capture must announce its phase transition");
+}
+
+fn assert_no_initial_settled_event(events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>) {
+    while let Ok(notice) = events.try_recv() {
+        assert_ne!(notice.name, CAPTURE_INITIAL_SETTLED_EVENT);
     }
 }
 
@@ -1189,6 +1215,40 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_baseline_emits_initial_settled_without_a_capture_moment() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let service = Arc::new(EngineService::default());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    let notice = events.try_recv().expect("initial transition precedes open");
+    assert_eq!(notice.name, CAPTURE_INITIAL_SETTLED_EVENT);
+    assert_eq!(notice.payload, json!({ "workspaceId": WORKSPACE_ID }));
+    assert!(
+        events.try_recv().is_err(),
+        "empty capture has no moment event"
+    );
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("ready"));
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    assert_no_initial_settled_event(&mut events);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -1267,9 +1327,11 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
 
     let probe = CaptureApplyProbe::default();
     probe.pause_next_apply();
-    let transport = InProcessTransport::new(Arc::new(
-        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
     ));
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
     let handle = tokio::time::timeout(
         Duration::from_secs(2),
         open_workspace(&transport, &scratch, 1),
@@ -1286,6 +1348,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .await
         .expect("watcher.status");
     assert_eq!(status.result["phase"], json!("importing"));
+    assert_no_initial_settled_event(&mut events);
 
     let flush = transport
         .call(
@@ -1461,8 +1524,16 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
             .expect("first RPC write while importing");
     }
 
+    assert_no_initial_settled_event(&mut events);
     probe.release();
-    wait_until_capture_ready(&transport, &handle, 20).await;
+    wait_for_initial_settled_event(&mut events).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(20, "versions.active", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("the advisory event follows the read admission transition");
     assert_eq!(
         read_text(&transport, &handle, 30, "same.md")
             .await
@@ -1579,9 +1650,11 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
     probe.fail_next_apply_before_worker();
     probe.pause_next_apply_worker();
     probe.use_manual_initial_settle_deadline();
-    let transport = InProcessTransport::new(Arc::new(
-        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
     ));
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
     let handle = tokio::time::timeout(
         Duration::from_secs(2),
         open_workspace(&transport, &scratch, 1),
@@ -1607,26 +1680,17 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
         "the fast first failure must precede the paused retry"
     );
 
+    assert_no_initial_settled_event(&mut events);
     probe.expire_initial_settle_deadline();
-    let degraded = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut id = 3;
-        loop {
-            let status = transport
-                .call(
-                    RequestContext::unbounded(),
-                    request(id, "watcher.status", Some(handle.clone()), json!({})),
-                )
-                .await
-                .expect("watcher.status after initial apply deadline");
-            id += 1;
-            if status.result["phase"] == json!("degraded") {
-                break status;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("manual apply deadline must leave importing before worker release");
+    wait_for_initial_settled_event(&mut events).await;
+    let degraded = transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status after the initial timeout event");
+    assert_eq!(degraded.result["phase"], json!("degraded"));
     assert_eq!(degraded.result["running"], json!(false));
     assert_eq!(degraded.result["degraded"], json!(true));
     assert_eq!(degraded.result["terminal"], json!(false));
@@ -1638,6 +1702,7 @@ async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
 
     probe.release_apply_worker();
     wait_until_capture_ready(&transport, &handle, 100).await;
+    assert_no_initial_settled_event(&mut events);
     assert_eq!(
         read_text(&transport, &handle, 200, "bulk/seed-0000.md")
             .await
