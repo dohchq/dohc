@@ -6,7 +6,7 @@ import { parseEnv } from 'node:util';
 import test from 'node:test';
 import { load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions } from '../tools/self-host/bootstrap.mjs';
-import { validateSettings, composeArgs } from '../tools/self-host/config.mjs';
+import { validateSettings, composeArgs, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
@@ -14,6 +14,11 @@ const compose = load(composeText, { schema: YAML11_SCHEMA });
 const settings = () => ({ ...parseEnv(readFileSync('.env.self-host.example', 'utf8')),
   ...initialSettings({ origin: 'https://dohc.team.invalid', image: 'dohc-self-host:v1' }),
   DOHC_SMTP_HOST: 'mail.team.invalid', DOHC_SMTP_FROM: 'dohc@team.invalid' });
+
+test('private overlay requires a Compose version that supports override tags', () => {
+  for (const version of ['2.24.4', 'v2.24.4', '2.25.0', '3.0.0']) assert.equal(supportedComposeVersion(version), true);
+  for (const version of ['2.24.3', '1.29.2', '2.23.9', '', 'unavailable']) assert.equal(supportedComposeVersion(version), false);
+});
 
 test('production services use built images without source mounts or install commands', () => {
   for (const name of ['workspace-api', 'sync-relay', 'share-web']) {

@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { resolve } from 'node:path';
 
+export function supportedComposeVersion(value) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && (minor > 24 || (minor === 24 && patch >= 4)));
+}
+
 export function readSettings(path = '.env.self-host') {
   return parseEnv(readFileSync(path, 'utf8'));
 }

@@ -1,17 +1,20 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { composeArgs, readSettings, validateSettings } from '../tools/self-host/config.mjs';
+import { composeArgs, readSettings, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
 const { values } = parseArgs({ options: { start: { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
 const envFile = values['env-file'];
 const checks = [];
 const record = (name, ok, detail = '') => { checks.push(ok); console.log(`[${ok ? 'ok' : 'missing'}] ${name}${detail ? ` - ${detail}` : ''}`); };
+const version = spawnSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8' });
+const supportedCompose = version.status === 0 && supportedComposeVersion(version.stdout ?? '');
+record('Docker Compose', supportedCompose, supportedCompose ? version.stdout.trim() : 'Install Docker Compose 2.24.4 or newer with access to the Docker daemon.');
 if (!existsSync(envFile)) record('self-host env file', false, `${envFile} is missing. Run: node tools/self-host/bootstrap.mjs init --origin https://HOST`);
 else {
   let settings;
   try { settings = readSettings(envFile); } catch (error) { record('self-host env file', false, error.message); settings = null; }
-  if (settings) {
+  if (settings && supportedCompose) {
     const errors = validateSettings(settings);
     record('self-host env values', errors.length === 0, errors.join(' '));
     const compose = spawnSync('docker', composeArgs(envFile, settings, 'config', '--services'), { encoding: 'utf8' });
