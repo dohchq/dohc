@@ -80,6 +80,7 @@ export function DemoSidebar(props: {
   onOpenDocument: (path: string) => void;
   onCreateDocument: () => void;
   onBeforeChanges: () => Promise<void>;
+  onError: (message: string) => void;
 }) {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
@@ -88,7 +89,6 @@ export function DemoSidebar(props: {
     "projects",
     "research",
   ]);
-  const [explorerError, setExplorerError] = useState<string | null>(null);
   const [openTabs, setOpenTabs] = useState<string[]>(() =>
     props.documents.slice(0, 5).map((document) => document.path),
   );
@@ -160,11 +160,6 @@ export function DemoSidebar(props: {
       width={width}
       onWidthChange={setWidth}
     >
-      {explorerError ? (
-        <div role="alert" className="border-b border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-          {explorerError}
-        </div>
-      ) : null}
       {props.activePanel === "explorer" ? (
         <Explorer
           workspaceId="marketing-demo"
@@ -228,7 +223,7 @@ export function DemoSidebar(props: {
           onUnmountShare={() => undefined}
           onShare={() => undefined}
           onRefresh={() => undefined}
-          onError={(message) => setExplorerError(message)}
+          onError={props.onError}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

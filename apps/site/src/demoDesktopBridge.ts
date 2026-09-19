@@ -241,6 +241,8 @@ export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | nu
 type DemoDesktopBridge = Pick<
   DohcDesktopBridge,
   | "onSearchResults"
+  | "onUpdateState"
+  | "getUpdateState"
   | "searchWorkspace"
   | "cancelWorkspaceSearch"
   | "readWorkspaceGraph"
@@ -427,6 +429,10 @@ export function answerDemoJoinedLane(
 }
 
 const demoBridge = {
+  onUpdateState() { return () => undefined; },
+  async getUpdateState() {
+    return { status: "idle" as const, message: "Updates are unavailable in the demo." };
+  },
   onSearchResults(listener: (batch: SearchResultsEvent) => void) {
     searchListeners.add(listener);
     return () => searchListeners.delete(listener);

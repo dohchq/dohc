@@ -1,6 +1,5 @@
 import { DohcMark } from "@dohc/brand";
 import {
-  Bell,
   ChevronDown,
   Cloud,
   FileText,
@@ -29,6 +28,8 @@ import {
   parseFrontmatter,
 } from "../../desktop/src/renderer/markdown/frontmatter";
 import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
+import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
+import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
 import { isViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
   DemoSidebar,
@@ -215,6 +216,7 @@ function initialSidebarVisible(): boolean {
 }
 
 export function ProductDemo() {
+  const { shellErrors, showShellError, hideShellError, dismissShellError } = useShellError("marketing-demo");
   const [theme, setTheme] = useState<"light" | "dark">(currentTheme);
   const [drafts, setDrafts] = useState<Record<string, string>>(initialDrafts);
   const [activePath, setActivePath] = useState(
@@ -586,6 +588,7 @@ export function ProductDemo() {
           onOpenDocument={openDocument}
           onCreateDocument={createDocument}
           onBeforeChanges={flushActiveDraft}
+          onError={showShellError}
         />
 
         <section className="demo-editor-column" aria-label="Editable dohc document demo">
@@ -677,7 +680,24 @@ export function ProductDemo() {
               : ""}
         </span>
         <span className="demo-status-right">
-          <Bell size={12} aria-hidden />
+          <NoticeCenter
+            workspaceId="marketing-demo"
+            syncStatus={null}
+            agentActive={false}
+            conflictSummaries={[]}
+            onOpenHistory={() => selectActivity("history")}
+            onOpenSettings={() => undefined}
+            onOpenConflicts={() => undefined}
+            onRefreshShareView={() => undefined}
+            onRebuildEngineStore={() => undefined}
+            workspaceErrors={shellErrors.map((error) => ({
+              ...error,
+              details: error.message,
+              canRetry: false,
+            }))}
+            onHideWorkspaceError={hideShellError}
+            onDismissWorkspaceError={dismissShellError}
+          />
           <Cloud size={12} aria-hidden />
           Connect sync
           <GitBranch size={12} aria-hidden /> Main
