@@ -54,7 +54,7 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => ["/mcp", "/api/mcp/exchange"].includes(url.pathname) ? 256 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   oversized: refusal,
   failure: refusal,
