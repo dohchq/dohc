@@ -28,6 +28,10 @@ else {
         const ready = spawnSync('docker', composeArgs(envFile, settings, 'ps', '--status', 'running', '--services'), { encoding: 'utf8' });
         const running = new Set((ready.stdout ?? '').trim().split(/\r?\n/).filter(Boolean));
         for (const service of ['workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`running service:${service}`, ready.status === 0 && running.has(service));
+        for (const service of ['workspace-api', 'sync-relay', 'share-web']) {
+          const health = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', service, 'node', '/app/tools/self-host/health.mjs', service), {stdio: 'inherit'});
+          record(`ready service:${service}`, health.status === 0);
+        }
       }
     }
     if ((values.start || values.running) && checks.every(Boolean)) {
