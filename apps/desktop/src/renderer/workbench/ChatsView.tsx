@@ -86,7 +86,6 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
-import { Overlay } from "../Overlay";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
@@ -4654,15 +4653,13 @@ export function ChatsView(props: {
                 </ul>
               ) : null}
               {addingAgent && props.userSettings && props.onSaveUserSettings ? (
-                <Overlay onClose={() => setAddingAgent(false)}>
-                  <AddAgentForm
-                    workspaceId={workspaceId}
-                    settings={props.userSettings}
-                    onSave={props.onSaveUserSettings}
-                    onDone={() => setAddingAgent(false)}
-                    onCancel={() => setAddingAgent(false)}
-                  />
-                </Overlay>
+                <AddAgentForm
+                  workspaceId={workspaceId}
+                  settings={props.userSettings}
+                  onSave={props.onSaveUserSettings}
+                  onDone={() => setAddingAgent(false)}
+                  onCancel={() => setAddingAgent(false)}
+                />
               ) : null}
               {props.userSettings && props.onSaveUserSettings ? (
                 <button
