@@ -233,15 +233,16 @@ describe("JoinSyncedWorkspace", () => {
     expect(screen.getByTestId("join-open-anyway")).toBeTruthy();
   });
 
-  it("gates on sign-in and unlocks after the embedded login completes", async () => {
+  it("gates on the server connection and unlocks after the embedded login completes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudStatus
-      .mockResolvedValueOnce({ connected: false, managedCloudStatus: "ready" }) // panel gate
-      .mockResolvedValueOnce({ connected: false, managedCloudStatus: "ready" }) // embedded CloudLogin check
+      .mockResolvedValueOnce({ connected: false }) // panel gate
+      // Embedded CloudLogin check: a known server address prefills its field.
+      .mockResolvedValueOnce({ connected: false, serverUrl: "https://dohc.example.test" })
       .mockResolvedValue({
         connected: true,
         email: "ice@dohc.dev",
-        managedCloudStatus: "ready",
+        serverUrl: "https://dohc.example.test",
       });
     bridgeMock.cloudLoginStart.mockResolvedValue({
       userCode: "ABCD",
@@ -254,7 +255,7 @@ describe("JoinSyncedWorkspace", () => {
 
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
     expect(
-      await screen.findByText(/sign in first, then enter the code/i),
+      await screen.findByText(/connect your server first, then enter the code/i),
     ).toBeTruthy();
 
     await user.click(await screen.findByTestId("cloud-connect-start"));

@@ -1,7 +1,8 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isServerDisplayName } from "./cloudConfiguration";
 
-// dohc Drive session credentials for this desktop install. The token is
+// server session credentials for this desktop install. The token is
 // sealed with Electron safeStorage when the OS keychain is available, but
 // safeStorage cannot be imported under vitest, so the cipher is injected;
 // this module stays unit-testable with a temp dir and a fake cipher.
@@ -9,6 +10,8 @@ import { join } from "node:path";
 export interface CloudCredentials {
   serverUrl: string;
   relayUrl?: string;
+  serverName?: string;
+  networkAccess?: "private" | "public";
   email: string;
   // The Better Auth user id (an opaque uuid). This is the stable author key,
   // so a signed-in session cannot exist without it.
@@ -93,6 +96,8 @@ export function createCloudCredentialStore(options: {
       return {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
+        ...(isServerDisplayName(obj.serverName) ? { serverName: obj.serverName } : {}),
+        ...(obj.networkAccess === "private" || obj.networkAccess === "public" ? { networkAccess: obj.networkAccess } : {}),
         email: obj.email,
         userId: obj.userId,
         token,
@@ -107,7 +112,9 @@ export function createCloudCredentialStore(options: {
         !nonEmptyString(credentials.userId) ||
         !nonEmptyString(credentials.token) ||
         (credentials.relayUrl !== undefined &&
-          !nonEmptyString(credentials.relayUrl))
+          !nonEmptyString(credentials.relayUrl)) ||
+        (credentials.serverName !== undefined && !isServerDisplayName(credentials.serverName)) ||
+        (credentials.networkAccess !== undefined && !["private", "public"].includes(credentials.networkAccess))
       ) {
         throw new Error(
           "Cannot save cloud credentials: serverUrl, email, userId, and token must be non-empty strings; relayUrl must be non-empty when set.",
@@ -123,6 +130,8 @@ export function createCloudCredentialStore(options: {
         version: 1,
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
+        ...(credentials.serverName ? { serverName: credentials.serverName } : {}),
+        ...(credentials.networkAccess ? { networkAccess: credentials.networkAccess } : {}),
         email: credentials.email,
         userId: credentials.userId,
         token,

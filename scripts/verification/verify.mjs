@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
-import { prepare, assertPrepared, sourceFingerprint, buildEnvironment } from "./build.mjs";
+import { prepare, assertPrepared, sourceFingerprint, buildEnvironment, enginePath, hashFile } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
@@ -15,6 +15,12 @@ function treeState() {
     (command) => { try { return git(command.split(" ").slice(1)); } catch { return null; } },
     () => { try { return existsSync(resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"]))); } catch { return null; } },
   );
+}
+function passedSpecTitles(suites = []) {
+  return suites.flatMap((suite) => [
+    ...(suite.specs ?? []).filter((spec) => spec.ok === true && spec.tests?.some((test) => test.results?.some((result) => result.status === "passed"))).map((spec) => spec.title),
+    ...passedSpecTitles(suite.suites),
+  ]);
 }
 export function selectedGates(files, workflow) {
   const yaml = require("js-yaml");
@@ -33,6 +39,23 @@ export function changedFiles(baseCommit, includeUncommitted = false, root = repo
       ...paths(["ls-files", "--others", "--exclude-standard", "-z"]),
     ] : []),
   ])];
+}
+
+export function readSelfHostNativeProof(output, executable, sha256) {
+  const tests = JSON.parse(readFileSync(join(output, "vitest.json"), "utf8"));
+  if (!tests.success || tests.numTotalTests !== 1 || tests.numPassedTests !== 1 || tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
+    throw new Error("The self-host native proof did not complete its mandatory test.");
+  }
+  const directories = readdirSync(output, {withFileTypes: true}).filter(entry => entry.isDirectory() && entry.name.startsWith("self-host-live-"));
+  if (directories.length !== 1) throw new Error("The self-host native proof did not produce one evidence record.");
+  const path = join(output, directories[0].name, "result.json");
+  const proof = JSON.parse(readFileSync(path, "utf8"));
+  if (proof.verdict !== "PASS" || resolve(proof.executable) !== resolve(executable) || proof.sha256 !== sha256 || proof.acceptance ||
+    proof.results?.ownerDelivery?.restartPreservedDraft !== true || proof.results?.ownerDelivery?.concurrentOwnerAndNamedEditsMerged !== true ||
+    proof.results?.ownerDelivery?.idleOwnerPulledRecipientEdit !== true || proof.results?.settledAndPublished?.ordinaryOwnerReadMatched !== true) {
+    throw new Error("The self-host native proof does not cover the prepared engine and complete delivery flow.");
+  }
+  return {path, executable, sha256, tests: {passed: tests.numPassedTests}};
 }
 
 export async function postgres(output, command = run) {
@@ -58,7 +81,7 @@ export async function postgres(output, command = run) {
   };
   listen();
   try {
-    const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
+    const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -h 127.0.0.1 -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
     const returnedId = result.stdout.trim();
     if (!/^[a-f0-9]{64}$/.test(returnedId)) throw new Error(`Docker returned no container ID. Inspect container ${name}.`);
     id = returnedId;
@@ -121,6 +144,7 @@ export async function verify(args) {
     await cancellation.checkpoint();
   }
   let database;
+  let desktopEnvironment = process.env;
   async function step(name, command, commandArgs, env = process.env) {
     await cancellation.checkpoint();
     const started = Date.now();
@@ -167,16 +191,32 @@ export async function verify(args) {
       database = await postgres(output);
       report.postgres = { id: database.id }; save();
       const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_REQUIRE_PLUGIN_INSTALL_E2E: "1" };
+      desktopEnvironment = env;
       await step("typecheck", ...pnpm(["run", "typecheck"]), env);
       await step("tests", ...pnpm(["run", "test"]), env);
+      const nativeOutput = join(output, "self-host-native");
+      mkdirSync(nativeOutput, {recursive: true});
+      const nativeHash = hashFile(enginePath);
+      await step("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
+        "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
+        {...env, DOHC_SERVICE_HOST_PROOF_BINARY: enginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+      report.selfHostNative = readSelfHostNativeProof(nativeOutput, enginePath, nativeHash); save();
+      await step("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
+      const accountReport = join(output, "accounts-playwright.json");
+      await step("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
+      report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
+      if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
     }
     if (mode !== "pr" || gates.js) {
-      const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", "@verification-smoke"];
+      const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", mode === "pr" ? "@verification-smoke|@self-host-onboarding" : "@verification-smoke"];
       const jsonReport = join(output, "playwright.json");
-      await step("desktop", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
-      report.desktop = JSON.parse(readFileSync(jsonReport, "utf8")).stats;
+      await step("desktop", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { ...desktopEnvironment, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+      const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
+      report.desktop = desktopReport.stats;
+      report.desktopProofs = passedSpecTitles(desktopReport.suites);
       if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
-      if (mode !== "e2e" && report.desktop.skipped) throw new Error("The mandatory desktop smoke test was skipped.");
+      if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
+      if (mode === "pr" && ["@verification-smoke", "@self-host-onboarding"].some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error("The desktop gate did not pass both persistence and self-host onboarding proofs.");
       assertPrepared();
     }
     await checkTree("finish");

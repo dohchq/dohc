@@ -34,6 +34,9 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   ListOwnerLiveDocumentsPayload,
+  ListOwnerLiveRefusalsPayload,
+  OwnerLiveRefusalsResult,
+  RetryOwnerLiveSharePayload,
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
@@ -383,6 +386,11 @@ const bridge: DohcDesktopBridge = {
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
   listOwnerLiveDocuments: async payload => OwnerLiveDocumentsResult.parse(await ipcRenderer.invoke(
     CHANNELS.listOwnerLiveDocuments, ListOwnerLiveDocumentsPayload.parse(payload))),
+  listOwnerLiveRefusals: async payload => OwnerLiveRefusalsResult.parse(await ipcRenderer.invoke(
+    CHANNELS.listOwnerLiveRefusals, ListOwnerLiveRefusalsPayload.parse(payload))),
+  retryOwnerLiveShare: async payload => {
+    await ipcRenderer.invoke(CHANNELS.retryOwnerLiveShare, RetryOwnerLiveSharePayload.parse(payload));
+  },
   stopOwnerLiveDocument: async payload => {
     await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
   },

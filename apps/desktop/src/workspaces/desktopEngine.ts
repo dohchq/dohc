@@ -32,9 +32,11 @@ import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwn
 export interface ServerOwnerDelivery {
   prepare(): Promise<Omit<DesktopOwnerDeliveryConfig, "relayUrl" | "documents">>;
   workspaceIds(): string[];
+  hasRefusals(workspaceId: string): boolean | undefined;
   connect(workspace: RegistryEntry, signal: AbortSignal): Promise<{
     bearer: string; relayUrl: string; signal: AbortSignal;
     assertCurrent(): void;
+    refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
   } | null>;
 }
@@ -141,6 +143,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               };
               check();
               try {
+              try {await session.refusals(signal);}
+              catch (error) {check(); console.error("[desktop] owner live refusal discovery failed:", error);}
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
@@ -535,6 +539,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;
+    },
+    hasOwnerLiveRefusals(workspaceId: string): boolean | undefined {
+      return dependencies.serverOwnerDelivery?.hasRefusals(workspaceId);
     },
     get daemon() { return rustEngineDaemon; },
     get sessions() { return rustEngineWorkspaceSessions; },

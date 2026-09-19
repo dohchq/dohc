@@ -7,6 +7,7 @@ import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
+import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SectionLabel } from "./ui/controls";
 import { FolderChip } from "./ui/Step";
 
@@ -74,7 +75,7 @@ export function OpenSharedView(props: {
     workspaceId: string;
     onMounted: (label: string) => void;
   };
-}) {
+} & ConnectionNoticeHost) {
   const [gate, setGate] = useState<Gate>(
     props.resolvedShare
       ? { kind: "signed-in", email: "" }
@@ -333,9 +334,15 @@ export function OpenSharedView(props: {
           className="flex flex-col gap-2 rounded-md border border-line bg-bg p-3"
         >
           <p id="open-share-sign-in-description" className="sr-only">
-            Shares are addressed to your dohc Drive account. Sign in to open this share.
+            Shares are addressed to your account on the server. Connect that server to open this share.
           </p>
-          <CloudLogin onConnected={checkSession} embedded untitled />
+          <CloudLogin
+            onConnected={checkSession}
+            embedded
+            untitled
+            onConnectionError={props.onConnectionError}
+            initialServerUrl={props.initialServerUrl}
+          />
         </div>
       ) : null}
       {opening ? (

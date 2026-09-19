@@ -113,7 +113,7 @@
       <h2><span>One folder.</span> <span>Everything connected.</span></h2>
       <p class="section-lede">
         Files, documents, data, chat, and apps as the foundation for your agents
-        to build on. Sync, sharing, and history built in.
+        to build on. History is built in. Sync and sharing need a server.
       </p>
     </div>
     <div class="principles-graph reveal" data-principles-graph>
@@ -185,16 +185,16 @@
           <span class="visually-hidden">Chat with people and your own agent inside the workspace. Threads stay attached to the files they are about.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="sharing" data-title="One link, scoped to what you chose." data-copy="Share a folder, a document, or an app. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed." data-agent="Opens a share link like a person would: read, comment, or edit, nothing more." aria-pressed="false" style="--node-x: 22%; --node-y: 78%; --node-delay: 220ms;">
+        <button class="principle-node" type="button" data-principle="sharing" data-title="One link, scoped to what you chose." data-copy="Share a folder, a document, or an app through your server. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed." data-agent="Opens a share link like a person would: read, comment, or edit, nothing more." aria-pressed="false" style="--node-x: 22%; --node-y: 78%; --node-delay: 220ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Sharing</span>
-          <span class="visually-hidden">Share a folder, a document, or an app. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed.</span>
+          <span class="visually-hidden">Share a folder, a document, or an app through your server. Whoever opens the link gets exactly that scope, at the access level you set, with no account needed.</span>
         </button>
 
-        <button class="principle-node" type="button" data-principle="apps" data-title="Real web apps, sandboxed." data-copy="An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Share it by URL with anyone." data-agent="Builds and revises apps from chat, and the source stays inspectable." aria-pressed="false" style="--node-x: 13%; --node-y: 48%; --node-delay: 250ms;">
+        <button class="principle-node" type="button" data-principle="apps" data-title="Real web apps, sandboxed." data-copy="An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Publish it by URL from a configured server." data-agent="Builds and revises apps from chat, and the source stays inspectable." aria-pressed="false" style="--node-x: 13%; --node-y: 48%; --node-delay: 250ms;">
           <span class="principle-node-dot" aria-hidden="true"></span>
           <span class="principle-node-label">Apps</span>
-          <span class="visually-hidden">An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Share it by URL with anyone.</span>
+          <span class="visually-hidden">An app is source in the folder, served in a sandbox, bound only to the data its owner granted. Publish it by URL from a configured server.</span>
         </button>
       </div>
 
@@ -322,13 +322,12 @@
     <div class="section-head reveal">
       <h2 id="sync-title"><span>Files on your computer.</span> <span>Sync when you need it.</span></h2>
       <p class="section-lede">
-        Local and offline first, with sync and collaboration built in. Keep
-        working with no connection. When it's back, everything syncs across
-        your devices.
+        Local and offline first. Connect a sync server to work across devices.
+        Offline changes sync when your connection returns.
       </p>
     </div>
     <div class="sync-stage reveal d1">
-      <div class="sync-demo" data-sync-demo>
+      <div class="sync-demo" data-sync-demo role="group" aria-label="Interactive demo of syncing between two devices">
         <div class="device laptop">
           <div class="laptop-lid">
             <span class="laptop-notch" aria-hidden="true"></span>
@@ -373,6 +372,7 @@
         </div>
       </div>
       <div class="sync-controls">
+        <span>Sync demo</span>
         <label class="sync-switch">
           <input type="checkbox" checked data-sync-toggle />
           <span class="sync-switch-track theme-track" aria-hidden="true">
@@ -427,8 +427,8 @@
       <div class="ownership-summary reveal d1">
         <h2 id="ownership-title">Free, open source, and self-hostable.</h2>
         <div class="ownership-details">
-          <p>No account, no lock-in. Run the sync server yourself, or use ours.</p>
-          <a class="ownership-source" href="https://github.com/dohc-ai/dohc">View source on GitHub <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+          <p>Work locally without an account. Run sync and sharing on your own server.</p>
+          <a class="ownership-source" href="https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md">Read the self-hosting guide <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
         </div>
       </div>
 
@@ -438,7 +438,7 @@
             <span class="drive-status">Coming soon</span>
             <h3 id="drive-title">dohc Drive.</h3>
           </div>
-          <p>Managed sync and sharing for your workspace.</p>
+          <p>Managed sync and sharing for your workspace, with a free tier planned. Run the same capabilities on your own server.</p>
           <ul class="drive-includes">
             <li>Sync across your devices</li>
             <li>Share links for people and agents</li>

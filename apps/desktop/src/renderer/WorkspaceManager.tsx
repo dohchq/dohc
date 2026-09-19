@@ -10,6 +10,7 @@ import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
+import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
@@ -294,6 +295,13 @@ export function WorkspaceManager(props: {
   const [notice, setNotice] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
+  // The manager owns connection notices rather than the route that raised
+  // them: a route change unmounts the panel, and the failure has to survive
+  // it along with the way to try again.
+  const connectionNotices = useConnectionNotices();
+  // The address a failed attempt used, put back when a notice's Try again
+  // reopens the route it came from.
+  const [retryServerUrl, setRetryServerUrl] = useState("");
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
   const hasWorkspaces = props.workspaces.length > 0;
   const workspaces = useMemo(() => byRecency(props.workspaces), [props.workspaces]);
@@ -353,6 +361,21 @@ export function WorkspaceManager(props: {
   }
 
   const onWorkspaceReady = (workspace: Workspace) => void open(workspace);
+  // Where Try again goes when the panel that failed is gone. A handoff is
+  // driven from outside the manager, so its retry lands on the share route,
+  // which is the same connect step the user was on.
+  function reopen(route: "join" | "share") {
+    return (serverUrl: string | null) => {
+      setRetryServerUrl(serverUrl ?? "");
+      setJoining(route === "join");
+      setOpeningShare(route === "share");
+    };
+  }
+  function leaveRoute() {
+    setRetryServerUrl("");
+    setJoining(false);
+    setOpeningShare(false);
+  }
   const routes =
     handoffStatus.status !== "idle" ? (
       <ShareHandoffSurface
@@ -360,11 +383,23 @@ export function WorkspaceManager(props: {
         onWorkspaceReady={onWorkspaceReady}
         onBack={() => props.onDismissShareHandoff?.()}
         onOpened={() => props.onShareHandoffOpened?.()}
+        onConnectionError={connectionNotices.reporter(reopen("share"))}
+        initialServerUrl={retryServerUrl}
       />
     ) : joining ? (
-      <JoinSyncedWorkspace onWorkspaceReady={onWorkspaceReady} onBack={() => setJoining(false)} />
+      <JoinSyncedWorkspace
+        onWorkspaceReady={onWorkspaceReady}
+        onBack={leaveRoute}
+        onConnectionError={connectionNotices.reporter(reopen("join"))}
+        initialServerUrl={retryServerUrl}
+      />
     ) : openingShare ? (
-      <OpenSharedView onWorkspaceReady={onWorkspaceReady} onBack={() => setOpeningShare(false)} />
+      <OpenSharedView
+        onWorkspaceReady={onWorkspaceReady}
+        onBack={leaveRoute}
+        onConnectionError={connectionNotices.reporter(reopen("share"))}
+        initialServerUrl={retryServerUrl}
+      />
     ) : (
       <div className="flex w-full flex-col gap-5">
         <NewWorkspaceCard onWorkspaceReady={onWorkspaceReady} />
@@ -380,7 +415,7 @@ export function WorkspaceManager(props: {
           <RouteRow
             icon={<Laptop size={15} strokeWidth={1.9} aria-hidden />}
             title="Join from another machine"
-            detail="Bring over a workspace you sync with dohc Drive."
+            detail="Bring over a workspace you sync through your server."
             action="Join"
             testId="first-run-join-synced"
             onClick={() => setJoining(true)}
@@ -485,6 +520,12 @@ export function WorkspaceManager(props: {
           </div>
         </div>
       </div>
+      <ConnectionNotices
+        notices={connectionNotices.notices}
+        onRetry={connectionNotices.retryNotice}
+        onHide={connectionNotices.hideNotice}
+        onDismiss={connectionNotices.dismissNotice}
+      />
     </div>
   );
 }

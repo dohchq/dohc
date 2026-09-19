@@ -16,7 +16,6 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
-import type { ManagedCloudConfiguration } from "../workspaces/cloudConfiguration";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
@@ -53,7 +52,6 @@ export function registerCloudIpcHandlers<
   notifyCloudSessionChangedWithKey(key: string | null, phase: "changing" | "ready"): void;
   notifyRenderer(): void;
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  managedCloudConfiguration: ManagedCloudConfiguration;
   engineDaemonStartup(): Promise<unknown>;
   requireEngineSessions(): EngineWorkspaceSessions;
   currentEngineSessions(): EngineWorkspaceSessions | null;
@@ -92,7 +90,7 @@ export function registerCloudIpcHandlers<
     refreshCredentialCache, warmCredentialCache, currentCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
-    notifyRenderer, findWorkspace, managedCloudConfiguration, engineDaemonStartup,
+    notifyRenderer, findWorkspace, engineDaemonStartup,
     requireEngineSessions, currentEngineSessions, withPhysicalWorkspaceOperation,
     withRendererWorkspaceOperation, receivedShareEngine, readWorkspaceSecretState,
     readWorkspaceDataKeyForEnrollment, assertWritableWorkspace, relayClientForWorkspace,
@@ -105,7 +103,7 @@ export function registerCloudIpcHandlers<
   registerHandler(CHANNELS.cloudLoginStart, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudLoginStartPayload.parse(payload ?? {});
-    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl, input.relayUrl));
+    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl));
   });
 
   registerHandler(CHANNELS.cloudLoginPoll, async (event) => {
@@ -163,7 +161,6 @@ export function registerCloudIpcHandlers<
     }
     return CloudStatusResult.parse({
       ...status,
-      managedCloudStatus: managedCloudConfiguration.status,
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,
@@ -217,7 +214,7 @@ export function registerCloudIpcHandlers<
         assertWritableWorkspace(workspace);
         const credentials = await loadAndCacheCurrentCredentials();
         operation.assertCurrent();
-        if (!credentials) throw new Error("Sign in to dohc Drive first");
+        if (!credentials) throw new Error("Sign in to your server first");
         if (!credentials.relayUrl) {
           throw new Error("Cloud sync requires a relay URL");
         }
@@ -300,7 +297,7 @@ export function registerCloudIpcHandlers<
       // inside a pasted code.
       throw new Error(
         "This workspace syncs through a different server than the one you're signed in to. " +
-          `Reconnect dohc Drive with the sync relay URL ${parsed.relayUrl}, then join again.`,
+          "Connect to the server that hosts this workspace, then join again.",
       );
     }
     if (findWorkspace(parsed.workspaceId)) {
@@ -338,7 +335,7 @@ export function registerCloudIpcHandlers<
       }
       if (error instanceof RelayUnauthorizedError) {
         throw new Error(
-          "Your dohc Drive session expired. Sign in again, then retry.",
+          "Your server session expired. Sign in again, then retry.",
         );
       }
       throw error;

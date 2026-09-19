@@ -6784,7 +6784,7 @@ describe("shareViewIdentitySelector", () => {
     expect(decide(undefined)).toBeNull();
   });
 
-  it("skips when there are no dohc Drive credentials", () => {
+  it("skips when there are no server credentials", () => {
     for (const relayUrl of [null, ""]) {
       expect(
         decide(

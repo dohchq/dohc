@@ -6,11 +6,34 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, postgres, selectedGates } from "./verify.mjs";
+import { changedFiles, postgres, selectedGates, readSelfHostNativeProof } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+
+test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
+  const output = mkdtempSync(join(tmpdir(), "dohc-native-proof-verdict-"));
+  const executable = join(output, "engine"), sha256 = "a".repeat(64), path = join(output, "self-host-live-fixture");
+  mkdirSync(path);
+  const tests = {success: true, numTotalTests: 1, numPassedTests: 1, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0};
+  const proof = {verdict: "PASS", executable, sha256, results: {ownerDelivery: {restartPreservedDraft: true, concurrentOwnerAndNamedEditsMerged: true,
+    idleOwnerPulledRecipientEdit: true}, settledAndPublished: {ordinaryOwnerReadMatched: true}}};
+  const write = (report = tests, evidence = proof) => {
+    writeFileSync(join(output, "vitest.json"), JSON.stringify(report));
+    writeFileSync(join(path, "result.json"), JSON.stringify(evidence));
+  };
+  try {
+    write(); assert.equal(readSelfHostNativeProof(output, executable, sha256).sha256, sha256);
+    for (const delta of [{numPendingTests: 1}, {numTotalTests: 0, numPassedTests: 0}, {success: false}, {numTodoTests: 1}]) {
+      write({...tests, ...delta}); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /mandatory test/);
+    }
+    for (const delta of [{sha256: "b".repeat(64)}, {executable: join(output, "different")}, {results: {}}, {acceptance: "diagnostic only"}]) {
+      write(tests, {...proof, ...delta}); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /prepared engine/);
+    }
+    write(); rmSync(join(path, "result.json")); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /ENOENT/);
+  } finally { rmSync(output, {recursive: true, force: true}); }
+});
 
 test("Windows setup uses pnpm.cmd and stops after failed or missing installation", { skip: process.platform !== "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-setup-windows-"));
@@ -235,6 +258,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", null, "source"],
+    ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
   ]) await t.test([mode, job, fault].filter(Boolean).join(" "), () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
     const put = (path, contents) => {
@@ -269,7 +293,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
       const adapterPath = "scripts/verification/process.mjs";
       put(adapterPath, readFileSync(join(root, adapterPath), "utf8").replace("export async function run(", "async function prepareRun(") + `
         export async function run(command,args,options={}) {
-          const {enginePath,assertPrepared}=await import('./build.mjs');
+          const {enginePath,assertPrepared,hashFile}=await import('./build.mjs');
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
             assert.deepEqual(args,['install','--frozen-lockfile']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
@@ -290,7 +314,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
             return {stdout:'PASS'};
           }
           if(command==='docker') {
-            if(args[0]==='run')return {stdout:'a'.repeat(64)};
+            if(args[0]==='run'){writeFileSync(join(repoRoot,'.dohc-dev/database-started'),'yes');return {stdout:'a'.repeat(64)};}
             if(args[0]==='inspect')return {stdout:'healthy'};
             if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
             assert.deepEqual(args,['rm','--force','a'.repeat(64)]);
@@ -301,13 +325,47 @@ test("verification prepares the engine after Rust without changing gate scope", 
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_REQUIRE_PLUGIN_INSTALL_E2E'])assert.equal(options.env[flag],'1');
             return {stdout:''};
           }
+          if(command==='pnpm' && args[0]==='exec') {
+            assert.deepEqual(args,['exec','playwright','install',...(process.platform==='linux'?['--with-deps']:[]),'chromium']);
+            assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
+            writeFileSync(join(repoRoot,'.dohc-dev/browser-installed'),'yes');
+            return {stdout:''};
+          }
+          if(command==='pnpm' && args.includes('vitest.self-host-native.config.ts')) {
+            assertPrepared();
+            assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_BINARY,enginePath);
+            assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_SHA256,hashFile(enginePath));
+            assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
+            const output=options.env.DOHC_SERVICE_HOST_PROOF_OUTPUT;
+            mkdirSync(join(output,'self-host-live-fixture'),{recursive:true});
+            writeFileSync(join(output,'vitest.json'),JSON.stringify({success:true,numTotalTests:1,numPassedTests:1,numFailedTests:0,numPendingTests:0,numTodoTests:0}));
+            writeFileSync(join(output,'self-host-live-fixture/result.json'),JSON.stringify({verdict:'PASS',executable:enginePath,sha256:hashFile(enginePath),results:{ownerDelivery:{restartPreservedDraft:true,concurrentOwnerAndNamedEditsMerged:true,idleOwnerPulledRecipientEdit:true},settledAndPublished:{ordinaryOwnerReadMatched:true}}}));
+            return {stdout:''};
+          }
           if(args[0]==='apps/desktop/scripts/run-playwright.mjs') {
             assertPrepared();
             const receipt=JSON.parse(readFileSync(join(repoRoot,'.dohc-dev/verification/build.json'),'utf8'));
             assert.ok(receipt.engine.artifact);
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep','@verification-smoke'];
+            const pr=process.env.FIXTURE_MODE==='pr';
+            if(pr) {
+              assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
+              assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
+              assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-started')),true);
+              assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-stopped')),false);
+              assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
+            }
+            if(args.includes('services/workspace-api/playwright.config.ts')) {
+              assert.ok(pr);
+              writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
+              return {stdout:''};
+            }
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding':'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:1,unexpected:0,flaky:0,skipped:0}}));
+            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[])];
+            writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
+              stats:{expected:pr?2:1,unexpected:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
+              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
+            }));
             return {stdout:''};
           }
           return prepareRun(command,args,options);
@@ -338,9 +396,17 @@ test("verification prepares the engine after Rust without changing gate scope", 
       assert.equal(result.error, undefined, result.stderr);
       if (fault) {
         assert.equal(result.status, 1, result.stderr);
-        assert.match(result.stderr, fault === "source" ? /Source changed during verification/ : /fixture Rust verdict rejected/);
-        assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
-        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), false);
+        const messages = {
+          source: /Source changed during verification/,
+          "rust-verdict": /fixture Rust verdict rejected/,
+          "accounts-skipped": /Account browser verification did not complete without failures or skips/,
+          "desktop-skipped": /A mandatory desktop smoke test was skipped/,
+          "onboarding-missing": /did not pass both persistence and self-host onboarding proofs/,
+        };
+        assert.match(result.stderr, messages[fault]);
+        const browserFault = ["accounts-skipped", "desktop-skipped", "onboarding-missing"].includes(fault);
+        assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), browserFault);
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), browserFault);
       } else {
         assert.equal(result.status, 0, result.stderr);
         const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
@@ -349,7 +415,7 @@ test("verification prepares the engine after Rust without changing gate scope", 
         assert.deepEqual(report.steps.map(({name})=>name), [
           ...(mode === "pr" ? ["install"] : []),
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
-          ...(js ? ["typecheck", "tests"] : []), ...(job !== "rust" ? ["desktop"] : []),
+          ...(js ? ["typecheck", "tests", "self-host-native", "browser-install", "accounts"] : []), ...(job !== "rust" ? ["desktop"] : []),
         ]);
         assert.equal(report.verdict, "PASS");
         assert.equal(report.provenance.status, "PASS");
@@ -768,6 +834,7 @@ test("Postgres startup rejection cleans its created container and preserves star
       assert.equal(executable, "docker");
       calls.push({ args, options });
       if (args[0] === "run") {
+        assert.equal(args[args.indexOf("--health-cmd") + 1], "pg_isready -h 127.0.0.1 -U dohc -d dohc");
         ownedName = args[args.indexOf("--name") + 1];
         containers.add(ownedName);
         throw startupError;

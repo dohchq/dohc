@@ -388,7 +388,7 @@ export function registerSharedChannelsIpcHandlers<
         const relay = await readRelayChatShareLanes({
           fetchListing: async () => {
             if (!credentials) {
-              throw new RelaySessionError("Sign in to dohc Drive first.");
+              throw new RelaySessionError("Sign in to your server first.");
             }
             assertCurrentShareSession();
             const listing = await relayShareJsonWithCredentials<{
@@ -498,7 +498,7 @@ export function registerSharedChannelsIpcHandlers<
         const joinCredentialGeneration = currentCredentialGeneration();
         if (!joinCredentials.relayUrl) {
           throw new Error(
-            "Reconnect dohc Drive with a sync relay URL, then try again.",
+            "Reconnect your server to refresh its connection settings, then try again.",
           );
         }
         // Capture the credentials before the awaits below (CodeRabbit Data

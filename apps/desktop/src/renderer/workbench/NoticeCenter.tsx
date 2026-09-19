@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Copy, Download, GitPullRequestArrow, LogIn, MessageSquare, X } from "lucide-react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Copy, Download, GitPullRequestArrow, LogIn, MessageSquare, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -12,7 +12,7 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
-import { CopyDetailsButton } from "../shell/copyDetails";
+import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -131,6 +131,57 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   };
 }
 
+// Owner live delivery, and only while it is retrying: what stopped, and the
+// way forward. A stable reason is not a connection the engine can dial
+// again, so it never offers Try again — resuming a document there would
+// rebind an identity the user has not asked for. The transient case is the
+// only one the retry command can help.
+type LiveDeliveryRecovery = "retry" | "live-documents" | "restart";
+function liveDeliveryCopy(
+  reason: SyncStatusResult["ownerLiveDeliveryReason"],
+): { title: string; body: string; recovery: LiveDeliveryRecovery } {
+  if (reason === "document-unavailable") {
+    return {
+      title: "Live editing paused",
+      body: "A document this workspace was editing live is no longer available. Open Live documents to review it.",
+      recovery: "live-documents",
+    };
+  }
+  if (reason === "workspace-changed") {
+    return {
+      title: "Live editing paused",
+      body: "This workspace changed while live editing was running. Open Live documents to review affected documents.",
+      recovery: "live-documents",
+    };
+  }
+  if (reason === "restart-required") {
+    return {
+      title: "Live editing paused",
+      body: "Restart dohc to enable live editing. Your edits are saved on this device.",
+      recovery: "restart",
+    };
+  }
+  return {
+    title: "Live editing retrying",
+    body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
+    recovery: "retry",
+  };
+}
+
+// Corner hosts need room above the bell; rail hosts use the bottom-right corner.
+export type NoticeHostPlacement = "rail" | "corner";
+
+const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
+  rail: "fixed bottom-3 right-3 z-40 flex flex-col items-end gap-2",
+  // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
+  corner: "fixed bottom-14 right-3 z-40 flex flex-col items-end gap-2",
+};
+
+const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
+  rail: "bottom-12 left-14 w-[min(360px,calc(100vw-68px))]",
+  corner: "bottom-14 right-3 w-[min(360px,calc(100vw-24px))]",
+};
+
 function toneClass(tone: Notice["tone"]): string {
   if (tone === "danger") return "text-danger";
   if (tone === "warning") return "text-warning";
@@ -143,6 +194,9 @@ export function NoticeCenter(props: {
   // here — another workspace's paths must not leak across
   // a switch. The app-level close guard deliberately stays global.
   workspaceId: string;
+  // Where the surface above mounts this center. Defaults to the workbench's
+  // activity bar.
+  host?: NoticeHostPlacement;
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
   conflictSummaries: string[];
@@ -166,6 +220,11 @@ export function NoticeCenter(props: {
   onRetryWorkspaceError?: (id: string) => void;
   onHideWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
+  // Owner live delivery: the shell's trusted retry command, and the way into
+  // the live-document list. Both are derived from the status, so a snapshot
+  // that repeats itself changes nothing here.
+  onRetryLiveDelivery?: () => void;
+  onOpenLiveDocuments?: () => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -187,6 +246,7 @@ export function NoticeCenter(props: {
     generation: number,
   ) => void;
 }) {
+  const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
   const centerRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -212,7 +272,6 @@ export function NoticeCenter(props: {
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const toggleRef = useRef<HTMLButtonElement | null>(null);
-  const toastRef = useRef<HTMLDivElement | null>(null);
 
   const readyUpdateKey =
     updateState?.status === "ready"
@@ -223,6 +282,66 @@ export function NoticeCenter(props: {
     (updateState?.status === "ready" &&
       readyUpdateKey !== null &&
       readyUpdateKey !== dismissedUpdateToastKey);
+
+  // Derived from the status, never accumulated: a snapshot that repeats
+  // itself renders the same notice, and delivery that recovers to active (or
+  // reports nothing at all) leaves no notice and no toast behind.
+  // The workspace is part of the key: a dismissal answers one workspace's
+  // failure, so the same failure in another workspace is still news.
+  const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
+  const liveDeliveryKey =
+    props.syncStatus?.ownerLiveDelivery === "retrying"
+      ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
+      : null;
+  const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
+    string | null
+  >(null);
+  // Recovery forgets the dismissal, so the next failure is announced again
+  // instead of staying silent behind an answer about an older one.
+  if (liveDeliveryKey === null && dismissedLiveDeliveryKey !== null) {
+    setDismissedLiveDeliveryKey(null);
+  }
+  // Keyed, so an unchanged status keeps one copy object: the notice list and
+  // the toast below both hang off its identity.
+  const liveDelivery = useMemo(
+    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason) : null),
+    [liveDeliveryKey, liveDeliveryReason],
+  );
+  // One report for the row and the toast, so a person who copies from either
+  // pastes the same facts — including when this state was first observed.
+  const liveDeliveryDetails = useMemo(
+    () =>
+      liveDelivery
+        ? errorDetails([
+            ["Live editing", liveDelivery.title],
+            ["Detail", liveDelivery.body],
+            ["Reason", liveDeliveryReason ?? "retrying"],
+            ["Workspace id", props.workspaceId],
+            ["Time", new Date().toISOString()],
+          ])
+        : "",
+    [liveDelivery, liveDeliveryReason, props.workspaceId],
+  );
+  const { onOpenLiveDocuments, onRetryLiveDelivery } = props;
+  // One control for the row and the toast, so they can never offer different
+  // ways out of the same state. A restart has no command to call.
+  const liveDeliveryAction = useMemo(() => {
+    if (!liveDelivery) return null;
+    if (liveDelivery.recovery === "retry") {
+      return onRetryLiveDelivery
+        ? { label: "Try again", onClick: onRetryLiveDelivery }
+        : null;
+    }
+    if (liveDelivery.recovery === "live-documents") {
+      return onOpenLiveDocuments
+        ? { label: "Live documents", onClick: onOpenLiveDocuments }
+        : null;
+    }
+    return null;
+  }, [liveDelivery, onOpenLiveDocuments, onRetryLiveDelivery]);
+  const liveDeliveryToastVisible =
+    liveDeliveryKey !== null && liveDeliveryKey !== dismissedLiveDeliveryKey;
+
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
@@ -256,7 +375,6 @@ export function NoticeCenter(props: {
       const path = event.composedPath();
       if (centerRef.current && path.includes(centerRef.current)) return;
       if (toggleRef.current && path.includes(toggleRef.current)) return;
-      if (toastRef.current && path.includes(toastRef.current)) return;
       setOpen(false);
     };
 
@@ -355,6 +473,20 @@ export function NoticeCenter(props: {
       });
     }
 
+    // Above the sync states: the local save is fine, and this says what is
+    // not — live editing for the owner's own documents.
+    if (liveDelivery) {
+      next.push({
+        id: "owner-live-delivery",
+        tone: "warning",
+        title: liveDelivery.title,
+        body: liveDelivery.body,
+        ...(liveDeliveryAction ? { action: liveDeliveryAction } : {}),
+        copyText: liveDeliveryDetails,
+        Icon: RefreshCw,
+      });
+    }
+
     if (props.syncStatus?.shareProjection?.state === "pending") {
       next.push({
         id: "share-projection-pending",
@@ -385,8 +517,8 @@ export function NoticeCenter(props: {
       next.push({
         id: "cloud-disconnected",
         tone: "warning",
-        title: "Cloud disconnected",
-        body: "Local work is safe. Reconnect dohc Drive when you want sync again.",
+        title: "Server disconnected",
+        body: "Local work is safe. Reconnect your server when you want sync again.",
         Icon: CloudOff,
       });
     }
@@ -538,6 +670,9 @@ export function NoticeCenter(props: {
     props.onReviewShareChanges,
     props.shareChangeNotices,
     props.syncStatus,
+    liveDelivery,
+    liveDeliveryAction,
+    liveDeliveryDetails,
     installPending,
     installUpdate,
     updateActionError,
@@ -568,90 +703,134 @@ export function NoticeCenter(props: {
 
   return (
     <>
-      {errorToast ? (
-        <div
-          data-testid="workspace-shell-error"
-          role="alert"
-          className="dohc-popover dohc-pop-in fixed right-3 z-40 flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-          style={{ bottom: updateToastVisible ? "4rem" : "0.75rem" }}
-        >
-          <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
-          <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-            {errorToast.message}
-          </span>
-          {errorToast.canRetry && props.onRetryWorkspaceError ? (
-            <button
-              type="button"
-              data-testid="workspace-shell-error-retry"
-              onClick={() => props.onRetryWorkspaceError?.(errorToast.id)}
-              className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+      {/* One stack in the window's bottom-right corner: the toasts lay
+          themselves out in order instead of counting row heights. Opening
+          Notices hides it — every row is in the panel, and a toast must never
+          sit over it. */}
+      {open ? null : (
+        <div data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
+          {errorToast ? (
+            <div
+              data-testid="workspace-shell-error"
+              role="alert"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              Try again
-            </button>
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {errorToast.message}
+              </span>
+              {errorToast.canRetry && props.onRetryWorkspaceError ? (
+                <button
+                  type="button"
+                  data-testid="workspace-shell-error-retry"
+                  onClick={() => props.onRetryWorkspaceError?.(errorToast.id)}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  Try again
+                </button>
+              ) : null}
+              <CopyDetailsButton
+                key={errorToast.id}
+                iconOnly
+                label="Copy error details"
+                data-testid="workspace-shell-error-copy"
+                details={() => errorToast.details}
+              />
+              {props.onHideWorkspaceError ? (
+                <button
+                  type="button"
+                  aria-label="Dismiss workspace error"
+                  onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
+                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              ) : null}
+            </div>
           ) : null}
-          <CopyDetailsButton
-            key={errorToast.id}
-            iconOnly
-            label="Copy error details"
-            data-testid="workspace-shell-error-copy"
-            details={() => errorToast.details}
-          />
-          {props.onHideWorkspaceError ? (
-            <button
-              type="button"
-              aria-label="Dismiss workspace error"
-              onClick={() => props.onHideWorkspaceError?.(errorToast.id)}
-              className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          {liveDeliveryToastVisible && liveDelivery ? (
+            <div
+              data-testid="owner-live-delivery-toast"
+              role="status"
+              aria-live="polite"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <X size={12} aria-hidden />
-            </button>
+              <RefreshCw size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {liveDelivery.title}. {liveDelivery.body}
+              </span>
+              {liveDeliveryAction ? (
+                <button
+                  type="button"
+                  data-testid="owner-live-delivery-toast-action"
+                  onClick={liveDeliveryAction.onClick}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+                >
+                  {liveDeliveryAction.label}
+                </button>
+              ) : null}
+              <CopyDetailsButton
+                key={liveDeliveryKey}
+                iconOnly
+                label="Copy live editing details"
+                data-testid="owner-live-delivery-toast-copy"
+                details={() => liveDeliveryDetails}
+              />
+              <button
+                type="button"
+                aria-label="Dismiss live editing notice"
+                onClick={() => setDismissedLiveDeliveryKey(liveDeliveryKey)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          {updateToastVisible ? (
+            <div
+              data-testid="update-toast"
+              role="status"
+              className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <span>{updateActionError ?? updateState?.message}</span>
+              {updateState?.canInstall ? (
+                <button
+                  type="button"
+                  disabled={installPending}
+                  onClick={() => {
+                    if (props.onRestartToUpdate) props.onRestartToUpdate();
+                    else void installUpdate();
+                  }}
+                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+                >
+                  {installPending ? "Restarting" : "Restart"}
+                </button>
+              ) : updateActionError ? (
+                <button
+                  type="button"
+                  onClick={props.onOpenSettings}
+                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
+                >
+                  Open Settings
+                </button>
+              ) : null}
+              <button
+                type="button"
+                aria-label="Dismiss update notice"
+                onClick={() => {
+                  setUpdateActionError(null);
+                  if (readyUpdateKey) {
+                    setDismissedUpdateToastKey(readyUpdateKey);
+                  }
+                }}
+                className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
           ) : null}
         </div>
-      ) : null}
-      {updateToastVisible ? (
-        <div
-          ref={toastRef}
-          data-testid="update-toast"
-          role="status"
-          className="dohc-popover dohc-pop-in fixed bottom-3 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-        >
-          <span>{updateActionError ?? updateState?.message}</span>
-          {updateState?.canInstall ? (
-            <button
-              type="button"
-              disabled={installPending}
-              onClick={() => {
-                if (props.onRestartToUpdate) props.onRestartToUpdate();
-                else void installUpdate();
-              }}
-              className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
-            >
-              {installPending ? "Restarting" : "Restart"}
-            </button>
-          ) : updateActionError ? (
-            <button
-              type="button"
-              onClick={props.onOpenSettings}
-              className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
-            >
-              Open Settings
-            </button>
-          ) : null}
-          <button
-            type="button"
-            aria-label="Dismiss update notice"
-            onClick={() => {
-              setUpdateActionError(null);
-              if (readyUpdateKey) {
-                setDismissedUpdateToastKey(readyUpdateKey);
-              }
-            }}
-            className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
+      )}
 
       {open ? (
         <div
@@ -667,7 +846,7 @@ export function NoticeCenter(props: {
             setOpen(false);
             toggleRef.current?.focus();
           }}
-          className="dohc-popover dohc-pop-in fixed bottom-12 left-14 z-20 flex max-h-[calc(100vh-100px)] w-[min(360px,calc(100vw-68px))] flex-col rounded-lg border border-line bg-panel text-xs text-ink"
+          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-20 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />

@@ -26,6 +26,7 @@ const bridge = {
   createWorkspaceFile: vi.fn(async () => ({ path: "notes/welcome.md" })),
   importWorkspaceFiles: vi.fn(async () => ({ imported: [], skipped: 0 })),
   cloudStatus: vi.fn(async () => ({ connected: false })),
+  cloudLoginStart: vi.fn(),
   cloudJoinWorkspace: vi.fn(),
   listRelayShares: vi.fn(),
   retryShareHandoff: vi.fn(async () => undefined),
@@ -35,6 +36,9 @@ const bridge = {
   openWorkspaceWindow: vi.fn(async () => undefined),
   openWorkspaceManager: vi.fn(async () => undefined),
   closeThisWindow: vi.fn(async () => undefined),
+  // The notice dock the connection surfaces raise their failures into.
+  getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
+  onUpdateState: vi.fn(() => () => undefined),
   windowRole: "workspace",
   platform: "linux",
 };
@@ -101,7 +105,7 @@ describe("workspace manager", () => {
     );
 
     expect(
-      await screen.findByText("Sign in to open the share from your browser."),
+      await screen.findByText("Connect your server to open the share from your browser."),
     ).toBeTruthy();
     expect(screen.getByTestId("cloud-sync-panel")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /create workspace/i })).toBeNull();
@@ -253,7 +257,7 @@ describe("workspace manager", () => {
     // No session yet: the panel asks for sign-in before showing the code
     // field, and the normal cloud sign-in is embedded right there.
     expect(
-      await screen.findByText(/sign in first, then enter the code/i),
+      await screen.findByText(/connect your server first, then enter the code/i),
     ).toBeTruthy();
     expect(screen.queryByTestId("join-sync-code")).toBeNull();
     // Back returns to the normal first-run card.
@@ -261,6 +265,41 @@ describe("workspace manager", () => {
     expect(
       screen.getByRole("button", { name: /create workspace/i }),
     ).toBeTruthy();
+  });
+
+  it("keeps a connection failure after the route that raised it closes", async () => {
+    const user = userEvent.setup();
+    bridge.cloudLoginStart.mockRejectedValueOnce(
+      new Error("dohc found no dohc server at https://dohc.example.test."),
+    );
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await screen.findByText("/home/ice/dohc/");
+    await user.click(screen.getByTestId("first-run-join-synced"));
+
+    fireEvent.change(await screen.findByTestId("cloud-server-url"), {
+      target: { value: "https://dohc.example.test" },
+    });
+    await user.click(screen.getByTestId("cloud-connect-start"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc found no dohc server at https://dohc.example.test.",
+    );
+
+    // Leaving the route takes the panel away. The failure is the manager's,
+    // so it stays on screen with its way forward.
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.queryByTestId("join-synced-workspace")).toBeNull();
+    expect(screen.getByTestId("workspace-shell-error")).toBeTruthy();
+
+    // Try again reopens the route the failure came from, with the address
+    // that attempt used.
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).value).toBe(
+        "https://dohc.example.test",
+      ),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("reads like a desktop app, not a marketing page", async () => {

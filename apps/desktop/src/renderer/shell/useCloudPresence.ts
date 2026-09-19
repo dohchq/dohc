@@ -6,7 +6,12 @@ import { buildChatCollaboration } from "../collab/chatCollaboration";
 export function useCloudPresence(workspaceId: string) {
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
-  const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
+  // Scope the first render after a workspace switch, before effects run.
+  const [scopedStatus, setScopedStatus] = useState<
+    { workspaceId: string; status: CloudStatusResult } | null
+  >(null);
+  const cloudStatus =
+    scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
   // Stable per-session client id so this device's own presence entry is
   // identifiable and filtered out of "others". Lazily minted once — a fresh id
   // per render would churn the presence channel.
@@ -23,14 +28,16 @@ export function useCloudPresence(workspaceId: string) {
     bridge()
       .cloudStatus({ workspaceId })
       .then((status) => {
-        if (token === cloudStatusToken.current) setCloudStatus(status);
+        if (token === cloudStatusToken.current) {
+          setScopedStatus({ workspaceId, status });
+        }
       })
       .catch(() => {
-        if (token === cloudStatusToken.current) setCloudStatus(null);
+        if (token === cloudStatusToken.current) setScopedStatus(null);
       });
   }, [workspaceId]);
   useEffect(() => {
-    setCloudStatus(null);
+    setScopedStatus(null);
     refreshCloudStatus();
     return () => {
       // A pending response after unmount / switch must never repaint.
@@ -46,7 +53,7 @@ export function useCloudPresence(workspaceId: string) {
   useEffect(() => {
     return bridge().onCloudSessionChanged(() => {
       cloudStatusToken.current += 1;
-      setCloudStatus(null);
+      setScopedStatus(null);
       refreshCloudStatus();
     });
   }, [refreshCloudStatus]);
@@ -72,5 +79,7 @@ export function useCloudPresence(workspaceId: string) {
     ],
   );
 
-  return { chatCollaboration, refreshCloudStatus };
+  const workspaceSynced = cloudStatus?.workspaceSynced === true;
+
+  return { chatCollaboration, refreshCloudStatus, workspaceSynced };
 }

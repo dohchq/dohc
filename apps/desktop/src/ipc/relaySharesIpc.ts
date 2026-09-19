@@ -1,5 +1,8 @@
 import {
   ListOwnerLiveDocumentsPayload,
+  ListOwnerLiveRefusalsPayload,
+  OwnerLiveRefusalsResult,
+  RetryOwnerLiveSharePayload,
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
@@ -193,6 +196,36 @@ export function registerRelaySharesIpcHandlers<
         ...document, canResume: !document.reason && (document.status === "retired" || document.status === "paused"),
       }]));
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
+    }, assertOriginalWorkspace);
+  });
+
+  registerHandler(CHANNELS.listOwnerLiveRefusals, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListOwnerLiveRefusalsPayload.parse(payload);
+    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+      const after = input.after === undefined ? "" : `&after=${encodeURIComponent(input.after)}`;
+      const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
+        `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?refusals=1${after}`));
+      const response = OwnerLiveRefusalsResult.extend({ok: z.literal(true)}).parse(result);
+      if (response.nextCursor !== null && response.nextCursor === input.after) {
+        throw new Error("The live document list changed. Refresh the list and try again.");
+      }
+      return OwnerLiveRefusalsResult.parse({refusals: response.refusals, nextCursor: response.nextCursor});
+    }, assertOriginalWorkspace);
+  });
+
+  registerHandler(CHANNELS.retryOwnerLiveShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RetryOwnerLiveSharePayload.parse(payload);
+    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+      const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
+        `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
+          method: "POST", body: JSON.stringify({shareId: input.shareId, retry: true}),
+        }));
+      const response = activeLiveDocuments.parse(result);
+      if (response.documents.some(document => document.status === "unavailable" || document.status === "paused")) {
+        throw new Error("Some documents could not start live editing. Refresh the list and try again.");
+      }
     }, assertOriginalWorkspace);
   });
 
@@ -696,7 +729,7 @@ export function registerRelaySharesIpcHandlers<
             }
             operation.assertCurrent();
             if (currentCredentialGeneration() !== credentialGeneration) {
-              throw new Error("Your dohc Drive session changed. Try again.");
+              throw new Error("Your server session changed. Try again.");
             }
             if (poll.signal.aborted) throw new Error("aborted");
             return PollRelayShareDiscussionActivityResult.parse({

@@ -1,12 +1,8 @@
 const MAX_CLOUD_ORIGIN_LENGTH = 2048;
 
-const MANAGED_CLOUD_SERVER_ENV = "DOHC_CLOUD_URL";
-const MANAGED_CLOUD_RELAY_ENV = "DOHC_CLOUD_RELAY_URL";
-
-export type ManagedCloudConfiguration =
-  | { status: "ready"; serverUrl: string; relayUrl: string }
-  | { status: "unconfigured" }
-  | { status: "invalid" };
+export function isServerDisplayName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 100 && !/[\u0000-\u001f\u007f]/u.test(value);
+}
 
 export function canonicalCloudOrigin(value: string): string | null {
   const raw = value.trim();
@@ -15,6 +11,7 @@ export function canonicalCloudOrigin(value: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return null;
     if (!url.hostname) return null;
     if (url.username || url.password || url.search || url.hash) return null;
     if (url.pathname !== "/") return null;
@@ -22,20 +19,4 @@ export function canonicalCloudOrigin(value: string): string | null {
   } catch {
     return null;
   }
-}
-
-export function resolveManagedCloudConfiguration(
-  env: Readonly<Record<string, string | undefined>>,
-): ManagedCloudConfiguration {
-  const rawServerUrl = env[MANAGED_CLOUD_SERVER_ENV]?.trim();
-  const rawRelayUrl = env[MANAGED_CLOUD_RELAY_ENV]?.trim();
-
-  if (!rawServerUrl && !rawRelayUrl) return { status: "unconfigured" };
-  if (!rawServerUrl || !rawRelayUrl) return { status: "invalid" };
-
-  const serverUrl = canonicalCloudOrigin(rawServerUrl);
-  const relayUrl = canonicalCloudOrigin(rawRelayUrl);
-  if (!serverUrl || !relayUrl) return { status: "invalid" };
-
-  return { status: "ready", serverUrl, relayUrl };
 }

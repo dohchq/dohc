@@ -111,7 +111,7 @@ export function registerSharedViewsIpcHandlers<
       // inside a pasted code.
       throw new Error(
         "This share lives on a different server than the one you're signed in to. " +
-          `Reconnect dohc Drive with the sync relay URL ${parsed.relayUrl}, then try again.`,
+          "Connect to the server that hosts this share, then try again.",
       );
     }
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
@@ -128,7 +128,7 @@ export function registerSharedViewsIpcHandlers<
       }
       if (error instanceof RelayUnauthorizedError) {
         throw new Error(
-          "Your dohc Drive session expired. Sign in again, then retry.",
+          "Your server session expired. Sign in again, then retry.",
         );
       }
       if (error instanceof ShareSelectorInvalidError) {

@@ -5,8 +5,17 @@ import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
+import { ipcErrorMessage } from "./ipcError";
 import { openLinkExternally } from "./linkActivation";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import {
+  ConnectionNotices,
+  useConnectionNotices,
+  type ConnectionNoticeHost,
+} from "./shell/connectionNotices";
+import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
+
+const SETUP_GUIDE_URL =
+  "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
 
 type WorkspaceSyncState = Required<Pick<
   CloudStatusResult,
@@ -29,38 +38,72 @@ function normalizeWorkspaceSyncState(
 }
 
 type PassphrasePurpose = "enable" | "protect" | "unlock";
-type ManagedCloudStatus = "unknown" | "ready" | "unconfigured" | "invalid";
-type ConnectionMode = "managed" | "self-host";
-type ConnectionError = {
-  message: string;
-  invalid: "both" | "server" | "relay";
-};
 const MIN_PASSPHRASE_LENGTH = 8;
 
 type Phase =
   | { kind: "loading" }
-  | { kind: "status-failed" }
+  // Main could not say whether this machine has a session. Say that rather
+  // than guessing "disconnected"; the notice carries the failure and Try again.
+  | { kind: "unknown" }
   | { kind: "disconnected" }
+  | { kind: "connecting" }
   | { kind: "code"; userCode: string; verificationUri: string }
   | { kind: "connected"; email: string }
-  | { kind: "failed"; reason: string };
+  // The browser answered and refused the code. That is an outcome of the flow
+  // the user just watched, not an error to route elsewhere, so it stays here
+  // next to the form that restarts it.
+  | { kind: "refused"; reason: string };
 
-// Device-flow login panel inside the cloud overlay: show a short code, send
-// the user to the browser to approve it, poll until the session lands. The
-// token never reaches this process — main stores it encrypted; we only ever
-// render status + email. Local-only use never opens this panel.
+// canonicalCloudOrigin takes https anywhere but http only on loopback, so say
+// which of those two rules the address missed.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function checkServerAddress(
+  value: string,
+): { origin: string } | { problem: string } {
+  const typed = value.trim();
+  if (!typed) return { problem: "Enter the address of your server." };
+  const origin = canonicalCloudOrigin(typed);
+  if (origin) return { origin };
+  try {
+    const url = new URL(typed);
+    if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
+      return {
+        problem: "Enter an https address. dohc allows http only for localhost.",
+      };
+    }
+  } catch {
+    // Not a URL at all — the example address is the useful correction.
+  }
+  return { problem: "Enter the server address like https://dohc.example.com." };
+}
+
+// Sync and sharing: one server address, then the device-authorization flow.
+// Show a short code, send the user to the browser to approve it, poll until
+// the session lands. The token never reaches this process — main stores it
+// encrypted; we only ever render status, server, and email. Main discovers the
+// sync relay from the server, so there is no relay field here. Local work
+// needs none of this: this panel only ever adds sync and sharing on top.
+// The session belongs to the installation rather than to one workspace, so
+// connecting and disconnecting here reach every workspace on this machine.
 export function CloudLogin(props: {
   workspaceId?: string;
   // Fired when a device-flow login completes inside this panel (the join
   // surface re-checks its own gate on it).
   onConnected?: () => void;
-  // Nested inside another elevated card (join/open-shared signed-out gates):
-  // drop this panel's own frame so cards never stack elevation.
+  // Nested inside another elevated card (join/open-shared/handoff signed-out
+  // gates): drop this panel's own frame so cards never stack elevation, and
+  // drop the standalone explanation the host surface already gives.
   embedded?: boolean;
-  // The host already names dohc Drive (a step title, a section header):
-  // drop this panel's own heading so the name is not said twice.
+  // The host already titles the step (a step title, a section header): drop
+  // this panel's own heading so the name is not said twice.
   untitled?: boolean;
-}) {
+  // onConnectionError decides where a failed connect, poll, status check, or
+  // disconnect goes. A host that takes it owns the toast and the Notices row,
+  // so the failure outlives this panel and survives the route change that
+  // closes it. Without it the panel raises its own through the same
+  // components.
+} & ConnectionNoticeHost) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
   const [workspaceSyncState, setWorkspaceSyncState] = useState(UNSYNCED);
@@ -71,17 +114,35 @@ export function CloudLogin(props: {
   const [needsPassphrase, setNeedsPassphrase] = useState(false);
   const [passphrasePurpose, setPassphrasePurpose] = useState<PassphrasePurpose>("enable");
   const [passphrase, setPassphrase] = useState("");
-  const [managedCloudStatus, setManagedCloudStatus] =
-    useState<ManagedCloudStatus>("unknown");
   const [statusAttempt, setStatusAttempt] = useState(0);
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("self-host");
-  const [connectionError, setConnectionError] = useState<ConnectionError | null>(null);
-  const [serverUrl, setServerUrl] = useState("");
+  // Inline only for what the user can fix in the field in front of them.
+  const [addressProblem, setAddressProblem] = useState<string | null>(null);
+  const [disconnectBusy, setDisconnectBusy] = useState(false);
+  const [serverUrl, setServerUrl] = useState(props.initialServerUrl ?? "");
+  // Kept from the connected session only — the sync code carries the relay the
+  // other machine joins through, and main is the one that discovers it.
   const [relayUrl, setRelayUrl] = useState("");
+  // Reported by the server itself: the name it calls itself, and whether it
+  // answers from the open internet or only from a private network.
+  const [serverName, setServerName] = useState("");
+  const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(
+    null,
+  );
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set only by a Try again on a failed status check, read by the check it
+  // starts.
+  const recheckRef = useRef(false);
   const serverUrlInput = useRef<HTMLInputElement | null>(null);
-  const relayUrlInput = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRequestSequence();
+  // Used only when nothing above this panel owns connection notices, so a
+  // panel rendered on its own still reaches the same toast and Notices row.
+  const ownNotices = useConnectionNotices();
+  const ownsNotices = props.onConnectionError === undefined;
+  const reportOwnError = useMemo(
+    () => ownNotices.reporter(),
+    [ownNotices.reporter],
+  );
+  const reportConnectionError = props.onConnectionError ?? reportOwnError;
   const protectPassphraseTooShort =
     needsPassphrase &&
     passphrasePurpose === "protect" &&
@@ -94,8 +155,50 @@ export function CloudLogin(props: {
     }
   }
 
+  function statusQuery() {
+    return props.workspaceId ? { workspaceId: props.workspaceId } : {};
+  }
+
+  // Runs the status check again. The ref is what tells that run it was asked
+  // for, so a session it finds reaches the host like a fresh sign-in does.
+  function recheckStatus() {
+    recheckRef.current = true;
+    setStatusAttempt((attempt) => attempt + 1);
+  }
+
+  // A retry the owner can hold after this panel closes. It answers false once
+  // the panel is gone or has started a newer attempt, and the owner reopens
+  // the panel instead of rerunning an attempt nothing is watching.
+  function retryFor(session: number, run: () => void): () => boolean {
+    return () => {
+      if (!sessionRef.isCurrent(session)) return false;
+      run();
+      return true;
+    };
+  }
+
+  // Main owns the truth about the session. The address and relay only move
+  // when main reports them, so a status without them leaves what the user
+  // typed in place to retry with.
+  function applyStatus(status: CloudStatusResult, email?: string) {
+    setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
+    if (status.serverUrl) setServerUrl(status.serverUrl);
+    if (status.relayUrl) setRelayUrl(status.relayUrl);
+    setServerName(status.serverName ?? "");
+    setNetworkAccess(status.networkAccess ?? null);
+    setPhase(
+      status.connected
+        ? { kind: "connected", email: email ?? status.email ?? "" }
+        : { kind: "disconnected" },
+    );
+  }
+
   useEffect(() => {
     const session = sessionRef.next();
+    // Only a user-asked recheck tells the host about a session it found. A
+    // mount or a workspace switch is not news: the host ran its own check.
+    const announceSession = recheckRef.current;
+    recheckRef.current = false;
     clearPollTimer();
     setPhase({ kind: "loading" });
     setWorkspaceSyncState(UNSYNCED);
@@ -104,35 +207,38 @@ export function CloudLogin(props: {
     setNeedsPassphrase(false);
     setPassphrasePurpose("enable");
     setPassphrase("");
-    setManagedCloudStatus("unknown");
-    setConnectionMode("self-host");
-    setConnectionError(null);
-    setServerUrl("");
+    setAddressProblem(null);
+    setDisconnectBusy(false);
+    setServerUrl(props.initialServerUrl ?? "");
     setRelayUrl("");
+    setServerName("");
+    setNetworkAccess(null);
     void bridge()
-      .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
+      .cloudStatus(statusQuery())
       .then((status) => {
         if (!sessionRef.isCurrent(session)) return;
-        setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
-        const configuredStatus = status.managedCloudStatus;
-        setManagedCloudStatus(configuredStatus);
-        setConnectionMode(configuredStatus === "ready" ? "managed" : "self-host");
-        if (status.serverUrl) setServerUrl(status.serverUrl);
-        if (status.relayUrl) setRelayUrl(status.relayUrl);
-        setPhase(
-          status.connected
-            ? { kind: "connected", email: status.email ?? "" }
-            : { kind: "disconnected" },
-        );
+        applyStatus(status);
+        if (announceSession && status.connected) props.onConnected?.();
       })
       .catch(() => {
-        if (sessionRef.isCurrent(session)) setPhase({ kind: "status-failed" });
+        if (!sessionRef.isCurrent(session)) return;
+        // Nothing on screen can recover this one, so the notice carries the
+        // only way back: run the check again.
+        setPhase({ kind: "unknown" });
+        reportConnectionError({
+          // Main rejects a status check with an engine or IPC failure, not
+          // with a sentence for the user. Say what dohc could not do.
+          message: "dohc could not check this connection.",
+          serverUrl: null,
+          retry: retryFor(session, recheckStatus),
+        });
       });
     return () => {
       if (sessionRef.isCurrent(session)) sessionRef.next();
       clearPollTimer();
     };
-  }, [props.workspaceId, statusAttempt]);
+    // A notice can retry a different address while this panel is already open.
+  }, [props.workspaceId, props.initialServerUrl, statusAttempt]);
 
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
@@ -168,7 +274,14 @@ export function CloudLogin(props: {
             : "Enter at least 8 characters to protect synced secrets.",
         );
       } else {
-        setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
+        // Nothing in this panel can fix an engine, relay, or claim failure,
+        // so it leaves with the same toast and Notices row every other
+        // operational failure uses.
+        reportConnectionError({
+          message: ipcErrorMessage(cause, "dohc could not enable sync for this workspace."),
+          serverUrl: null,
+          retry: retryFor(session, () => void enableSync()),
+        });
       }
     } finally {
       if (sessionRef.isCurrent(session)) setSyncBusy(false);
@@ -187,117 +300,99 @@ export function CloudLogin(props: {
     setSyncError(null);
   }
 
-  function pollUntilDone(session: number) {
+  function pollUntilDone(session: number, origin: string) {
     pollTimer.current = setTimeout(() => {
       void bridge()
         .cloudLoginPoll()
         .then((result) => {
           if (!sessionRef.isCurrent(session)) return;
-          if (result.status === "pending") return pollUntilDone(session);
+          if (result.status === "pending") return pollUntilDone(session, origin);
           if (result.status === "complete") {
             void bridge()
-              .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
+              .cloudStatus(statusQuery())
               .then((status) => {
                 if (!sessionRef.isCurrent(session)) return;
-                setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
-                if (status.serverUrl) setServerUrl(status.serverUrl);
-                if (status.relayUrl) setRelayUrl(status.relayUrl);
-                setPhase({ kind: "connected", email: result.email ?? status.email ?? "" });
-                props.onConnected?.();
+                // Main owns the session, and this answer is newer than the
+                // poll. A browser approval that did not leave a session on
+                // this machine has to read as disconnected.
+                applyStatus(status, result.email ?? status.email ?? "");
+                if (status.connected) props.onConnected?.();
               })
               .catch(() => {
                 if (!sessionRef.isCurrent(session)) return;
-                setWorkspaceSyncState((current) => ({
-                  ...current,
-                  workspaceSyncConnected: false,
-                }));
-                setPhase({ kind: "connected", email: result.email ?? "" });
-                props.onConnected?.();
+                // The approval happened, but nothing here can say what the
+                // session is now. Do not announce a connection main has not
+                // confirmed; the notice carries the way to ask again.
+                setPhase({ kind: "unknown" });
+                reportConnectionError({
+                  message: "dohc could not check this connection after sign-in.",
+                  serverUrl: origin,
+                  retry: retryFor(session, recheckStatus),
+                });
               });
           } else {
             setPhase({
-              kind: "failed",
+              kind: "refused",
               reason:
                 result.status === "denied"
                   ? "The request was denied in the browser."
-                  : "The code expired — start again.",
+                  : "The code expired. Start again.",
             });
           }
         })
-        .catch(() => {
-          if (sessionRef.isCurrent(session)) {
-            setPhase({ kind: "failed", reason: "Couldn't reach the server." });
-          }
+        .catch((cause) => {
+          if (!sessionRef.isCurrent(session)) return;
+          // The code on screen is unreachable now, so the form comes back and
+          // a retry starts the whole flow again at the same address.
+          setPhase({ kind: "disconnected" });
+          reportConnectionError({
+            message: ipcErrorMessage(cause, "dohc could not reach the server."),
+            serverUrl: origin,
+            retry: retryFor(session, () => void connect(origin)),
+          });
         });
     }, 3000);
   }
 
-  async function connect() {
-    let connection: { serverUrl: string; relayUrl: string } | undefined;
-    if (connectionMode === "self-host") {
-      const normalizedServerUrl = canonicalCloudOrigin(serverUrl);
-      const normalizedRelayUrl = canonicalCloudOrigin(relayUrl);
-      const missingServer = !serverUrl.trim();
-      const missingRelay = !relayUrl.trim();
-      if (missingServer || missingRelay) {
-        setConnectionError({
-          message:
-            missingServer && missingRelay
-              ? "Enter the server and sync relay."
-              : missingServer
-                ? "Enter the server."
-                : "Enter the sync relay.",
-          invalid:
-            missingServer && missingRelay
-              ? "both"
-              : missingServer
-                ? "server"
-                : "relay",
-        });
-        (missingServer ? serverUrlInput : relayUrlInput).current?.focus();
-        return;
-      }
-      if (!normalizedServerUrl) {
-        setConnectionError({
-          message: "Enter the server as an HTTP or HTTPS origin.",
-          invalid: "server",
-        });
-        serverUrlInput.current?.focus();
-        return;
-      }
-      if (!normalizedRelayUrl) {
-        setConnectionError({
-          message: "Enter the sync relay as an HTTP or HTTPS origin.",
-          invalid: "relay",
-        });
-        relayUrlInput.current?.focus();
-        return;
-      }
-      connection = {
-        serverUrl: normalizedServerUrl,
-        relayUrl: normalizedRelayUrl,
-      };
+  function submitConnect() {
+    const address = checkServerAddress(serverUrl);
+    if ("problem" in address) {
+      setAddressProblem(address.problem);
+      serverUrlInput.current?.focus();
+      return;
     }
+    void connect(address.origin);
+  }
 
+  // Takes the canonical origin rather than reading the field, so a retry runs
+  // the address that failed even after the field moved on or went away.
+  async function connect(origin: string) {
     const session = sessionRef.next();
     clearPollTimer();
-    setConnectionError(null);
-    setPhase({ kind: "loading" });
+    setAddressProblem(null);
+    setServerUrl(origin);
+    setServerName("");
+    setNetworkAccess(null);
+    setRelayUrl("");
+    setPhase({ kind: "connecting" });
     try {
-      const started = await bridge().cloudLoginStart(connection ?? {});
+      const started = await bridge().cloudLoginStart({ serverUrl: origin });
       if (!sessionRef.isCurrent(session)) return;
       setPhase({ kind: "code", ...started });
-      pollUntilDone(session);
-    } catch {
-      if (sessionRef.isCurrent(session)) {
-        setPhase({
-          kind: "failed",
-          reason:
-            connectionMode === "managed"
-              ? "dohc could not reach dohc Drive. Check your connection, then try again."
-              : "dohc could not reach this self-hosted server. Check both URLs, then try again.",
-        });
-      }
+      pollUntilDone(session, origin);
+    } catch (cause) {
+      if (!sessionRef.isCurrent(session)) return;
+      setPhase({ kind: "disconnected" });
+      reportConnectionError({
+        // Main reports the concrete validation or discovery failure. The
+        // fallback only covers a rejection that carries no message.
+        message: ipcErrorMessage(
+          cause,
+          "dohc could not reach this server. Check the address, then choose Try again.",
+        ),
+        serverUrl: origin,
+        retry: retryFor(session, () => void connect(origin)),
+      });
     }
   }
 
@@ -326,6 +421,9 @@ export function CloudLogin(props: {
     workspaceSynced,
   ]);
 
+  // The server the session actually uses, in the form the user typed it.
+  const connectedServer = canonicalCloudOrigin(serverUrl) ?? serverUrl.trim();
+
   async function copySyncCode() {
     if (!syncCode) return;
     try {
@@ -337,20 +435,43 @@ export function CloudLogin(props: {
     }
   }
 
+  // Main drops the cached credentials before the cleanup that can fail, so a
+  // rejection here says nothing about whether the session survived. Report the
+  // reason, then ask main what the state actually is.
   async function disconnect() {
-    const session = sessionRef.next();
-    clearPollTimer();
+    if (disconnectBusy) return;
+    const session = sessionRef.current();
+    setDisconnectBusy(true);
     try {
       await bridge().cloudLogout();
-      if (sessionRef.isCurrent(session)) setPhase({ kind: "disconnected" });
-    } catch {
-      if (sessionRef.isCurrent(session)) {
-        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Drive." });
+      if (!sessionRef.isCurrent(session)) return;
+      clearPollTimer();
+      setPhase({ kind: "disconnected" });
+      setDisconnectBusy(false);
+      sessionRef.next();
+    } catch (cause) {
+      if (!sessionRef.isCurrent(session)) return;
+      clearPollTimer();
+      reportConnectionError({
+        message: ipcErrorMessage(cause, "dohc could not finish disconnecting."),
+        serverUrl: null,
+        retry: retryFor(session, () => void disconnect()),
+      });
+      try {
+        const status = await bridge().cloudStatus(statusQuery());
+        if (sessionRef.isCurrent(session)) applyStatus(status);
+      } catch {
+        // The disconnect failure is already reported. A second notice for the
+        // recheck would say the same thing twice, so the panel just stops
+        // claiming to know.
+        if (sessionRef.isCurrent(session)) setPhase({ kind: "unknown" });
       }
+    } finally {
+      if (sessionRef.isCurrent(session)) setDisconnectBusy(false);
     }
   }
 
-  return (
+  const panel = (
     <div
       data-testid="cloud-sync-panel"
       className={
@@ -362,179 +483,115 @@ export function CloudLogin(props: {
       {props.untitled ? null : (
         <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold text-ink">
           <Cloud size={14} aria-hidden className="text-subtle" />
-          dohc Drive
+          Sync and sharing
         </h2>
       )}
 
       {phase.kind === "loading" ? (
-        <p className="mb-0 mt-2 text-xs text-subtle">Checking connection…</p>
+        <p className="mb-0 mt-2 text-xs text-subtle">Checking your connection…</p>
       ) : null}
 
-      {phase.kind === "status-failed" ? (
-        <div>
-          <p
-            data-testid="cloud-status-error"
-            role="alert"
-            className="mb-0 mt-2 text-xs text-danger"
-          >
-            dohc could not check the cloud connection.
-          </p>
-          <SecondaryButton
-            type="button"
-            data-testid="cloud-status-retry"
-            onClick={() => setStatusAttempt((attempt) => attempt + 1)}
-            className="mt-3"
-          >
-            Retry
-          </SecondaryButton>
-        </div>
+      {phase.kind === "connecting" ? (
+        <p data-testid="cloud-connecting" className="mb-0 mt-2 text-xs text-subtle">
+          Connecting to the server…
+        </p>
       ) : null}
 
-      {phase.kind === "disconnected" || phase.kind === "failed" ? (
+      {/* The check failed, so this panel cannot say what the session is. The
+          notice holds the reason and the way to ask again. */}
+      {phase.kind === "unknown" ? (
+        <p
+          data-testid="cloud-connection-unknown"
+          className="mb-0 mt-2 text-xs text-muted"
+        >
+          dohc doesn’t know whether this machine is connected.
+        </p>
+      ) : null}
+
+      {phase.kind === "disconnected" || phase.kind === "refused" ? (
         <>
-          {phase.kind === "failed" ? (
-            <p data-testid="cloud-login-error" className="mb-0 mt-2 text-xs text-danger">
+          {props.embedded ? null : (
+            <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
+              Your workspaces already work on this machine. Connect one server
+              here to sync and share them.
+            </p>
+          )}
+          {/* The browser's own answer, next to the form that starts over. */}
+          {phase.kind === "refused" ? (
+            <p
+              data-testid="cloud-login-refused"
+              role="alert"
+              className="mb-0 mt-2 text-xs text-danger"
+            >
               {phase.reason}
             </p>
           ) : null}
-          {managedCloudStatus === "ready" && connectionMode === "managed" ? (
-            <>
-              <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-                Connect to dohc Drive for sync and sharing. Your workspace keeps
-                working locally without a connection.
+          <form
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitConnect();
+            }}
+          >
+            <label className="mt-3 block text-[11px] font-medium text-subtle">
+              Server address
+              <input
+                ref={serverUrlInput}
+                spellCheck={false}
+                aria-invalid={addressProblem !== null}
+                aria-describedby={
+                  addressProblem !== null ? "cloud-connection-error" : undefined
+                }
+                data-testid="cloud-server-url"
+                value={serverUrl}
+                onChange={(event) => {
+                  setServerUrl(event.currentTarget.value);
+                  setAddressProblem(null);
+                }}
+                placeholder="https://dohc.example.com"
+                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+              />
+            </label>
+            {/* The one error that stays inline: the field in front of the user
+                is the thing to fix. */}
+            {addressProblem ? (
+              <p
+                id="cloud-connection-error"
+                data-testid="cloud-connection-error"
+                role="alert"
+                className="mb-0 mt-2 text-xs text-danger"
+              >
+                {addressProblem}
               </p>
-              <PrimaryButton
-                data-testid="cloud-connect-start"
-                onClick={() => void connect()}
-                className="mt-3"
-              >
-                Connect to dohc Drive
+            ) : null}
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <PrimaryButton type="submit" data-testid="cloud-connect-start">
+                Connect server
               </PrimaryButton>
-              <SecondaryButton
+              <button
                 type="button"
-                data-testid="cloud-use-self-host"
-                onClick={() => {
-                  setConnectionMode("self-host");
-                  setConnectionError(null);
-                }}
-                className="ml-2 mt-3"
+                data-testid="cloud-setup-guide"
+                onClick={() => void openLinkExternally(SETUP_GUIDE_URL)}
+                className="flex items-center gap-1 text-[11px] text-muted underline underline-offset-2 transition-colors hover:text-ink"
               >
-                Use a self-hosted server
-              </SecondaryButton>
-            </>
-          ) : (
-            <>
-              {managedCloudStatus === "unconfigured" ? (
-                <p
-                  data-testid="cloud-managed-unconfigured"
-                  className="mb-0 mt-2 text-xs leading-relaxed text-muted"
-                >
-                  dohc Drive isn't configured in this version. Enter your own server.
-                </p>
-              ) : null}
-              {managedCloudStatus === "invalid" ? (
-                <>
-                  <p
-                    data-testid="cloud-managed-invalid"
-                    className="mb-0 mt-2 text-xs leading-relaxed text-danger"
-                  >
-                    dohc Drive is unavailable because this build has incomplete
-                    server settings.
-                  </p>
-                  <p className="mb-0 mt-1 text-xs leading-relaxed text-muted">
-                    Connect a self-hosted server instead.
-                  </p>
-                </>
-              ) : null}
-              {managedCloudStatus === "ready" ? (
-                <SecondaryButton
-                  type="button"
-                  data-testid="cloud-use-managed"
-                  onClick={() => {
-                    setConnectionMode("managed");
-                    setConnectionError(null);
-                  }}
-                  className="mt-3"
-                >
-                  Use dohc Drive
-                </SecondaryButton>
-              ) : null}
-              <form
-                noValidate
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void connect();
-                }}
-              >
-                <label className="mt-3 block text-[11px] font-medium text-subtle">
-                  Server
-                  <input
-                    ref={serverUrlInput}
-                    spellCheck={false}
-                    aria-invalid={
-                      connectionError?.invalid === "both" ||
-                      connectionError?.invalid === "server"
-                    }
-                    aria-describedby={
-                      connectionError?.invalid === "both" ||
-                      connectionError?.invalid === "server"
-                        ? "cloud-connection-error"
-                        : undefined
-                    }
-                    data-testid="cloud-server-url"
-                    value={serverUrl}
-                    onChange={(event) => {
-                      setServerUrl(event.currentTarget.value);
-                      setConnectionError(null);
-                    }}
-                    placeholder="https://cloud.example.com"
-                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-                  />
-                </label>
-                <label className="mt-2 block text-[11px] font-medium text-subtle">
-                  Sync relay
-                  <input
-                    ref={relayUrlInput}
-                    spellCheck={false}
-                    aria-invalid={
-                      connectionError?.invalid === "both" ||
-                      connectionError?.invalid === "relay"
-                    }
-                    aria-describedby={
-                      connectionError?.invalid === "both" ||
-                      connectionError?.invalid === "relay"
-                        ? "cloud-connection-error"
-                        : undefined
-                    }
-                    data-testid="cloud-relay-url"
-                    value={relayUrl}
-                    onChange={(event) => {
-                      setRelayUrl(event.currentTarget.value);
-                      setConnectionError(null);
-                    }}
-                    placeholder="https://relay.example.com"
-                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-                  />
-                </label>
-                {connectionError ? (
-                  <p
-                    id="cloud-connection-error"
-                    data-testid="cloud-connection-error"
-                    role="alert"
-                    className="mb-0 mt-2 text-xs text-danger"
-                  >
-                    {connectionError.message}
-                  </p>
-                ) : null}
-                <PrimaryButton
-                  type="submit"
-                  data-testid="cloud-connect-start"
-                  className="mt-3"
-                >
-                  Connect
-                </PrimaryButton>
-              </form>
-            </>
+                <ExternalLink size={11} aria-hidden />
+                How to set up a server
+              </button>
+            </div>
+          </form>
+          {props.embedded ? null : (
+            <div
+              data-testid="cloud-drive-coming-soon"
+              className="mt-4 border-t border-line pt-3"
+            >
+              <p className="m-0 flex items-center gap-1.5 text-[11px] font-semibold text-ink">
+                dohc Drive
+                <Pill>Coming soon</Pill>
+              </p>
+              <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
+                A server dohc runs for you. Connect your own server for now.
+              </p>
+            </div>
           )}
         </>
       ) : null}
@@ -559,20 +616,51 @@ export function CloudLogin(props: {
             Open browser
           </PrimaryButton>
           <p className="mb-0 mt-2 text-[11px] text-subtle">
-            Waiting for approval — this updates by itself.
+            Waiting for approval. This updates by itself.
           </p>
         </div>
       ) : null}
 
       {phase.kind === "connected" ? (
         <div data-testid="cloud-connected">
-          <p className="mb-0 mt-2 text-xs text-muted">
-            Connected as{" "}
+          {/* The session covers the installation, so say so once here rather
+              than leaving "connected" to read as a property of this
+              workspace. The server names itself; the origin stays visible
+              underneath because that is the part the user typed and can
+              check. */}
+          <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
+            This machine is connected
+            {serverName ? (
+              <>
+                {" to "}
+                <span data-testid="cloud-connected-server-name" className="text-ink">
+                  {serverName}
+                </span>
+              </>
+            ) : null}{" "}
+            as{" "}
             <span data-testid="cloud-connected-email" className="text-ink">
               {phase.email}
             </span>
             .
           </p>
+          {connectedServer ? (
+            <p
+              data-testid="cloud-connected-server"
+              className="mb-0 mt-1 font-mono text-[11px] text-subtle"
+            >
+              {connectedServer}
+            </p>
+          ) : null}
+          {networkAccess === "private" ? (
+            <p
+              data-testid="cloud-network-access"
+              className="mb-0 mt-2 text-[11px] leading-relaxed text-muted"
+            >
+              This server is on a private network. Everyone you share with
+              needs access to that network, from every device they use.
+            </p>
+          ) : null}
           {props.workspaceId ? (
             workspaceSynced ? (
               <>
@@ -582,7 +670,7 @@ export function CloudLogin(props: {
                       data-testid="cloud-workspace-synced"
                       className="mb-0 mt-2 text-xs text-success"
                     >
-                      This workspace syncs to the cloud — edits flow
+                      This workspace syncs to the server — edits flow
                       automatically.
                     </p>
                     {syncCode ? (
@@ -710,16 +798,34 @@ export function CloudLogin(props: {
               {syncError}
             </p>
           ) : null}
+          <p className="mb-0 mt-4 text-[11px] leading-relaxed text-subtle">
+            Disconnecting stops sync for every workspace on this machine. Your
+            files stay where they are.
+          </p>
           <SecondaryButton
             data-testid="cloud-disconnect"
+            disabled={disconnectBusy}
             onClick={() => void disconnect()}
-            className="mt-3 flex items-center gap-1.5"
+            className="mt-2 flex items-center gap-1.5"
           >
             <LogOut size={12} aria-hidden />
-            Disconnect
+            {disconnectBusy ? "Disconnecting…" : "Disconnect"}
           </SecondaryButton>
         </div>
       ) : null}
     </div>
+  );
+
+  if (!ownsNotices) return panel;
+  return (
+    <>
+      {panel}
+      <ConnectionNotices
+        notices={ownNotices.notices}
+        onRetry={ownNotices.retryNotice}
+        onHide={ownNotices.hideNotice}
+        onDismiss={ownNotices.dismissNotice}
+      />
+    </>
   );
 }

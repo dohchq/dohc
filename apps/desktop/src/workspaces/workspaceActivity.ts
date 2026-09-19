@@ -329,7 +329,7 @@ export function createWorkspaceActivity(
     if (!entry) throw new Error(`Workspace is not open: ${workspace.workspaceId}`);
     if (entry.engine) return;
     const engine = options.engineFor?.(workspace, entry.capture, engineOptions) ?? null;
-    if (!engine) throw new Error("Cloud sync requires a signed-in dohc Drive session");
+    if (!engine) throw new Error("Cloud sync requires a signed-in server session");
     entry.engine = engine;
     try {
       // Propagate first-contact failure: a dead token must surface here, not be

@@ -1298,13 +1298,13 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
     !nonEmptyString(credentials.userId) ||
     !nonEmptyString(credentials.token)
   ) {
-    return { ok: false, status: "missing", reason: "Sign in to dohc Drive first." };
+    return { ok: false, status: "missing", reason: "Sign in to your server first." };
   }
 
   if (credentials.token.startsWith("plain:")) {
     const token = credentials.token.slice("plain:".length);
     if (!token) {
-      return { ok: false, status: "invalid", reason: "dohc Drive session token is empty." };
+      return { ok: false, status: "invalid", reason: "server session token is empty." };
     }
     return {
       ok: true,
@@ -1319,11 +1319,11 @@ async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLo
       ok: false,
       status: "encrypted",
       reason:
-        "dohc Drive session is encrypted by Desktop safeStorage; open dohc Desktop or use a desktop-brokered MCP session to sync.",
+        "server session is encrypted by Desktop safeStorage; open dohc Desktop or use a desktop-brokered MCP session to sync.",
     };
   }
 
-  return { ok: false, status: "invalid", reason: "dohc Drive session token has an unknown format." };
+  return { ok: false, status: "invalid", reason: "server session token has an unknown format." };
 }
 
 function credentialStatusFor(

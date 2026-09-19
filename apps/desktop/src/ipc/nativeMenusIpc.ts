@@ -216,7 +216,7 @@ export function registerNativeMenusIpcHandlers<
               ? [
                   item("Open History", "open-history"),
                   separator,
-                  item("Connect dohc Drive", "connect-cloud"),
+                  item("Connect server", "connect-cloud"),
                   item("Settings", "settings"),
                   separator,
                   item("Check for Updates…", "check-updates"),

@@ -730,7 +730,7 @@ describe("private owner peer lifecycle", () => {
 describe("server owner peer lifecycle", () => {
   it("keeps local work available when optional owner ingress preparation fails", async () => {
     const f = fixture();
-    f.dependencies.serverOwnerDelivery = {prepare: async () => {throw new Error("readonly profile");}, workspaceIds: () => ["owner"], connect: async () => null};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => {throw new Error("readonly profile");}, workspaceIds: () => ["owner"], hasRefusals: () => undefined, connect: async () => null};
     try {
       expect(await f.engine.start()).toBe(true);
       expect(f.options().privateOwnerHost).toBeUndefined();
@@ -753,8 +753,9 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     const changed = vi.fn();
     f.dependencies.notifyOwnerDeliveryChanged = changed;
-    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"],
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document}]})})};
     ownerDeliveryMock.pass.mockResolvedValue("retry");
     try {
@@ -784,9 +785,9 @@ describe("server owner peer lifecycle", () => {
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
-    f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"],
+    f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, refusals: async () => {}})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {

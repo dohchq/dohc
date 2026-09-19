@@ -4,9 +4,10 @@ import {
   type CloudCredentials,
 } from "./cloudCredentialStore";
 import { canonicalCloudOrigin } from "./cloudConfiguration";
+import { discoverServer } from "./serverDiscovery";
 
-// Desktop side of the OAuth device-authorization flow against dohc Drive (or
-// a self-host server): start() asks the server for a short user code, the
+// Desktop side of the device-authorization flow against a self-hosted server:
+// start() discovers its auth and relay endpoints, then asks for a short code,
 // user approves it in the system browser, poll() exchanges the device code
 // for a session token once approved. The token is persisted via the injected
 // store (safeStorage-encrypted in production) and never returned to callers —
@@ -35,15 +36,13 @@ export interface CloudLoginStore {
 
 export interface CloudLoginOptions {
   store: CloudLoginStore;
-  defaultServerUrl?: string;
-  defaultRelayUrl?: string;
   fetch?: typeof fetch;
 }
 
 export interface CloudLogin {
-  start(serverUrl?: string, relayUrl?: string): Promise<{ userCode: string; verificationUri: string }>;
+  start(serverUrl: string): Promise<{ userCode: string; verificationUri: string }>;
   poll(): Promise<{ status: "pending" | "complete" | "denied" | "expired"; email?: string }>;
-  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string }>;
+  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string; serverName?: string; networkAccess?: "private" | "public" }>;
   logout(): Promise<void>;
   // Atomically clear the saved session only while it still matches the given
   // identity. Runs inside the store's mutation queue, so a login save cannot
@@ -158,7 +157,7 @@ function throwTransitionFailures(failures: unknown[]): never {
   if (failures.length === 1) throw failures[0];
   throw new AggregateError(
     failures,
-    "Cloud login session transition did not complete.",
+    "The server connection change did not complete.",
   );
 }
 
@@ -166,6 +165,8 @@ type PendingLogin = {
   epoch: number;
   serverUrl: string;
   relayUrl?: string;
+  serverName?: string;
+  networkAccess?: "private" | "public";
   deviceCode: string;
 };
 
@@ -250,14 +251,14 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
   function assertCurrentAttempt(attempt: PendingLogin): void {
     if (pending !== attempt || attempt.epoch !== attemptEpoch) {
-      throw new Error("Cloud login was cancelled.");
+      throw new Error("Server sign-in was cancelled.");
     }
   }
 
   function failCloudLoginIdentity(attempt: PendingLogin): never {
     if (pending === attempt && attempt.epoch === attemptEpoch) pending = null;
     throw new Error(
-      "Cloud login failed because the server could not confirm your identity. Contact the server administrator.",
+      "The server could not confirm your identity. Contact its administrator.",
     );
   }
 
@@ -271,11 +272,18 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   }
 
   async function postJson(url: string, body: unknown): Promise<Response> {
-    return fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    try {
+      return await fetchImpl(url, {
+        method: "POST",
+        redirect: "error",
+        credentials: "omit",
+        signal: AbortSignal.timeout(10_000),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      throw new Error("dohc could not reach this server. Check your connection, then try again.");
+    }
   }
 
   async function pollAttempt(attempt: PendingLogin): Promise<CloudLoginPollResult> {
@@ -295,6 +303,9 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       // the encrypted store.
       const session = await fetchImpl(`${serverUrl}/api/auth/get-session`, {
         headers: { authorization: `Bearer ${data.access_token}` },
+        redirect: "error",
+        credentials: "omit",
+        signal: AbortSignal.timeout(10_000),
       });
       assertCurrentAttempt(attempt);
       if (!session.ok) failCloudLoginIdentity(attempt);
@@ -315,6 +326,8 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       const credentials = {
         serverUrl,
         ...(relayUrl ? { relayUrl } : {}),
+        ...(attempt.serverName ? { serverName: attempt.serverName } : {}),
+        ...(attempt.networkAccess ? { networkAccess: attempt.networkAccess } : {}),
         email,
         userId,
         token: data.access_token,
@@ -347,33 +360,20 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   }
 
   return {
-    async start(serverUrl, relayUrl) {
+    async start(serverUrl) {
       const epoch = await mutateStore(async () => {
         attemptEpoch += 1;
         pending = null;
         return attemptEpoch;
       });
-      const serverInput = serverUrl?.trim() || options.defaultServerUrl?.trim();
-      if (!serverInput) {
-        throw new Error(
-          "No dohc Drive server is configured. Enter your self-hosted server URL.",
-        );
-      }
-      const server = canonicalCloudOrigin(serverInput);
-      if (!server) {
-        throw new Error("The cloud server URL must be an HTTP or HTTPS origin.");
-      }
-      const relayInput = relayUrl?.trim() || options.defaultRelayUrl?.trim();
-      const relay = relayInput ? canonicalCloudOrigin(relayInput) : undefined;
-      if (relayInput && !relay) {
-        throw new Error("The sync relay URL must be an HTTP or HTTPS origin.");
-      }
-      const response = await postJson(`${server}/api/auth/device/code`, {
+      const descriptor = await discoverServer(serverUrl, fetchImpl);
+      if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
+      const response = await postJson(`${descriptor.authUrl}/api/auth/device/code`, {
         client_id: CLIENT_ID,
       });
-      if (attemptEpoch !== epoch) throw new Error("Cloud login was cancelled.");
+      if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
       if (!response.ok) {
-        throw new Error(`Cloud login unavailable (${response.status}) at ${server}`);
+        throw new Error("This server could not start sign-in. Try again or contact its administrator.");
       }
       const data = (await response.json()) as {
         device_code: string;
@@ -381,16 +381,29 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         verification_uri: string;
         verification_uri_complete?: string;
       };
-      if (attemptEpoch !== epoch) throw new Error("Cloud login was cancelled.");
+      if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
+      let verificationUri: URL;
+      try {
+        verificationUri = new URL(data.verification_uri_complete ?? data.verification_uri);
+        if (canonicalCloudOrigin(verificationUri.origin) !== descriptor.authUrl ||
+            verificationUri.username || verificationUri.password || verificationUri.hash ||
+            typeof data.device_code !== "string" || !data.device_code || data.device_code.length > 2048 ||
+            typeof data.user_code !== "string" || !data.user_code || data.user_code.length > 128 ||
+            verificationUri.href.length > 2048) throw new Error("invalid device authorization");
+      } catch {
+        throw new Error("This server returned an invalid sign-in address. Contact its administrator.");
+      }
       pending = {
         epoch,
-        serverUrl: server,
-        ...(relay ? { relayUrl: relay } : {}),
+        serverUrl: descriptor.authUrl,
+        relayUrl: descriptor.relayUrl,
+        ...(descriptor.name ? { serverName: descriptor.name } : {}),
+        ...(descriptor.networkAccess ? { networkAccess: descriptor.networkAccess } : {}),
         deviceCode: data.device_code,
       };
       return {
         userCode: data.user_code,
-        verificationUri: data.verification_uri_complete ?? data.verification_uri,
+        verificationUri: verificationUri.href,
       };
     },
 
@@ -418,6 +431,8 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         email: credentials.email,
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
+        ...(credentials.serverName ? { serverName: credentials.serverName } : {}),
+        ...(credentials.networkAccess ? { networkAccess: credentials.networkAccess } : {}),
       };
     },
 

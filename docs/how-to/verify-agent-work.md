@@ -70,6 +70,7 @@ Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate uses a dedicated Postgres container and requires the normally optional integration suites.
+It also runs the native self-host editing proof with the prepared engine and verifies its complete delivery evidence.
 The Rust gate uses the repository build budget and checks its summary verdict.
 The runner removes its Postgres container by the recorded container ID.
 

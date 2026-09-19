@@ -382,6 +382,24 @@ export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
 export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
 export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
 
+const OWNER_LIVE_SHARE_ID = z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/);
+export const OwnerLiveRefusal = z.object({
+  shareId: OWNER_LIVE_SHARE_ID,
+  paths: z.array(SAFE_RELATIVE_PATH).max(100),
+  code: z.string().min(1).max(128),
+  message: z.string().min(1).max(1024),
+}).strict();
+export type OwnerLiveRefusal = z.infer<typeof OwnerLiveRefusal>;
+export const ListOwnerLiveRefusalsPayload = WorkspaceIdPayload.extend({after: OWNER_LIVE_SHARE_ID.optional()}).strict();
+export type ListOwnerLiveRefusalsPayload = z.infer<typeof ListOwnerLiveRefusalsPayload>;
+export const OwnerLiveRefusalsResult = z.object({
+  refusals: z.array(OwnerLiveRefusal).max(64),
+  nextCursor: OWNER_LIVE_SHARE_ID.nullable(),
+}).strict();
+export type OwnerLiveRefusalsResult = z.infer<typeof OwnerLiveRefusalsResult>;
+export const RetryOwnerLiveSharePayload = WorkspaceIdPayload.extend({shareId: OWNER_LIVE_SHARE_ID}).strict();
+export type RetryOwnerLiveSharePayload = z.infer<typeof RetryOwnerLiveSharePayload>;
+
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
@@ -1204,6 +1222,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.
@@ -3741,7 +3760,7 @@ export type InvokePluginPanelSdkResult = z.infer<
   typeof InvokePluginPanelSdkResult
 >;
 
-// dohc Drive login (device-authorization flow): the desktop shows a short
+// Server login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
 // session token never reaches the renderer — main stores it via safeStorage
 // and the renderer only ever sees connection status + email.
@@ -3751,9 +3770,8 @@ export const OpenExternalUrlPayload = z.object({
 export type OpenExternalUrlPayload = z.infer<typeof OpenExternalUrlPayload>;
 
 export const CloudLoginStartPayload = z.object({
-  serverUrl: z.url().max(2048).optional(),
-  relayUrl: z.url().max(2048).optional(),
-});
+  serverUrl: z.url().max(2048),
+}).strict();
 export type CloudLoginStartPayload = z.infer<typeof CloudLoginStartPayload>;
 
 export const CloudLoginStartResult = z.object({
@@ -3775,10 +3793,11 @@ export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
   connected: z.boolean(),
-  managedCloudStatus: z.enum(["ready", "unconfigured", "invalid"]),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
+  serverName: z.string().max(100).optional(),
+  networkAccess: z.enum(["private", "public"]).optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
   // Whether that remote is pinned to the current signed-in account.
@@ -6013,6 +6032,8 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
+  listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
+  retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
   stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;

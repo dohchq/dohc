@@ -236,6 +236,8 @@ export const CHANNELS = {
   listRelayShareLinks: "desktop:list-relay-share-links",
   ownerRestore: "desktop:owner-restore",
   listOwnerLiveDocuments: "desktop:list-owner-live-documents",
+  listOwnerLiveRefusals: "desktop:list-owner-live-refusals",
+  retryOwnerLiveShare: "desktop:retry-owner-live-share",
   stopOwnerLiveDocument: "desktop:stop-owner-live-document",
   resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",

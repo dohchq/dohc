@@ -114,14 +114,14 @@ async function harness() {
     currentCredentials: () => cache.snapshot().credentials,
     loadAndCacheCurrentCredentials: async () => {
       const loaded = await cache.adoptCurrent(login.credentials);
-      if (!loaded.current) throw new Error("Your dohc Drive session changed. Try again.");
+      if (!loaded.current) throw new Error("Your server session changed. Try again.");
       return loaded.credentials;
     },
     closeAllRelayTransportWorkspaces: closeRelay,
     activity: { stopEngines: stop, enableCloud: enable, getStatus: () => status },
     reconcileCloud: () => { steps.push("reconcile"); },
     notifyCloudSessionChanged: ready, notifyCloudSessionChangedWithKey: changing, notifyRenderer: notify,
-    findWorkspace: (id) => registry.get(id) ?? null, managedCloudConfiguration: { status: "unconfigured" },
+    findWorkspace: (id) => registry.get(id) ?? null,
     engineDaemonStartup: daemonStartup, requireEngineSessions: () => sessions, currentEngineSessions: () => sessions,
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work), withRendererWorkspaceOperation,
     receivedShareEngine: { workspaceForRegistered: (entry) => entry },
@@ -163,8 +163,8 @@ describe("registered cloud handlers", () => {
 
   it("parses login inputs and returns only the public result", async () => {
     const h = await harness();
-    await h.invoke(CHANNELS.cloudLoginStart);
-    expect(h.login.start).toHaveBeenCalledWith(undefined, undefined);
+    await h.invoke(CHANNELS.cloudLoginStart, { serverUrl: credentials.serverUrl });
+    expect(h.login.start).toHaveBeenCalledWith(credentials.serverUrl);
     await expect(h.invoke(CHANNELS.cloudLoginStart, { serverUrl: "invalid" })).rejects.toThrow();
     expect(h.login.start).toHaveBeenCalledOnce();
     h.login.poll.mockResolvedValue({ status: "pending" });
@@ -232,7 +232,7 @@ describe("registered cloud handlers", () => {
     h.login.status.mockResolvedValue({ ...credentials, connected: true });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toEqual({
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
-      relayUrl: credentials.relayUrl, managedCloudStatus: "unconfigured",
+      relayUrl: credentials.relayUrl,
       workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
     });
     h.cache.set({ ...credentials, userId: "other" });

@@ -289,15 +289,16 @@ export function MentionComposer(props: {
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (
-            // The one-line pill. Clicking focuses the real textarea below.
+            // The collapsed prompt stays on one line; clicking focuses the textarea.
             <button
               type="button"
               data-testid={`${props.testIdPrefix}-open`}
               aria-label="Write a post"
+              title={props.placeholder}
               onClick={() => textareaRef.current?.focus()}
-              className="h-9 min-w-0 flex-1 rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted dohc-focus-visible"
+              className="flex h-9 min-w-0 flex-1 items-center rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted dohc-focus-visible"
             >
-              {props.placeholder}
+              <span className="min-w-0 truncate">{props.placeholder}</span>
             </button>
           )}
         </div>

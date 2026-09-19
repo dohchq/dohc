@@ -6,14 +6,15 @@ import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton } from "./ui/controls";
 import { FolderChip, Step } from "./ui/Step";
 
 // "Join a synced workspace": the second-machine half of multi-machine sync.
 // Three real gates, shown as three steps so the whole cost is visible up
 // front: sign in, enter the code from the machine that has the workspace,
-// pick an empty folder. Joining needs a dohc Drive session, so step one
-// embeds the normal sign-in until one exists.
+// pick an empty folder. Joining needs a server session, so step one embeds
+// the normal connect panel until one exists.
 
 type Gate =
   | { kind: "checking" }
@@ -31,7 +32,7 @@ function displayPath(path: string): string {
 export function JoinSyncedWorkspace(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
   onBack: () => void;
-}) {
+} & ConnectionNoticeHost) {
   const [gate, setGate] = useState<Gate>({ kind: "checking" });
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
@@ -172,16 +173,22 @@ export function JoinSyncedWorkspace(props: {
         <div className="flex flex-col">
           <Step
             number={1}
-            title="Sign in to dohc Drive"
+            title="Connect your server"
             state={gate.kind === "signed-in" ? "done" : "current"}
             summary={gate.kind === "signed-in" ? gate.email : undefined}
           >
             {gate.kind === "checking" ? (
-              <p className="m-0 text-xs text-subtle">Checking your dohc Drive connection…</p>
+              <p className="m-0 text-xs text-subtle">Checking your server connection…</p>
             ) : (
               <>
-                <p className="sr-only">Sign in first, then enter the code from your other machine.</p>
-                <CloudLogin onConnected={checkSession} embedded untitled />
+                <p className="sr-only">Connect your server first, then enter the code from your other machine.</p>
+                <CloudLogin
+                  onConnected={checkSession}
+                  embedded
+                  untitled
+                  onConnectionError={props.onConnectionError}
+                  initialServerUrl={props.initialServerUrl}
+                />
               </>
             )}
           </Step>

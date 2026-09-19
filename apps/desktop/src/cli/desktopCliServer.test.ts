@@ -185,7 +185,7 @@ describe("desktop CLI workspace context", () => {
     const result = context.assertMessageWritable({ channelId: "channel" }, "owner");
     const observed = result.catch((error: unknown) => error);
     try { f.setCredentials(null); } finally { held.release(); await observed; }
-    expect(await observed).toMatchObject({ message: expect.stringContaining("Sign in to dohc Drive") });
+    expect(await observed).toMatchObject({ message: expect.stringContaining("Sign in to your server") });
     f.setCredentials(credentials);
     await expect(context.assertMessageWritable({ channelId: "channel" }, "owner")).resolves.toBeUndefined();
     await expect(context.assertMessageWritable({ channelId: "channel" }, "other")).rejects.toThrow("account that joined");
