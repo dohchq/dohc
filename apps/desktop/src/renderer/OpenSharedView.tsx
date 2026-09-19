@@ -1,3 +1,4 @@
+import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-react";
@@ -91,6 +92,7 @@ export function OpenSharedView(props: {
   const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useMouseBackButton(props.onBack);
   const sessionRef = useRequestSequence();
   const folderRequestRef = useRequestSequence();
   const suggestRequestRef = useRequestSequence();

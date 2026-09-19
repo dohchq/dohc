@@ -1,3 +1,4 @@
+import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -29,6 +30,7 @@ function HandoffCard(props: {
   onBack?: () => void;
   children?: ReactNode;
 }) {
+  useMouseBackButton(props.onBack);
   return (
     <div
       data-testid="share-handoff-surface"
