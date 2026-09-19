@@ -369,7 +369,7 @@ export function RunnerSettingsCard(props: {
             selfTest.status === "success" ? "text-success" : "text-danger"
           }`}
         >
-          {selfTest.status === "success" ? selfTest.detail : "Test failed. See Notices."}
+          {selfTest.status === "success" ? selfTest.detail : "Test failed."}
         </p>
       ) : null}
     </section>

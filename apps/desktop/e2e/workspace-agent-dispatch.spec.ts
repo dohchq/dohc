@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
@@ -228,6 +228,48 @@ test("My agent posts a durable failure note when the runner exits silently", asy
     await expect(failureNote.getByTestId("chats-comment-agent-badge")).toHaveCount(0);
     await expect(failureNote.getByTestId("chats-message-author")).toHaveText("dohc");
     await expect(failureNote.getByTestId("chats-message-author")).toHaveAttribute("data-author-kind", "system");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("failed runner tests stay readable above Settings and remain in Notices", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-settings-failure-e2e");
+    await seedRunnerSettings(temp, "silent-fail");
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await page.getByTestId("open-settings").click();
+    await page.getByTestId("settings-nav-agents").click();
+    await page.getByTestId("runner-self-test-button").click();
+    await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");
+    await expect(page.getByTestId("runner-self-test-result")).toHaveText("Test failed.");
+    const reason = "Runner exited before reporting self-test success.";
+    const toast = page.getByTestId("workspace-shell-error");
+    await expect(toast).toContainText(reason);
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await expect.poll(() => toast.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+      })).toBe(true);
+      if (process.env.UI_AUDIT_SHOT_DIR) {
+        await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
+      }
+    }
+    await page.getByTestId("workspace-shell-error-copy").click();
+    await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss workspace error" }).click();
+    await expect(toast).toHaveCount(0);
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(page.getByTestId("notice-center")).toContainText(reason);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

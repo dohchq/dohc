@@ -569,7 +569,7 @@ export function NoticeCenter(props: {
         <div
           data-testid="workspace-shell-error"
           role="alert"
-          className="dohc-popover dohc-pop-in fixed right-3 z-30 flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+          className="dohc-popover dohc-pop-in fixed right-3 z-40 flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
           style={{ bottom: updateToastVisible ? "5.5rem" : "2.25rem" }}
         >
           <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />

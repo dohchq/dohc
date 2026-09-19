@@ -803,7 +803,7 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByTestId("runner-self-test-button"));
 
     const result = await screen.findByRole("alert");
-    expect(result.textContent).toBe("Test failed. See Notices.");
+    expect(result.textContent).toBe("Test failed.");
     expect(onError).toHaveBeenCalledWith("Runner did not report within 120 seconds.");
     expect(screen.getByRole("switch", { name: "Enable chat runner" }).getAttribute(
       "aria-checked",
