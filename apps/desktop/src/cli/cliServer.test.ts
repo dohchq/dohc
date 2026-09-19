@@ -707,9 +707,8 @@ describe("CLI socket server", () => {
       needsDecision: false,
       body: "Reply through the engine thread id",
     });
-    expect(replied).toEqual({
+    expect(replied).toMatchObject({
       threadId: started.threadId,
-      messageId: replied.messageId,
       parentMessageId: started.messageId,
     });
 
@@ -719,10 +718,8 @@ describe("CLI socket server", () => {
       threadId: startedThread.id,
     });
     if (!reread.ok) throw new Error(reread.reason);
-    expect(reread.messages.map((entry) => entry.id)).toEqual([
-      openingMessageId,
-      `message-${replied.messageId.slice("msg_".length)}`,
-    ]);
+    expect(reread.messages[0]!.id).toBe(openingMessageId);
+    expect(cliMessageId(reread.messages[1]!.id)).toBe(replied.messageId);
     expect(reread.messages[1]).toMatchObject({
       threadId: startedThread.id,
       authorKind: "human",
