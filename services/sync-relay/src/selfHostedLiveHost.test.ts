@@ -84,6 +84,22 @@ it("keeps the working daemon when the next configuration fails validation", asyn
   expect(first.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeDefined();
 });
 
+it("retries runtime checks without rescanning unchanged shares and rescans after owner writes", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  const scans = vi.spyOn(f.storage, "scanServiceHostCandidateShares");
+  const identity = vi.spyOn(f.storage, "verifyWorkspaceIdentity");
+  f.host.reconcile();
+  await vi.waitFor(() => expect(identity).toHaveBeenCalled(), {timeout: 3_000});
+  expect(scans).not.toHaveBeenCalled();
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalled(), {timeout: 3_000});
+  expect(scans).toHaveBeenCalled();
+  scans.mockClear();
+  f.storage.enrollServiceHostDocument(f.input);
+  await f.waitStarted(2);
+  expect(scans).toHaveBeenCalled();
+});
+
 it("pauses the final document without restarting it and closes owned daemons", async () => {
   const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});

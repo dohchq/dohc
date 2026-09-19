@@ -39,6 +39,7 @@ export async function startSelfHostedLiveHost(options: {
   let current: Host | undefined, closing = false, active: Promise<void> | undefined, timer: ReturnType<typeof setTimeout> | undefined;
   let signature = "", lastError: unknown, requested = false;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
+  let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
   const lifetime = new AbortController();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
@@ -62,7 +63,11 @@ export async function startSelfHostedLiveHost(options: {
     requested = false;
     try {
       signal.throwIfAborted();
-      discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
+      if (discoveryCursor || scannedGeneration !== writeGeneration) {
+        if (!discoveryCursor) scanGeneration = writeGeneration;
+        discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
+        if (!discoveryCursor) scannedGeneration = scanGeneration;
+      }
       const rows = selection(), next = selectionSignature(rows);
       if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) return;
       const grouped = new Map<string, ServiceHostEnrollment>();
@@ -102,7 +107,7 @@ export async function startSelfHostedLiveHost(options: {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     }
   }
-  const stopWatching = observeRelayWrites(storage, schedule);
+  const stopWatching = observeRelayWrites(storage, () => {writeGeneration++; schedule();});
   const retry = setInterval(schedule, 2_000); retry.unref();
   schedule();
   return {
