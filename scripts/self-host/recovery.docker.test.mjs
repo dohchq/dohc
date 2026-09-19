@@ -27,6 +27,12 @@ test("Docker cold repair and private deployment archive", { skip: !process.env.D
     "--mount", `type=bind,source=${resolve("services/sync-relay/dist/relay-deployment.js")},target=${commandPath},readonly`,
     "--entrypoint", "node", image];
   const command = (...args) => docker([...common, commandPath, ...args]);
+  function returnScratchOwnership() {
+    if (!process.getuid) return;
+    docker(["run", "--rm", "--network", "none", "--user", "0:0",
+      "--mount", `type=bind,source=${scratch},target=/backup`, "--entrypoint", "chown",
+      image, "-R", `${process.getuid()}:${process.getgid()}`, "/backup"]);
+  }
   try {
     for (const volume of volumes) {
       docker(["volume", "create", "--label", `dohc.recovery-proof=${owner}`, volume]);
@@ -40,6 +46,7 @@ test("Docker cold repair and private deployment archive", { skip: !process.env.D
     command("provision-service", "--config", "/continuity/deployment.json", "--host-id", "proof-host");
     command("check-backup", "--config", "/continuity/deployment.json", "--directory", "/backup/snapshot");
     command("salvage", "--directory", "/backup/snapshot", "--output", "/backup/salvage");
+    returnScratchOwnership();
     assert.equal(JSON.parse(await readFile(join(scratch, "salvage/recovery.json"), "utf8")).complete, true);
     const envFile = join(scratch, "deployment.env");
     await writeFile(envFile, "PRIVATE_PROOF_SECRET=archive-preserves-it\n", { mode: 0o600 });
@@ -61,6 +68,7 @@ test("Docker cold repair and private deployment archive", { skip: !process.env.D
       assert.equal(inspection.Labels?.["dohc.recovery-proof"], owner);
       docker(["volume", "rm", volume]);
     }
+    returnScratchOwnership();
     await rm(scratch, { recursive: true, force: true });
   }
 });

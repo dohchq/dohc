@@ -11,11 +11,12 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
-function runner({ failMaintenance = false, foreign = false } = {}) {
+function runner({ failMaintenance = false, foreign = false, missingVolume = false } = {}) {
   const calls = [];
   return { calls, run(args) {
     calls.push(args);
     if (args.includes("config")) return JSON.stringify(config);
+    if (args[0] === "volume" && args[1] === "inspect" && missingVolume) throw new Error("missing deployment volume");
     if (args[0] === "ps") return foreign ? "foreign-container\n" : "";
     if (args[0] === "inspect") return JSON.stringify([{ Mounts: [{ Type: "volume", Name: "recovery_data" }], Config: { Labels: { "com.docker.compose.project": "other" } } }]);
     if (args.includes("ps")) return "sync-relay\nshare-web\n";
@@ -28,7 +29,36 @@ test("backup stops before maintenance and resumes only previously running servic
   const root = await fixture(t), mock = runner();
   await runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]);
   assert.ok(mock.calls.findIndex(args => args.includes("stop")) < mock.calls.findIndex(args => args.includes("run")));
+  assert.ok(mock.calls.findIndex(args => args[0] === "volume" && args[1] === "inspect") < mock.calls.findIndex(args => args.includes("stop")));
   assert.deepEqual(mock.calls.at(-1), ["compose", "start", "sync-relay", "share-web"]);
+});
+
+test("missing deployment volumes refuse every maintenance operation before stop", async t => {
+  const root = await fixture(t);
+  for (const action of ["backup", "check-backup", "restore", "archive"]) {
+    const directory = join(root, action);
+    if (["check-backup", "restore"].includes(action)) await mkdir(directory);
+    const mock = runner({ missingVolume: true });
+    await assert.rejects(runRecovery(parseRecoveryArguments([action, directory]), mock.run, () => {}, ["compose"]), /missing deployment volume/);
+    assert.equal(mock.calls.some(args => args.includes("stop") || args.includes("run") || args.includes("start")), false);
+  }
+});
+
+test("ambiguous bind-mount parents are refused before Docker changes", async t => {
+  const root = await fixture(t);
+  for (const parent of ["colon:parent", "comma,parent"]) {
+    const mock = runner();
+    await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, parent, "snapshot")]), mock.run, () => {}, ["compose"]), /parent must not contain/);
+    assert.deepEqual(mock.calls, []);
+  }
+});
+
+test("archive failure after stop never restarts services", async t => {
+  const root = await fixture(t), mock = runner();
+  const options = parseRecoveryArguments(["archive", join(root, "archive"), "--env-file", join(root, "missing.env")]);
+  await assert.rejects(runRecovery(options, mock.run, () => {}, ["compose"]), /ENOENT/);
+  assert.equal(mock.calls.some(args => args.includes("stop")), true);
+  assert.equal(mock.calls.some(args => args.includes("start")), false);
 });
 test("restore and failed maintenance remain stopped", async t => {
   const root = await fixture(t), directory = join(root, "snapshot");

@@ -18,6 +18,11 @@ async function canonical(path: string): Promise<void> {
     throw new Error("Use absolute recovery paths without symbolic links.");
   }
 }
+async function syncPath(path: string, directory = false): Promise<void> {
+  if (directory && process.platform === "win32") return;
+  const handle = await open(path, process.platform === "win32" ? "r+" : "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
 
 /** Export ordinary settled files. The original snapshot remains evidence, never active authority. */
 export async function salvageRelayContent(directory: string, output: string): Promise<{ exported: number; skipped: number }> {
@@ -38,10 +43,12 @@ export async function salvageRelayContent(directory: string, output: string): Pr
   await mkdir(output, { mode: 0o700 });
   const evidence = join(output, "evidence");
   await mkdir(evidence, { mode: 0o700 });
+  const directories = new Set([output, evidence]);
   const snapshot = join(evidence, "relay.sqlite");
   await copyFile(source, snapshot, constants.COPYFILE_EXCL);
   if (await fileDigest(snapshot) !== manifest.sha256) throw new Error("The snapshot checksum changed. Partial output remains for inspection.");
-  await writeFile(join(evidence, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+  await syncPath(snapshot);
+  await writeFile(join(evidence, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600, flush: true });
   const db = new DatabaseSync(snapshot, { readOnly: true });
   const inventory = await open(join(output, "files.jsonl"), "wx", 0o600);
   let exported = 0, skipped = 0;
@@ -67,7 +74,8 @@ export async function salvageRelayContent(directory: string, output: string): Pr
         const destination = join(output, base, path);
         try {
           await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-          await writeFile(destination, blob!.content as Uint8Array, { flag: "wx", mode: 0o600 });
+          for (let parent = dirname(destination); parent !== output; parent = dirname(parent)) directories.add(parent);
+          await writeFile(destination, blob!.content as Uint8Array, { flag: "wx", mode: 0o600, flush: true });
           exported++;
           await inventory.write(JSON.stringify({ ...record, exportedPath: `${base}/${path}` }) + "\n");
         } catch (error) {
@@ -80,15 +88,20 @@ export async function salvageRelayContent(directory: string, output: string): Pr
     }
     await inventory.sync();
   } finally { await inventory.close(); db.close(); }
+  for (const directory of [...directories].sort((a, b) => b.length - a.length)) await syncPath(directory, true);
+  await syncPath(dirname(output), true);
   await writeFile(join(output, "recovery.json"), JSON.stringify({
     version: 1, kind: "dohc-offline-content-salvage", complete: true, exported, skipped,
     source: manifest, createdAt: new Date().toISOString(),
     limitations: [
       "Only settled tracked file contents present in this snapshot are materialized.",
-      "Live edits not settled into relay file state, protected files, chats, discussions, history and app responses are not imported.",
+      "Accepted app responses stored as tracked files are included; app collection records are not imported.",
+      "Live edits not settled into relay file state, protected files, chats, discussions and history are not imported.",
       "The evidence directory retains the original private database, including historical content and credentials. Keep it offline.",
       "No workspace identity, permissions, shares, sessions or live-edit authority are restored. Create a new local workspace from selected recovered files.",
     ],
   }, null, 2) + "\n", { flag: "wx", mode: 0o600, flush: true });
+  await syncPath(output, true);
+  await syncPath(dirname(output), true);
   return { exported, skipped };
 }

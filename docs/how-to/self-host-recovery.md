@@ -45,7 +45,8 @@ Do not make the backup directory publicly readable or writable.
 
 The command stops the selected Compose project before taking the snapshot.
 It resumes only services that were running before a successful snapshot.
-A failed operation leaves services stopped for inspection.
+Preflight failures leave running services unchanged.
+Failures after the services stop leave them stopped for inspection.
 The snapshot contains `relay.sqlite` and `manifest.json`.
 Keep both files together.
 Protect snapshot storage against unauthorized writes as well as reads.
@@ -135,7 +136,8 @@ Recreate accounts and sharing deliberately on a fresh server if needed.
 
 Salvage exports settled tracked files present in the snapshot's current file state.
 It reports missing blobs, invalid checksums and unsupported paths as skipped entries.
-It does not import protected files, unsettled live edits, chats, discussions, history or app responses.
+Accepted app responses stored as tracked files are included.
+It does not import app collection records, protected files, unsettled live edits, chats, discussions or history.
 The `evidence` directory retains the original private SQLite snapshot unchanged.
 Keep that evidence offline; it includes credentials and historical content.
 Do not attach or serve the evidence database.

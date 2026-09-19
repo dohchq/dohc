@@ -49,8 +49,9 @@ export async function recoveryComposeArgs(options) {
 
 export async function runRecovery(options, run = docker, log = console.log, composePrefix) {
   const parent = dirname(options.directory), name = basename(options.directory);
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name) || parent.includes(",")) {
-    throw new Error("Use a backup directory name containing letters, numbers, dots, underscores or hyphens; its parent must not contain commas.");
+  const mountParent = process.platform === "win32" ? parent.replace(/^[a-zA-Z]:/, "") : parent;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name) || parent.includes(",") || mountParent.includes(":")) {
+    throw new Error("Use a backup directory name containing letters, numbers, dots, underscores or hyphens; its parent must not contain commas or colons except a Windows drive prefix.");
   }
   if (options.action === "backup" || options.action === "archive") {
     if (await stat(options.directory).then(() => true, error => { if (error.code === "ENOENT") return false; throw error; })) {
@@ -65,6 +66,7 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     throw new Error("This command requires the supported self-host deployment layout.");
   }
   const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
+  if (volumeNames.size) run(["volume", "inspect", ...volumeNames]);
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
   const runningIds = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
   if (runningIds.length) {
