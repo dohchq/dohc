@@ -698,10 +698,12 @@ export function ProductDemo() {
             onHideWorkspaceError={hideShellError}
             onDismissWorkspaceError={dismissShellError}
           />
-          <Cloud size={12} aria-hidden />
-          Connect sync
-          <GitBranch size={12} aria-hidden /> Main
-          <Settings size={12} aria-hidden /> Settings
+          <span className="demo-status-details">
+            <Cloud size={12} aria-hidden />
+            Connect sync
+            <GitBranch size={12} aria-hidden /> Main
+            <Settings size={12} aria-hidden /> Settings
+          </span>
         </span>
       </footer>
     </div>
