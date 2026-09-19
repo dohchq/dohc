@@ -12,6 +12,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type {
   BinaryFileData,
@@ -30,6 +31,16 @@ import {
 } from "./collab/excalidrawPresence";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
+function readTheme(): "light" | "dark" {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function subscribeTheme(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributeFilter: ["data-theme"] });
+  return () => observer.disconnect();
+}
+
 export type ExcalidrawCanvasProps = {
   document: ExcalidrawDocument;
   readOnly: boolean;
@@ -42,6 +53,7 @@ export type ExcalidrawCanvasProps = {
 };
 
 export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
+  const theme = useSyncExternalStore(subscribeTheme, readTheme);
   const sceneBinding = useMemo(
     () => (props.sceneDoc ? new ExcalidrawSceneBinding(props.sceneDoc) : null),
     [props.sceneDoc],
@@ -246,6 +258,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
       <Excalidraw
         key={sceneDocGeneration.current}
         initialData={initial.scene}
+        theme={theme}
         isCollaborating={presenceBound}
         onPointerUpdate={
           presenceBound

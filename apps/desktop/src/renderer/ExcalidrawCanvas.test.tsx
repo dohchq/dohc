@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const excalidraw = vi.hoisted(() => ({
@@ -30,6 +30,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
   Excalidraw: (props: {
     viewModeEnabled?: boolean;
     autoFocus?: boolean;
+    theme?: "light" | "dark";
     onLinkOpen?: (
       element: { id: string; link: string },
       event: { preventDefault(): void },
@@ -46,6 +47,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
         data-testid="mock-upstream-excalidraw"
         data-read-only={String(props.viewModeEnabled)}
         data-auto-focus={String(props.autoFocus)}
+        data-theme={props.theme}
         onClick={() =>
           props.onChange?.(
             [{ id: "image-1", type: "image", fileId: "file-1" }],
@@ -86,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete globalThis.document.documentElement.dataset.theme;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -98,6 +101,26 @@ describe("ExcalidrawCanvas", () => {
     appState: {},
     files: {},
   };
+
+  it.each([false, true])(
+    "follows the app theme without remounting (readOnly=%s)",
+    async (readOnly) => {
+      globalThis.document.documentElement.dataset.theme = "dark";
+      const onChange = vi.fn();
+      render(
+        <ExcalidrawCanvas document={document} readOnly={readOnly} onChange={onChange} />,
+      );
+      const canvas = screen.getByTestId("mock-upstream-excalidraw");
+      expect(canvas.dataset.theme).toBe("dark");
+
+      for (const theme of ["light", "dark"]) {
+        globalThis.document.documentElement.dataset.theme = theme;
+        await waitFor(() => expect(canvas.dataset.theme).toBe(theme));
+        expect(screen.getByTestId("mock-upstream-excalidraw")).toBe(canvas);
+      }
+      expect(onChange).not.toHaveBeenCalled();
+    },
+  );
 
   it("serializes the embedded files returned with a scene change", () => {
     const onChange = vi.fn();
