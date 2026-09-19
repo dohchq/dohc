@@ -60,6 +60,7 @@ button {
 
 .demo-window {
   display: grid;
+  contain: layout paint;
   grid-template-rows: 40px minmax(0, 1fr) 25px;
   width: 100%;
   height: 100%;
