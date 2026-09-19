@@ -373,6 +373,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       if (page === 7) throw new Error("Owner pull exceeded its eight-page bound.");
     }
     expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(expected);
+    expect(readFileSync(join(ownerRoot, "docs/a.md"), "utf8")).toBe(expected);
     results.settledAndPublished = {settled, markdownDigest: hash(Buffer.from(expected)), ordinaryOwnerReadMatched: true};
     provider.close(); provider.doc.destroy(); providers.length = 0;
     await supervisor!.close(); supervisor = undefined; active = undefined;
