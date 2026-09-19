@@ -266,6 +266,36 @@ describe("share handoff delivery", () => {
 });
 
 describe("share handoff runtime registration", () => {
+  it.each([true, false])("leaves the OS handler untouched for isolated QA (defaultApp=%s)", (defaultApp) => {
+    const setAsDefaultProtocolClient = vi.fn(() => true);
+    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      defaultApp,
+      execPath: "dohc.exe",
+      argv: ["dohc.exe", "--dohc-isolated-test", `--user-data-dir=${resolve("isolated-profile")}`],
+    })).toBe(false);
+    expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
+  });
+
+  it.each([[], ["--user-data-dir=relative"], ["--user-data-dir="],
+    [`--user-data-dir=${resolve("one")}`, `--user-data-dir=${resolve("two")}`],
+  ])("rejects an isolated launch without one absolute profile: %j", (...profileArgs) => {
+    const setAsDefaultProtocolClient = vi.fn(() => true);
+    expect(() => registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      execPath: "dohc.exe",
+      argv: ["dohc.exe", "--dohc-isolated-test", ...profileArgs],
+    })).toThrow("one absolute --user-data-dir");
+    expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
+  });
+
+  it("keeps protocol registration for a normal launch with a custom profile", () => {
+    const setAsDefaultProtocolClient = vi.fn(() => true);
+    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
+      execPath: "dohc.exe",
+      argv: ["dohc.exe", `--user-data-dir=${resolve("custom-profile")}`],
+    })).toBe(true);
+    expect(setAsDefaultProtocolClient).toHaveBeenCalledWith("dohc");
+  });
+
   it("registers the development entry with Electron's exact argument shape", () => {
     const calls: unknown[][] = [];
     const registrar = {

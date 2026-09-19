@@ -1,4 +1,4 @@
-import { resolve, join } from 'node:path';
+import { resolve, join, isAbsolute } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 
 export const usage = 'node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs 3] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario full|startup|switches|small-switch|small-tab] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]';
@@ -48,6 +48,12 @@ export async function createEvidenceDirectory(output) {
   // The final mkdir is exclusive: two invocations cannot share a profile.
   await mkdir(resolve(output, '..'), { recursive: true });
   await mkdir(output);
+}
+
+export function packagedLaunchArgs(profile, diagnosticArgs = []) {
+  if (!isAbsolute(profile)) throw Error('A packaged rehearsal requires an absolute profile path');
+  return [`--user-data-dir=${profile}`, '--dohc-isolated-test', '--remote-debugging-port=0',
+    '--remote-debugging-address=127.0.0.1', '--enable-logging', ...diagnosticArgs];
 }
 
 export function benchmarkEnvironment(inherited, updateUrl) {

@@ -1,5 +1,5 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
-import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, usage } from './packaged-benchmark-options.mjs';
+import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -153,7 +153,7 @@ async function launch(runDir, fixture, phase) {
   const started = performance.now();
   const startedAt = Date.now();
   cancellation.signal.throwIfAborted();
-  const child = spawn(binary, [`--user-data-dir=${fixture.profile}`, '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--enable-logging', ...profileArgs], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
   const launchStages = { spawnReturnedObservedMs: performance.now() - started };
   let logs = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { logs += chunk; });

@@ -85,5 +85,10 @@ node tools/perf-profiling/packaged-benchmark.mjs `
 
 Use a new output directory. Read its `result.json` before recording a pass.
 The benchmark checks startup, editing, disk persistence, and restart. It does
-not run an installer or install an update. Keep its evidence until review ends,
+not run an installer or install an update. It supplies an isolated profile and
+`--dohc-isolated-test` so the app leaves the installed share-link handler alone.
+Only use builds that implement this flag. The updater checks a loopback feed
+with no newer release or downloadable package.
+
+Keep its evidence until review ends,
 then follow the [cleanup procedure](../../.agents/skills/workspace-cleanup/SKILL.md).

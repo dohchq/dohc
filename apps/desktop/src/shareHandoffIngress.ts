@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { canonicalRelayUrl } from "./workspaces/syncCode";
 
 const SHARE_HANDOFF_SCHEME = "dohc";
@@ -164,6 +164,14 @@ export function registerShareHandoffProtocol(
   registrar: ProtocolClientRegistrar,
   runtime: ProtocolRuntime,
 ): boolean {
+  if (runtime.argv.includes("--dohc-isolated-test")) {
+    const profiles = runtime.argv.filter((argument) => argument.startsWith("--user-data-dir="));
+    if (profiles.length !== 1 || !isAbsolute(profiles[0]!.slice("--user-data-dir=".length))) {
+      throw new Error("An isolated desktop test requires one absolute --user-data-dir path.");
+    }
+    // QA must not replace the installed app's OS-level share-link handler.
+    return false;
+  }
   if (runtime.defaultApp) {
     const appEntry = runtime.argv[1];
     if (!appEntry) return false;
