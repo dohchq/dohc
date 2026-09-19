@@ -2200,6 +2200,7 @@ export function DesktopWorkspaceShell(props: {
   const chatEditors = useChatEditorTabs({
     workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
     paths: chatPaths,
+    activePaths: wb.editorGroups.flatMap((group) => group.activeTab ? [group.activeTab] : []),
     enabled: captureAvailable,
     agentName: agentSetup?.agentName,
   });
@@ -2242,12 +2243,13 @@ export function DesktopWorkspaceShell(props: {
         isCurrent: () =>
           dmNavigationRequest.current.workspaceId === request.workspaceId &&
           dmNavigationRequest.current.sequence === request.sequence,
-        // Canonicalization failure deliberately clears any prior DM/thread
-        // target. Merely reopening the Chats tab would preserve stale chatsNav.
         open: openChatsNavInTab,
+        onUnavailable: (error) => reportShellError(
+          "Could not open this conversation.", error, () => void openCanonicalDmInTab(locator),
+        ),
       });
     },
-    [openChatsNavInTab, workspaceId],
+    [openChatsNavInTab, reportShellError, workspaceId],
   );
   // The one way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
@@ -4162,8 +4164,8 @@ export function DesktopWorkspaceShell(props: {
     workspacePath: props.workspace.rootPath,
   } as const;
   // The panel intentionally stays on the overview and only selects editor
-  // destinations. While the Chats editor is active, the page instance owns the
-  // live surface: disable the navigator's collaboration transport so it cannot
+  // destinations. Active chat pages own the live conversations: disable the
+  // navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
   // conversation does not double every chat read (D2#6). The page's landed
   // reads still reach the navigator through their local-thread and DM
@@ -4172,8 +4174,8 @@ export function DesktopWorkspaceShell(props: {
     isChatsTabPath(group.activeTab),
   );
   // The panel is a navigator, like the Explorer: it lists Home, the groups,
-  // people and agents, and every click opens that conversation in the Chats
-  // tab. It never shows a conversation itself, so it holds no presence lease
+  // people and agents, and every click opens that conversation's editor tab.
+  // It never shows a conversation itself, so it holds no presence lease
   // and never seeds or reports a destination.
   const chatsNavigatorProps = {
     workspaceId,
@@ -4963,7 +4965,9 @@ export function DesktopWorkspaceShell(props: {
                   <LazyChatsView
                     key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
                     {...chatsViewProps}
-                    {...chatEditors.get(tabPath)}
+                    onNavChange={chatEditors.get(tabPath).onNavChange}
+                    onNavCommand={chatEditors.get(tabPath).onNavCommand}
+                    onDraftsChange={chatEditors.get(tabPath).onDraftsChange}
                     initialNav={chatEditors.get(tabPath).nav}
                     initialDrafts={chatEditors.get(tabPath).drafts}
                     editorTabPath={tabPath}

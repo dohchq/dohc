@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import { parseChatTabPath } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
-import { chatEditorPath, chatEditorTitle, chatsNavigationChangesDestination, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
+import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
 type ChatEditor = {
   nav: ChatsNav | undefined;
   drafts: ChatsDrafts | undefined;
   revision: number;
   generation: number;
+  restored: boolean;
   onNavChange: (nav: ChatsNav) => void;
   onNavCommand: (nav: ChatsNav) => void;
   onDraftsChange: (drafts: ChatsDrafts) => void;
@@ -21,6 +22,7 @@ export function useChatEditorTabs(input: {
   onOpen: (path: string) => void;
   onNavigate: () => void;
   paths: readonly string[];
+  activePaths?: readonly string[];
   enabled: boolean;
   agentName?: string;
 }) {
@@ -31,20 +33,24 @@ export function useChatEditorTabs(input: {
     store.current = { workspaceId: input.workspaceId, entries: new Map() };
   }
   const [revision, render] = useState(0);
-  const session = useRef({ key: undefined as string | null | undefined, generation: 0 });
+  const session = useRef({ key: undefined as string | null | undefined, generation: 0, ready: true });
+  const [sessionRevision, refreshSession] = useState(0);
   useEffect(() => {
-    if (!input.enabled) return;
-    return bridge().onCloudSessionChanged(({ sessionKey }) => {
-      if (session.current.key === sessionKey) return;
-      session.current = { key: sessionKey, generation: session.current.generation + 1 };
-      for (const path of store.current.entries.keys()) {
-        const kind = parseChatTabPath(path)?.kind;
-        if (kind !== "dm" && kind !== "new") continue;
-        store.current.entries.delete(path);
+    return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
+      session.current.ready = phase === "ready";
+      if (session.current.key !== sessionKey) {
+        session.current.key = sessionKey;
+        session.current.generation += 1;
+        for (const path of store.current.entries.keys()) {
+          const kind = parseChatTabPath(path)?.kind;
+          if (kind !== "dm" && kind !== "new") continue;
+          store.current.entries.delete(path);
+        }
+        render((value) => value + 1);
       }
-      render((value) => value + 1);
+      refreshSession((value) => value + 1);
     });
-  }, [input.enabled, input.workspaceId]);
+  }, [input.workspaceId]);
   const get = useCallback((path: string): ChatEditor => {
     const owner = store.current;
     const existing = owner.entries.get(path);
@@ -54,11 +60,10 @@ export function useChatEditorTabs(input: {
       drafts: undefined,
       revision: 0,
       generation: session.current.generation,
+      restored: false,
       onNavChange(nav) {
         if (store.current !== owner || owner.entries.get(path) !== entry || entry.nav === nav) return;
-        const changed = chatsNavigationChangesDestination(entry.nav ?? null, nav);
         entry.nav = nav;
-        if (changed) callbacks.current.onNavigate();
         render((value) => value + 1);
       },
       onNavCommand(nav) {
@@ -90,16 +95,21 @@ export function useChatEditorTabs(input: {
     }
     callbacks.current.onOpen(path);
   }, [get]);
+  // Mounted pages resolve their own destinations. Hydrate only hidden tabs.
+  const pathsKey = JSON.stringify(input.paths.filter((path) => !input.activePaths?.includes(path)));
   useEffect(() => {
-    if (!input.enabled) return;
+    if (!input.enabled || !session.current.ready) return;
     const owner = store.current;
     const generation = session.current.generation;
     let cancelled = false;
-    const targets = input.paths
-      .filter((path) => !get(path).nav)
+    const paths: string[] = JSON.parse(pathsKey);
+    const targets = paths
+      .filter((path) => !get(path).nav && !get(path).restored)
       .map((path) => ({ path, target: parseChatTabPath(path) }));
-    const remember = (path: string, nav: ChatsNav) => {
-      if (cancelled || store.current !== owner || session.current.generation !== generation || get(path).nav) return;
+    const remember = (path: string, nav?: ChatsNav) => {
+      if (cancelled || store.current !== owner || !session.current.ready || session.current.generation !== generation || get(path).nav) return;
+      get(path).restored = true;
+      if (!nav) return;
       get(path).nav = nav;
       render((value) => value + 1);
     };
@@ -108,7 +118,7 @@ export function useChatEditorTabs(input: {
         for (const { path, target } of targets) {
           if (target?.kind !== "channel") continue;
           const channel = channels.find((entry) => entry.id === target.id);
-          if (channel) remember(path, { level: "channel", channel });
+          remember(path, channel ? { level: "channel", channel } : undefined);
         }
       }).catch(() => undefined);
     }
@@ -117,12 +127,12 @@ export function useChatEditorTabs(input: {
         for (const { path, target } of targets) {
           if (target?.kind !== "dm") continue;
           const dm = dms.find((entry) => entry.channelId === target.id);
-          if (dm) remember(path, { level: "dm", dm });
+          remember(path, dm ? { level: "dm", dm } : undefined);
         }
       }).catch(() => undefined);
     }
     return () => { cancelled = true; };
-  }, [get, input.enabled, input.paths, input.workspaceId]);
+  }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   const titles = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
       [path, chatEditorTitle(entry.nav!, input.agentName)] as const),

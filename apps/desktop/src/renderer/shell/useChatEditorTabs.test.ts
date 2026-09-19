@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatEditorTabs } from "./useChatEditorTabs";
 import { chatEditorPath } from "./chatsNav";
 import { chatTabPath } from "../workbench/workbenchState";
@@ -25,9 +25,76 @@ const thread: ChatsNav = { level: "thread", channel: general.channel, thread: {
   updatedAtMs: 0, messageCount: 1, lastReadSequence: 0, unreadCount: 1,
 } };
 
+beforeEach(() => vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {} }));
+afterEach(() => vi.unstubAllGlobals());
+
 describe("chat editor tabs", () => {
+  it("leaves active destinations to their mounted pages", () => {
+    const syncDms = vi.fn();
+    const listChatChannels = vi.fn();
+    vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
+    const paths = [chatEditorPath(dm), chatEditorPath(general)];
+    renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths, activePaths: paths, enabled: true,
+    }));
+    expect(syncDms).not.toHaveBeenCalled();
+    expect(listChatChannels).not.toHaveBeenCalled();
+  });
+
+  it("purges account state while disabled and restores titles only after the session is ready", async () => {
+    let changeSession: (event: { sessionKey: string; phase: "changing" | "ready" }) => void = () => {};
+    const syncDms = vi.fn().mockResolvedValue({ available: true, dms: [{ ...dm.dm, peerLabel: "New account" }] });
+    vi.stubGlobal("dohcDesktop", {
+      onCloudSessionChanged: (listener: typeof changeSession) => { changeSession = listener; return () => {}; }, syncDms,
+    });
+    const path = chatEditorPath(dm);
+    const { result, rerender } = renderHook(({ enabled }) => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled,
+    }), { initialProps: { enabled: false } });
+    act(() => result.current.open(dm));
+    const stale = result.current.get(path);
+    act(() => stale.onDraftsChange(draft));
+    act(() => changeSession({ sessionKey: "next", phase: "changing" }));
+    rerender({ enabled: true });
+    expect(result.current.get(path).drafts).toBeUndefined();
+    expect(syncDms).not.toHaveBeenCalled();
+    act(() => changeSession({ sessionKey: "next", phase: "ready" }));
+    await waitFor(() => expect(result.current.titles.get(path)).toBe("New account"));
+    expect(result.current.get(path).drafts).toBeUndefined();
+  });
+
+  it("does not repeatedly hydrate missing chats when tabs change", async () => {
+    const syncDms = vi.fn().mockResolvedValue({ available: true, dms: [] });
+    const listChatChannels = vi.fn().mockResolvedValue({ channels: [], fileThreads: [] });
+    vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
+    const paths = [chatEditorPath(dm), chatEditorPath(general)];
+    const { result, rerender } = renderHook(({ paths }) => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate: vi.fn(), paths, enabled: true,
+    }), { initialProps: { paths } });
+    await act(async () => {});
+    expect(result.current.get(paths[0]!).restored).toBe(true);
+    rerender({ paths: [...paths] });
+    rerender({ paths: [...paths, chatEditorPath({ level: "feed" })] });
+    await act(async () => {});
+    expect(syncDms).toHaveBeenCalledTimes(1);
+    expect(listChatChannels).toHaveBeenCalledTimes(1);
+  });
+
+  it("only user commands cancel a pending navigation, not reports from another live editor", () => {
+    const onNavigate = vi.fn();
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", onOpen: vi.fn(), onNavigate, paths: [], enabled: false,
+    }));
+    act(() => { result.current.open(general); result.current.open(dm); });
+    onNavigate.mockClear();
+    act(() => result.current.get(chatEditorPath(general)).onNavChange(thread));
+    expect(onNavigate).not.toHaveBeenCalled();
+    act(() => result.current.get(chatEditorPath(dm)).onNavCommand(dm));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+
   it("clears hidden DM drafts on account changes and ignores callbacks from the old editor", () => {
-    let changeSession: (event: { sessionKey: string | null }) => void = () => {};
+    let changeSession: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void = () => {};
     vi.stubGlobal("dohcDesktop", {
       onCloudSessionChanged: (listener: typeof changeSession) => { changeSession = listener; return () => {}; },
     });
@@ -37,7 +104,7 @@ describe("chat editor tabs", () => {
     act(() => result.current.open(dm));
     const old = result.current.get(chatEditorPath(dm));
     act(() => old.onDraftsChange(draft));
-    act(() => changeSession({ sessionKey: "new-account" }));
+    act(() => changeSession({ sessionKey: "new-account", phase: "changing" }));
     act(() => { old.onNavChange(dm); old.onDraftsChange(draft); });
     const current = result.current.get(chatEditorPath(dm));
     expect(current).not.toBe(old);

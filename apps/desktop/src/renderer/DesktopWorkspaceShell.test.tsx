@@ -6343,6 +6343,27 @@ describe("ui-state merge-on-load", () => {
     chatsVisible: false,
   };
 
+  it("keeps Home open when a DM link cannot resolve and offers a retry", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
+    renderShell(bridge);
+    await screen.findByTestId("chats-personal-feed");
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
+    const rows = await screen.findAllByTestId("graph-file-row");
+    const callsBefore = bridge.syncDms.mock.calls.length;
+    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
+    await waitFor(() => expect(bridge.syncDms.mock.calls.length).toBe(callsBefore + 1));
+    await act(async () => bridge.syncAnswers.at(-1)!(dmSyncResult([])));
+    expect(await screen.findByTestId("workspace-shell-error-retry")).toBeTruthy();
+    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+    expect(screen.getByTestId("chats-personal-feed")).toBeTruthy();
+    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await act(async () => bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM])));
+    expect(await screen.findByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeTruthy();
+  });
+
   // The Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
   // pending DM lookup synchronously in the click — the passive nav report is
   // an effect that flushes after the microtask queue, so a DM answer landing

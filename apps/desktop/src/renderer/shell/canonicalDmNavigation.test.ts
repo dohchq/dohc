@@ -101,6 +101,7 @@ describe("targeted chat navigation", () => {
       syncDms: async () => ({ available: true, dms: [dm] }),
       isCurrent: () => true,
       open,
+      onUnavailable: vi.fn(),
     });
 
     expect(open).toHaveBeenCalledWith({
@@ -139,6 +140,7 @@ describe("targeted chat navigation", () => {
       syncDms: async () => ({ available: false, dms: [dm] }),
       isCurrent: () => true,
       open,
+      onUnavailable: vi.fn(),
     });
 
     expect(open).toHaveBeenCalledWith({ level: "dm", dm });
@@ -170,6 +172,7 @@ describe("targeted chat navigation", () => {
       syncDms: () => delayed.promise,
       isCurrent: () => current,
       open,
+      onUnavailable: vi.fn(),
     });
 
     // Models the centralized workbench mutation invalidation used by file,
@@ -193,18 +196,21 @@ describe("targeted chat navigation", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it("clears stale chat navigation to channels when DM canonicalization fails", async () => {
+  it("reports unavailable DMs without changing the current tab", async () => {
     const open = vi.fn();
+    const onUnavailable = vi.fn();
     const base = {
       locator: { channelId: "dm-local", threadId: "dm-thread" },
       isCurrent: () => true,
       open,
+      onUnavailable,
     };
     await runCanonicalDmNavigation({
       ...base,
       syncDms: async () => ({ available: true, dms: [] }),
     });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
+    expect(open).not.toHaveBeenCalled();
+    expect(onUnavailable).toHaveBeenCalled();
 
     open.mockClear();
     await runCanonicalDmNavigation({
@@ -213,6 +219,7 @@ describe("targeted chat navigation", () => {
         throw new Error("offline");
       },
     });
-    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
+    expect(open).not.toHaveBeenCalled();
+    expect(onUnavailable).toHaveBeenCalled();
   });
 });

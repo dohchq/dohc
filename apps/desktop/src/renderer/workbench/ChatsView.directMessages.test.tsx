@@ -41,7 +41,7 @@ describe("ChatsView direct messages", () => {
         : Promise.resolve({ messages: [] }),
     );
 
-    renderView(vi.fn(), vi.fn(), { variant: "page", onNavCommand });
+    renderView(vi.fn(), vi.fn(), { variant: "panel", onNavCommand });
     expect(await screen.findByText("Message requests")).toBeTruthy();
     expect(screen.getByText("Wants to message you")).toBeTruthy();
     await user.click(screen.getByTestId("chats-dm-request-accept"));
@@ -307,7 +307,7 @@ describe("ChatsView direct messages", () => {
     });
     bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
 
-    renderView(vi.fn(), vi.fn(), { variant: "page", onNavCommand });
+    renderView(vi.fn(), vi.fn(), { variant: "panel", onNavCommand });
     await user.click(await screen.findByTestId("chats-dm-request-accept"));
     await user.click(screen.getByTestId("chats-accept-dm-confirm"));
 
@@ -493,7 +493,7 @@ describe("ChatsView direct messages", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
 
     renderView(vi.fn(), vi.fn(), {
-      variant: "page",
+      variant: "panel",
       initialNav: {
         level: "dm",
         dm: dm(),
