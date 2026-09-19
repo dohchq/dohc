@@ -222,7 +222,6 @@ export function DemoSidebar(props: {
           onUnmountShare={() => undefined}
           onShare={() => undefined}
           onRefresh={() => undefined}
-          onNewFileDialog={props.onCreateDocument}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">
