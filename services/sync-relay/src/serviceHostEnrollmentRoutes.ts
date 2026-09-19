@@ -31,7 +31,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
     catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
     for (const path of paths) {
       const key = JSON.stringify([share.workspaceId, path]);
-      if (existing.has(key)) continue;
+      if (existing.has(key) || storage.hasServiceHostEnrollment(share.workspaceId, path)) continue;
       try {storage.enrollServiceHostDocument({workspaceId: share.workspaceId, ownerUserId, shareId: share.shareId, path, nowMs: Date.now(), guard: storage.captureStanding()});}
       catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
       existing.add(key);
@@ -61,25 +61,37 @@ export function createServiceHostEnrollmentRoutes(options: {
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url), parts = url.pathname.split("/");
-      if (parts.length !== 4 || parts[1] !== "sync" || parts[3] !== "live-host" || url.search || request.headers.has("cookie") ||
+      const retiredPage = request.method === "GET" && url.searchParams.get("retired") === "1" &&
+        [...url.searchParams.keys()].every(key => key === "retired" || key === "after") &&
+        url.searchParams.getAll("retired").length === 1 && url.searchParams.getAll("after").length <= 1;
+      if (parts.length !== 4 || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage) || request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") || !["GET", "POST", "DELETE"].includes(request.method)) throw notFound();
       const workspaceId = parseWorkspaceId(decodeURIComponent(parts[2]!));
       const actor = await options.resolveActor(request, workspaceId);
       const guard = () => {request.signal.throwIfAborted(); if (actor.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();};
       guard();
+      if (retiredPage) {
+        const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
+        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired"})), nextCursor: page.nextCursor});
+      }
       if (request.method === "GET") return response({ok: true, documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
       if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Expected a JSON request.");
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "DELETE") {
-        if (Object.keys(input).join() !== "path" || typeof input.path !== "string") throw badRequest("A document path is required.");
-        const row = storage.setServiceHostEnrollmentEnabled({workspaceId, path: input.path, ownerUserId: actor.userId, enabled: false, nowMs: Date.now(), guard});
+        if (Object.keys(input).some(key => key !== "path" && key !== "retire") || typeof input.path !== "string" ||
+          (input.retire !== undefined && input.retire !== true)) throw badRequest("A document path and optional retirement are required.");
+        const row = storage.setServiceHostEnrollmentEnabled({workspaceId, path: input.path, ownerUserId: actor.userId, enabled: false,
+          ...(input.retire === true ? {retire: true} : {}), nowMs: Date.now(), guard});
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...state(row)});
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, status: "retired"} : state(row))});
       }
-      if (Object.keys(input).some(key => !["path", "shareId"].includes(key)) || typeof input.shareId !== "string" || (input.path !== undefined && typeof input.path !== "string")) throw badRequest("An owned share is required.");
-      const shareId = parseShareId(input.shareId);
+      if (Object.keys(input).some(key => !["path", "shareId"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
+        (input.path !== undefined && typeof input.path !== "string") || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
+      const retained = input.shareId === undefined ? storage.readServiceHostEnrollment(workspaceId, input.path as string) : undefined;
+      if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
+      const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId}) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
       host.reconcile();

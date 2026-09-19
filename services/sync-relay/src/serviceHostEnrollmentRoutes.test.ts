@@ -160,3 +160,20 @@ it("reports a renamed enrolled document as unavailable and retains its original 
   expect(await response.json()).toMatchObject({ok: true, documents: [{path: binding.currentPath, status: "unavailable"}]});
   expect(f.storage.listServiceHostEnrollments()).toEqual([enrolled]);
 });
+
+it("retires an owner document, lists it separately, and resumes its retained identity without a supplied share", async () => {
+  const f = await fixture(), first = f.storage.enrollServiceHostDocument(f.input);
+  const bearer = deriveServiceHostBearer(first, {key, namespace});
+  const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true}));
+  expect(await stop.json()).toEqual({ok: true, path: first.path, status: "retired"});
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
+  discoverServiceHostDocuments(f.storage);
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, status: "retired"}], nextCursor: null});
+  const replication = createServiceHostReplication({storage: f.storage, key, namespace});
+  expect((await replication(new Request(`https://relay.test/sync/${scope.workspaceId}/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}))).status).toBe(404);
+  expect((await f.handle(f.request("POST", {path: first.path}))).status).toBe(202);
+  expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({objectId: first.objectId, shareId: first.shareId, retired: false, enabled: true});
+  expect((await f.handle(f.request("POST", {path: "docs/missing.md"}))).status).toBe(404);
+  expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&retired=1"))).status).toBe(404);
+});

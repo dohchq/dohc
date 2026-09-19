@@ -177,3 +177,77 @@ it("refuses altered enrollment schema on reopen", async () => {
   f.raw.exec(`CREATE TRIGGER unexpected_enrollment_trigger AFTER UPDATE ON ${SERVICE_HOST_ENROLLMENTS} BEGIN SELECT 1; END`);
   expect(() => openSyncRelayStorage(f.path, f.config)).toThrow("constraints are damaged");
 });
+
+it("retirement frees capacity beyond 64 lifetime documents while preserving every canonical enrollment", async () => {
+  const f = await fixture(), first = f.enroll(), bearer = deriveServiceHostBearer(first, key);
+  const retire = (path: string) => f.storage.setServiceHostEnrollmentEnabled({...f.input, path, enabled: false, retire: true});
+  for (let i = 1; i <= 63; i++) {
+    const path = `docs/retirement-${i}.md`, shareId = `retirement-${i}`;
+    f.seed(scope.workspaceId, `retirement-${i}`, path, shareId); f.enroll({path, shareId});
+  }
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
+  expect(retire(first.path)).toMatchObject({retired: true, enabled: false});
+  expect(f.authorize(bearer)).toBeNull();
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+  expect(f.storage.hasServiceHostEnrollment(scope.workspaceId, first.path)).toBe(true);
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(63);
+  f.seed(scope.workspaceId, "sixty-fifth", "docs/sixty-fifth.md", "sixty-fifth");
+  f.enroll({path: "docs/sixty-fifth.md", shareId: "sixty-fifth"});
+  expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(65);
+  expect(() => f.enroll()).toThrow("capacity");
+  expect(() => f.setEnabled(true)).toThrow("capacity");
+  expect(f.authorize(bearer)).toBeNull();
+  retire("docs/sixty-fifth.md");
+  expect(f.enroll()).toEqual(first);
+  expect(f.authorize(bearer)).toBe("owner-1");
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
+});
+
+it("retired rows stay hidden until an explicit reactivation and still reject foreign identities", async () => {
+  const f = await fixture(), first = f.enroll();
+  expect(f.storage.hasServiceHostEnrollment(scope.workspaceId, first.path)).toBe(true);
+  expect(f.storage.hasServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBe(false);
+  expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, retire: true})).toThrow("Invalid");
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, ownerUserId: "other"})).toBeNull();
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, first.path)).toMatchObject({shareId: first.shareId, retired: true, enabled: false});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBeNull();
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId)).toEqual([]);
+  expect(f.storage.listCurrentServiceHostEnrollments(scope.workspaceId)).toEqual([]);
+  expect(f.setEnabled(false)).toMatchObject({retired: true, enabled: false});
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(f.setEnabled(true)).toMatchObject({retired: false, enabled: true});
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
+});
+
+it("retiring the last enrollment in a workspace frees its workspace slot", async () => {
+  const f = await fixture(); f.enroll();
+  for (let i = 2; i <= 17; i++) {
+    const workspaceId = `workspace-${i}`, shareId = `share-${i}`;
+    f.seed(workspaceId, `object-${i}`, binding.currentPath, shareId);
+    if (i < 17) f.enroll({workspaceId, shareId});
+  }
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  f.enroll({workspaceId: "workspace-17", shareId: "share-17"});
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(16);
+  expect(() => f.enroll()).toThrow("capacity");
+  expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(17);
+});
+
+it("pages retired documents by path without mixing workspaces or active rows", async () => {
+  const f = await fixture(); f.enroll();
+  for (let i = 0; i < 65; i++) {
+    const path = `docs/retired-${String(i).padStart(2, "0")}.md`, shareId = `retired-page-${i}`;
+    f.seed(scope.workspaceId, shareId, path, shareId); f.enroll({path, shareId});
+    f.storage.setServiceHostEnrollmentEnabled({...f.input, path, enabled: false, retire: true});
+  }
+  const first = f.storage.listRetiredServiceHostEnrollments(scope.workspaceId);
+  expect(first.documents).toHaveLength(64); expect(first.nextCursor).toBe("docs/retired-63.md");
+  expect(first.documents.every(row => row.retired && !row.enabled)).toBe(true);
+  const second = f.storage.listRetiredServiceHostEnrollments(scope.workspaceId, first.nextCursor!);
+  expect(second.documents.map(row => row.path)).toEqual(["docs/retired-64.md"]); expect(second.nextCursor).toBeNull();
+  expect(f.storage.listRetiredServiceHostEnrollments("other")).toEqual({documents: [], nextCursor: null});
+  expect(() => f.storage.listRetiredServiceHostEnrollments(scope.workspaceId, "docs/../bad.md")).toThrow();
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
+});

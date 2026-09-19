@@ -136,7 +136,10 @@ The relay enrolls current Markdown documents covered by Edit shares and retains 
 The authenticated owner can inspect preparation or pause a document through `/sync/:workspaceId/live-host`.
 Pausing retains its state and stops live authorization immediately.
 
-The profile retains up to 64 documents across 16 workspaces, including paused documents.
+The profile runs up to 64 documents across 16 workspaces, including paused documents.
+Stopping live editing retires an enrollment and frees its slot. The server keeps acknowledged history and native state.
+Retirement stops live editing for that document. It does not revoke its share grants or delete settled shared files.
+An owner can resume the same document at the same path while capacity is available.
 Active live documents must keep their original paths. Moving, deleting, or replacing one makes its live enrollment unavailable.
 Other enrolled documents continue working. Returning the same document to its original path allows the host to resume.
 Deleting enrollment storage or resetting its native state is not a recovery procedure.
