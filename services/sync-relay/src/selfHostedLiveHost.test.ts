@@ -17,7 +17,7 @@ function deferred() {
   return {promise, resolve};
 }
 
-async function fixture() {
+async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean} = {}) {
   const f = await ticketFixture(); cleanup.push(f.close);
   // The ticket fixture provisions a device; this supervisor test starts a clean service deployment.
   f.raw.exec("DELETE FROM sync_relay_session_host_control");
@@ -26,10 +26,12 @@ async function fixture() {
   cleanup.push(() => rm(root, {recursive: true, force: true}));
   const input = {workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId, path: binding.currentPath, nowMs: 10, guard() {}};
   f.storage.enrollServiceHostDocument(input);
+  if (options.empty) f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
   const history = createLiveJournalHistoryAuthority({namespace: "supervisor-history", reconciled: true});
   const starts: Array<{config: Configuration; close: ReturnType<typeof vi.fn<() => Promise<void>>>; ready: ReturnType<typeof vi.fn<() => boolean>>; controller: AbortController}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
+    await options.beforeStart?.();
     const config = JSON.parse(await readFile(configPath, "utf8")) as Configuration;
     const controller = new AbortController(); let stopped = false;
     const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}}), ready = vi.fn(() => true);
@@ -49,8 +51,30 @@ async function fixture() {
   return {...f, host, history, starts, startHost, input, add, waitStarted, onError, peak: () => peak};
 }
 
+it("stays unavailable until retained documents have a running native host", async () => {
+  const entered = deferred(), finish = deferred();
+  const f = await fixture({beforeStart: async () => {entered.resolve(); await finish.promise;}});
+  expect(f.host.unavailable).toBe(true);
+  try {
+    await entered.promise;
+    expect(f.host.current()).toBeUndefined();
+    expect(f.host.unavailable).toBe(true);
+  } finally {finish.resolve();}
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  expect(f.host.current()).toBeDefined();
+  f.starts[0]!.controller.abort();
+  expect(f.host.unavailable).toBe(true);
+});
+
+it("becomes available after reconciling an empty deployment without starting a daemon", async () => {
+  const f = await fixture({empty: true});
+  expect(f.host.unavailable).toBe(true);
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  expect(f.startHost).not.toHaveBeenCalled();
+});
+
 it("adds documents with stable workspace roots and profile while draining the previous daemon first", async () => {
-  const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
+  const f = await fixture(); expect(f.host.unavailable).toBe(true); await f.waitStarted(1); const first = f.starts[0]!;
   const drained = deferred(), entered = deferred(), close = first.close.getMockImplementation()!;
   first.close.mockImplementation(async () => {entered.resolve(); await drained.promise; await close();});
   f.add(); await entered.promise;

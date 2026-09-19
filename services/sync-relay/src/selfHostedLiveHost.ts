@@ -37,6 +37,7 @@ export async function startSelfHostedLiveHost(options: {
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined, closing = false, active: Promise<void> | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+  let initialReconciliationComplete = false, selectedDocuments = false;
   let signature = "", lastError: unknown, requested = false;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
@@ -69,8 +70,10 @@ export async function startSelfHostedLiveHost(options: {
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
       const rows = selection(), next = selectionSignature(rows);
+      selectedDocuments = rows.length > 0;
       if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) {
         lastError = undefined;
+        initialReconciliationComplete = true;
         return;
       }
       const grouped = new Map<string, ServiceHostEnrollment>();
@@ -87,7 +90,7 @@ export async function startSelfHostedLiveHost(options: {
       signal.throwIfAborted();
       if (next !== selectionSignature(selection())) {schedule(); return;}
       if (rows.length === 0) {
-        await stopCurrent(); signature = next; lastError = undefined;
+        await stopCurrent(); signature = next; lastError = undefined; initialReconciliationComplete = true;
         if (next !== selectionSignature(selection())) schedule();
         return;
       }
@@ -104,7 +107,7 @@ export async function startSelfHostedLiveHost(options: {
         if (next !== selectionSignature(selection())) {schedule(); return;}
         current = await (options.startHost ?? startServiceLiveHost)({configPath, storage, history, frameChanges: options.frameChanges, signal});
         current.invalidated.addEventListener("abort", schedule, {once: true});
-        signature = next; lastError = undefined;
+        signature = next; lastError = undefined; initialReconciliationComplete = true;
       } finally {await rm(temporary, {recursive: true, force: true});}
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
@@ -116,7 +119,8 @@ export async function startSelfHostedLiveHost(options: {
   return {
     current: () => current,
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
-    get unavailable() {return signal.aborted || lastError !== undefined;},
+    get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
+      (selectedDocuments && (!current || current.invalidated.aborted));},
     reconcile: schedule,
     async close() {
       if (closing) return;
