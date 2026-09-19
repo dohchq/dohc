@@ -6,7 +6,7 @@ import { z } from "zod";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
-export const CLI_PROTOCOL_VERSION = 2;
+export const CLI_PROTOCOL_VERSION = 3;
 export const CLI_JSON_SCHEMA_VERSION = 1;
 
 const cliActorSchema = z.enum(["human", "agent"]);
@@ -109,21 +109,6 @@ const chatArgsSchema = z
   .object({ ...argsBase, threadId: z.string().min(1).max(200) })
   .strict();
 const channelsFullArgsSchema = z.object(argsBase).strict();
-const startChannelChatArgsSchema = z
-  .object({
-    ...argsBase,
-    channel: z.string().min(1).max(200),
-    body: z.string().min(1).max(65_536),
-    title: z.string().min(1).max(200).optional(),
-  })
-  .strict();
-const replyToChatArgsSchema = z
-  .object({
-    ...argsBase,
-    threadId: z.string().min(1).max(200),
-    body: z.string().min(1).max(65_536),
-  })
-  .strict();
 
 // Collection field values cross the CLI socket in the engine wire's JSON
 // encoding: an integer outside the safe double range rides a `$dohcInt64` /
@@ -269,16 +254,6 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     ...requestBase,
     verb: z.literal("channelsFull"),
     args: channelsFullArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("startChannelChat"),
-    args: startChannelChatArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("replyToChat"),
-    args: replyToChatArgsSchema,
   }).strict(),
   z.object({
     ...requestBase,
@@ -564,6 +539,16 @@ const rawChatMessageSchema = z
     authorDisplayName: z.string().min(1),
     body: z.string(),
     createdAtMs: z.number().int().nonnegative(),
+    parentMessageId: rawMessageIdSchema.optional(),
+    attachments: z.array(z.object({
+      objectId: z.string().min(1).optional(),
+      pathHint: z.string().min(1).optional(),
+    }).strict()),
+    needsDecision: z.boolean(),
+    decisionState: z.enum(["open", "resolved"]).optional(),
+    options: z.array(z.string()).optional(),
+    chosenOption: z.string().optional(),
+    resolvedByMessageId: rawMessageIdSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z
@@ -629,28 +614,6 @@ const channelsFullResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const startChannelChatResultSchema = z.discriminatedUnion("ok", [
-  z
-    .object({
-      ok: z.literal(true),
-      channel: z
-        .object({
-          id: rawChannelIdSchema,
-          name: z.string().min(1),
-          slug: z.string().min(1),
-        })
-        .strict(),
-      thread: rawChatThreadSchema,
-      message: rawChatMessageSchema,
-    })
-    .strict(),
-  rawFailureSchema,
-]);
-const replyToChatResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), message: rawChatMessageSchema }).strict(),
-  rawFailureSchema,
-]);
-
 const collectionSchemaReasonSchema = z
   .object({ code: z.enum(COLLECTION_SCHEMA_REASON_CODES), path: z.string() })
   .strict();
@@ -773,8 +736,6 @@ const cliResultSchemas = {
   fileChats: fileChatsResultSchema,
   chat: chatResultSchema,
   channelsFull: channelsFullResultSchema,
-  startChannelChat: startChannelChatResultSchema,
-  replyToChat: replyToChatResultSchema,
   collectionQuery: collectionQueryResultSchema,
   collectionRecord: collectionRecordResultSchema,
   collectionSetFields: collectionSetFieldsResultSchema,

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
 import type { ToolContext } from "./tools";
 
@@ -13,8 +14,6 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_delete_path",
   "dohc_create_site",
   "dohc_import_data",
-  "dohc_publish_site",
-  "dohc_share",
   // Collection writes change the granter's records, so they sit in the
   // document tier: a shared view never sees them.
   "dohc_set_record_fields",
@@ -32,11 +31,20 @@ const READ_TOOLS = [
   "dohc_read_record",
 ];
 
+const connections: Array<{ client: Client; server: ReturnType<typeof createDohcMcpServer> }> = [];
+afterEach(async () => {
+  await Promise.all(connections.splice(0).map(async ({ client, server }) => {
+    await client.close();
+    await server.close();
+  }));
+});
+
 async function connectedToolNames(ctx: ToolContext): Promise<{ names: string[]; client: Client }> {
   const server = createDohcMcpServer(ctx);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  connections.push({ client, server });
   const listed = await client.listTools();
   return { names: listed.tools.map((tool) => tool.name), client };
 }
@@ -137,5 +145,62 @@ describe("parseArgs", () => {
   it("rejects blank explicit path arguments", () => {
     expect(() => parseArgs(["--workspace", " "])).toThrow(/--workspace requires/);
     expect(() => parseArgs(["--home", " "])).toThrow(/--home requires/);
+  });
+});
+
+
+describe("MCP tool results", () => {
+  it("omits tools that cannot perform the advertised action", async () => {
+    const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
+    for (const name of ["build_site", "preview_site", "publish_site", "share", "open_in_dohc", "resolve_conflict"]) {
+      expect(names).not.toContain(`dohc_${name}`);
+    }
+  });
+
+  it("returns structured chat output and preserves run-link warnings", async () => {
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        expect(request.verb).toBe("reply");
+        expect(request.args).toMatchObject({ actor: "agent", thread: "thread-1", runId: "run-1" });
+        return { threadId: "th_1", messageId: "msg_2", warning: "Run provenance pending." };
+      },
+    });
+    const result = await client.callTool({
+      name: "dohc_reply_to_chat",
+      arguments: { threadId: "thread-1", body: "Done", runId: "run-1" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: true, threadId: "thread-1", messageId: "message-2", warning: "Run provenance pending.",
+    });
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.structuredContent, null, 2) }]);
+  });
+
+  it("reports authorization refusals as tool errors", async () => {
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async () => { throw new DohcCliError("This channel is read-only."); },
+    });
+    const result = await client.callTool({
+      name: "dohc_start_channel_chat", arguments: { channel: "general", body: "Hello" },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, reason: "This channel is read-only." });
+  });
+
+  it("turns poll options into a decision even without needsDecision", async () => {
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        expect(request.args).toMatchObject({ needsDecision: true, options: ["Yes", "No"] });
+        return { channel: { id: "ch_1", name: "general", slug: "general", kind: "channel" },
+          threadId: "th_1", messageId: "msg_1", title: "" };
+      },
+    });
+    const result = await client.callTool({
+      name: "dohc_start_channel_chat", arguments: { channel: "general", body: "Ready?", options: ["Yes", "No"] },
+    });
+    expect(result.isError).not.toBe(true);
   });
 });

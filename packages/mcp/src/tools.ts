@@ -27,7 +27,7 @@ import {
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 // The resolved-path rule lives in one place for every surface that decides
 // authority from a path. This surface owns only its wording.
 import { errnoCode,
@@ -168,6 +168,14 @@ function unresolvedPathRefusal(
   }
 }
 
+const LIVE_DOCUMENT_WRITE_REFUSAL =
+  "This file is a live document. Edit it in dohc; raw MCP file writes cannot update its document state.";
+
+function isLiveDocumentPath(resolved: { normalized: string; realRelative: string }): boolean {
+  return liveDocumentKindForPath(resolved.normalized) !== null ||
+    liveDocumentKindForPath(resolved.realRelative) !== null;
+}
+
 async function safeResolveForMutation(
   ctx: ToolContext,
   normalizedPath: string,
@@ -176,6 +184,7 @@ async function safeResolveForMutation(
   if (!resolved.ok) {
     throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
   }
+  if (isLiveDocumentPath(resolved)) throw new Error(LIVE_DOCUMENT_WRITE_REFUSAL);
   return resolved;
 }
 
@@ -906,6 +915,12 @@ export async function writeWorkspaceFile(
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  if (isLiveDocumentPath(resolved)) {
+    return {
+      ok: false as const,
+      reason: LIVE_DOCUMENT_WRITE_REFUSAL,
+    };
+  }
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -2168,85 +2183,6 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
   return { ok, site, checks };
 }
 
-export async function buildSite(ctx: ToolContext, args: { siteRoot: string }) {
-  const tested = await testSite(ctx, args);
-  if (!tested.ok) return tested;
-  const site = tested.site;
-  const command = site.scripts.build;
-  const output = site.buildOutputs[0] ?? (command ? "dist" : site.root);
-  return {
-    ok: true as const,
-    status: command ? "planned" : "static-ready",
-    siteRoot: site.root,
-    command,
-    output,
-    message: command
-      ? "Build command detected. MCP build execution is not wired yet; run this command in the site folder."
-      : "No build command detected; the site can be previewed directly as static files.",
-    checks: tested.checks,
-  };
-}
-
-function previewModesForSite(site: WorkspaceSite) {
-  const modes = [];
-  if (site.entry) {
-    modes.push({ mode: "static" as const, entry: site.entry });
-  }
-  if (site.scripts.dev || site.scripts.start) {
-    modes.push({
-      mode: "dev" as const,
-      command: site.scripts.dev ? "dev" : "start",
-      script: site.scripts.dev ?? site.scripts.start,
-      packageManager: site.packageManager ?? "npm",
-    });
-  }
-  if (site.scripts.build || site.buildOutputs.length > 0) {
-    modes.push({
-      mode: "build" as const,
-      command: site.scripts.build,
-      output: site.buildOutputs[0] ?? "dist",
-      packageManager: site.packageManager ?? "npm",
-    });
-  }
-  return modes;
-}
-
-export async function previewSite(ctx: ToolContext, args: { siteRoot: string }) {
-  const tested = await testSite(ctx, args);
-  if (!tested.ok) return tested;
-  const site = tested.site;
-  const modes = previewModesForSite(site);
-  return {
-    ok: true as const,
-    siteRoot: site.root,
-    modes,
-    message:
-      modes.length > 0
-        ? "Open this app in Apps to run the preview."
-        : "No preview mode is available yet.",
-    checks: tested.checks,
-  };
-}
-
-export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) {
-  const tested = await testSite(ctx, args);
-  if (!tested.ok) return tested;
-  const site = tested.site;
-  return {
-    ok: false as const,
-    status: "review-required",
-    siteRoot: site.root,
-    reason:
-      "Site publish/share is a dohc Drive boundary and is not wired in this local MCP tool yet.",
-    review: {
-      siteRoot: site.root,
-      modes: previewModesForSite(site),
-      includesSharedWithMe: isSharedWithMePath(site.root),
-    },
-    checks: tested.checks,
-  };
-}
-
 // --- dohc_import_data -------------------------------------------------------
 
 // A visible user database under both spellings. The strategy is read off the
@@ -2373,31 +2309,6 @@ function isReadOnlySelect(sql: string): boolean {
   return !stripTrailingSemicolon(trimmed).includes(";");
 }
 
-// --- dohc_share -------------------------------------------------------------
-
-// Sharing crosses a boundary, so this never auto-applies. It routes through
-// the liberal collaboration policy and returns needs-confirmation with the
-// human-readable reason; only the desktop, with the user's explicit OK, applies
-// the share.
-export async function share(ctx: ToolContext, args: { path: string; scope: "public" | "workspace" }) {
-  const resolved = await safeResolve(ctx, args.path);
-  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return {
-    ok: true as const,
-    status: "needs-confirmation" as const,
-    boundaryCrossing: args.scope === "public" ? "public-share" : "private-to-shared",
-    path: resolved.normalized,
-    reason:
-      "Sharing crosses a boundary — it waits for your explicit OK in dohc before anything is shared.",
-  };
-}
-
-// --- dohc_resolve_conflict --------------------------------------------------
-
-// Attempts a conservative three-way merge of a markdown conflict. A clean merge
-// is returned as proposed content; an ambiguous one returns conflict so a human
-// decides — never a silent overwrite.
-
 // --- desktop-owned history and Chats ---------------------------------------
 //
 // MCP is a separate process and never opens the daemon-owned engine database.
@@ -2457,21 +2368,98 @@ export async function listChannels(ctx: ToolContext) {
   return requestCli(ctx, "channelsFull", {});
 }
 
+// Canonical chat verbs return CLI handles. MCP reads use engine ids, so
+// convert write results before returning them to the client.
+function engineId(id: string, handlePrefix: string, enginePrefix: string): string {
+  return id.startsWith(handlePrefix)
+    ? `${enginePrefix}${id.slice(handlePrefix.length)}`
+    : id;
+}
+
+const engineChannelId = (id: string) => engineId(id, "ch_", "channel-");
+const engineThreadId = (id: string) => engineId(id, "th_", "thread-");
+const engineMessageId = (id: string) => engineId(id, "msg_", "message-");
+
+interface ChatWriteInput {
+  body: string;
+  // Workspace-relative paths of tracked files to attach.
+  attachments?: string[];
+  needsDecision?: boolean;
+  // A poll's choices; implies a decision.
+  options?: string[];
+  // Links the message to a local agent run for provenance.
+  runId?: string;
+}
+
+function chatWriteArgs(input: ChatWriteInput) {
+  return {
+    ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    attachments: input.attachments ?? [],
+    needsDecision: Boolean(input.needsDecision || input.options?.length),
+    ...(input.options !== undefined ? { options: input.options } : {}),
+    body: input.body,
+  };
+}
+
 // Start a chat in a channel AS THE AGENT. `channel` accepts a channel id or
 // a name/slug ("general", "#general", "Client ACME"). No title is required:
 // untitled chats display their first-message snippet.
 export async function startChannelChat(
   ctx: ToolContext,
-  args: { channel: string; body: string; title?: string },
+  args: ChatWriteInput & { channel: string; title?: string },
 ) {
-  return requestCli(ctx, "startChannelChat", args);
+  const result = await requestCli(ctx, "post", {
+    channel: args.channel,
+    ...(args.title !== undefined ? { title: args.title } : {}),
+    ...chatWriteArgs(args),
+  });
+  if ("ok" in result) return result;
+  return {
+    ok: true as const,
+    channel: {
+      id: engineChannelId(result.channel.id),
+      slug: result.channel.slug,
+      kind: result.channel.kind,
+    },
+    threadId: engineThreadId(result.threadId),
+    messageId: engineMessageId(result.messageId),
+    title: result.title,
+    ...(result.warning !== undefined ? { warning: result.warning } : {}),
+  };
 }
 
+// Reply in a chat thread AS THE AGENT. `to`, `resolve`, and `choose` take
+// message ids from dohc_read_chat; `resolve` closes that open decision with
+// this reply. A poll requires `choose` to name one of its options.
 export async function replyToChat(
   ctx: ToolContext,
-  args: { threadId: string; body: string },
+  args: ChatWriteInput & {
+    threadId: string;
+    to?: string;
+    resolve?: string;
+    choose?: string;
+  },
 ) {
-  return requestCli(ctx, "replyToChat", args);
+  const result = await requestCli(ctx, "reply", {
+    thread: args.threadId,
+    ...(args.to !== undefined ? { to: args.to } : {}),
+    ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
+    ...(args.choose !== undefined ? { choose: args.choose } : {}),
+    ...chatWriteArgs(args),
+  });
+  if ("ok" in result) return result;
+  return {
+    ok: true as const,
+    threadId: engineThreadId(result.threadId),
+    messageId: engineMessageId(result.messageId),
+    ...(result.parentMessageId !== undefined
+      ? { parentMessageId: engineMessageId(result.parentMessageId) }
+      : {}),
+    ...(result.resolvedMessageId !== undefined
+      ? { resolvedMessageId: engineMessageId(result.resolvedMessageId) }
+      : {}),
+    ...(result.warning !== undefined ? { warning: result.warning } : {}),
+  };
 }
 
 // --- collections ------------------------------------------------------------
@@ -2601,27 +2589,6 @@ export async function createRecord(
     name: args.name,
     fields: fields.value,
   });
-}
-
-export function resolveConflict(args: { base: string; local: string; remote: string }) {
-  const result = mergeMarkdown(args);
-  return result.kind === "merged"
-    ? { resolved: true as const, content: result.content }
-    : {
-        resolved: false as const,
-        reason: "Both sides changed overlapping lines — kept both for a human to pick.",
-      };
-}
-
-// --- dohc_open_in_dohc ------------------------------------------------------
-
-// Returns the absolute path the desktop should surface (open/select). Path is
-// contained first so it can never point outside the workspace.
-export async function openInDohc(ctx: ToolContext, args: { path: string }) {
-  // Opening is a read: mounted files open in dohc like any other file.
-  const resolved = await safeResolve(ctx, args.path, "read");
-  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return { ok: true as const, path: resolved.absolute, relativePath: resolved.normalized };
 }
 
 export { safeResolve };

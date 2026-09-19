@@ -16,7 +16,6 @@ import { dirname, join, parse, relative, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   createWorkspaceDirectory,
-  buildSite,
   createSite,
   deleteWorkspacePath,
   detectSites,
@@ -25,16 +24,11 @@ import {
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
-  openInDohc,
-  previewSite,
-  publishSite,
   queryDatabase,
   readChange,
   readWorkspaceFile,
-  resolveConflict,
   safeResolve,
   searchWorkspaceFiles,
-  share,
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
@@ -190,7 +184,6 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   }
 }
 
-
 async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -291,7 +284,6 @@ describe("mcp tool path containment", () => {
       expect(escaped.ok).toBe(false);
       if (!escaped.ok) expect(escaped.reason).toMatch(/symlink/i);
       // And the tools that follow it refuse too.
-      expect(await openInDohc(ctx, { path: "escape/secret.txt" })).toMatchObject({ ok: false });
       await rm(outside, { recursive: true, force: true });
     });
   });
@@ -308,29 +300,6 @@ describe("mcp tool path containment", () => {
     await withWorkspace(async (ctx) => {
       await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
       await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
-    });
-  });
-
-  it("query_database, import_data, site tools, open_in_dohc, share all refuse traversal", async () => {
-    await withWorkspace(async (ctx) => {
-      for (const evil of TRAVERSALS) {
-        expect(await openInDohc(ctx, { path: evil })).toMatchObject({ ok: false });
-        await expect(share(ctx, { path: evil, scope: "public" })).resolves.toMatchObject({ ok: false });
-        await expect(
-          queryDatabase(ctx, { databasePath: evil, sql: "SELECT 1" }),
-        ).resolves.toMatchObject({ ok: false });
-        await expect(
-          importData(ctx, { sourcePath: "data.csv", databasePath: evil, tableName: "t" }),
-        ).resolves.toMatchObject({ ok: false });
-        await expect(
-          importData(ctx, { sourcePath: evil, databasePath: "out.sqlite", tableName: "t" }),
-        ).resolves.toMatchObject({ ok: false });
-        await expect(detectSites(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
-        await expect(testSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-        await expect(buildSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-        await expect(previewSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-        await expect(publishSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-      }
     });
   });
 
@@ -407,9 +376,6 @@ describe("mcp tool path containment", () => {
       });
       expect(secretDb).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
 
-      // Read-side resolution also covers open + database query paths.
-      const opened = await openInDohc(ctx, { path: "shared-with-me/alex/brief.md" });
-      expect(opened).toMatchObject({ ok: true });
       // The database file doesn't exist (open throws), but the failure must
       // never be the reserved prefix — mounted databases are queryable.
       const queried = await queryDatabase(ctx, {
@@ -457,9 +423,6 @@ describe("mcp tool path containment", () => {
       for (const siteRoot of ["shared-with-me/alex/site", "Shared-With-Me/alex/site"]) {
         for (const run of [
           () => testSite(ctx, { siteRoot }),
-          () => buildSite(ctx, { siteRoot }),
-          () => previewSite(ctx, { siteRoot }),
-          () => publishSite(ctx, { siteRoot }),
         ]) {
           await expect(run()).resolves.toMatchObject({
             ok: false,
@@ -1961,12 +1924,6 @@ describe("mcp tools operate on allowed paths", () => {
         ]),
       });
 
-      await expect(previewSite(ctx, { siteRoot: "docs" })).resolves.toMatchObject({
-        ok: true,
-        modes: expect.arrayContaining([
-          expect.objectContaining({ mode: "static", entry: "docs/public/index.html" }),
-        ]),
-      });
     });
   });
 
@@ -1989,53 +1946,6 @@ describe("mcp tools operate on allowed paths", () => {
         diagnostics: expect.arrayContaining([
           expect.objectContaining({ code: "invalid-preview-entry", severity: "warning" }),
         ]),
-      });
-    });
-  });
-
-  it("build_site returns the detected build plan without executing it", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo", title: "Todo" });
-      const result = await buildSite(ctx, { siteRoot: "todo" });
-      expect(result).toMatchObject({
-        ok: true,
-        status: "planned",
-        siteRoot: "todo",
-        command: "npm run build",
-        output: "dist",
-      });
-    });
-  });
-
-  it("preview_site returns available dohc preview modes", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo", title: "Todo" });
-      const result = await previewSite(ctx, { siteRoot: "todo" });
-      expect(result).toMatchObject({
-        ok: true,
-        siteRoot: "todo",
-        modes: expect.arrayContaining([
-          expect.objectContaining({ mode: "static", entry: "todo/index.html" }),
-          expect.objectContaining({ mode: "dev", command: "dev" }),
-          expect.objectContaining({ mode: "build", output: "dist" }),
-        ]),
-      });
-    });
-  });
-
-  it("publish_site stops at the explicit dohc Drive review boundary", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo", title: "Todo" });
-      const result = await publishSite(ctx, { siteRoot: "todo" });
-      expect(result).toMatchObject({
-        ok: false,
-        status: "review-required",
-        siteRoot: "todo",
-        reason: expect.stringMatching(/drive boundary/i),
-        review: {
-          siteRoot: "todo",
-          includesSharedWithMe: false,
-        },
       });
     });
   });
@@ -2102,34 +2012,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("share returns needs-confirmation for a boundary crossing and never auto-applies", async () => {
-    await withWorkspace(async (ctx) => {
-      const result = await share(ctx, { path: "notes/plan.md", scope: "public" });
-      expect(result).toMatchObject({
-        ok: true,
-        status: "needs-confirmation",
-        boundaryCrossing: "public-share",
-      });
-    });
-  });
-
-  it("resolve_conflict merges a clean change but keeps an overlap as a conflict", () => {
-    expect(
-      resolveConflict({ base: "a\nb\nc\n", local: "a\nB\nc\n", remote: "a\nb\nc\n" }),
-    ).toMatchObject({ resolved: true });
-    expect(
-      resolveConflict({ base: "a\nb\nc\n", local: "a\nX\nc\n", remote: "a\nY\nc\n" }),
-    ).toMatchObject({ resolved: false });
-  });
-
-  it("open_in_dohc returns the contained absolute path", async () => {
-    await withWorkspace(async (ctx) => {
-      const result = await openInDohc(ctx, { path: "notes/day.md" });
-      expect(result).toMatchObject({ ok: true, relativePath: "notes/day.md" });
-      if (result.ok) expect(result.path).toBe(join(ctx.root, "notes/day.md"));
-    });
-  });
-
   it("query_database refuses a non-visible-database target and bounds large results", async () => {
     await withWorkspace(async (ctx) => {
       // A real SQLite file that is not a visible-db path (wrong extension): the
@@ -2154,7 +2036,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 });
-
 
 // The agent named a workspace, not a host. A message carrying an absolute
 // host path states a fact the agent never supplied and cannot act on, so
@@ -2188,7 +2069,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
     await withWorkspace(async (ctx) => {
       armMetadataErrno(ctx, "EPERM");
       try {
-        const result = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
+        const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
         expect(result).toMatchObject({
           ok: false,
           reason:
@@ -2200,7 +2081,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
         disarm();
       }
       // The claim the message makes, checked.
-      await expect(readFile(join(ctx.root, "notes.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(ctx.root, "notes.txt"), "utf8")).rejects.toThrow();
     });
   });
 
@@ -2220,7 +2101,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
       await withWorkspace(async (ctx) => {
         armMetadataErrno(ctx, code);
         try {
-          const result = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
+          const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
           const reason = refusalReason(result);
           expect(reason, code).toContain(`(${code})`);
           expect(reason, code).toContain(instruction);
@@ -2231,7 +2112,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
           disarm();
         }
         // The claim the message makes, checked.
-        await expect(readFile(join(ctx.root, "notes.md"), "utf8")).rejects.toThrow();
+        await expect(readFile(join(ctx.root, "notes.txt"), "utf8")).rejects.toThrow();
       });
     }
   });
@@ -2239,7 +2120,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
   it("passes a guard refusal through whole", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, ".dohc"), "not a directory");
-      const result = await writeWorkspaceFile(ctx, { path: "notes.md", content: "draft\n" });
+      const result = await writeWorkspaceFile(ctx, { path: "notes.txt", content: "draft\n" });
       expect(result).toMatchObject({
         ok: false,
         reason: notARealFolderRefusal(DOHC_METADATA_GUARD, {
@@ -2281,30 +2162,30 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
   // other seven fail without it.
   it("refuses the delete, and the file is still where it was", async () => {
     await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "still here");
+      await writeFile(join(ctx.root, "note.txt"), "still here");
 
-      expect(await deleteWorkspacePath(ctx, { path: "note.md" })).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
+      expect(await deleteWorkspacePath(ctx, { path: "note.txt" })).toMatchObject({ ok: false, reason: BLOCKED });
+      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("still here");
     });
   });
 
   it("refuses the write, and no file appears", async () => {
     await withBlockedMetadataDir(async (ctx) => {
       expect(
-        await writeWorkspaceFile(ctx, { path: "notes/new.md", content: "written" }),
+        await writeWorkspaceFile(ctx, { path: "notes/new.txt", content: "written" }),
       ).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(stat(join(ctx.root, "notes", "new.md"))).rejects.toThrow();
+      await expect(stat(join(ctx.root, "notes", "new.txt"))).rejects.toThrow();
     });
   });
 
   it("refuses an overwrite, and the existing bytes are untouched", async () => {
     await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "original");
+      await writeFile(join(ctx.root, "note.txt"), "original");
 
       expect(
-        await writeWorkspaceFile(ctx, { path: "note.md", content: "replacement" }),
+        await writeWorkspaceFile(ctx, { path: "note.txt", content: "replacement" }),
       ).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("original");
+      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("original");
     });
   });
 
@@ -2317,12 +2198,12 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 
   it("refuses the move, and both paths are where they were", async () => {
     await withBlockedMetadataDir(async (ctx) => {
-      await writeFile(join(ctx.root, "note.md"), "still here");
+      await writeFile(join(ctx.root, "note.txt"), "still here");
 
       expect(
-        await moveWorkspacePath(ctx, { fromPath: "note.md", toPath: "notes/moved.md" }),
+        await moveWorkspacePath(ctx, { fromPath: "note.txt", toPath: "notes/moved.md" }),
       ).toMatchObject({ ok: false, reason: BLOCKED });
-      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("still here");
+      expect(await readFile(join(ctx.root, "note.txt"), "utf8")).toBe("still here");
       await expect(stat(join(ctx.root, "notes", "moved.md"))).rejects.toThrow();
     });
   });
@@ -2561,7 +2442,6 @@ describe("a symlink cannot alias a reserved area", () => {
       // These tools return wide unions, so the refusal is read positionally:
       // a result without `reason` did not refuse, which is the failure.
       for (const result of [
-        await buildSite(ctx, { siteRoot: "mine/landing" }),
         await testSite(ctx, { siteRoot: "mine/landing" }),
       ]) {
         expect(result.ok).toBe(false);
@@ -2697,18 +2577,18 @@ describe("a symlink cannot alias a reserved area", () => {
       await symlink(join(ctx.root, "notes"), join(ctx.root, "shortcut"), "dir");
 
       await expect(
-        writeWorkspaceFile(ctx, { path: "shortcut/day.md", content: "hello\n" }),
+        writeWorkspaceFile(ctx, { path: "shortcut/day.txt", content: "hello\n" }),
       ).resolves.toMatchObject({ ok: true });
-      expect(await readFile(join(ctx.root, "notes", "day.md"), "utf8")).toBe("hello\n");
+      expect(await readFile(join(ctx.root, "notes", "day.txt"), "utf8")).toBe("hello\n");
 
       await expect(
-        readWorkspaceFile(ctx, { path: "shortcut/day.md" }),
+        readWorkspaceFile(ctx, { path: "shortcut/day.txt" }),
       ).resolves.toMatchObject({ ok: true, content: "hello\n" });
 
       await expect(
-        deleteWorkspacePath(ctx, { path: "shortcut/day.md" }),
+        deleteWorkspacePath(ctx, { path: "shortcut/day.txt" }),
       ).resolves.toMatchObject({ ok: true });
-      await expect(stat(join(ctx.root, "notes", "day.md"))).rejects.toThrow();
+      await expect(stat(join(ctx.root, "notes", "day.txt"))).rejects.toThrow();
     });
   });
 });
@@ -2911,6 +2791,44 @@ describe("a guard that decides authority reads the resolved path", () => {
         expect(reason).toContain("ELOOP");
         expect(reason).toMatch(/cannot be resolved/i);
       });
+    });
+  });
+});
+
+describe("raw file writes preserve live documents", () => {
+  it.each(["note.md", "note.MD", "note.markdown", "scene.excalidraw"])(
+    "refuses replacing %s without changing its bytes or creating metadata",
+    async (path) => {
+      await withWorkspace(async (ctx) => {
+        await writeFile(join(ctx.root, path), "original");
+        for (const encoding of ["utf8", "base64"] as const) {
+          const result = await writeWorkspaceFile(ctx, {
+            path, content: encoding === "base64" ? "bmV3" : "new", encoding,
+          });
+          expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+          expect(await readFile(join(ctx.root, path), "utf8")).toBe("original");
+          expect(await readdir(ctx.root)).toEqual([path]);
+        }
+      });
+    },
+  );
+
+  it("refuses creating a live document before making parent directories", async () => {
+    await withWorkspace(async (ctx) => {
+      expect(await writeWorkspaceFile(ctx, { path: "draft/note.md", content: "new" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+      expect(await readdir(ctx.root)).toEqual([]);
+    });
+  });
+
+  it("cannot hide a document extension behind a file symlink", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "note.md"), "original");
+      await symlink(join(ctx.root, "note.md"), join(ctx.root, "alias.txt"));
+      expect(await writeWorkspaceFile(ctx, { path: "alias.txt", content: "new" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+      expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("original");
+      expect((await lstat(join(ctx.root, "alias.txt"))).isSymbolicLink()).toBe(true);
     });
   });
 });
