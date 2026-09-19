@@ -39,7 +39,7 @@ export interface ServerOwnerDelivery {
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "restart-required";
 
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
@@ -532,7 +532,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
     },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
-      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? ownerDeliveryReason.get(workspaceId) : undefined;
+      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;
     },
     get daemon() { return rustEngineDaemon; },
     get sessions() { return rustEngineWorkspaceSessions; },

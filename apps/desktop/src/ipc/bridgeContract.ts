@@ -1203,7 +1203,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   syncFailing: z.boolean().optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.

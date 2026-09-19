@@ -736,6 +736,7 @@ describe("server owner peer lifecycle", () => {
       expect(f.options().privateOwnerHost).toBeUndefined();
       expect(f.dependencies.app.quit).not.toHaveBeenCalled();
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("restart-required");
     } finally {await f.close();}
   });
   it("reports preparing and retrying once, and an explicit retry clears the failed document after recovery", async () => {
