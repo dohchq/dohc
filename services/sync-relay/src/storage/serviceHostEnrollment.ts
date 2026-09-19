@@ -151,6 +151,32 @@ function assertCapacity(storage: StorageContext, workspaceId: string): void {
     throw relayError("quota_exceeded", "Service host enrollment capacity is full.");
   }
 }
+
+/** Checks automatic enrollment without changing retained documents or consuming capacity. */
+export function checkServiceHostDocuments(storage: StorageContext, input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void {
+  storage.readTx(() => {
+    const identity = ownedIdentity(storage, input.workspaceId, input.ownerUserId);
+    let added = 0, bytes = 0;
+    const objects = new Set<string>();
+    for (const path of input.paths) {
+      if (read(storage, input.workspaceId, path)) continue;
+      const objectId = assertOwnedEditableDocument(storage, {...input, path});
+      if (objects.has(objectId) || storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(input.workspaceId, objectId)) {
+        throw relayError("conflict", "Service host enrollment document moved from its retained path.");
+      }
+      objects.add(objectId); added++;
+      bytes += Buffer.byteLength(JSON.stringify([input.workspaceId, objectId, path, input.ownerUserId, input.shareId,
+        identity.replicationEpoch, identity.streamIdentity, "0".repeat(64)])) + 64;
+    }
+    if (!added) return;
+    const all = storage.db.prepare(`SELECT workspace_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS + 1);
+    if (all.length + added > SERVICE_HOST_MAX_DOCUMENTS || (!all.some(row => row.workspace_id === input.workspaceId) &&
+      new Set(all.map(row => row.workspace_id)).size >= SERVICE_HOST_MAX_WORKSPACES)) {
+      throw relayError("quota_exceeded", "The server has no room for more live documents. Stop live editing for unused documents, then try again.");
+    }
+    assertWorkspaceQuota(storage, input.workspaceId, bytes);
+  });
+}
 export function enrollServiceHostDocument(storage: StorageContext, input: EnrollServiceHostDocumentInput): ServiceHostEnrollment {
   return enrollServiceHostDocuments(storage, [input])[0]!;
 }
@@ -246,13 +272,14 @@ export function serviceHostDocumentEnabled(storage: StorageContext, document: {w
     value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream);
 }
 
-export function scanServiceHostCandidateShares(storage: StorageContext, after?: ServiceHostCandidateCursor): ServiceHostCandidatePage {
+export function scanServiceHostCandidateShares(storage: StorageContext, after?: ServiceHostCandidateCursor, onlyWorkspaceId?: string): ServiceHostCandidatePage {
   const workspaceId = after === undefined ? "" : parseWorkspaceId(after.workspaceId), shareId = after === undefined ? "" : parseLiveUpdateIdentifier(after.shareId, "share ID");
+  const workspace = onlyWorkspaceId === undefined ? undefined : parseWorkspaceId(onlyWorkspaceId);
   return storage.readTx(() => {
     const values = storage.db.prepare(`SELECT s.* FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX} JOIN sync_relay_workspaces w USING(workspace_id)
-      WHERE (s.workspace_id,s.share_id)>(?,?) AND s.granter_user_id=w.owner_user_id AND w.replication_epoch IS NOT NULL AND w.stream_identity IS NOT NULL
+      WHERE ${workspace === undefined ? "(s.workspace_id,s.share_id)>(?,?)" : "s.workspace_id=? AND s.share_id>?"} AND s.granter_user_id=w.owner_user_id AND w.replication_epoch IS NOT NULL AND w.stream_identity IS NOT NULL
         AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')
-      ORDER BY s.workspace_id,s.share_id LIMIT ?`).all(workspaceId, shareId, SERVICE_HOST_MAX_DOCUMENTS + 1);
+      ORDER BY s.workspace_id,s.share_id LIMIT ?`).all(workspace ?? workspaceId, shareId, SERVICE_HOST_MAX_DOCUMENTS + 1);
     const page = values.slice(0, SERVICE_HOST_MAX_DOCUMENTS), last = page.at(-1);
     const shares = page.flatMap(value => {
       const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),

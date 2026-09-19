@@ -42,6 +42,25 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
   return page.nextCursor;
 }
 
+export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspaceId: string, ownerUserId: string, after?: string) {
+  const page = storage.scanServiceHostCandidateShares(after === undefined ? undefined : {workspaceId, shareId: after}, workspaceId);
+  const refusals: Array<{shareId: string; paths: string[]; code: string; message: string}> = [];
+  for (const share of page.shares) {
+    if (share.granterUserId !== ownerUserId) continue;
+    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector = parsed && effectiveShareSelector(parsed, "edit");
+    if (!selector || !isLiveEditShareSelector(selector)) continue;
+    try {
+      const paths = serviceHostSharePaths(storage, {workspaceId, ownerUserId, shareId: share.shareId});
+      storage.checkServiceHostDocuments({workspaceId, ownerUserId, shareId: share.shareId, paths});
+    } catch (error) {
+      if (!(error instanceof RelayError)) throw error;
+      refusals.push({shareId: share.shareId, paths: [...selector.paths], code: error.code, message: error.message});
+    }
+  }
+  return {refusals, nextCursor: page.nextCursor?.shareId ?? null};
+}
+
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
   host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable">;
@@ -67,12 +86,18 @@ export function createServiceHostEnrollmentRoutes(options: {
       const retiredPage = request.method === "GET" && url.searchParams.get("retired") === "1" &&
         [...url.searchParams.keys()].every(key => key === "retired" || key === "after") &&
         url.searchParams.getAll("retired").length === 1 && url.searchParams.getAll("after").length <= 1;
-      if (parts.length !== 4 || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage) || request.headers.has("cookie") ||
+      const refusalPage = request.method === "GET" && url.searchParams.get("refusals") === "1" &&
+        [...url.searchParams.keys()].every(key => key === "refusals" || key === "after") &&
+        url.searchParams.getAll("refusals").length === 1 && url.searchParams.getAll("after").length <= 1;
+      if (retiredPage && refusalPage) throw notFound();
+      if (parts.length !== 4 || parts[1] !== "sync" || parts[3] !== "live-host" || (url.search && !retiredPage && !refusalPage) || request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") || !["GET", "POST", "DELETE"].includes(request.method)) throw notFound();
       const workspaceId = parseWorkspaceId(decodeURIComponent(parts[2]!));
       const actor = await options.resolveActor(request, workspaceId);
       const guard = () => {request.signal.throwIfAborted(); if (actor.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();};
       guard();
+      if (refusalPage) return response({ok: true, ...serviceHostEnrollmentRefusals(storage, workspaceId, actor.userId,
+        url.searchParams.has("after") ? parseShareId(url.searchParams.get("after") ?? undefined) : undefined)});
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
         return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired"})), nextCursor: page.nextCursor});

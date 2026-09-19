@@ -88,6 +88,64 @@ it("reports ready only with completed retained activation and the current native
   expect((await state()).status).toBe("paused");
 });
 
+it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {
+  const f = await fixture();
+  const response = await f.handle(f.request("GET", undefined, {}, "?refusals=1"));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ok: true, refusals: [], nextCursor: null});
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  f.raw.exec("DELETE FROM sync_relay_object_moments");
+  const before = f.raw.prepare("SELECT total_changes() AS changes").get();
+  const refused = await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
+  expect(refused).toMatchObject({ok: true, refusals: [{shareId: scope.shareId, paths: ["docs"], code: "conflict"}], nextCursor: null});
+  expect(f.raw.prepare("SELECT total_changes() AS changes").get()).toEqual(before);
+  expect(f.host.reconcile).not.toHaveBeenCalled();
+  f.setActor({workspaceId: scope.workspaceId, userId: "recipient"});
+  expect((await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).status).toBe(404);
+  f.setActor({workspaceId: "other", userId: "owner-1"});
+  expect((await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).status).toBe(404);
+  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
+  expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&refusals=1"))).status).toBe(404);
+});
+
+it("clears derived capacity refusals when an owner frees space and retries enrollment", async () => {
+  const f = await fixture();
+  f.storage.enrollServiceHostDocument(f.input);
+  for (let index = 1; index < 64; index++) {
+    const path = `docs/capacity-${index}.md`; f.seed(path, `capacity-${index}`);
+    f.storage.enrollServiceHostDocument({...f.input, path});
+  }
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}), scope.shareId);
+  f.seed("pending/a.md", "pending-object");
+  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('pending-share',?,'owner-1',?,1)").run(scope.workspaceId, JSON.stringify({paths: ["pending"], versionId: null}));
+  f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'pending-grant','pending-share',principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(scope.grantId);
+  const read = async () => (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
+  expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  expect(await read()).toEqual({ok: true, refusals: [], nextCursor: null});
+  expect((await f.handle(f.request("POST", {shareId: "pending-share"}))).status).toBe(202);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "pending/a.md")).toMatchObject({enabled: true});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({retired: true, enabled: false});
+});
+
+it("advances refusal pages past healthy shares to an oversized share", async () => {
+  const f = await fixture();
+  f.storage.enrollServiceHostDocument(f.input);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  for (let index = 0; index < 65; index++) {
+    const shareId = `page-${String(index).padStart(3, "0")}`;
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
+    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(`page-grant-${index}`, shareId, scope.grantId);
+  }
+  const first = await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
+  expect(first.refusals).toEqual([]); expect(first.nextCursor).toBe("page-063");
+  for (let index = 0; index < 65; index++) f.seed(`large/${index}.md`, `large-${index}`);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='page-064'").run(JSON.stringify({paths: ["large"], versionId: null}));
+  const second = await (await f.handle(f.request("GET", undefined, {}, `?refusals=1&after=${first.nextCursor}`))).json();
+  expect(second).toMatchObject({refusals: [{shareId: "page-064", paths: ["large"], code: "bad_request"}], nextCursor: null});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({retired: true, enabled: false});
+});
+
 it("rolls back every folder enrollment when a later current file lacks a live document", async () => {
   const f = await fixture();
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main','docs/z.md',?,'text',1)").run(scope.workspaceId, "b".repeat(64));
