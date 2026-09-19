@@ -7,7 +7,7 @@ import type {
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
-import { StatusBar } from "./StatusBar";
+import { NoticeCenter } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 
 // Captures the renderer-side update listener exactly as the preload would
@@ -49,15 +49,13 @@ afterEach(() => {
   pushUpdate = null;
 });
 
-function barElement(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
+function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
   return (
-    <StatusBar
+    <NoticeCenter
       workspaceId="ws-status-test"
-      workspaceName="my-notes"
       syncStatus={props.syncStatus ?? null}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
-      onConnectCloud={() => {}}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
@@ -71,14 +69,12 @@ function barElement(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
       {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
       {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
-      onToggleTheme={() => {}}
-      onContextMenu={props.onContextMenu ?? (() => {})}
     />
   );
 }
 
-function renderBar(props: Partial<Parameters<typeof StatusBar>[0]> = {}) {
-  return render(barElement(props));
+function renderNotices(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
+  return render(noticeElement(props));
 }
 
 function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
@@ -98,7 +94,7 @@ function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotificat
 
 describe("update toast", () => {
   it("shows the machine's message when an update becomes ready, and dismisses", async () => {
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -126,7 +122,7 @@ describe("update toast", () => {
         getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
       }
     ).getUpdateState.mockReturnValueOnce(pending.promise);
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -157,7 +153,7 @@ describe("update toast", () => {
   it.each(["checking", "downloading", "offline"] as const)(
     "keeps the %s state silent",
     (status) => {
-      renderBar();
+      renderNotices();
       const listener = pushUpdate;
       expect(listener).toBeTypeOf("function");
       if (!listener) throw new Error("The update listener was not installed.");
@@ -169,53 +165,15 @@ describe("update toast", () => {
   );
 
   it("unsubscribes from the update channel on unmount", () => {
-    renderBar().unmount();
+    renderNotices().unmount();
     expect(unsubscribe).toHaveBeenCalledOnce();
-  });
-});
-
-describe("sync status surface", () => {
-  it("keeps the pinned testid/data-state and shows no count when clean", () => {
-    renderBar({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-      },
-    });
-    const status = screen.getByTestId("sync-status");
-    expect(status.getAttribute("data-state")).toBe("synced");
-    expect(status.textContent).not.toContain("(");
-  });
-
-  it("shows the workspace name in the left cluster (plan E2 status-bar item)", () => {
-    renderBar();
-    expect(screen.getByTestId("status-workspace").textContent).toBe("my-notes");
-  });
-
-  it("appends the conflict COUNT only in the conflict state", () => {
-    renderBar({
-      syncStatus: {
-        state: "conflict",
-        pendingChangeCount: 2,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        conflictCount: 2,
-      },
-    });
-    expect(screen.getByTestId("sync-status").textContent).toContain("Conflict (2)");
   });
 });
 
 describe("notice center", () => {
   it("offers to repair shared files whose folder projection is pending", async () => {
     const onRefreshShareView = vi.fn();
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -245,10 +203,21 @@ describe("notice center", () => {
 
     await userEvent.click(within(notice).getByRole("button", { name: "Refresh" }));
     expect(onRefreshShareView).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it("preserves focus assigned by a notice action", async () => {
+    render(<input aria-label="History filter" />);
+    const destination = screen.getByRole("textbox", { name: "History filter" });
+    renderNotices({ agentActive: true, onOpenHistory: () => destination.focus() });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open History" }));
+    expect(document.activeElement).toBe(destination);
+    expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
   it("keeps a clear notice for each file that is too large to sync", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -283,7 +252,7 @@ describe("notice center", () => {
   it("collects conflict, agent, and update notices in one popover", async () => {
     const onOpenConflicts = vi.fn();
     const onOpenHistory = vi.fn();
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "conflict",
         pendingChangeCount: 2,
@@ -357,7 +326,7 @@ describe("notice center", () => {
     otherSentence,
   }) => {
     const onRebuildEngineStore = vi.fn();
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -389,7 +358,7 @@ describe("notice center", () => {
   // failure and the next step, and offers no rebuild that would lose it.
   it("names a migration failure without offering the rebuild", async () => {
     const onRebuildEngineStore = vi.fn();
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -433,7 +402,7 @@ describe("notice center", () => {
       onHideWorkspaceError: vi.fn(),
       onDismissWorkspaceError,
     });
-    const { rerender } = renderBar(barProps(false));
+    const { rerender } = renderNotices(barProps(false));
 
     const toast = screen.getByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("Could not refresh history.");
@@ -442,7 +411,7 @@ describe("notice center", () => {
     expect(screen.getAllByRole("status").some((el) => el.textContent === "Copied")).toBe(true);
     // Closing the toast marks the error seen: the toast goes, the row stays.
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-    rerender(barElement(barProps(true)));
+    rerender(noticeElement(barProps(true)));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -456,7 +425,7 @@ describe("notice center", () => {
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "conflict",
         pendingChangeCount: 0,
@@ -477,7 +446,7 @@ describe("notice center", () => {
 
   // The recorder failed to build, so nothing records.
   it("names the failure when the recorder could not be built", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -501,7 +470,7 @@ describe("notice center", () => {
   // A shared view records no history by design, a capability, not a
   // failure. The share banner speaks and this surface stays quiet.
   it("raises no history-off notice for a shared view", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -519,7 +488,7 @@ describe("notice center", () => {
   });
 
   it("shows all clear when there are no notices", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -535,7 +504,7 @@ describe("notice center", () => {
 
   it("shows the persistent history-capture-failure notice while capture is failing", async () => {
     const onOpenHistory = vi.fn();
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "synced",
         pendingChangeCount: 0,
@@ -574,7 +543,7 @@ describe("notice center", () => {
       engineStoreRefused: null,
       historyCaptureFailed: true as const,
     };
-    const { rerender } = renderBar({ syncStatus: failedStatus });
+    const { rerender } = renderNotices({ syncStatus: failedStatus });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(
       within(screen.getByTestId("notice-center")).getByTestId(
@@ -588,27 +557,23 @@ describe("notice center", () => {
       ...recoveredStatus
     } = failedStatus;
     rerender(
-      <StatusBar
+      <NoticeCenter
         workspaceId="ws-status-test"
-        workspaceName="my-notes"
         syncStatus={recoveredStatus}
         agentActive={false}
         conflictSummaries={[]}
-        onConnectCloud={() => {}}
         onOpenHistory={() => {}}
         onOpenConflicts={() => {}}
         onRefreshShareView={() => {}}
         onOpenSettings={() => {}}
         onRebuildEngineStore={() => {}}
-        onToggleTheme={() => {}}
-        onContextMenu={() => {}}
       />,
     );
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
   it("keeps the notice center open when dismissing the update toast", async () => {
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -629,7 +594,7 @@ describe("notice center", () => {
   });
 
   it("calls installUpdate from the update notice action", async () => {
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -653,7 +618,7 @@ describe("notice center", () => {
   it("keeps the install result after an older update event arrives", async () => {
     const pendingInstall = deferred<UpdateActionResult>();
     installUpdate.mockReturnValueOnce(pendingInstall.promise);
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -714,7 +679,7 @@ describe("notice center", () => {
         version: "1.2.3",
       },
     });
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -752,7 +717,7 @@ describe("notice center", () => {
         version: "1.2.3",
       },
     });
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -798,7 +763,7 @@ describe("notice center", () => {
         canInstall: false,
       },
     });
-    renderBar({ onOpenSettings });
+    renderNotices({ onOpenSettings });
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -839,7 +804,7 @@ describe("notice center", () => {
 
   it("surfaces live updater errors in the toast and notice center", async () => {
     const onOpenSettings = vi.fn();
-    renderBar({ onOpenSettings });
+    renderNotices({ onOpenSettings });
 
     pushUpdate?.({
       status: "error",
@@ -881,7 +846,7 @@ describe("notice center", () => {
   });
 
   it("does not show the restart action when the update is not installable", async () => {
-    renderBar();
+    renderNotices();
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready. Restart dohc to apply it.",
@@ -905,7 +870,7 @@ describe("notice center", () => {
   });
 
   it("surfaces agent notifications with specific copy, newest first", async () => {
-    renderBar({
+    renderNotices({
       agentNotifications: [
         agentNotice({ id: "ws-a::run-1::finished", createdAtMs: 1000 }),
         agentNotice({
@@ -931,7 +896,7 @@ describe("notice center", () => {
   it("dismisses an agent notification through its dismiss action", async () => {
     const onDismissAgentNotification = vi.fn();
     const notice = agentNotice();
-    renderBar({
+    renderNotices({
       agentNotifications: [notice],
       onDismissAgentNotification,
     });
@@ -945,7 +910,7 @@ describe("notice center", () => {
   });
 
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
-    renderBar({
+    renderNotices({
       syncStatus: {
         state: "cloud-disconnected",
         pendingChangeCount: 0,

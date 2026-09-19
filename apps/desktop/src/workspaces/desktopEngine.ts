@@ -287,9 +287,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           if (terminal && !isQuitting()) {
             // The dialog is for the user, so it says what broke and what to do
             // instead — no internal names, one instruction per sentence
-            // (the dohc-interface skill). "The workspace engine" is the noun the
-            // shipping UI already uses for this (SettingsDialog, StatusBar,
-            // NoticeCenter), so this must not invent another one.
+            // (the dohc-interface skill). Use the same workspace engine name
+            // as the runner settings.
             //
             // Cause-neutral on purpose: a terminal failure also arrives from the
             // restart limit and the crash window, where the engine crashed

@@ -242,7 +242,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await page.getByTestId("open-settings").click();
+    await page.getByTestId("activity-settings").click();
     await page.getByTestId("settings-nav-agents").click();
     await page.getByTestId("runner-self-test-button").click();
     await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");

@@ -1,10 +1,10 @@
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
-// Exported: the status bar shows the same name (one derivation, two surfaces).
+// Workspace labels use the final folder name on either platform.
 export function workspaceName(workspace: WorkspaceSummary): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
@@ -21,23 +21,37 @@ function LayoutToggle(props: {
   pressed: boolean;
   onClick: () => void;
   Icon: typeof PanelLeft;
+  agentActive?: boolean;
 }) {
+  const statusId = useId();
   return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      aria-label={props.label}
-      aria-pressed={props.pressed}
-      title={props.label}
-      onClick={props.onClick}
-      className={`titlebar-no-drag grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
-        props.pressed
-          ? "bg-line/70 text-ink"
-          : "text-subtle hover:bg-line/50 hover:text-ink"
-      }`}
-    >
-      <props.Icon size={15} strokeWidth={1.8} aria-hidden />
-    </button>
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        data-testid={props.testId}
+        aria-label={props.label}
+        aria-pressed={props.pressed}
+        aria-describedby={props.agentActive ? statusId : undefined}
+        title={props.agentActive ? `${props.label}: Agent running` : props.label}
+        onClick={props.onClick}
+        className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
+          props.pressed
+            ? "bg-line/70 text-ink"
+            : "text-subtle hover:bg-line/50 hover:text-ink"
+        }`}
+      >
+        <props.Icon size={15} strokeWidth={1.8} aria-hidden />
+      </button>
+      {props.agentActive ? (
+        <span
+          id={statusId}
+          data-testid="agent-run-indicator"
+          role="status"
+          aria-label="Agent running"
+          className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-agent"
+        ><span className="sr-only">Agent running</span></span>
+      ) : null}
+    </span>
   );
 }
 
@@ -56,6 +70,9 @@ export function Titlebar(props: {
   onQuickOpen?: () => void;
   primarySidebar?: TitlebarPanelToggle;
   chatsSidebar?: TitlebarPanelToggle;
+  workspaceStatus?: ReactNode;
+  onWorkspaceContextMenu?: () => void;
+  agentActive?: boolean;
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // macOS draws traffic lights on the left and never populates the
@@ -80,7 +97,13 @@ export function Titlebar(props: {
       </span>
 
       {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
-        <div className="titlebar-no-drag relative">
+        <div
+          className="titlebar-no-drag relative flex min-w-0 items-center gap-1"
+          onContextMenu={props.onWorkspaceContextMenu ? (event) => {
+            event.preventDefault();
+            props.onWorkspaceContextMenu?.();
+          } : undefined}
+        >
           <button
             type="button"
             data-testid="workspace-switcher"
@@ -89,11 +112,12 @@ export function Titlebar(props: {
             onClick={() => setSwitcherOpen((open) => !open)}
             className="titlebar-no-drag flex h-7 items-center gap-1.5 rounded px-2 text-[13px] text-muted hover:bg-line/50 hover:text-ink"
           >
-            <span className="max-w-48 truncate">
+            <span data-testid="status-workspace" className="max-w-48 truncate">
               {workspaceName(props.workspace)}
             </span>
             <ChevronsUpDown size={13} aria-hidden className="text-subtle" />
           </button>
+          {props.workspaceStatus}
           {switcherOpen ? (
             <ul
               role="listbox"
@@ -207,6 +231,7 @@ export function Titlebar(props: {
               pressed={props.chatsSidebar.visible}
               onClick={props.chatsSidebar.onToggle}
               Icon={PanelRight}
+              agentActive={props.agentActive}
             />
           ) : null}
         </div>

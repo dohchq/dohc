@@ -188,6 +188,10 @@ export function NoticeCenter(props: {
   ) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const centerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (open) centerRef.current?.focus({ preventScroll: true });
+  }, [open]);
   // Relative-time labels ("3m ago") are computed at render; tick every 30s
   // while the panel is open so they can't sit stale between state updates.
   const [, forceTick] = useState(0);
@@ -207,7 +211,6 @@ export function NoticeCenter(props: {
     });
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
-  const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
 
@@ -570,7 +573,7 @@ export function NoticeCenter(props: {
           data-testid="workspace-shell-error"
           role="alert"
           className="dohc-popover dohc-pop-in fixed right-3 z-40 flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-          style={{ bottom: updateToastVisible ? "5.5rem" : "2.25rem" }}
+          style={{ bottom: updateToastVisible ? "4rem" : "0.75rem" }}
         >
           <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
           <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
@@ -610,7 +613,7 @@ export function NoticeCenter(props: {
           ref={toastRef}
           data-testid="update-toast"
           role="status"
-          className="dohc-popover dohc-pop-in fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+          className="dohc-popover dohc-pop-in fixed bottom-3 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
         >
           <span>{updateActionError ?? updateState?.message}</span>
           {updateState?.canInstall ? (
@@ -656,9 +659,15 @@ export function NoticeCenter(props: {
           data-testid="notice-center"
           role="dialog"
           aria-label="Notices"
-          className={`dohc-popover dohc-pop-in fixed right-3 z-20 flex w-[min(360px,calc(100vw-24px))] flex-col rounded-lg border border-line bg-panel text-xs text-ink ${
-            updateToastVisible ? "bottom-20" : "bottom-9"
-          }`}
+          tabIndex={-1}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" || event.defaultPrevented) return;
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen(false);
+            toggleRef.current?.focus();
+          }}
+          className="dohc-popover dohc-pop-in fixed bottom-12 left-14 z-20 flex max-h-[calc(100vh-100px)] w-[min(360px,calc(100vw-68px))] flex-col rounded-lg border border-line bg-panel text-xs text-ink"
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />
@@ -680,7 +689,7 @@ export function NoticeCenter(props: {
               All clear
             </div>
           ) : (
-            <div className="max-h-80 overflow-y-auto">
+            <div className="min-h-0 max-h-80 overflow-y-auto">
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
@@ -719,6 +728,7 @@ export function NoticeCenter(props: {
                           type="button"
                           disabled={notice.action.disabled}
                           onClick={() => {
+                            toggleRef.current?.focus({ preventScroll: true });
                             notice.action?.onClick();
                             setOpen(false);
                           }}
@@ -773,14 +783,16 @@ export function NoticeCenter(props: {
         data-testid="notice-center-toggle"
         aria-label={count > 0 ? `Notices (${count})` : "Notices"}
         title="Notices"
+        aria-expanded={open}
+        aria-haspopup="dialog"
         onClick={() => setOpen((value) => !value)}
-        className="relative grid size-5 place-items-center rounded-md text-muted transition-colors hover:bg-line/50 hover:text-ink"
+        className="relative grid size-9 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-100 hover:bg-line/50 hover:text-ink"
       >
-        <Bell size={13} aria-hidden />
+        <Bell size={18} strokeWidth={1.9} aria-hidden />
         {count > 0 ? (
           <span
             aria-hidden
-            className="absolute -right-1 -top-1 h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
+            className="absolute right-0.5 top-0.5 h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
           >
             {count > 9 ? "9+" : count}
           </span>
