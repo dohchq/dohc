@@ -933,9 +933,11 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
       DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
-    const response = await fetch(`${baseUrl}/ready`);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true});
+    await vi.waitFor(async () => {
+      const response = await fetch(`${baseUrl}/ready`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true});
+    }, {timeout: 10_000});
     expect((await fetch(`${baseUrl}/sync/workspace/live-host`)).status).toBe(404);
   });
 
