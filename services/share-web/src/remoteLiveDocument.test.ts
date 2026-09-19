@@ -16,7 +16,7 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const stop of cleanup.splice(0)) await stop();});
 
-async function fixture(acknowledge: boolean) {
+async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes) {
   const doc = markdownToYDoc("Hello **world**.\n");
   const server = new WebSocketServer({port: 0, host: "127.0.0.1", perMessageDeflate: false, handleProtocols: () => "dohc-live-v1"});
   await once(server, "listening");
@@ -69,7 +69,7 @@ async function fixture(acknowledge: boolean) {
     limits: {maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000}, browserLimits: limits,
     async resolveMaterial() {return {ok: true, capabilityToken: "A".repeat(43), profileSecret: "B".repeat(43), setCookie: null, currentCapability: async () => "A".repeat(43)};},
     async fetchRelay() {throw Error("Not used");}});
-  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(5000),
+  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(5000),
     async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32)});}}, "doc.md", {find: "world", replacement: "friend"})};
 }
 
@@ -86,4 +86,10 @@ it("reports unknown when the host applies the edit but the acknowledgement is lo
   const f = await fixture(false);
   expect(await f.run()).toMatchObject({ok: false, outcome: "unknown"});
   expect(yDocToMarkdown(f.doc)).toContain("**friend**");
+});
+
+it("reports a local size refusal as not applied and sends no edit", async () => {
+  const f = await fixture(false, 1);
+  expect(await f.run()).toMatchObject({ok: false, outcome: "not-applied", error: "pending-update-limit"});
+  expect(yDocToMarkdown(f.doc)).toContain("**world**");
 });

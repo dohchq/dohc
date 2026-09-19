@@ -113,3 +113,10 @@ it("rejects oversized and malformed MCP bodies without tool side effects", async
   }
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
 });
+
+it("refuses subscriptions immediately and does not create legacy GET sessions", async () => {
+  const f = fixture(); const bearer = await f.exchange();
+  const headers = {authorization: `Bearer ${bearer}`, "content-type": "application/json"};
+  expect(await (await f.send("/mcp", {method: "POST", headers, body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "subscriptions/listen"})})).json()).toMatchObject({error: {code: -32601}});
+  expect((await f.send("/mcp", {headers})).status).toBe(405);
+});

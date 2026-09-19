@@ -20,3 +20,9 @@ it.each(["missing", "repeat", ""]) ("refuses stale or ambiguous text without mut
   expect(() => replaceLiveText(getDohcYDocBodyFragment(doc), find, "new")).toThrow();
   expect(Y.encodeStateAsUpdate(doc)).toEqual(before); doc.destroy();
 });
+
+it("refuses a match across marks before changing the document", () => {
+  const doc = markdownToYDoc("Hello **world**."); const before = Y.encodeStateAsUpdate(doc);
+  expect(() => replaceLiveText(getDohcYDocBodyFragment(doc), "Hello world", "Hi friend")).toThrow(/formatting/);
+  expect(Y.encodeStateAsUpdate(doc)).toEqual(before); doc.destroy();
+});

@@ -42,7 +42,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
   });
   server.registerTool("dohc_read_file", {
     description: "Read up to 256 KiB of settled file content using a hash from dohc_list_files. Markdown may lag the live document. Binary files are base64 encoded.",
-    inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/i) }),
+    inputSchema: z.object({ blobSha256: z.string().regex(/^[0-9a-f]{64}$/) }),
   }, async ({ blobSha256 }) => {
     try {
       const response = await options.request(`/api/view/blob/${blobSha256}`);
@@ -74,7 +74,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
     inputSchema: z.object({path: z.string().max(1024).regex(/\.md$/i)}),
   }, async ({path}) => text(await remoteLiveDocument(liveOptions, path)));
   server.registerTool("dohc_edit_document", {
-    description: "Replace text in an existing live Markdown document. Read it first. Text must occur once within one text block. On outcome unknown, re-read before retrying. Applied means durable host acknowledgement, not Markdown settlement.",
+    description: "Replace text in an existing live Markdown document. Read it first. Text must occur once within one formatting run. On outcome unknown, re-read before retrying. Applied means durable host acknowledgement, not Markdown settlement.",
     inputSchema: z.object({ path: z.string().max(1024).regex(/\.md$/i), find: z.string().min(1).max(8_000), replacement: z.string().max(8_000) }),
   }, async ({ path, find, replacement }) => {
     return text(await remoteLiveDocument(liveOptions, path, {find, replacement}));
@@ -86,10 +86,16 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
   const metadata = await json(await options.request("/api/view/meta"), options.signal) as Record<string, unknown>;
   if (metadata.ok !== true) throw new Error("Share is unavailable.");
-  const handler = createMcpHandler(() => buildServer(options, metadata), { responseMode: "json" });
   const parsedBody = request.method === "POST" ? await readBoundedJson(request, 32 * 1024, options.signal) : undefined;
-  const response = await handler.fetch(request, {parsedBody});
-  return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };
+  if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
+    const result = Response.json({jsonrpc: "2.0", id: "id" in parsedBody ? parsedBody.id : null, error: {code: -32601, message: "This endpoint does not offer subscriptions."}});
+    return {body: result.body, status: result.status, headers: result.headers};
+  }
+  const handler = createMcpHandler(() => buildServer(options, metadata));
+  try {
+    const response = await handler.fetch(request, {parsedBody});
+    return { body: response.body ? await boundedBytes(response, 4 * 1024 * 1024, options.signal) : null, status: response.status, headers: response.headers };
+  } finally {await handler.close();}
 }
 
 async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer<ArrayBuffer>> {

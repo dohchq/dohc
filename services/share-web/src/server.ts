@@ -1082,7 +1082,7 @@ export function createShareWebApplication({
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
       const viewer = await serveViewer(pathname);
-      viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
+      if (!pathname.startsWith("/s/assets/")) viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
       return viewer;
     }
 

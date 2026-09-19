@@ -32,7 +32,7 @@ The agent can list files, read settled content, and read the share discussion.
 Comment and Edit links also expose discussion posting. The relay checks the grant again for every action.
 Live document tools require the existing Public Edit release and live-link configuration described below.
 They support existing `.md` documents on main while the document host is online.
-The edit tool replaces one exact text occurrence inside a text block. It preserves unrelated document content and frontmatter.
+The edit tool replaces one exact text occurrence inside a single formatting run. It preserves unrelated document content and frontmatter.
 
 An `applied` edit includes the durable host acknowledgement. Markdown settlement can happen later.
 If the outcome is `unknown`, read the live document before retrying.
@@ -42,6 +42,10 @@ The bearer uses the same bounded, in-memory session store as browser links.
 Restarting share-web or evicting the session invalidates it. Re-exchange the link to start a new agent identity.
 Browser cookies cannot authenticate MCP requests. The bearer never contains the relay workload key or a browser account credential.
 Do not log `Authorization` headers, exchange bodies, or bearer responses.
+
+Each edit opens a fresh live connection and adds a Yjs client clock to the document.
+This implementation is for bounded edits, not high-frequency automated rewriting.
+The existing state-vector and update limits also apply to agents.
 
 ## App publication storage
 

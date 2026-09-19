@@ -17,7 +17,10 @@ export function replaceLiveText(body: Y.XmlFragment, find: string, replacement: 
   let attributes: Record<string, unknown> | undefined;
   for (const part of text.toDelta()) {
     const length = typeof part.insert === "string" ? part.insert.length : 1;
-    if (index < offset + length) {attributes = part.attributes; break;}
+    if (index < offset + length) {
+      if (index + find.length > offset + length || typeof part.insert !== "string") throw new Error("The match crosses formatting boundaries. Replace text within one formatting run.");
+      attributes = part.attributes; break;
+    }
     offset += length;
   }
   body.doc!.transact(() => {
