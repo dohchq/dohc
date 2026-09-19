@@ -8,13 +8,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
+import {serveRemoteMcp} from "./remoteMcp";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -56,6 +57,7 @@ const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 type RelayFetch = (request: Request) => Promise<Response>;
 
 interface ShareWebSession {
+  agentProfileSecret?: string;
   discriminator: string;
   grantId: string;
   capabilityToken: string;
@@ -822,6 +824,8 @@ export function createShareWebApplication({
     MAX_ACTIVITY_HOLDS_PER_GRANT,
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
+  const mcpLimiter = new ShareWebInFlightLimiter(4, 16);
+  let mcpRequests = 0;
   if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
@@ -1009,6 +1013,38 @@ export function createShareWebApplication({
     if (appLaunch?.matches(request)) return appLaunch.handle(request);
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+    const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
+    if (pathname === "/api/mcp" && request.method === "GET" && !search) return jsonResponse({
+      endpoint: "/mcp", transport: "streamable-http", exchange: {path: "/api/mcp/exchange", method: "POST", body: {secret: "The secret after # in the share link"}},
+      authentication: "Send the returned bearer in the Authorization header as Bearer <bearer>. Each exchange creates a separate agent identity. Keep and reuse the bearer.",
+    });
+    if (pathname === "/mcp") {
+      if (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin ||
+        request.headers.get("sec-fetch-site") === "cross-site") return refused();
+      const bearer = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,256})$/u.exec(request.headers.get("authorization") ?? "");
+      const session = bearer && sessions.get(bearer[1]!, bearer[2]!, nowMs());
+      if (!session?.agentProfileSecret) return response(null, {status: 401, headers: {"www-authenticate": "Bearer"}});
+      const discriminator = session.discriminator;
+      if (mcpRequests >= 64) return refused(429);
+      const release = mcpLimiter.acquire(sessionKey(discriminator, bearer![2]!), session.grantId);
+      if (!release) return refused(429);
+      mcpRequests++;
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(35_000)]);
+      // Only server-held agent credentials cross into the shared link handlers.
+      const cookie = `${cookieName(discriminator)}=${bearer![2]}; ${profileCookieName(discriminator)}=${session.agentProfileSecret}`;
+      try {
+        const result = await serveRemoteMcp(request, {
+          signal, discriminator, cookie, linkLive, liveLimits: linkLiveConfig?.editor,
+          request: (path, init = {}) => handle(new Request(new URL(path, agentOrigin), {
+            ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
+            headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
+              "content-type": "application/json"},
+          })),
+        });
+        return response(result.body, {status: result.status, headers: result.headers});
+      } catch {return refused();}
+      finally {mcpRequests--; release();}
+    }
     if (pathname === "/api/apps") return discoverApps(request);
 
     if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
@@ -1045,13 +1081,23 @@ export function createShareWebApplication({
     }
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
-      return serveViewer(pathname);
+      const viewer = await serveViewer(pathname);
+      viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
+      return viewer;
     }
 
-    if (pathname === "/api/exchange" && request.method === "POST") {
+    if ((pathname === "/api/exchange" || pathname === "/api/mcp/exchange") && request.method === "POST") {
+      const agent = pathname === "/api/mcp/exchange";
+      if (agent && (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin || request.headers.get("sec-fetch-site") === "cross-site")) return refused();
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       if (!exchangeRateLimiter.allow(clientIp, nowMs())) return refused();
-      const secret = await exchangeInput(request);
+      let secret: string | null = null;
+      try {
+        if (agent) {
+          const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
+          if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
+        } else secret = await exchangeInput(request);
+      } catch {return refused();}
       if (!secret) return refused();
       try {
         const relayResponse = await fetchRelay(
@@ -1074,7 +1120,7 @@ export function createShareWebApplication({
         const token = newSessionToken();
         if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
         const cookies = parseCookies(request.headers.get("cookie"));
-        const existingProfile = cookies.get(profileCookieName(discriminator));
+        const existingProfile = agent ? undefined : cookies.get(profileCookieName(discriminator));
         const profile =
           existingProfile && LINK_SECRET_PATTERN.test(existingProfile)
             ? existingProfile
@@ -1088,9 +1134,11 @@ export function createShareWebApplication({
             capabilityToken: exchanged.capabilityToken,
             expiresAtMs: exchanged.expiresAtMs,
             createdAtMs: nowMs(),
+            ...(agent ? {agentProfileSecret: profile} : {}),
           },
           nowMs(),
         );
+        if (agent) return jsonResponse({ok: true, bearer: `${discriminator}.${token}`, endpoint: "/mcp"});
         const responseHeaders = new Headers();
         responseHeaders.append(
           "set-cookie",

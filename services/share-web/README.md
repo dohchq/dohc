@@ -18,6 +18,31 @@ Production operators must set four values:
 
 `DOHC_SHARE_WEB_PORT` defaults to `1790`.
 
+## Remote MCP for shared links
+
+Agents can use `/mcp` over Streamable HTTP. It supports current per-request MCP and older stateless clients.
+The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes authentication.
+
+1. Take the secret after `#` in the share URL.
+2. POST `{"secret":"<secret>"}` as JSON to `/api/mcp/exchange` on the same origin.
+3. Connect the MCP client to `/mcp` with `Authorization: Bearer <bearer>` from the exchange response.
+4. Keep and reuse the bearer for that agent. Each exchange creates a separate link identity.
+
+The agent can list files, read settled content, and read the share discussion.
+Comment and Edit links also expose discussion posting. The relay checks the grant again for every action.
+Live document tools require the existing Public Edit release and live-link configuration described below.
+They support existing `.md` documents on main while the document host is online.
+The edit tool replaces one exact text occurrence inside a text block. It preserves unrelated document content and frontmatter.
+
+An `applied` edit includes the durable host acknowledgement. Markdown settlement can happen later.
+If the outcome is `unknown`, read the live document before retrying.
+Settled file reads can lag live documents. File reads are limited to 256 KiB; other tool results are limited to 1 MiB.
+
+The bearer uses the same bounded, in-memory session store as browser links.
+Restarting share-web or evicting the session invalidates it. Re-exchange the link to start a new agent identity.
+Browser cookies cannot authenticate MCP requests. The bearer never contains the relay workload key or a browser account credential.
+Do not log `Authorization` headers, exchange bodies, or bearer responses.
+
 ## App publication storage
 
 Set `DOHC_RELAY_APP_PUBLICATIONS=1` on the relay to enable immutable app publications.

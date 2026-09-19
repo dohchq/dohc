@@ -103,15 +103,19 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
   const openHostRoute: LiveGatewayOptions["openHostRoute"] = async (input, signal, receive) => {
     const request = browserRequest(input.request, options.publicOrigin, signal);
     if (!request) return null;
-    const material = await options.resolveMaterial(input.discriminator, request.headers.get("cookie"), signal);
+    return openMaterialRoute(input.discriminator, request.headers.get("cookie"), input.ticketToken, signal, receive);
+  };
+  async function openMaterialRoute(discriminator: string, cookie: string | null, ticketToken: string,
+    signal: AbortSignal, receive: Parameters<LiveGatewayOptions["openHostRoute"]>[2]) {
+    const material = await options.resolveMaterial(discriminator, cookie, signal);
     if (!material.ok || signal.aborted) return null;
     return new Promise<LiveGatewayHostRoute | null>(done => {
-      const url = new URL("/sync/live/link", relay); url.protocol = relay.protocol === "https:" ? "wss:" : "ws:"; url.searchParams.set("session", input.discriminator);
+      const url = new URL("/sync/live/link", relay); url.protocol = relay.protocol === "https:" ? "wss:" : "ws:"; url.searchParams.set("session", discriminator);
       const invalidated = new AbortController(); let socket: WebSocket | undefined, settled = false;
       const finish = (value: LiveGatewayHostRoute | null) => {if (!settled) {settled = true; done(value);}};
       const stop = () => {invalidated.abort(); socket?.terminate(); finish(null);};
       try {
-        socket = new WebSocket(url, ["dohc-live-v1", `dohc-live-ticket.${input.ticketToken}`], {...receive, followRedirects: false, handshakeTimeout: limits.timeoutMs,
+        socket = new WebSocket(url, ["dohc-live-v1", `dohc-live-ticket.${ticketToken}`], {...receive, followRedirects: false, handshakeTimeout: limits.timeoutMs,
           headers: {origin: options.publicOrigin, authorization: `Bearer ${material.capabilityToken}`, "x-dohc-link-profile-secret": material.profileSecret,
             "x-dohc-relay-exchange-key": options.exchangeKey}});
         socket.on("error", stop); socket.once("close", () => {invalidated.abort(); signal.removeEventListener("abort", stop); finish(null);});
@@ -122,5 +126,5 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
       } catch {stop();}
     });
   };
-  return {handle, resolveSession, openHostRoute};
+  return {handle, resolveSession, openHostRoute, openMaterialRoute};
 }
