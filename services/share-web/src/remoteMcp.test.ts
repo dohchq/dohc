@@ -6,7 +6,7 @@ const origin = "https://share.example.test";
 const secret = "A".repeat(43);
 const clients: Client[] = [];
 afterEach(async () => {await Promise.all(clients.splice(0).map(client => client.close()));});
-function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null) {
+function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text") {
   const calls: Request[] = [];
   let revoked = false;
   const app = createShareWebApplication({relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test",
@@ -23,9 +23,9 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
       if (revoked) return new Response(null, {status: 401});
       if (path === "/sync/link/share") return Response.json({ok: true, access, effectiveSelector: {versionId}});
-      if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64)}]});
+      if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path.startsWith("/sync/link/blobs/")) return new Response("hello", {headers: {"content-type": "text/plain"}});
-      if (path === "/sync/link/discussion") return Response.json({ok: true, body: await request.json(), profile: request.headers.get("x-dohc-link-profile-secret")});
+      if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
       throw new Error(`Unexpected route: ${path}`);
     }});
@@ -119,4 +119,38 @@ it("refuses subscriptions immediately and does not create legacy GET sessions", 
   const headers = {authorization: `Bearer ${bearer}`, "content-type": "application/json"};
   expect(await (await f.send("/mcp", {method: "POST", headers, body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "subscriptions/listen"})})).json()).toMatchObject({error: {code: -32601}});
   expect((await f.send("/mcp", {headers})).status).toBe(405);
+});
+
+it("caps discussion pages at the relay limit before sending a request", async () => {
+  const f = fixture(); const client = await f.connect(await f.exchange());
+  expect(await client.callTool({name: "dohc_read_discussion", arguments: {limit: 101}})).toMatchObject({isError: true});
+  expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
+  expect(await client.callTool({name: "dohc_read_discussion", arguments: {limit: 100}})).toMatchObject({structuredContent: {ok: true, limit: "100"}});
+});
+
+it("validates discussion inputs before forwarding invalid writes", async () => {
+  const f = fixture(); const client = await f.connect(await f.exchange());
+  for (const args of [
+    {body: "x".repeat(2001)},
+    {body: "😀".repeat(2001)},
+    {body: "\0"},
+    {claimedName: "n".repeat(41)},
+    {claimedName: "😀".repeat(41)},
+    {claimedName: " "},
+    {idempotencyKey: "k".repeat(65)},
+    {idempotencyKey: "bad\nkey"},
+    {body: "\u0001".repeat(2000), claimedName: "\u0001".repeat(2000) + "Name"},
+  ]) {
+    expect(await client.callTool({name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "key", ...args}})).toMatchObject({isError: true});
+  }
+  expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
+  const body = "😀".repeat(2000), claimedName = "😀".repeat(40);
+  expect(await client.callTool({name: "dohc_post_discussion", arguments: {body, claimedName, idempotencyKey: "k".repeat(64)}})).toMatchObject({structuredContent: {ok: true, body: {body, claimedName}}});
+});
+
+it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-compatible file bytes", async contentKind => {
+  const f = fixture("view", false, null, contentKind); const client = await f.connect(await f.exchange());
+  expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: "a".repeat(64)}})).toMatchObject({
+    structuredContent: {ok: true, encoding: contentKind === "binary" ? "base64" : "utf8", content: contentKind === "binary" ? Buffer.from("hello").toString("base64") : "hello"},
+  });
 });

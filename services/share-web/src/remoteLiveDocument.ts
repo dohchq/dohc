@@ -3,6 +3,7 @@ import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import type {createLinkLiveClient} from "./linkLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
+import {LIVE_UPDATE_REFUSAL_VALUES} from "@dohc/live-session-contract/live-update-admission";
 
 type Provider = ReturnType<typeof createNamedLiveProvider>;
 function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) => boolean, signal: AbortSignal): Promise<void> {
@@ -74,7 +75,10 @@ export async function remoteLiveDocument(options: {
     }
     return {ok: true, path, markdown: yDocToMarkdown(current.doc), source: "live"};
   } catch (error) {
-    return {ok: false, path, outcome: changed ? "unknown" : "not-applied", error: changed ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
+    const state = provider?.state();
+    const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);
+    const unknown = changed && !refused;
+    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
   } finally {
     lifetime.abort();
     provider?.close();

@@ -33,6 +33,7 @@ Comment and Edit links also expose discussion posting. The relay checks the gran
 Live document tools require the existing Public Edit release and live-link configuration described below.
 They support existing `.md` documents on main while the document host is online.
 The edit tool replaces one exact text occurrence inside a single formatting run. It preserves unrelated document content and frontmatter.
+Supply `find` as document text without Markdown syntax. For `Hello **world**.`, use `world`, not `**world**`.
 
 An `applied` edit includes the durable host acknowledgement. Markdown settlement can happen later.
 If the outcome is `unknown`, read the live document before retrying.

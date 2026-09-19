@@ -8,6 +8,7 @@ import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createLinkLiveClient} from "./linkLiveClient";
 import {remoteLiveDocument} from "./remoteLiveDocument";
+import {LIVE_UPDATE_REFUSAL_VALUES, type LiveUpdateRefusal} from "@dohc/live-session-contract/live-update-admission";
 
 const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
@@ -16,7 +17,7 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const stop of cleanup.splice(0)) await stop();});
 
-async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes) {
+async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes, result?: LiveUpdateRefusal | "application-pending") {
   const doc = markdownToYDoc("Hello **world**.\n");
   const server = new WebSocketServer({port: 0, host: "127.0.0.1", perMessageDeflate: false, handleProtocols: () => "dohc-live-v1"});
   await once(server, "listening");
@@ -55,6 +56,12 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
           for (let offset = 0; offset < sync.length; offset += 900) await send({kind: "chunk", transferId: 1, offset, bytes: sync.subarray(offset, offset + 900)});
         }
         if (transfer?.begin.purpose === "submit-update") {
+          if (result) {
+            await send(result === "application-pending"
+              ? {kind: "result", result: "retry", deliveryId: transfer.begin.deliveryId, updateDigest: transfer.begin.digest, reason: result}
+              : {kind: "result", result: "refused", deliveryId: transfer.begin.deliveryId, updateDigest: transfer.begin.digest, reason: result});
+            submission(); return;
+          }
           Y.applyUpdate(doc, transfer.bytes); submission();
           if (!acknowledge) {socket.terminate(); return;}
           await ackGate;
@@ -92,4 +99,15 @@ it("reports a local size refusal as not applied and sends no edit", async () => 
   const f = await fixture(false, 1);
   expect(await f.run()).toMatchObject({ok: false, outcome: "not-applied", error: "pending-update-limit"});
   expect(yDocToMarkdown(f.doc)).toContain("**world**");
+});
+
+it.each(LIVE_UPDATE_REFUSAL_VALUES)("reports the host refusal %s as not applied", async reason => {
+  const f = await fixture(false, limits.provider.maxPendingUpdateBytes, reason);
+  expect(await f.run()).toMatchObject({ok: false, outcome: "not-applied", error: reason});
+  expect(yDocToMarkdown(f.doc)).toContain("**world**");
+});
+
+it("keeps application-pending ambiguous", async () => {
+  const f = await fixture(false, limits.provider.maxPendingUpdateBytes, "application-pending");
+  expect(await f.run()).toMatchObject({ok: false, outcome: "unknown"});
 });

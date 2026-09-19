@@ -25,6 +25,6 @@ export function replaceLiveText(body: Y.XmlFragment, find: string, replacement: 
   }
   body.doc!.transact(() => {
     text.delete(index, find.length);
-    if (replacement) text.insert(index, replacement, attributes);
+    if (replacement) text.insert(index, replacement, attributes ?? {});
   });
 }
