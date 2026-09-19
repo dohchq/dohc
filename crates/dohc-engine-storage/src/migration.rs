@@ -2052,6 +2052,30 @@ CREATE INDEX replication_log_moment ON replication_log(
 ) WHERE op_kind='moment.append';
 ";
 
+const V2_OWNER_PENDING_SETTLEMENTS_DDL: &str = "\
+CREATE TABLE owner_pending_settlements (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    relay_namespace TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+    report_id TEXT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX owner_pending_settlements_ready ON owner_pending_settlements(
+    workspace_id, applied, main_version_id, object_id, lineage_claim_id, terminal_cursor
+);
+CREATE INDEX owner_pending_settlements_report ON owner_pending_settlements(workspace_id, report_id);
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2076,6 +2100,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 3,
         id: "v2-owner-settlement-lookup",
         sql: V2_OWNER_SETTLEMENT_LOOKUP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 4,
+        id: "v2-owner-pending-settlements",
+        sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2310,6 +2340,10 @@ mod tests {
                 "v2-owner-settlement-lookup",
                 "4a0f33de170847a66bce66949d7eae39aadd6280f52fe5a6685f12bb1ff98ca1",
             ),
+            (
+                "v2-owner-pending-settlements",
+                "fea2d4775422066079c6812fbcfe5a79c58e9bd936400a406efb8e033cbe7e98",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2358,7 +2392,7 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 2 }
+            MigrationOutcome::Applied { newly_applied: 3 }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2383,7 +2417,7 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 3 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),
