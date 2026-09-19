@@ -139,6 +139,8 @@ export interface ExplorerProps {
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
   onRefresh: () => void;
+  // Failed tree operations go to the shell's error toast and Notices row.
+  onError: (message: string) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -445,6 +447,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const {
     workspaceId,
     onRefresh,
+    onError,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -484,7 +487,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   collectionFoldersRef.current = props.collectionFolders;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
-  const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
@@ -828,7 +830,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       run: (change: PendingTreeChange) => Promise<unknown>,
     ) => {
       if (changes.length === 0) return;
-      setOpError(null);
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
       // text or values this begin rejected.
@@ -836,7 +837,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
-        setOpError(cause instanceof Error ? cause.message : String(cause));
+        onError(cause instanceof Error ? cause.message : String(cause));
         return;
       }
       try {
@@ -848,7 +849,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             succeeded.push(change);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            setOpError(cause instanceof Error ? cause.message : String(cause));
+            onError(cause instanceof Error ? cause.message : String(cause));
           }
         }
         const changedExistingPath = succeeded.some(
@@ -861,7 +862,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         } catch (cause) {
           // The disk change already completed. Surface the settlement error,
           // then project the successful paths so the shell matches storage.
-          setOpError(cause instanceof Error ? cause.message : String(cause));
+          onError(cause instanceof Error ? cause.message : String(cause));
         }
         if (succeeded.length > 0) onPathsChanged(succeeded);
         onRefresh();
@@ -871,7 +872,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation?.release();
       }
     },
-    [onBeginChanges, onPathsChanged, onRefresh],
+    [onBeginChanges, onError, onPathsChanged, onRefresh],
   );
 
   const performMoves = useCallback(
@@ -980,10 +981,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       void bridge()
         .exportWorkspaceZip({ workspaceId, relativePath })
         .catch((cause) =>
-          setOpError(cause instanceof Error ? cause.message : String(cause)),
+          onError(cause instanceof Error ? cause.message : String(cause)),
         );
     },
-    [workspaceId],
+    [onError, workspaceId],
   );
 
   // ---- selection + clicks ----
@@ -1877,16 +1878,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   {renderedRows}
                 </ul>
               )}
-
-              {opError ? (
-                <p
-                  data-testid="explorer-error"
-                  role="alert"
-                  className="mx-3 mt-2 text-[11px] text-danger"
-                >
-                  {opError}
-                </p>
-              ) : null}
             </>
           ) : null}
         </section>

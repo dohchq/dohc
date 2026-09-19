@@ -4354,7 +4354,7 @@ describe("explorer operations over collection writes", () => {
       rejectMove(new Error("rename failed"));
       await move.catch(() => undefined);
     });
-    await screen.findByTestId("explorer-error");
+    await screen.findByTestId("workspace-shell-error");
     await waitFor(() =>
       expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
     );
@@ -4374,7 +4374,7 @@ describe("explorer operations over collection writes", () => {
     });
     expect(collectionWriteFailures()).toHaveLength(1);
     await beginRename(bridge);
-    await screen.findByTestId("explorer-error");
+    await screen.findByTestId("workspace-shell-error");
     expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
     expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false);
   });
@@ -9561,7 +9561,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
@@ -9600,7 +9600,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
@@ -9625,7 +9625,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
@@ -9689,7 +9689,7 @@ describe("explorer destructive change flush boundaries", () => {
     });
 
     expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
     expect(screen.getByTestId("tab-docs/b.md")).toBeTruthy();
@@ -9901,7 +9901,7 @@ describe("explorer destructive change flush boundaries", () => {
       rejectMove(new Error("rename failed"));
       await move.catch(() => undefined);
     });
-    expect((await screen.findByTestId("explorer-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "rename failed",
     );
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();

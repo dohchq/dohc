@@ -4165,6 +4165,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
+        onError={showShellError}
         onNewCollection={setNewCollectionFolder}
       />
     </>
