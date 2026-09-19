@@ -41,6 +41,7 @@ test('auth, relay, and share links advertise the same public origin and exchange
   assert.equal(api.WORKSPACE_API_BASE_URL, viewer.DOHC_SHARE_WEB_PUBLIC_ORIGIN);
   assert.equal(api.WORKSPACE_API_BASE_URL, relay.SYNC_RELAY_AUTH_BASE_URL);
   assert.equal(relay.DOHC_RELAY_EXCHANGE_KEY, viewer.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY);
+  assert.equal(relay.DOHC_RELAY_NAMED_LIVE_HOSTS, viewer.DOHC_SHARE_WEB_PUBLIC_HOSTS);
   assert.equal(api.DOHC_AUTH_TRUSTED_PROXIES, `${compose.services.gateway.networks.dohc.ipv4_address},${compose.services['share-web'].networks.dohc.ipv4_address}`);
 });
 
