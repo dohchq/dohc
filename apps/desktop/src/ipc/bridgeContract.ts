@@ -1308,8 +1308,7 @@ export const EngineMomentRecord = z.object({
   operation: z.enum(["write", "rename", "delete"]),
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc"]),
   // Present only when a dohc-tracked agent run authored the moment; main
-  // derives the display name (cloud email or the run's onBehalfOf label) —
-  // the renderer only formats it as "<User Name>'s agent".
+  // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   summary: z.string().max(500).optional(),
@@ -1473,6 +1472,7 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   authorKind: z.enum(["human", "agent"]),
   authorDisplayName: z.string().min(1).max(200),
+  authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
@@ -1839,6 +1839,8 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       id: OPAQUE_ID,
       authorKind: z.enum(["human", "agent"]),
       authorDisplayName: z.string().min(1).max(200),
+      authorOwnerDisplayName: z.string().min(1).max(200).optional(),
+      authorUserId: z.string().min(1).max(256).optional(),
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
       reactions: z.array(ChatReactionRecord),

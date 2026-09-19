@@ -2039,6 +2039,10 @@ ALTER TABLE chat_decisions ADD COLUMN options_json TEXT;
 ALTER TABLE chat_decisions ADD COLUMN chosen_option TEXT;
 ";
 
+const V2_AGENT_OWNER_DDL: &str = "\
+ALTER TABLE chat_messages ADD COLUMN author_owner_display_name TEXT;
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2051,6 +2055,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 1,
         id: V2_GROUPS_MIGRATION_ID,
         sql: V2_GROUPS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 2,
+        id: "v2-agent-owner",
+        sql: V2_AGENT_OWNER_DDL,
         sets_user_version: None,
     },
 ];
@@ -2277,6 +2287,10 @@ mod tests {
                 "v2-groups",
                 "5eaec46edc3fec5c729e8cca60c994be2c90299d9f06db842b276872d3e77075",
             ),
+            (
+                "v2-agent-owner",
+                "1b2a97da5260065640bdaaa9cfc2bad24cba32a08755db6fdf0e57a6aec52754",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2316,6 +2330,22 @@ mod tests {
     /// every migration, so a malformed list already fails closed at runtime,
     /// but that failure would first be seen by whoever opened a store.
     #[test]
+    fn a_groups_store_gains_nullable_agent_owner_metadata() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..2], &ctx, &NoFaults)
+            .expect("shipped schema");
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
+        assert!(nullable);
+    }
+
+    #[test]
     fn a_baseline_only_store_gains_the_groups_columns() {
         let dir = tempdir();
         let path = dir.join("engine.db");
@@ -2332,8 +2362,9 @@ mod tests {
             .expect("probe");
         assert!(!has_type, "the baseline alone has no type column");
 
-        let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("groups");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("groups and agent owner");
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),
@@ -2416,15 +2447,14 @@ mod tests {
         conn
     }
 
-    // A synthetic second migration used to exercise ordering / resume without
-    // waiting for a real future schema change.
+    // A synthetic migration after the shipped schema exercises resume.
     #[cfg(feature = "fault-injection")]
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     #[cfg(feature = "fault-injection")]
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 2,
+            ordinal: BASELINE_MIGRATIONS.len() as u32,
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,
@@ -2825,11 +2855,15 @@ mod tests {
             assert_eq!(base, 1, "baseline must be durably recorded");
         }
 
-        // Resume: the baseline is skipped (idempotent); the groups migration
-        // and the probe apply.
+        // Resume: the baseline is skipped; the remaining migrations apply.
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: migrations.len() as u32 - 1
+            }
+        );
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",

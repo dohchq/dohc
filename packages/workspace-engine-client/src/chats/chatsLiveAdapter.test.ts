@@ -1312,3 +1312,13 @@ describe("loopback poll validation", () => {
     expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
   });
 });
+
+
+it("decodes agent owner display metadata without changing its verified author", () => {
+  const message = decodeChatsResult(CHATS_METHOD.messageSend, {
+    id: "message", workspaceId: "workspace", threadId: "thread",
+    author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Ada", authorUserId: "owner-id",
+    body: "Done", createdAtMs: 1, attachments: [],
+  });
+  expect(message).toMatchObject({ author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Ada", authorUserId: "owner-id" });
+});

@@ -42,6 +42,7 @@ struct ChatThreadStartParams {
     lane: Option<String>,
     author_kind: String,
     author_display_name: String,
+    author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
     origin: Option<String>,
     body: String,
@@ -226,6 +227,20 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 }),
             );
     }
+    if let Some(author_user_id) = summary
+        .opening_message
+        .as_ref()
+        .and_then(|opening| opening.author_user_id.as_ref())
+    {
+        value["openingMessage"]["authorUserId"] = json!(author_user_id);
+    }
+    if let Some(owner_name) = summary
+        .opening_message
+        .as_ref()
+        .and_then(|opening| opening.author_owner_display_name.as_ref())
+    {
+        value["openingMessage"]["authorOwnerDisplayName"] = json!(owner_name);
+    }
     value
 }
 
@@ -256,6 +271,7 @@ impl EngineService {
                     lane,
                     author_kind,
                     author_display_name: params.author_display_name,
+                    author_owner_display_name: params.author_owner_display_name,
                     author_user_id: params.author_user_id,
                     origin: params.origin,
                     body: params.body,

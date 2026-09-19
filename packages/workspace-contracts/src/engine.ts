@@ -294,6 +294,7 @@ export interface ChatMessageAppendPayload {
   // byte-identical to the pre-MU-C0 shape and `authorDisplayName` (display-only,
   // never used for identity/authz) still renders. See the design's "Authenticated
   // authorship" section.
+  authorOwnerDisplayName?: string;
   authorUserId?: string;
   parentMessageId?: ChatMessageId;
   // Local CLI writes are replicated so every device can exclude them from
@@ -639,6 +640,8 @@ export interface ChannelThreadSummary {
   openingMessage?: {
     id: ChatMessageId;
     author: ChatActor;
+    authorOwnerDisplayName?: string;
+    authorUserId?: string;
     createdAtMs: number;
     bodySnippet: string;
     // Only active reactions belonging to this opening message.
@@ -692,6 +695,7 @@ export interface ChatMessage {
   // for a signed-in send; absent for solo/legacy messages. `author` stays the
   // display-only convenience — identity/authz key on `authorUserId`, never the
   // display name.
+  authorOwnerDisplayName?: string;
   authorUserId?: string;
   parentMessageId?: ChatMessageId;
   origin?: "cli";
@@ -724,7 +728,7 @@ type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
 // authorUserId (MU-C0) later fills authorId. displayName/kind render the
-// reaction ("<User>" / "<User>'s agent") without a separate lookup.
+// reaction ("<User>" / "<Agent>") without a separate lookup.
 interface ChatReactionAuthor {
   authorId: string;
   kind: ChatActor["kind"];
@@ -889,6 +893,7 @@ export interface LinkedChatStore {
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
+    authorOwnerDisplayName?: string;
     authorUserId?: string;
     origin?: "cli";
     body: string;
@@ -936,6 +941,7 @@ export interface LinkedChatStore {
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
+    authorOwnerDisplayName?: string;
     authorUserId?: string;
     parentMessageId?: ChatMessageId;
     origin?: "cli";

@@ -146,6 +146,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("verified-user".to_owned()),
                 origin: None,
                 body: "Choose a launch date".to_owned(),
@@ -166,6 +167,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 message_id: "local-resolver".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Local".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: None,
                 parent_message_id: None,
                 origin: None,
@@ -1294,10 +1296,11 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
         json!({
             "messageId": "early-message",
             "threadId": "late-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ice",
+            "authorKind": "agent",
+            "authorDisplayName": "Nova",
+            "authorOwnerDisplayName": "Ice",
             "authorUserId": "ice",
-            "body": "arrived first",
+            "body": "@agent arrived first",
             "createdAtMs": 30
         }),
     );
@@ -1342,7 +1345,7 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     );
     apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
 
-    let replayed: (String, String, i64) = engine
+    let replayed: (String, String, i64, String) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row(
@@ -1362,15 +1365,17 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
                 conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
                     row.get(0)
                 })?,
+                conn.query_row("SELECT author_owner_display_name FROM chat_messages WHERE message_id='early-message'", [], |row| row.get(0))?,
             ))
         })
         .expect("replayed message state");
     assert_eq!(
         replayed,
         (
-            "arrived first".to_owned(),
-            "Ice\narrived first".to_owned(),
-            0
+            "@agent arrived first".to_owned(),
+            "Nova\nNova (agent)\n@agent arrived first".to_owned(),
+            0,
+            "Ice".to_owned()
         ),
         "missing-thread refusal loses the message instead of replaying it"
     );
@@ -2247,6 +2252,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 body: "Default opening message".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("ada".to_owned()),
                 origin: None,
                 needs_decision: false,
@@ -2469,6 +2475,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("ada".to_owned()),
                 origin: None,
                 body: "Replicate this".to_owned(),
@@ -3045,6 +3052,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 message_id: "refused-message-id".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Local".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: None,
                 parent_message_id: None,
                 origin: None,
@@ -3084,6 +3092,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 message_id: "authored-child".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("verified-user".to_owned()),
                 parent_message_id: Some("refused-message-id".to_owned()),
                 origin: None,
@@ -3235,6 +3244,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 lane: ChatThreadLane::Posts,
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("verified-user".to_owned()),
                 origin: None,
                 body: "The valid thread must reach peers first.".to_owned(),
@@ -3255,6 +3265,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 message_id: "second-message-after-refused-thread".to_owned(),
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Verified".to_owned(),
+                author_owner_display_name: None,
                 author_user_id: Some("verified-user".to_owned()),
                 parent_message_id: None,
                 origin: None,
@@ -4818,4 +4829,26 @@ fn reserved_agent_channel_shapes_rejected() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
+}
+
+#[test]
+fn imported_agent_message_keeps_its_owner_display_name() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "agent-owner");
+    let operation = envelope(
+        "agent-owner",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "agent-owner-message", "threadId": "thread-imported",
+            "authorKind": "agent", "authorDisplayName": "Nova", "authorOwnerDisplayName": "Ada",
+            "body": "Done", "createdAtMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("apply");
+    let stored: String = engine.read_with(|conn| {
+        conn.query_row("SELECT author_owner_display_name FROM chat_messages WHERE message_id='agent-owner-message'", [], |row| row.get(0))
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+    }).expect("owner");
+    assert_eq!(stored, "Ada");
 }

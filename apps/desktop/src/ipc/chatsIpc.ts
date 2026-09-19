@@ -107,6 +107,7 @@ export function chatMessageForIpc(message: ChatMessage): ChatMessageRecord {
     threadId: message.threadId,
     authorKind: message.author.kind,
     authorDisplayName: message.author.displayName,
+    ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
@@ -631,6 +632,8 @@ export function registerChatsIpcHandlers<
             id: summary.openingMessage.id,
             authorKind: summary.openingMessage.author.kind,
             authorDisplayName: summary.openingMessage.author.displayName,
+            ...(summary.openingMessage.authorOwnerDisplayName ? { authorOwnerDisplayName: summary.openingMessage.authorOwnerDisplayName } : {}),
+            ...(summary.openingMessage.authorUserId ? { authorUserId: summary.openingMessage.authorUserId } : {}),
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
             reactions: reactionViewer

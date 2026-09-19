@@ -317,6 +317,7 @@ pub struct ChatMessage {
     pub message_order: i64,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
+    pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
     pub parent_message_id: Option<String>,
     pub origin: Option<String>,
@@ -592,6 +593,8 @@ pub struct ChannelOpeningMessage {
     pub message_id: String,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
+    pub author_owner_display_name: Option<String>,
+    pub author_user_id: Option<String>,
     pub created_at_ms: i64,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
@@ -785,6 +788,7 @@ pub struct StartChannelThread {
     pub lane: ChatThreadLane,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
+    pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
@@ -807,6 +811,7 @@ pub struct SendMessage {
     pub message_id: String,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
+    pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
     pub parent_message_id: Option<String>,
     pub origin: Option<String>,
@@ -1547,7 +1552,19 @@ pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError>
     Ok(normalized.to_owned())
 }
 
-/// `normalizeAuthorUserId`: absent -> None; else trim, 1..=200 chars.
+pub fn normalize_agent_owner_name(
+    is_agent: bool,
+    value: Option<&str>,
+) -> Result<Option<String>, DomainError> {
+    match value {
+        None => Ok(None),
+        Some(value) if is_agent => normalize_display_name(value).map(Some),
+        Some(_) => Err(DomainError::InvalidInput {
+            reason: "only agent messages carry an owner display name",
+        }),
+    }
+}
+
 /// Trim and validate an optional opaque relay author identity.
 pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
     match value {
@@ -2305,6 +2322,10 @@ impl<'a> LinkedChatStore<'a> {
         let options_c = normalize_poll_options(&input.options)?;
         let options_fingerprint = options_c.join("\u{0}");
         let display_name = normalize_display_name(&input.author_display_name)?;
+        let owner_name = normalize_agent_owner_name(
+            input.author_kind == ChatActorKind::Agent,
+            input.author_owner_display_name.as_deref(),
+        )?;
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
         let body = normalize_body(&input.body)?;
@@ -2326,6 +2347,7 @@ impl<'a> LinkedChatStore<'a> {
             body.as_bytes(),
             input.author_kind.as_str().as_bytes(),
             display_name.as_bytes(),
+            owner_name.as_deref().unwrap_or("").as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
             if input.needs_decision { b"1" } else { b"0" },
@@ -2402,8 +2424,8 @@ impl<'a> LinkedChatStore<'a> {
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
-                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
+                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -2415,6 +2437,7 @@ impl<'a> LinkedChatStore<'a> {
                     body_c,
                     now,
                     order,
+                    owner_name,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2469,6 +2492,9 @@ impl<'a> LinkedChatStore<'a> {
             let message_payload = message_payload
                 .as_object_mut()
                 .expect("message payload is an object");
+            if let Some(owner_name) = &owner_name {
+                message_payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
+            }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
@@ -2533,6 +2559,7 @@ impl<'a> LinkedChatStore<'a> {
                 message_order: order,
                 author_kind: input.author_kind,
                 author_display_name: display_c.clone(),
+                author_owner_display_name: owner_name.clone(),
                 author_user_id: author_user_c.clone(),
                 parent_message_id: None,
                 origin: origin_c.clone(),
@@ -2571,6 +2598,10 @@ impl<'a> LinkedChatStore<'a> {
             });
         }
         let display_name = normalize_display_name(&input.author_display_name)?;
+        let owner_name = normalize_agent_owner_name(
+            input.author_kind == ChatActorKind::Agent,
+            input.author_owner_display_name.as_deref(),
+        )?;
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
         let parent = match &input.parent_message_id {
@@ -2596,6 +2627,7 @@ impl<'a> LinkedChatStore<'a> {
             body.as_bytes(),
             input.author_kind.as_str().as_bytes(),
             display_name.as_bytes(),
+            owner_name.as_deref().unwrap_or("").as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             parent.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
@@ -2636,8 +2668,8 @@ impl<'a> LinkedChatStore<'a> {
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
-                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -2650,6 +2682,7 @@ impl<'a> LinkedChatStore<'a> {
                     origin_c,
                     body_c,
                     now,
+                    owner_name,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2708,6 +2741,9 @@ impl<'a> LinkedChatStore<'a> {
             let payload = payload
                 .as_object_mut()
                 .expect("message payload is an object");
+            if let Some(owner_name) = &owner_name {
+                payload.insert("authorOwnerDisplayName".to_owned(), serde_json::json!(owner_name));
+            }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
             }
@@ -2789,6 +2825,7 @@ impl<'a> LinkedChatStore<'a> {
                 message_order: order,
                 author_kind: input.author_kind,
                 author_display_name: display_c.clone(),
+                author_owner_display_name: owner_name.clone(),
                 author_user_id: author_user_c.clone(),
                 parent_message_id: parent_c.clone(),
                 origin: origin_c.clone(),
@@ -3126,7 +3163,7 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
-                         created_at_ms \
+                         created_at_ms, author_owner_display_name \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3154,6 +3191,8 @@ impl<'a> LinkedChatStore<'a> {
                         message_id: message.message_id,
                         author_kind: message.author_kind,
                         author_display_name: message.author_display_name,
+                        author_owner_display_name: message.author_owner_display_name,
+                        author_user_id: message.author_user_id,
                         created_at_ms: message.created_at_ms,
                     });
                 summaries.push(ChannelThreadSummary {
@@ -3623,7 +3662,7 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-                     author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+                     author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -6632,7 +6671,7 @@ fn message_by_id(
 ) -> Result<Option<ChatMessage>, DomainError> {
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -6651,7 +6690,7 @@ fn first_message_for_thread(
 ) -> Result<Option<ChatMessage>, DomainError> {
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -6856,6 +6895,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let origin: Option<String> = row.get(8)?;
     let body: String = row.get(9)?;
     let created_at_ms: i64 = row.get(10)?;
+    let author_owner_display_name: Option<String> = row.get(11)?;
     Ok(
         ChatActorKind::from_db(&author_kind_str).map(|author_kind| ChatMessage {
             workspace_id,
@@ -6864,6 +6904,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             message_order,
             author_kind,
             author_display_name,
+            author_owner_display_name,
             author_user_id,
             parent_message_id,
             origin,
