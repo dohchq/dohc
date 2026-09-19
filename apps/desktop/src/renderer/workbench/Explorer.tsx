@@ -903,7 +903,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const commitRename = useCallback(
     (path: string, isFolder: boolean, value: string) => {
-      const toPath = resolveTypedPath(value, dirnameOf(path));
+      const typed = resolveTypedPath(value, dirnameOf(path));
+      // A file name without an extension means markdown here too, so
+      // "hello.md" typed as "hello" stays put and "hello.m" becomes markdown.
+      const toPath = typed && !isFolder ? withMarkdownDefault(typed) : typed;
       setEditing(null);
       if (!toPath || toPath === path) return;
       void runChanges(
@@ -924,8 +927,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const commitCreate = useCallback(
     (kind: "file" | "folder", parentPath: string, value: string) => {
       const typed = resolveTypedPath(value, parentPath);
-      // New files are markdown unless an extension is typed. Renames
-      // (commitRename) stay literal so extensions can be changed on purpose.
+      // New files are markdown unless an extension is typed.
       const path = kind === "file" && typed ? withMarkdownDefault(typed) : typed;
       setEditing(null);
       if (!path) return;
