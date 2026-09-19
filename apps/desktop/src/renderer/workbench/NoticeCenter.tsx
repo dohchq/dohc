@@ -188,12 +188,15 @@ export function NoticeCenter(props: {
   ) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const centerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (open) centerRef.current?.focus({ preventScroll: true });
+  }, [open]);
   // Relative-time labels ("3m ago") are computed at render; tick every 30s
   // while the panel is open so they can't sit stale between state updates.
   const [, forceTick] = useState(0);
   useEffect(() => {
     if (!open) return;
-    centerRef.current?.focus({ preventScroll: true });
     const interval = setInterval(() => forceTick((n) => n + 1), 30_000);
     return () => clearInterval(interval);
   }, [open]);
@@ -208,7 +211,6 @@ export function NoticeCenter(props: {
     });
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
-  const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
 

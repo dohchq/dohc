@@ -789,7 +789,7 @@ export function SettingsDialog(props: {
           <div data-testid="settings-section-keyboard">
             <SettingRow
               title="Open settings"
-              description="The command palette, app menu, Activity Bar, Status Bar, and accelerator all route here."
+              description="Open Settings from the command palette, app menu, Activity Bar, or keyboard shortcut."
             >
               <kbd className="rounded border border-line bg-bg px-1.5 py-0.5 font-mono text-[11px] text-subtle">
                 Ctrl/Cmd + ,
