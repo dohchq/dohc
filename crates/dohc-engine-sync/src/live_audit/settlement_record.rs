@@ -3,6 +3,31 @@ use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
 
 pub(super) const SETTLEMENT_OP: &str = "live.audit.settlement";
 
+/// Imported audit identifies history; the authenticated owner binding supplies
+/// the accepted cursor against which its publication is checked.
+pub(crate) fn owner_settlement_cursor_in(
+    conn: &Connection,
+    owner: &dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor,
+    moment_id: &str,
+    markdown_digest: &str,
+) -> Result<Option<i64>, SyncError> {
+    conn.query_row(
+        "SELECT min(json_extract(record_json,'$.terminalCursor')) FROM live_audit_settlements
+         WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
+           AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
+           AND json(json_extract(record_json,'$.binding'))=json(?5)",
+        params![
+            owner.binding.workspace_id,
+            moment_id,
+            markdown_digest,
+            owner.relay_database_namespace,
+            serde_json::to_string(&owner.binding).map_err(SyncError::corrupt)?
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettlementRecord {
@@ -264,6 +289,13 @@ pub(super) fn journal_ready_in_tx(
     }
     let sequence = journal_local_op_in_tx(tx, workspace, SETTLEMENT_OP, &payload, now_ms)?;
     tx.execute("INSERT INTO live_audit_settlement_publications(settlement_id,workspace_id,relay_database_namespace,main_version_id,object_id,lineage_claim_id,terminal_cursor,markdown_digest,origin_id,origin_seq) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,(SELECT origin_id FROM sync_identity WHERE workspace_id=?2),?9)",params![id,workspace,record.relay_database_namespace,record.binding.main_version_id,record.binding.object_id,record.binding.lineage_claim_id,record.terminal_cursor,record.markdown_digest,sequence]).map_err(SyncError::persist)?;
+    let published: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)",
+        params![workspace, record.moment_id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if !published {
+        crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?;
+    }
     Ok(Some(sequence))
 }
 

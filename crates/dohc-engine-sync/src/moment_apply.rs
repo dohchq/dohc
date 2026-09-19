@@ -460,7 +460,7 @@ fn apply_moment_append(
         path_occupant.filter(|snapshot| snapshot.object_id != payload.object_id);
 
     let origin_saw_absent = matches!(payload.before_present.as_str(), "absent" | "null");
-    let head_fast_forward = if origin_saw_absent {
+    let mut head_fast_forward = if origin_saw_absent {
         local.is_none() && conflicting_occupant.is_none()
     } else {
         local.as_ref().is_some_and(|snapshot| {
@@ -475,7 +475,7 @@ fn apply_moment_append(
         require_binary_blob(tx, &payload.payload_after_blob_sha256)?;
         None
     };
-    let content_fast_forward = !head_fast_forward
+    let mut content_fast_forward = !head_fast_forward
         && if payload.operation == "delete" {
             local.is_none() && conflicting_occupant.is_none()
         } else {
@@ -492,6 +492,68 @@ fn apply_moment_append(
 
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
+
+    if mode == MomentApplyMode::Ordinary {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append Y.Doc coordinates are invalid",
+        })?;
+        if let Some((owner, accepted)) = crate::ydoc_apply::observed_owner_projection_in_tx(
+            tx,
+            &key,
+            &payload.payload_after_path,
+        )? {
+            if payload.operation != "write"
+                || after_kind != ContentKind::Text
+                || payload.path != payload.payload_after_path
+                || conflicting_occupant.is_some()
+                || !is_ydoc_settlement_moment_id(&payload.moment_id)
+                || local.as_ref().is_none_or(|snapshot| {
+                    snapshot.path != owner.binding.current_path
+                        || snapshot.kind != ContentKind::Text
+                })
+            {
+                return Err(SyncError::LiveDocumentBindingActive);
+            }
+            let cursor = crate::live_audit::owner_settlement_cursor_in(
+                tx,
+                &owner,
+                &payload.moment_id,
+                &payload.payload_after_blob_sha256,
+            )?
+            .ok_or(SyncError::LiveDocumentBindingActive)?;
+            if cursor > owner.accepted_cursor {
+                return Err(SyncError::RetryableState {
+                    reason: "native-owner-settlement-pending",
+                });
+            }
+            if after_text.as_deref() != Some(accepted.as_str()) {
+                if cursor == owner.accepted_cursor {
+                    return Err(SyncError::LiveDocumentBindingActive);
+                }
+                // The authenticated live feed can pass several settlements
+                // before ordinary sync imports their history. Never rewind it
+                // to an intermediate projection or wait for that past state.
+                ensure_file_object(tx, &envelope.workspace_id, payload)?;
+                insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+                return Ok(MomentApplyResult {
+                    conflicts_opened: 0,
+                    materialization_changes: Vec::new(),
+                    record_facts: None,
+                });
+            }
+            // Equality with native accepted state permits publication even
+            // when the authored predecessor was retained as history only.
+            // Use the local snapshot as the adopted-before side. The remote
+            // predecessor may be history-only and was never materialized.
+            head_fast_forward = false;
+            content_fast_forward = true;
+        }
+    }
 
     if mode == MomentApplyMode::Ordinary && payload.operation == "delete" && local.is_none() {
         let key = DocKey::new(

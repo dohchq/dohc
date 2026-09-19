@@ -2043,6 +2043,15 @@ const V2_AGENT_OWNER_DDL: &str = "\
 ALTER TABLE chat_messages ADD COLUMN author_owner_display_name TEXT;
 ";
 
+const V2_OWNER_SETTLEMENT_LOOKUP_DDL: &str = "\
+CREATE INDEX live_audit_settlement_moment ON live_audit_settlements(
+    workspace_id, json_extract(record_json,'$.momentId'), markdown_digest
+);
+CREATE INDEX replication_log_moment ON replication_log(
+    workspace_id, json_extract(payload_json,'$.momentId')
+) WHERE op_kind='moment.append';
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2061,6 +2070,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 2,
         id: "v2-agent-owner",
         sql: V2_AGENT_OWNER_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 3,
+        id: "v2-owner-settlement-lookup",
+        sql: V2_OWNER_SETTLEMENT_LOOKUP_DDL,
         sets_user_version: None,
     },
 ];
@@ -2291,6 +2306,10 @@ mod tests {
                 "v2-agent-owner",
                 "1b2a97da5260065640bdaaa9cfc2bad24cba32a08755db6fdf0e57a6aec52754",
             ),
+            (
+                "v2-owner-settlement-lookup",
+                "4a0f33de170847a66bce66949d7eae39aadd6280f52fe5a6685f12bb1ff98ca1",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2339,7 +2358,7 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied { newly_applied: 2 }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2364,7 +2383,7 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 3 });
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),

@@ -152,6 +152,92 @@ fn published(f: &Fixture) -> ReplicationEnvelope {
 }
 
 #[test]
+fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
+    use dohc_engine_collab::live_update_application::{LiveUpdateReceipt, with_settlement};
+    use dohc_engine_storage::TxnOutcome;
+    let mut f = fixture(false);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    contact(&mut f.store);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
+    let receipt = LiveUpdateReceipt {
+        delivery_id: "enrollment-1".into(),
+        update_digest: hex_sha256(&f.bytes),
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    let moment_id = "ydoc-settle-deferred";
+    let id = with_settlement::<Box<dyn std::error::Error>, _>(
+        &mut f.store,
+        &f.handle,
+        Some(receipt),
+        8,
+        |store, audit| {
+            let b = audit.binding();
+            let key = dohc_engine_collab::DocKey::new(
+                &b.workspace_id, &b.main_version_id, &b.object_id,
+            )?;
+            let doc = store.read_with(|conn| dohc_engine_collab::durable::load_doc_in(conn, &key))?;
+            let projected = doc.project(dohc_engine_collab::ContentKind::Richdoc)?.content;
+            let content = doc.preserved_markdown_source(&projected).unwrap_or(projected);
+            let vector = hex_sha256(&doc.encode_state_vector());
+            let result = store.write_with(&NoFaults, |tx| -> Result<String, Box<dyn std::error::Error>> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: &b.workspace_id,
+                        version_id: &b.main_version_id,
+                        object_id: &b.object_id,
+                        path: std::borrow::Cow::Borrowed(&b.current_path),
+                        text: std::borrow::Cow::Borrowed(&content),
+                        moment_id,
+                        metadata_origin: "ydoc",
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 300,
+                        request_id: None,
+                    })?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256],
+                )?;
+                let id = audit.record_in_tx(tx, moment_id, &written.snapshot.blob_sha256, &vector, 300)?;
+                assert_eq!(journal_live_settlement_in_tx(tx, "ws", &id, 300)?, None);
+                Ok(id)
+            })?;
+            match result {
+                TxnOutcome::Committed(id) => Ok(id),
+                TxnOutcome::Crashed { .. } => panic!("unexpected settlement crash"),
+            }
+        },
+    ).unwrap();
+    let paired = |store: &EngineStore| {
+        operations(store)
+            .into_iter()
+            .filter(|op| {
+                op.op_kind == settlement_record::SETTLEMENT_OP
+                    || (op.op_kind == "moment.append" && op.payload["momentId"] == moment_id)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(paired(&f.store).is_empty());
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 301).unwrap();
+    let published = paired(&f.store);
+    assert_eq!(published.len(), 2);
+    assert_eq!(published[0].op_kind, settlement_record::SETTLEMENT_OP);
+    assert_eq!(published[1].op_kind, "moment.append");
+    assert!(published[0].origin_seq < published[1].origin_seq);
+    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
+    f.store
+        .write_with(&NoFaults, |tx| {
+            journal_live_settlement_in_tx(tx, "ws", &id, 302)
+        })
+        .unwrap();
+    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, 303).unwrap();
+    assert_eq!(paired(&f.store), published);
+}
+
+#[test]
 fn bootstrap_publication_rolls_back_with_native_source_and_replays_once() {
     let mut f = fixture(true);
     let before = operations(&f.store);

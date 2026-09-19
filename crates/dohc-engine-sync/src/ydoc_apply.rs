@@ -1531,6 +1531,34 @@ pub(crate) struct CompleteYdocProjection {
     pub claim_status: dohc_engine_collab::LineageClaimStatus,
 }
 
+/// An observed owner's durable Y.Doc contains accepted state. Pending owner
+/// edits live in its separate outbox and must not enter ordinary publication.
+pub(crate) fn observed_owner_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+) -> Result<
+    Option<(
+        dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor,
+        String,
+    )>,
+    SyncError,
+> {
+    let Some(owner) = dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(tx, key)
+        .map_err(|_| SyncError::LiveDocumentBindingActive)?
+    else {
+        return Ok(None);
+    };
+    if owner.binding.current_path != path {
+        return Err(SyncError::LiveDocumentBindingActive);
+    }
+    require_unfenced_lineage(tx, key)?;
+    complete_ydoc_projection_in_tx(tx, key)?
+        .and_then(|projection| projection.content)
+        .map(|projection| Some((owner, projection)))
+        .ok_or(SyncError::LiveDocumentBindingActive)
+}
+
 /// Inspect one closed lineage after proving that none of its durable updates
 /// are deferred or dependency-incomplete.
 pub(crate) fn complete_ydoc_projection_in_tx(
