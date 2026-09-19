@@ -22,7 +22,8 @@ export async function runCanonicalDmNavigation(input: {
   locator: DmChatLocator;
   syncDms: () => Promise<{ available: boolean; dms: DmRecord[] }>;
   isCurrent: () => boolean;
-  open: (nav: Extract<ChatsNav, { level: "dm" }> | { level: "channels" }) => void;
+  open: (nav: Extract<ChatsNav, { level: "dm" }>) => void;
+  onUnavailable: (error?: unknown) => void;
 }): Promise<void> {
   try {
     const result = await input.syncDms();
@@ -30,18 +31,18 @@ export async function runCanonicalDmNavigation(input: {
     // `available` controls whether a new DM can be created; it does not make
     // already-local conversations unreadable while signed out or offline.
     const dm = resolveCanonicalDm(input.locator, result.dms);
-    input.open(
-      dm
-        ? {
-            level: "dm",
-            dm,
-            ...(input.locator.focusMessageId
-              ? { focusMessageId: input.locator.focusMessageId }
-              : {}),
-          }
-        : { level: "channels" },
-    );
-  } catch {
-    if (input.isCurrent()) input.open({ level: "channels" });
+    if (!dm) {
+      input.onUnavailable();
+      return;
+    }
+    input.open({
+      level: "dm",
+      dm,
+      ...(input.locator.focusMessageId
+        ? { focusMessageId: input.locator.focusMessageId }
+        : {}),
+    });
+  } catch (error) {
+    if (input.isCurrent()) input.onUnavailable(error);
   }
 }

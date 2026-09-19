@@ -3,6 +3,8 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmarkRecord } from "../../ipc/bridgeContract";
+import { deferred } from "../../testing/deferred";
+import { chatTabPath } from "./workbenchState";
 import {
   ChatsView,
   NOW,
@@ -22,9 +24,51 @@ import {
 // conversation via initialNav — consumed once, loaded through the same
 // openChannel/openThread path a click would take.
 describe("ChatsView expand-to-tab", () => {
+  it("shows the overview error while a restored DM cannot sync", async () => {
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("Engine unavailable"));
+    bridgeMock.syncDms.mockRejectedValue(new Error("Engine unavailable"));
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+    });
+    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect(screen.queryByText("Loading Chats...")).toBeNull();
+    const before = bridgeMock.listChatChannels.mock.calls.length;
+    await userEvent.click(retry);
+    await waitFor(() => expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThan(before));
+    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
+  });
+
+  it("restores a DM after a failed lookup succeeds on an activity retry", async () => {
+    bridgeMock.syncDms.mockRejectedValueOnce(new Error("offline"));
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+    });
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    await act(async () => emitWorkspaceActivity());
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+  });
+
+  it("keeps a restored DM loading until its lookup settles", async () => {
+    const pending = deferred<{ available: boolean; dms: ReturnType<typeof dm>[] }>();
+    bridgeMock.syncDms.mockImplementation(() => pending.promise);
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+    });
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
+    await act(async () => pending.resolve({ available: true, dms: [dm()] }));
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-back")).toBeNull();
+  });
+
   it("marks the page variant on the root so the tab surface is testable", async () => {
     renderView(vi.fn(), vi.fn(), { variant: "page" });
-    const view = await screen.findByTestId("chats-view");
+    const view = await screen.findByTestId("chats-personal-feed");
     expect(view.dataset.variant).toBe("page");
   });
 
@@ -87,14 +131,18 @@ describe("ChatsView expand-to-tab", () => {
     expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
   });
 
-  it("keeps page navigation inside the editor", async () => {
+  it("keeps thread navigation inside its channel editor", async () => {
     const user = userEvent.setup();
     const onOpenInTab = vi.fn();
-    renderView(vi.fn(), vi.fn(), { variant: "page", onOpenInTab });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openingMessage: openingPreview() })] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", initialNav: { level: "channel", channel: channel() }, onOpenInTab,
+      editorTabPath: chatTabPath({ kind: "channel", id: channel().id }),
+    });
 
-    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-post-card"));
 
-    expect(await screen.findByTestId("chats-channel-view")).toBeTruthy();
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
     expect(onOpenInTab).not.toHaveBeenCalled();
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -231,8 +279,7 @@ describe("ChatsView expand-to-tab", () => {
     vi.mocked(Element.prototype.scrollIntoView).mockClear();
 
     renderView(vi.fn(), vi.fn(), { variant: "page" });
-    await screen.findByTestId("chats-dm-item");
-    await user.click(screen.getByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const feedMessage = await screen.findByText("Focused Feed DM");
     await user.click(feedMessage.closest("button")!);
 

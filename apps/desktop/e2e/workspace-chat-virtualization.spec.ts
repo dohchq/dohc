@@ -95,7 +95,6 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await expect(lane.getByTestId("chats-lane-message-body")).toHaveText("First message in the empty chat");
     await expect(timeline(lane)).toBeVisible();
 
-    await page.getByTestId("chats-channel-back").click();
     await panel.getByTestId("chats-channel").filter({ hasText: "Long chat" }).click();
     const list = await expectWindowed(lane, "chats-lane", `Lane message ${messageCount - 1}`);
     await expect(lane.locator(`[data-message-id="${seeded.firstMessageId}"]`)).toHaveCount(0);

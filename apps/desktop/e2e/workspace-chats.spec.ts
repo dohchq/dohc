@@ -67,7 +67,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
       "Let's plan the launch this week.",
     );
     await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
-    await page.getByTestId("chats-channel-back").click();
     await expect(
       page.getByTestId("chats-panel").getByTestId("chats-channel"),
     ).toHaveAttribute("data-thread-count", "1");
@@ -76,8 +75,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // Chats click is a reveal (the panel's visibility persists in ui-state,
     // and collapsing fully unmounts the view — no right-edge stub).
     await page
-      .getByTestId("tab-dohc://chats")
-      .getByRole("button", { name: "Close Chats" })
+      .getByTestId(/^tab-dohc:\/\/chats\/channel\//)
+      .getByRole("button", { name: "Close #general" })
       .click();
     await page.getByTestId("chats-panel-collapse").click();
     await expect(page.getByTestId("chats-panel")).toHaveCount(0);
@@ -146,7 +145,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
     // The panel's channel row rolls the unread up.
-    await view.getByTestId("chats-channel-back").click();
     await expect(panel.getByTestId("chats-channel-unread")).toHaveText("1");
 
     // Opening the thread marks it read; the badges clear at both levels.
@@ -155,7 +153,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(view.getByTestId("chats-message-author")).toHaveText("Nova");
     await view.getByTestId("chats-thread-back").click();
     await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
-    await view.getByTestId("chats-channel-back").click();
     await expect(panel.getByTestId("chats-channel-unread")).toHaveCount(0);
 
     // WS-D integration: engine search finds the channel message and renders
@@ -185,7 +182,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
-    const page = desktop.page;
+    let page = desktop.page;
 
     // A document tab first, so tab switching can be exercised later.
     await explorerRow(page, "notes.md").click();
@@ -197,13 +194,19 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const panel = page.getByTestId("chats-panel");
     await expect(panel).toBeVisible();
     await panel.getByTestId("chats-channel").click();
-    const chatsTab = page.getByTestId("tab-dohc://chats");
+    const chatsTab = page.getByTestId(/^tab-dohc:\/\/chats\/channel\//);
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
     const pageChannelView = page.locator(
       '[data-testid="chats-channel-view"][data-variant="page"]',
     );
     await expect(pageChannelView).toBeVisible();
+    await expect(chatsTab).toContainText("#general");
+    await expect(pageChannelView.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
+    await pageChannelView.getByTestId("chats-new-thread-composer").focus();
+    await page.keyboard.press("Escape");
+    await expect(pageChannelView).toBeVisible();
+    await expect(page.locator('main [data-testid="chats-view"]')).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel-view")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel")).toBeVisible();
 
@@ -232,14 +235,46 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       "draft in flight",
     );
 
-    // Closing the tab leaves the panel as it was. The next click reopens the
-    // tab at the channel.
-    await chatsTab.getByRole("button", { name: "Close Chats" }).click();
-    await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
-    await expect(panel.getByTestId("chats-channel")).toBeVisible();
+    // Home has its own tab; returning to General preserves the thread draft.
+    await panel.getByTestId("chats-feed-link").click();
+    const homeTab = page.getByTestId("tab-dohc://chats");
+    await expect(homeTab).toContainText("Home");
+    await expect(chatsTab).toContainText("#general");
+    await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
+    await expect(page.getByTestId("chats-feed-back")).toHaveCount(0);
+    await expect(page.locator('main [data-testid="chats-view"]')).toHaveCount(0);
     await panel.getByTestId("chats-channel").click();
-    await expect(page.getByTestId("tab-dohc://chats")).toBeVisible();
+    await expect(pageThreadView).toBeVisible();
+    await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue("draft in flight");
+    await expect(chatsTab).toHaveCount(1);
+    await pageThreadView.getByTestId("chats-thread-back").click();
     await expect(pageChannelView).toBeVisible();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    for (const theme of ["Light", "Dark"] as const) {
+      await page.getByTestId("activity-settings").click();
+      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByRole("radio", { name: theme, exact: true }).click();
+      await page.getByRole("button", { name: "Close settings" }).click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
+      await panel.getByTestId("chats-feed-link").focus();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath(`chat-home-${theme.toLowerCase()}.png`) });
+      await panel.getByTestId("chats-channel").focus();
+      await page.keyboard.press("Enter");
+      await expect(pageChannelView).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`) });
+    }
+    // The durable channel identity and Home tab survive a desktop restart.
+    await desktop.close();
+    desktop = await launchDesktopApp({ workspace: temp });
+    page = desktop.page;
+    await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
+    await expect(page.getByTestId(/^tab-dohc:\/\/chats\/channel\//)).toContainText("#general");
+    await expect(page.getByTestId("tab-dohc://chats")).toContainText("Home");
+    await page.getByTestId("tab-dohc://chats").click();
+    await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
+
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

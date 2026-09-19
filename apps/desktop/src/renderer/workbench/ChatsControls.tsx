@@ -123,10 +123,10 @@ export function ShareReadFailureNotice(props: {
   );
 }
 
-export function BackHeader(props: {
+export function ChatHeader(props: {
   label: string;
   testId: string;
-  onBack: () => void;
+  onBack?: () => void;
   icon?: React.ReactNode;
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
@@ -134,16 +134,18 @@ export function BackHeader(props: {
 }) {
   return (
     <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
-      <button
-        type="button"
-        data-testid={`${props.testId}-back`}
-        aria-label="Back"
-        title="Back"
-        onClick={props.onBack}
-        className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-      >
-        <ArrowLeft size={13} aria-hidden />
-      </button>
+      {props.onBack ? (
+        <button
+          type="button"
+          data-testid={`${props.testId}-back`}
+          aria-label="Back"
+          title="Back"
+          onClick={props.onBack}
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <ArrowLeft size={13} aria-hidden />
+        </button>
+      ) : null}
       {props.icon}
       <span
         data-testid={`${props.testId}-title`}

@@ -38,7 +38,7 @@ import type {
 } from "@dohc/workspace-engine-client";
 export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
-  CHATS_TAB_PATH,
+  isChatsTabPath,
   canonicalSingletonEditorTabPath,
   isPluginPanelTabPath,
   isSiteTabPath,
@@ -5630,8 +5630,8 @@ export const WorkspaceUiState = z.object({
           code: z.ZodIssueCode.custom,
           path: ["editorGroups", groupIndex, "tabs", tabIndex],
           message:
-            tab === CHATS_TAB_PATH
-              ? "Chats can be open in only one editor group."
+            isChatsTabPath(tab)
+              ? "Each chat can be open in only one editor group."
               : isSiteTabPath(tab)
                 ? "An app preview can be open in only one editor group."
                 : isPluginPanelTabPath(tab)

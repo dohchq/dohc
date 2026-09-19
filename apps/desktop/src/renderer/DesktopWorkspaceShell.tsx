@@ -51,11 +51,7 @@ import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
-import {
-  chatsNavigationChangesDestination,
-  chatsNavigationLeavesConversation,
-  chatsNavigationRequiresRemount,
-} from "./shell/chatsNav";
+import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import {
   chatMentionOpenTarget,
   graphChatOpenTarget,
@@ -183,7 +179,6 @@ import {
 } from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
 import type {
-  ChatsDrafts,
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
@@ -204,7 +199,6 @@ import {
   isCollectionTabPath,
   parseCollectionTabPath,
   defaultWorkbenchState,
-  CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
   isChatsTabPath,
@@ -828,7 +822,7 @@ export function DesktopWorkspaceShell(props: {
   // id can collide between two discovered rows.
   const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
   const {
-    tabLabels,
+    tabLabels: knownTabLabels,
     rememberWebAppTitle,
     rememberPluginDetailsTitle,
     rememberMomentDiffPath,
@@ -2201,13 +2195,22 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     openVirtualTab(HISTORY_TAB_PATH);
   }, [openVirtualTab]);
-  // The editor owns the live conversation while the right panel remains a
-  // lightweight Slack-style navigator. The ref seeds editor remounts without
-  // making draft keystrokes rerender the shell; selectedNav is only updated on
-  // navigation so the panel can highlight the active destination.
-  const chatsNav = useRef<ChatsNav | null>(null);
-  const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
-  const [chatsPageRevision, setChatsPageRevision] = useState(0);
+  const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
+  const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter(isChatsTabPath), [wb.editorGroups]);
+  const chatEditors = useChatEditorTabs({
+    workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
+    paths: chatPaths,
+    activePaths: wb.editorGroups.flatMap((group) => group.activeTab ? [group.activeTab] : []),
+    enabled: captureAvailable,
+    agentName: agentSetup?.agentName,
+  });
+  const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
+    ? chatEditors.get(focusedTabPath).nav : undefined;
+  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles]), [knownTabLabels, chatEditors.titles]);
+  const openChatsNavigator = useCallback(() => {
+    mutateWb((state) => ({ ...state, chatsVisible: true }));
+    setChatsPanelTab("all");
+  }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
@@ -2223,76 +2226,10 @@ export function DesktopWorkspaceShell(props: {
   const onChatsThreadStarted = useCallback(() => {
     setChatsThreadRevision((current) => current + 1);
   }, []);
-  // The one write of the chat destination: the ref the panel reads, the state
-  // the navigator highlights, and the cancellation that choosing a different
-  // conversation implies. Both writers below open-coded these two lines, which
-  // is why the invalidation kept being missed one caller at a time — a chat
-  // destination can only change here, so this is where the rule belongs.
-  // Reports that stay on the same conversation change nothing and cancel
-  // nothing.
-  const setChatsDestination = useCallback((nav: ChatsNav) => {
-    if (chatsNavigationChangesDestination(chatsNav.current, nav)) {
-      invalidateDmNavigation(dmNavigationRequest);
-    }
-    chatsNav.current = nav;
-    setSelectedChatsNav(nav);
-  }, []);
-  const onChatsNav = useCallback(
-    (nav: ChatsNav) => {
-      setChatsDestination(nav);
-    },
-    [setChatsDestination],
-  );
-  // The Chats PAGE's explicit clicks arrive here, with the same rule as
-  // openChatsNavInTab: a user command cancels a pending DM lookup even when
-  // it repeats the current destination — an exact-repeat backlink still
-  // re-loads and re-scrolls, and the page it lands on must not be replaced by
-  // a DM answering late. Only the passive onChatsNav report stays conditional.
-  const onChatsNavCommand = useCallback(
-    (nav: ChatsNav) => {
-      invalidateDmNavigation(dmNavigationRequest);
-      setChatsDestination(nav);
-    },
-    [setChatsDestination],
-  );
-  // Unsent drafts ride the same handoff: mirrored live (a ref write per
-  // keystroke, no re-render) and seeded into the next mount, so expanding
-  // or collapsing chats never discards what the user typed.
-  const chatsDrafts = useRef<ChatsDrafts | null>(null);
-  const onChatsDrafts = useCallback((drafts: ChatsDrafts) => {
-    chatsDrafts.current = drafts;
-  }, []);
+  const openChatsNavInTab = chatEditors.open;
   const openChatsTab = useCallback(() => {
-    openVirtualTab(CHATS_TAB_PATH);
-  }, [openVirtualTab]);
-  const openChatsNavInTab = useCallback(
-    (nav: ChatsNav) => {
-      // Read before the write: both answers are about the destination the
-      // panel is leaving.
-      const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
-      const leftConversation = chatsNavigationLeavesConversation(chatsNav.current, nav);
-      // An explicit open is the user going somewhere, so it always cancels a
-      // pending DM — even when the destination key is unchanged. Repeating a
-      // backlink to the message you already focused is the case that proves
-      // it: chatsNavigationRequiresRemount deliberately treats it as a new
-      // jump, and the page it remounts must not be replaced by a DM answering
-      // late. Only the panel's passive onChatsNav reports stay conditional;
-      // they say where the view already is, and nobody commanded them.
-      invalidateDmNavigation(dmNavigationRequest);
-      setChatsDestination(nav);
-      if (leftConversation) {
-        // Drafts are scoped to the conversation they were typed in. Until the
-        // draft store is keyed per channel/thread, never seed one into a
-        // different destination.
-        chatsDrafts.current = null;
-      }
-      if (shouldRemount) {
-        setChatsPageRevision((current) => current + 1);
-      }
-      openVirtualTab(CHATS_TAB_PATH);
-    },
-    [openVirtualTab, setChatsDestination],
-  );
+    openChatsNavInTab({ level: "feed" });
+  }, [openChatsNavInTab]);
   const openCanonicalDmInTab = useCallback(
     async (locator: DmChatLocator) => {
       const request = {
@@ -2306,12 +2243,13 @@ export function DesktopWorkspaceShell(props: {
         isCurrent: () =>
           dmNavigationRequest.current.workspaceId === request.workspaceId &&
           dmNavigationRequest.current.sequence === request.sequence,
-        // Canonicalization failure deliberately clears any prior DM/thread
-        // target. Merely reopening the Chats tab would preserve stale chatsNav.
         open: openChatsNavInTab,
+        onUnavailable: (error) => reportShellError(
+          "Could not open this conversation.", error, () => void openCanonicalDmInTab(locator),
+        ),
       });
     },
-    [openChatsNavInTab, workspaceId],
+    [openChatsNavInTab, reportShellError, workspaceId],
   );
   // The one way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
@@ -4208,11 +4146,7 @@ export function DesktopWorkspaceShell(props: {
   const chatsViewProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
-    initialNav: chatsNav.current ?? undefined,
-    initialDrafts: chatsDrafts.current ?? undefined,
-    onNavChange: onChatsNav,
-    onNavCommand: onChatsNavCommand,
-    onDraftsChange: onChatsDrafts,
+    onOpenNavigator: openChatsNavigator,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,
     onDmRead: onChatsDmRead,
@@ -4230,8 +4164,8 @@ export function DesktopWorkspaceShell(props: {
     workspacePath: props.workspace.rootPath,
   } as const;
   // The panel intentionally stays on the overview and only selects editor
-  // destinations. While the Chats editor is active, the page instance owns the
-  // live surface: disable the navigator's collaboration transport so it cannot
+  // destinations. Active chat pages own the live conversations: disable the
+  // navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
   // conversation does not double every chat read (D2#6). The page's landed
   // reads still reach the navigator through their local-thread and DM
@@ -4240,8 +4174,8 @@ export function DesktopWorkspaceShell(props: {
     isChatsTabPath(group.activeTab),
   );
   // The panel is a navigator, like the Explorer: it lists Home, the groups,
-  // people and agents, and every click opens that conversation in the Chats
-  // tab. It never shows a conversation itself, so it holds no presence lease
+  // people and agents, and every click opens that conversation's editor tab.
+  // It never shows a conversation itself, so it holds no presence lease
   // and never seeds or reports a destination.
   const chatsNavigatorProps = {
     workspaceId,
@@ -5029,8 +4963,15 @@ export function DesktopWorkspaceShell(props: {
               captureAvailable ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyChatsView
-                    key={`${workspaceId}:${chatsPageRevision}`}
+                    key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
                     {...chatsViewProps}
+                    onNavChange={chatEditors.get(tabPath).onNavChange}
+                    onNavCommand={chatEditors.get(tabPath).onNavCommand}
+                    onDraftsChange={chatEditors.get(tabPath).onDraftsChange}
+                    initialNav={chatEditors.get(tabPath).nav}
+                    initialDrafts={chatEditors.get(tabPath).drafts}
+                    editorTabPath={tabPath}
+                    onOpenInTab={openChatsNavInTab}
                     variant="page"
                   />
                 </Suspense>

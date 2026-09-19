@@ -2254,7 +2254,7 @@ describe("workspace UI state IPC contract", () => {
       expect(result.error.issues).toEqual([
         expect.objectContaining({
           path: ["editorGroups", 1, "tabs", 1],
-          message: "Chats can be open in only one editor group.",
+          message: "Each chat can be open in only one editor group.",
         }),
       ]);
     }

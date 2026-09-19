@@ -1,3 +1,5 @@
+import { chatEditorPath } from "../shell/chatsNav";
+import { parseChatTabPath } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
@@ -9,7 +11,7 @@ import {
   AgentPresenceHint,
   UnreadPill,
   ShareReadFailureNotice,
-  BackHeader,
+  ChatHeader,
   joinedChannelLabel,
   ComposerNotice,
   AddressedToMe,
@@ -382,6 +384,7 @@ export function ChatsView(props: {
   // next, so panel and tab feel like one chats surface. Applied once per
   // mount; workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
+  editorTabPath?: string;
   // Unsent drafts to restore alongside initialNav (same handoff, same
   // apply-once timing).
   initialDrafts?: ChatsDrafts;
@@ -393,15 +396,17 @@ export function ChatsView(props: {
   // user command, so the shell cancels a pending cross-surface navigation
   // (the DM lookup) unconditionally — even when the click repeats the current
   // destination, which still re-loads and re-scrolls. The passive onNavChange
-  // report only says where the view already is and stays conditional.
+  // report only records where the view already is.
   onNavCommand?: (nav: ChatsNav) => void;
   // The compact panel is a navigator: selecting a conversation can hand its
   // destination to the shell so it opens in the editor instead of replacing
-  // the panel's list. The page variant always navigates in place.
+  // the panel's list. Pages hand other conversations to their own tabs.
   onOpenInTab?: (nav: ChatsNav) => void;
   // Active editor destination, used by a persistent panel navigator to mark
   // the selected channel or DM without navigating the panel itself.
   selectedNav?: ChatsNav;
+  // Reveals the sidebar list without replacing the editor destination.
+  onOpenNavigator?: () => void;
   // Reports every draft edit (ref-cheap in the shell) so unsent input
   // survives the panel/tab handoff.
   onDraftsChange?: (drafts: ChatsDrafts) => void;
@@ -449,6 +454,7 @@ export function ChatsView(props: {
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
+  const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
@@ -1126,6 +1132,7 @@ export function ChatsView(props: {
           setDms(keepIfUnchanged(result.dms));
           setPendingDmRequests(keepIfUnchanged(result.pending));
           setDeclinedDmRequests(keepIfUnchanged(result.declined));
+          setDmRestoreReady(true);
           if (keepAcceptedNoticeRef.current) {
             keepAcceptedNoticeRef.current = false;
           } else {
@@ -1150,6 +1157,7 @@ export function ChatsView(props: {
     dmRefreshSeq.current += 1;
     paintedDmRevision.current = null;
     resetForWorkspace();
+    setDmRestoreReady(false);
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -2195,7 +2203,8 @@ export function ChatsView(props: {
         { level: "channel" | "thread" | "dm" | "feed" }
       >,
     ) => {
-      if (variant === "panel" && props.onOpenInTab) {
+      if (props.onOpenInTab && (variant === "panel" ||
+        (props.editorTabPath && chatEditorPath(target) !== props.editorTabPath))) {
         props.onOpenInTab(target);
         return;
       }
@@ -2216,6 +2225,7 @@ export function ChatsView(props: {
       openThread,
       props.onNavCommand,
       props.onOpenInTab,
+      props.editorTabPath,
       variant,
     ],
   );
@@ -2227,7 +2237,7 @@ export function ChatsView(props: {
   // reporting those would overwrite the very state the seed is about to
   // restore (closing the tab while the overview is still loading would then
   // hand "channels" and empty drafts back to the panel).
-  const handoffReportBlocked = useRef(props.initialNav !== undefined);
+  const handoffReportBlocked = useRef(props.initialNav !== undefined || variant === "page");
   useEffect(() => {
     if (handoffReportBlocked.current) return;
     onNavChange?.(nav);
@@ -2264,9 +2274,21 @@ export function ChatsView(props: {
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
+    let seed = props.initialNav;
+    const target = parseChatTabPath(props.editorTabPath ?? null);
+    if (!seed && target?.kind === "channel") {
+      const channel = overview.channels.find((entry) => entry.id === target.id);
+      seed = channel ? { level: "channel", channel } : { level: "channels" };
+    } else if (!seed && target?.kind === "dm") {
+      if (!dmRestoreReady) return;
+      const dm = dms.find((entry) => entry.channelId === target.id);
+      seed = dm ? { level: "dm", dm } : { level: "channels" };
+    } else if (!seed && target?.kind === "new") {
+      seed = { level: "dm-new" };
+    }
+    seed ??= variant === "page" ? { level: "feed" } : undefined;
     seededRef.current = true;
     handoffReportBlocked.current = false;
-    const seed = props.initialNav;
     if (seed) {
       if (seed.level === "feed") openFeed();
       else if (seed.level === "channel") void openChannel(seed.channel);
@@ -2297,6 +2319,11 @@ export function ChatsView(props: {
     overview.status,
     props.initialDrafts,
     props.initialNav,
+    props.editorTabPath,
+    overview,
+    dms,
+    dmRestoreReady,
+    variant,
   ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers'),
@@ -2421,8 +2448,13 @@ export function ChatsView(props: {
         ...current.filter((dm) => dm.channelId !== result.dm.channelId),
       ]);
       // The completion is the user's command landing (see openConversation).
-      props.onNavCommand?.({ level: "dm", dm: result.dm });
-      void openDm(result.dm);
+      if (props.editorTabPath && props.onOpenInTab) {
+        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null });
+        props.onOpenInTab({ level: "dm", dm: result.dm });
+      } else {
+        props.onNavCommand?.({ level: "dm", dm: result.dm });
+        void openDm(result.dm);
+      }
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that conversation."));
@@ -2430,7 +2462,7 @@ export function ChatsView(props: {
       startingDmRef.current = false;
       setStartingDm(false);
     }
-  }, [dmDraft, dmRecipients, openDm, props.onError, props.onNavCommand, startingDm, workspaceId]);
+  }, [dmDraft, dmRecipients, openDm, props.onError, props.onNavCommand, props.onOpenInTab, props.editorTabPath, onDraftsChange, startingDm, workspaceId]);
 
   const acceptDmRequest = useCallback(
     async (request: DmRequestRow, chosenWorkspaceId: string) => {
@@ -3026,7 +3058,7 @@ export function ChatsView(props: {
     // Back is an explicit command like any conversation click: report it
     // synchronously through the same seam, so a DM answer queued in this
     // tick cannot pass its isCurrent() check and remount over the place the
-    // user just went back to. Every BackHeader (and the keyboard shortcut)
+    // user just went back to. Every ChatHeader (and the keyboard shortcut)
     // routes through here.
     props.onNavCommand?.(
       nav.level === "thread"
@@ -3309,14 +3341,15 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      if (nav.level === "channels") return;
+      if (nav.level === "channels" || (variant === "page" && nav.level !== "thread")) return;
       event.stopPropagation();
       goBack();
     },
-    [goBack, nav.level, replyTarget, resolveTargetMessageId],
+    [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
-  if (overview.status === "loading") {
+  if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
+    parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
     return (
       <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
         Loading Chats...
@@ -3347,10 +3380,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label="Home"
           testId="chats-feed"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
         <PostFeedList
@@ -3365,7 +3398,7 @@ export function ChatsView(props: {
                 <button
                   type="button"
                   data-testid="chats-feed-empty-groups"
-                  onClick={goBack}
+                  onClick={variant === "page" ? props.onOpenNavigator : goBack}
                   className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
                 >
                   Open Groups
@@ -3601,10 +3634,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label="New message"
           testId="chats-dm-new"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
         <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
@@ -3654,10 +3687,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={dm.peerLabel}
           testId="chats-dm"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
           // A connected participant (shareId set, not already ended) has a
           // live placement to reverse; the owner side (shareId null)
@@ -3767,7 +3800,7 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={nav.thread.title}
           testId="chats-thread"
           onBack={goBack}
@@ -4016,10 +4049,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={nav.channel.kind === "agent" ? "My agent" : nav.channel.name}
           testId="chats-channel"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={
             nav.channel.kind === "agent" ? (
               <span aria-hidden className="shrink-0 font-mono text-[12px] text-agent">
@@ -4363,6 +4396,19 @@ export function ChatsView(props: {
               ? "This channel is no longer shared with you. You can still read it."
               : "This channel is read-only for you."}
           </ComposerNotice>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (variant === "page") {
+    return (
+      <div data-testid="chats-page-empty" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+        <p className="m-0 text-sm text-muted">Choose a conversation in Chats.</p>
+        {props.onOpenNavigator ? (
+          <button type="button" onClick={props.onOpenNavigator} className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink">
+            Open Chats
+          </button>
         ) : null}
       </div>
     );
