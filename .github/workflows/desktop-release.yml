@@ -1,25 +1,6 @@
 name: Desktop Release
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/desktop-release.yml"
-      - "apps/desktop/**"
-      - "packages/**"
-      - "services/**"
-      - "scripts/desktop-release-scripts.test.mjs"
-      - "scripts/verification/**"
-      - "tools/rust-engine-program/build-slot.mjs"
-      - "scripts/merge-update-manifests.mjs"
-      - "scripts/mock-update-server.mjs"
-      - "scripts/release-smoke.mjs"
-      - "scripts/resolve-desktop-release.mjs"
-      - "scripts/update-desktop-package-version.mjs"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
   push:
     branches:
       - main
@@ -46,8 +27,8 @@ on:
         type: boolean
 
 concurrency:
-  group: desktop-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'workflow_dispatch' && inputs.channel || github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref_type == 'branch' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
+  group: desktop-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
 
 permissions:
   contents: read
@@ -89,9 +70,7 @@ jobs:
         name: Resolve publish mode
         shell: bash
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo "dry_run=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
           else
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
@@ -111,9 +90,6 @@ jobs:
           elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
             channel="latest"
             version_arg=(--version "${GITHUB_REF_NAME}")
-          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            channel="nightly"
-            version_arg=()
           else
             channel="${DISPATCH_CHANNEL:-nightly}"
             version_arg=()
@@ -160,24 +136,28 @@ jobs:
         include:
           - label: macOS x64
             os: macOS
+            artifact_platform: mac
             runner: macos-latest
             arch: x64
             target: x86_64-apple-darwin
             require_signing: "1"
           - label: macOS arm64
             os: macOS
+            artifact_platform: mac
             runner: macos-latest
             arch: arm64
             target: aarch64-apple-darwin
             require_signing: "1"
           - label: Windows x64
             os: Windows
+            artifact_platform: win
             runner: windows-latest
             arch: x64
             target: x86_64-pc-windows-msvc
             require_signing: "1"
           - label: Linux x64
             os: Linux
+            artifact_platform: linux
             runner: ubuntu-latest
             arch: x64
             target: x86_64-unknown-linux-gnu
@@ -281,6 +261,16 @@ jobs:
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          node scripts/verify-desktop-release-artifacts.mjs \
+            --directory apps/desktop/release \
+            --platform "${{ matrix.artifact_platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --channel "${{ needs.preflight.outputs.release_channel }}"
+
       - name: Fuse smoke
         if: runner.os == 'Linux'
         env:
@@ -300,7 +290,7 @@ jobs:
     needs:
       - preflight
       - build
-    if: ${{ github.event_name != 'pull_request' && needs.preflight.outputs.dry_run != 'true' }}
+    if: ${{ needs.preflight.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

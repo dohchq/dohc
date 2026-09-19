@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,14 @@ import { createMockUpdateServer } from "./mock-update-server.mjs";
 
 async function main() {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-smoke-"));
+  try {
+    await runSmoke(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runSmoke(root) {
   await mkdir(join(root, "apps/desktop"), { recursive: true });
   await writeFile(
     join(root, "apps/desktop/package.json"),
