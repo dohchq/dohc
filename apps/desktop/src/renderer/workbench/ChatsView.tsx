@@ -3348,7 +3348,7 @@ export function ChatsView(props: {
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
-  if (overview.status === "loading" || (variant === "page" && !props.initialNav &&
+  if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
     parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
     return (
       <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">

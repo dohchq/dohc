@@ -24,6 +24,21 @@ import {
 // conversation via initialNav — consumed once, loaded through the same
 // openChannel/openThread path a click would take.
 describe("ChatsView expand-to-tab", () => {
+  it("shows the overview error while a restored DM cannot sync", async () => {
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("Engine unavailable"));
+    bridgeMock.syncDms.mockRejectedValue(new Error("Engine unavailable"));
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+    });
+    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect(screen.queryByText("Loading Chats...")).toBeNull();
+    const before = bridgeMock.listChatChannels.mock.calls.length;
+    await userEvent.click(retry);
+    await waitFor(() => expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThan(before));
+    expect(await screen.findByText("Engine unavailable")).toBeTruthy();
+  });
+
   it("restores a DM after a failed lookup succeeds on an activity retry", async () => {
     bridgeMock.syncDms.mockRejectedValueOnce(new Error("offline"));
     renderView(vi.fn(), vi.fn(), {
