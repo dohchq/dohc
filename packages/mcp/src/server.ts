@@ -26,7 +26,6 @@ import {
   readChat,
   replyToChat,
   startChannelChat,
-  buildSite,
   createSite,
   deleteWorkspacePath,
   detectSites,
@@ -35,15 +34,10 @@ import {
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
-  openInDohc,
-  previewSite,
-  publishSite,
   queryDatabase,
   readChange,
   readWorkspaceFile,
-  resolveConflict,
   searchWorkspaceFiles,
-  share,
   testSite,
   writeWorkspaceFile,
   workspaceStatus,
@@ -82,8 +76,12 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
-function text(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+function text(structuredContent: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
+    structuredContent,
+    ...(structuredContent.ok === false ? { isError: true } : {}),
+  };
 }
 
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
@@ -201,7 +199,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_write_file",
     {
       description:
-        "Write any visible workspace file. History: the desktop watcher captures the write as a workspace-engine moment while the app is open (a standalone MCP write is captured on the next desktop open).",
+        "Write an ordinary workspace file. Markdown and Excalidraw documents must be edited in dohc and are refused here. The desktop watcher captures file history while open, or on the next open.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         content: z.string(),
@@ -293,42 +291,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await testSite(ctx, args)),
   );
 
-  server.registerTool(
-    "dohc_build_site",
-    {
-      description:
-        "Return the detected build plan for a normal website folder. Command execution is not wired in this MCP stub yet.",
-      inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
-      },
-    },
-    async (args) => text(await buildSite(ctx, args)),
-  );
-
-  server.registerTool(
-    "dohc_preview_site",
-    {
-      description:
-        "Return the dohc preview modes available for a normal website folder: static, dev server, and built preview.",
-      inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
-      },
-    },
-    async (args) => text(await previewSite(ctx, args)),
-  );
-
-  registerWrite(
-    "dohc_publish_site",
-    {
-      description:
-        "Prepare a site publish/share review. This refuses to publish until dohc Drive publish is wired.",
-      inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
-      },
-    },
-    async (args) => text(await publishSite(ctx, args)),
-  );
-
   registerWrite(
     "dohc_import_data",
     {
@@ -352,18 +314,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await queryDatabase(ctx, args)),
-  );
-
-  registerWrite(
-    "dohc_share",
-    {
-      description: "Request sharing a file. Returns needs-confirmation — sharing crosses a boundary and is never auto-applied.",
-      inputSchema: {
-        path: z.string().min(1).max(4096),
-        scope: z.enum(["public", "workspace"]),
-      },
-    },
-    async (args) => text(await share(ctx, args)),
   );
 
   server.registerTool(
@@ -400,15 +350,23 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await listChannels(ctx)),
   );
 
+  const chatWriteInput = {
+    body: z.string().min(1).max(65536),
+    attachments: z.array(z.string().min(1).max(4096)).max(32).optional(),
+    needsDecision: z.boolean().optional(),
+    options: z.array(z.string().min(1).max(200)).max(12).optional(),
+    runId: z.string().min(1).max(200).optional(),
+  };
+
   registerWrite(
     "dohc_start_channel_chat",
     {
       description:
-        "Start a new chat in a channel as the agent. `channel` accepts a channel name, #slug, or id. No title needed — the chat displays its first message.",
+        "Start a new chat in a channel as the agent. `channel` accepts a channel name, #slug, or id. No title needed — the chat displays its first message. `attachments` are workspace-relative paths of tracked files; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
         channel: z.string().min(1).max(200),
-        body: z.string().min(1).max(65536),
         title: z.string().min(1).max(200).optional(),
+        ...chatWriteInput,
       },
     },
     async (args) => text(await startChannelChat(ctx, args)),
@@ -418,10 +376,13 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_reply_to_chat",
     {
       description:
-        "Reply to a dohc Chat thread as the agent. The message is attributed to the user's agent and appears in the desktop file rail.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_channel_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
-        body: z.string().min(1).max(65536),
+        to: z.string().min(1).max(200).optional(),
+        resolve: z.string().min(1).max(200).optional(),
+        choose: z.string().min(1).max(200).optional(),
+        ...chatWriteInput,
       },
     },
     async (args) => text(await replyToChat(ctx, args)),
@@ -499,28 +460,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await createRecord(ctx, args)),
-  );
-
-  server.registerTool(
-    "dohc_resolve_conflict",
-    {
-      description: "Attempt a conservative three-way markdown merge. Ambiguous overlaps stay a conflict for a human.",
-      inputSchema: {
-        base: z.string().max(2 * 1024 * 1024),
-        local: z.string().max(2 * 1024 * 1024),
-        remote: z.string().max(2 * 1024 * 1024),
-      },
-    },
-    async (args) => text(resolveConflict(args)),
-  );
-
-  server.registerTool(
-    "dohc_open_in_dohc",
-    {
-      description: "Return the contained absolute path for the desktop to open/select.",
-      inputSchema: { path: z.string().min(1).max(4096) },
-    },
-    async (args) => text(await openInDohc(ctx, args)),
   );
 
   return server;

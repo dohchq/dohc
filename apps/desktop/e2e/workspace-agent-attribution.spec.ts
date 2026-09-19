@@ -184,7 +184,8 @@ test("an MCP chat reply reaches the file rail as \"You's agent\"", async () => {
 
     expect(reply).toMatchObject({
       ok: true,
-      message: { authorKind: "agent", authorDisplayName: "You" },
+      threadId,
+      messageId: expect.stringMatching(/^message-/u),
     });
 
     // Re-open the thread (back -> open) to fetch the fresh message list and

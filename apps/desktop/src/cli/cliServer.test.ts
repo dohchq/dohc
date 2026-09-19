@@ -31,6 +31,7 @@ import {
   CLI_ENDPOINT_FILE,
   CLI_SOCKET_FILE,
   RUN_MESSAGE_LINK_RECOVERY_FILE,
+  cliMessageId,
   cliThreadId,
   disposeCliServerRuntime,
   handleCliRequestLine,
@@ -557,7 +558,7 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(0);
   });
 
-  it("returns MCP-shaped history and chats with full engine ids and no CLI origin", async () => {
+  it("returns MCP-shaped history and chats with engine ids that post and reply accept", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const linkedThread = await store.createThread({
@@ -655,70 +656,105 @@ describe("CLI socket server", () => {
         threads: [],
       }],
     });
-    const started = await invoke("startChannelChat", {
+    // The engine channel id from channelsFull opens a thread through the
+    // canonical post verb: no MCP-only write path exists.
+    const started = await invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
       channel: general.id,
       title: "Raw id contract",
-      body: "Opening without a CLI origin",
+      attachments: [],
+      needsDecision: false,
+      body: "Opening through the engine channel id",
     });
     expect(started).toMatchObject({
-      ok: true,
-      channel: { id: general.id, name: "general", slug: "general" },
-      thread: { title: "Raw id contract" },
-      message: {
-        authorKind: "agent",
-        authorDisplayName: "Ice",
-        body: "Opening without a CLI origin",
-      },
+      channel: { name: "general", slug: "general", kind: "channel" },
+      title: "Raw id contract",
     });
-    if (!started.ok) throw new Error(started.reason);
-    const replied = await invoke("replyToChat", {
-      cwd: workspaceRoot,
-      actor: "human",
-      threadId: started.thread.id,
-      body: "Reply without a CLI origin",
-    });
-    expect(replied).toMatchObject({
-      ok: true,
-      message: {
-        threadId: started.thread.id,
-        authorKind: "human",
-        authorDisplayName: "Ice",
-        body: "Reply without a CLI origin",
-      },
-    });
-    if (!replied.ok) throw new Error(replied.reason);
 
-    const fullChannels = await invoke("channelsFull", {
+    const listedChannels = await invoke("channelsFull", {
       cwd: workspaceRoot,
       actor: "agent",
     });
-    expect(fullChannels).toMatchObject({
-      ok: true,
-      channels: [{
-        id: general.id,
-        threadCount: 1,
-        threads: [{
-          id: started.thread.id,
-          title: "Raw id contract",
-          messageCount: 2,
-          updatedAtMs: replied.message.createdAtMs,
-        }],
+    if (!listedChannels.ok) throw new Error(listedChannels.reason);
+    const startedThread = listedChannels.channels[0]?.threads[0];
+    if (!startedThread) throw new Error("Posted thread is not listed");
+    expect(startedThread).toMatchObject({ title: "Raw id contract", messageCount: 1 });
+    expect(cliThreadId(startedThread.id)).toBe(started.threadId);
+
+    const opening = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: startedThread.id,
+    });
+    if (!opening.ok) throw new Error(opening.reason);
+    expect(opening.messages).toMatchObject([{
+      threadId: startedThread.id,
+      authorKind: "agent",
+      authorDisplayName: "Ice",
+      body: "Opening through the engine channel id",
+    }]);
+    const openingMessageId = opening.messages[0]!.id;
+    expect(cliMessageId(openingMessageId)).toBe(started.messageId);
+
+    // The engine thread and message ids from chat drive the canonical reply.
+    const replied = await invoke("reply", {
+      cwd: workspaceRoot,
+      actor: "human",
+      thread: startedThread.id,
+      to: openingMessageId,
+      attachments: [],
+      needsDecision: false,
+      body: "Reply through the engine thread id",
+    });
+    expect(replied).toEqual({
+      threadId: started.threadId,
+      messageId: replied.messageId,
+      parentMessageId: started.messageId,
+    });
+
+    const reread = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: startedThread.id,
+    });
+    if (!reread.ok) throw new Error(reread.reason);
+    expect(reread.messages.map((entry) => entry.id)).toEqual([
+      openingMessageId,
+      `message-${replied.messageId.slice("msg_".length)}`,
+    ]);
+    expect(reread.messages[1]).toMatchObject({
+      threadId: startedThread.id,
+      authorKind: "human",
+      authorDisplayName: "Ice",
+      body: "Reply through the engine thread id",
+    });
+    // post provisions the default channels like the terminal CLI does, so
+    // general is looked up by id rather than assumed to be the only channel.
+    const relisted = await invoke("channelsFull", {
+      cwd: workspaceRoot,
+      actor: "agent",
+    });
+    if (!relisted.ok) throw new Error(relisted.reason);
+    expect(relisted.channels.find((channel) => channel.id === general.id)).toMatchObject({
+      threadCount: 1,
+      threads: [{
+        id: startedThread.id,
+        title: "Raw id contract",
+        messageCount: 2,
+        updatedAtMs: reread.messages[1]!.createdAtMs,
       }],
     });
 
     expect(general.id).toMatch(/^channel-/u);
     expect(linkedThread.id).toMatch(/^thread-/u);
     expect(linkedMessage.id).toMatch(/^message-/u);
-    expect(started.channel.id).toMatch(/^channel-/u);
-    expect(started.thread.id).toMatch(/^thread-/u);
-    expect(started.message.id).toMatch(/^message-/u);
-    expect(replied.message.id).toMatch(/^message-/u);
+    expect(startedThread.id).toMatch(/^thread-/u);
+    expect(openingMessageId).toMatch(/^message-/u);
 
     const persisted = await store.listMessages({
       workspaceId: WORKSPACE_ID,
-      threadId: started.thread.id,
+      threadId: startedThread.id,
     });
     expect(persisted.map((message) => ({
       kind: message.author.kind,
@@ -730,13 +766,13 @@ describe("CLI socket server", () => {
         kind: "agent",
         displayName: "Ice",
         authorUserId: "verified-user-id",
-        origin: undefined,
+        origin: "cli",
       },
       {
         kind: "human",
         displayName: "Ice",
         authorUserId: "verified-user-id",
-        origin: undefined,
+        origin: "cli",
       },
     ]);
   });
@@ -867,36 +903,42 @@ describe("CLI socket server", () => {
         : [],
     ).not.toContain("Primary-only channel chat");
 
-    const started = await invoke("startChannelChat", {
+    const started = await invoke("post", {
       cwd: scopedRoot,
       actor: "agent",
       channel: scopedGeneral.id,
+      attachments: [],
+      needsDecision: false,
       body: "Scoped opening",
     });
-    if (!started.ok) throw new Error(started.reason);
-    const replied = await invoke("replyToChat", {
+    const startedThread = (await scopedStore.listChannelThreads({
+      workspaceId: scopedWorkspaceId,
+      channelId: scopedGeneral.id,
+    })).find((summary) => cliThreadId(summary.thread.id) === started.threadId)?.thread;
+    if (!startedThread) throw new Error("Scoped opening is not in the scoped store");
+    const replied = await invoke("reply", {
       cwd: scopedRoot,
       actor: "agent",
-      threadId: started.thread.id,
+      thread: startedThread.id,
+      attachments: [],
+      needsDecision: false,
       body: "Scoped reply",
     });
-    expect(replied).toMatchObject({
-      ok: true,
-      message: { threadId: started.thread.id },
-    });
+    expect(replied).toMatchObject({ threadId: started.threadId });
     expect(
       (await store.listThreads({ workspaceId: WORKSPACE_ID }))
         .map((thread) => thread.id),
-    ).not.toContain(started.thread.id);
+    ).not.toContain(startedThread.id);
     expect(await scopedStore.listMessages({
       workspaceId: scopedWorkspaceId,
-      threadId: started.thread.id,
+      threadId: startedThread.id,
     })).toHaveLength(2);
   });
 
-  it("returns MCP write failures when assertWritable refuses the target", async () => {
+  it("refuses post and reply by engine id before identity when assertWritable rejects the target", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const existing = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
@@ -908,24 +950,22 @@ describe("CLI socket server", () => {
       throw new Error("This shared channel is read-only.");
     };
 
-    await expect(invoke("startChannelChat", {
+    await expect(invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
       channel: general.id,
+      attachments: [],
+      needsDecision: false,
       body: "Must not land",
-    })).resolves.toEqual({
-      ok: false,
-      reason: "This shared channel is read-only.",
-    });
-    await expect(invoke("replyToChat", {
+    })).rejects.toThrow("This shared channel is read-only.");
+    await expect(invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
-      threadId: existing.thread.id,
+      thread: existing.thread.id,
+      attachments: [],
+      needsDecision: false,
       body: "Must not land",
-    })).resolves.toEqual({
-      ok: false,
-      reason: "This shared channel is read-only.",
-    });
+    })).rejects.toThrow("This shared channel is read-only.");
     expect(calls.writable).toBe(2);
     expect(calls.identity).toBe(0);
     expect(calls.writes).toBe(0);
@@ -953,21 +993,9 @@ describe("CLI socket server", () => {
       throw new Error(reason);
     };
 
-    await expect(invoke("startChannelChat", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      channel: general.id,
-      body: "Blocked legacy opening",
-    })).resolves.toEqual({ ok: false, reason });
-    await expect(invoke("replyToChat", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      threadId: existing.thread.id,
-      body: "Blocked legacy reply",
-    })).resolves.toEqual({ ok: false, reason });
     await expect(post({
       actor: "human",
-      title: "Blocked modern opening",
+      title: "Blocked opening",
       body: "Must not land",
     })).rejects.toThrow(reason);
     await expect(invoke("reply", {
@@ -976,11 +1004,19 @@ describe("CLI socket server", () => {
       thread: cliThreadId(existing.thread.id),
       attachments: [],
       needsDecision: false,
-      body: "Blocked modern reply",
+      body: "Blocked reply by handle",
+    })).rejects.toThrow(reason);
+    await expect(invoke("reply", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      thread: existing.thread.id,
+      attachments: [],
+      needsDecision: false,
+      body: "Blocked reply by engine id",
     })).rejects.toThrow(reason);
 
-    expect(messageGuardCalls).toBe(4);
-    expect(calls.identity).toBe(4);
+    expect(messageGuardCalls).toBe(3);
+    expect(calls.identity).toBe(3);
     expect(calls.writes).toBe(writesBefore);
     expect(await store.listChannelThreads({
       workspaceId: WORKSPACE_ID,
@@ -992,7 +1028,7 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
-  it("rejects legacy MCP messages when the account changes before mutation", async () => {
+  it("rejects post and reply by engine id when the account changes before mutation", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const existing = await store.startChannelThread({
@@ -1015,21 +1051,25 @@ describe("CLI socket server", () => {
     const reason = "dohc: Your dohc Drive session changed. Try again.";
 
     await expect(
-      invoke("startChannelChat", {
+      invoke("post", {
         cwd: workspaceRoot,
         actor: "agent",
         channel: general.id,
-        body: "Blocked legacy opening",
+        attachments: [],
+        needsDecision: false,
+        body: "Blocked opening",
       }),
-    ).resolves.toEqual({ ok: false, reason });
+    ).rejects.toThrow(reason);
     await expect(
-      invoke("replyToChat", {
+      invoke("reply", {
         cwd: workspaceRoot,
         actor: "agent",
-        threadId: existing.thread.id,
-        body: "Blocked legacy reply",
+        thread: existing.thread.id,
+        attachments: [],
+        needsDecision: false,
+        body: "Blocked reply",
       }),
-    ).resolves.toEqual({ ok: false, reason });
+    ).rejects.toThrow(reason);
 
     expect(identityCalls).toBe(4);
     expect(
@@ -1167,16 +1207,20 @@ describe("CLI socket server", () => {
     });
 
     const openCallsAfterReads = calls.openWorkspace;
-    await expect(invoke("startChannelChat", {
+    await expect(invoke("post", {
       cwd: workspaceRoot,
       actor: "agent",
       channel: general.id,
+      attachments: [],
+      needsDecision: false,
       body: "Forbidden",
     })).rejects.toThrow("chats are not available in a read-only shared view");
-    await expect(invoke("replyToChat", {
+    await expect(invoke("reply", {
       cwd: workspaceRoot,
       actor: "agent",
-      threadId: channelChat.thread.id,
+      thread: channelChat.thread.id,
+      attachments: [],
+      needsDecision: false,
       body: "Forbidden",
     })).rejects.toThrow("chats are not available in a read-only shared view");
     expect(calls.openWorkspace).toBe(openCallsAfterReads);

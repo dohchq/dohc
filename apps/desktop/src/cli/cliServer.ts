@@ -1731,89 +1731,6 @@ async function dispatch(
       }
     }
 
-    case "startChannelChat": {
-      try {
-        const requested = request.args.channel.replace(/^#/u, "").trim();
-        const bySlug = await context.store.findChannelBySlug({
-          workspaceId: context.workspaceId,
-          slug: requested,
-        });
-        const channel = bySlug ??
-          (await context.store.listChannels({
-            workspaceId: context.workspaceId,
-          })).find(
-            (candidate) =>
-              candidate.id === requested || candidate.name === requested,
-          );
-        if (!channel) {
-          return {
-            ok: false as const,
-            reason: `channel not found: ${request.args.channel}`,
-          };
-        }
-        await context.assertWritable({ channelId: channel.id });
-        const target = { channelId: channel.id };
-        const identity = await options.identity(context.workspaceId, target);
-        await context.assertMessageWritable(target, identity.authorUserId);
-        await revalidateCliWrite(context, options, target, identity);
-        const started = await context.store.startChannelThread({
-          workspaceId: context.workspaceId,
-          channelId: channel.id,
-          ...(channel.type === "chat" ? { lane: "chat" as const } : {}),
-          ...(request.args.title !== undefined
-            ? { title: request.args.title }
-            : {}),
-          author: authorForActor(identity, request.args.actor),
-          ...(identity.authorUserId
-            ? { authorUserId: identity.authorUserId }
-            : {}),
-          body: request.args.body,
-        });
-        await notifyWrite(options, context, target);
-        return {
-          ok: true as const,
-          channel: {
-            id: channel.id,
-            name: channel.name,
-            slug: channel.slug,
-          },
-          thread: rawChatThread(started.thread),
-          message: rawChatMessage(started.message),
-        };
-      } catch (error) {
-        return mcpFailure(
-          error,
-          `failed to start a chat in: ${request.args.channel}`,
-        );
-      }
-    }
-
-    case "replyToChat": {
-      try {
-        await context.assertWritable({ threadId: request.args.threadId });
-        const target = { threadId: request.args.threadId };
-        const identity = await options.identity(context.workspaceId, target);
-        await context.assertMessageWritable(target, identity.authorUserId);
-        await revalidateCliWrite(context, options, target, identity);
-        const message = await context.store.sendMessage({
-          workspaceId: context.workspaceId,
-          threadId: request.args.threadId,
-          author: authorForActor(identity, request.args.actor),
-          ...(identity.authorUserId
-            ? { authorUserId: identity.authorUserId }
-            : {}),
-          body: request.args.body,
-        });
-        await notifyWrite(options, context, target);
-        return { ok: true as const, message: rawChatMessage(message) };
-      } catch (error) {
-        return mcpFailure(
-          error,
-          `failed to reply to chat: ${request.args.threadId}`,
-        );
-      }
-    }
-
     case "collectionQuery": {
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
@@ -2551,8 +2468,6 @@ async function workspaceContextForRequest(
     request.verb === "reply" ||
     request.verb === "react" ||
     request.verb === "export" ||
-    request.verb === "startChannelChat" ||
-    request.verb === "replyToChat" ||
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
