@@ -18,13 +18,14 @@ import {
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
+import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 
 /** Compose the production SDK read port from the workspace's owner records. */
 export function createOwnedWorkspaceSdkReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   files: Pick<ShareViewFiles, "read">;
   databaseReader?: OwnedWorkspaceDatabaseReader;
-  listFiles(): Promise<ListWorkspaceFilesResult>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
   collections: OwnedWorkspaceCollectionReadSource;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (

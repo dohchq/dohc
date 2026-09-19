@@ -45,6 +45,11 @@ import {
   workspaceTextLimitReason,
 } from "./workspaceTextLimits";
 import type { ZipEntry } from "./zipWriter";
+import {
+  directoryMayContainListedFiles,
+  matchesFileListingScope,
+  type WorkspaceFileListingScope,
+} from "./workspaceFileListingScope";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
 // the part realpath can resolve, so we can check containment before mkdir.
@@ -223,7 +228,7 @@ const runMarkdownIconRead = createBoundedTaskQueue(
 
 export async function listFiles(
   rootPath: string,
-  options: {
+  options: WorkspaceFileListingScope & {
     platform?: NodeJS.Platform;
     includeContentIdentity?: boolean;
   } = {},
@@ -245,9 +250,12 @@ export async function listFiles(
       // workspace and leak names or recurse into foreign trees.
       if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        folders.push(rel);
-        pending.push(walk(join(dir, dirent.name), rel));
+        if (matchesFileListingScope(rel, options)) folders.push(rel);
+        if (directoryMayContainListedFiles(rel, options)) {
+          pending.push(walk(join(dir, dirent.name), rel));
+        }
       } else if (dirent.isFile()) {
+        if (!matchesFileListingScope(rel, options)) continue;
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileListingEntry = { path: rel, kind };
         if (

@@ -140,6 +140,21 @@ function seedDatabase(path: string, marker: string): void {
 }
 
 describe("workspace SDK host authority", () => {
+  it("passes normalized listing scope through the read port and still filters its answer", async () => {
+    const root = await workspace();
+    const context = hostContext(root);
+    const listFiles = vi.fn(async () => ({ files: [
+      { path: "notes/a.md", kind: "file" as const },
+      { path: "notes/deep/b.md", kind: "file" as const },
+      { path: "notes-other/c.md", kind: "file" as const },
+    ] }));
+    context.reads = { ...context.reads, listFiles };
+    await expect(invokeWorkspaceSdkHost(context, "files.list", {
+      path: "notes//./", recursive: false,
+    })).resolves.toEqual([{ path: "notes/a.md", kind: "file", name: "a.md" }]);
+    expect(listFiles).toHaveBeenCalledWith({ path: "notes", recursive: false });
+  });
+
   it("reads, lists, and writes through owned workspace authority", async () => {
     const root = await workspace();
     const context = hostContext(root);

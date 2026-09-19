@@ -20,7 +20,7 @@ export function localWorkspaceSdkReads(
     );
   return createOwnedWorkspaceSdkReadPort({
     readText: (path) => readWorkspaceText(workspaceRoot, path),
-    listFiles: () => listFiles(workspaceRoot),
+    listFiles: (scope) => listFiles(workspaceRoot, scope),
     readDatabase: (path) => readDatabaseSnapshot(workspaceRoot, path),
     collections: {
       list: noEngine,

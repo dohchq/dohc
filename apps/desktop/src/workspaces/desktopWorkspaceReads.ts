@@ -15,6 +15,7 @@ import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFiles
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { listFiles } from "./workspaceFiles";
+import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;
@@ -107,6 +108,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
 
   async function listOwnedWorkspaceFilesFor(
     workspace: RegistryEntry & { readonly attachmentId: symbol },
+    scope?: WorkspaceFileListingScope,
   ) {
     if (shareViewIsPresent(workspace.shareView)) {
       // The shell lists at mount, which can precede the daemon handshake now
@@ -124,6 +126,9 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     const mounts = storedShareMounts(workspace);
     const disk = await listFiles(workspace.rootPath, {
       includeContentIdentity: true,
+      // Mounted shares need the complete disk listing for their canonical
+      // overlay, including malformed registry records that must fail closed.
+      ...(shareMountRegistryIsPresent(workspace) ? {} : scope),
     });
     if (!shareMountRegistryIsPresent(workspace)) return disk;
     await dependencies.desktopEngine.startup;
@@ -171,7 +176,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       workspace,
       files: dependencies.shareViewFiles,
       ...(databaseReader ? { databaseReader } : {}),
-      listFiles: () => listOwnedWorkspaceFilesFor(workspace),
+      listFiles: (scope) => listOwnedWorkspaceFilesFor(workspace, scope),
       collections: {
         // "No collections" is the honest empty answer without a capture;
         // the addressed reads below must name the missing capability instead.
