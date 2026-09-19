@@ -27,7 +27,7 @@ try {
   mkdirSync(output, { recursive: true });
   const files = ['docker-compose.self-host.yml', '.env.self-host.example', 'scripts/check-self-host.mjs',
     'tools/self-host/bootstrap.mjs', 'tools/self-host/config.mjs', 'tools/self-host/Caddyfile', 'tools/self-host/Caddyfile.private', 'tools/self-host/compose.private.yml',
-    ...['scripts/self-host/recovery.mjs', 'scripts/self-host/archive.mjs', 'docs/how-to/self-host.md', 'docs/how-to/self-host-recovery.md'].filter(existsSync)];
+    ...['scripts/self-host/recovery.mjs', 'scripts/self-host/archive.mjs', 'docs/how-to/self-host.md', 'docs/how-to/self-host-recovery.md', 'services/share-web/README.md'].filter(existsSync)];
   for (const path of files) {
     const destination = join(output, path);
     mkdirSync(dirname(destination), { recursive: true }); cpSync(path, destination);
