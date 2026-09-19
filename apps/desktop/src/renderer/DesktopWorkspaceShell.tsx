@@ -4236,10 +4236,10 @@ export function DesktopWorkspaceShell(props: {
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     isChatsTabPath(group.activeTab),
   );
-  // The panel owns chat: it navigates in place and reports its destination
-  // and drafts, the same seam the page uses, so expanding to a tab picks up
-  // where the panel is. While a Chats tab is live the page owns the surface;
-  // the panel goes back to being a navigator that hands clicks to that tab.
+  // The panel is a navigator, like the Explorer: it lists Home, the groups,
+  // people and agents, and every click opens that conversation in the Chats
+  // tab. It never shows a conversation itself, so it holds no presence lease
+  // and never seeds or reports a destination.
   const chatsNavigatorProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -4247,25 +4247,14 @@ export function DesktopWorkspaceShell(props: {
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
     dmReadRevision: chatsDmReadRevision,
-    ...(chatsTabIsLive
-      ? { onOpenInTab: openChatsNavInTab }
-      : {
-          initialNav: chatsNav.current ?? undefined,
-          initialDrafts: chatsDrafts.current ?? undefined,
-          onNavChange: onChatsNav,
-          onNavCommand: onChatsNavCommand,
-          onDraftsChange: onChatsDrafts,
-          onThreadRead: onChatsThreadRead,
-          onThreadStarted: onChatsThreadStarted,
-          onDmRead: onChatsDmRead,
-        }),
+    onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: chatsTabIsLive ? null : chatCollaboration,
+    collaboration: null,
     suspendPolling: chatsTabIsLive,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -5338,12 +5327,7 @@ export function DesktopWorkspaceShell(props: {
                 </Suspense>
               ) : (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView
-                    // The panel re-seeds from the shell's destination each
-                    // time ownership of chat moves between it and a tab.
-                    key={`${workspaceId}:${chatsTabIsLive ? "tab" : "panel"}`}
-                    {...chatsNavigatorProps}
-                  />
+                  <LazyChatsView key={workspaceId} {...chatsNavigatorProps} />
                 </Suspense>
               )}
             </ErrorBoundary>

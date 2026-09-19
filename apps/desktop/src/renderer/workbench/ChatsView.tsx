@@ -3009,15 +3009,14 @@ export function ChatsView(props: {
           answerLocally(joinedOrder.current, workspaceId, result.channel.wireId);
         }
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
-        // The completion is the user's command landing (see openConversation).
-        props.onNavCommand?.({ level: "channel", channel: result.channel });
-        void openChannel(result.channel);
+        // The new group opens where any click on it would.
+        openConversation({ level: "channel", channel: result.channel });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not create that channel."));
       }
     },
-    [newGroupPurpose, newGroupType, resetGroupForm, openChannel, props.onError, props.onNavCommand, workspaceId],
+    [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
   );
 
   const goBack = useCallback(() => {
@@ -4520,6 +4519,10 @@ export function ChatsView(props: {
                     // recipient/draft left over from a previous compose.
                     setDmRecipients("");
                     setDmDraft("");
+                    if (variant === "panel" && props.onOpenInTab) {
+                      props.onOpenInTab({ level: "dm-new" });
+                      return;
+                    }
                     // A command like any conversation click (see
                     // openConversation): report it synchronously, or a DM
                     // answer queued in this tick remounts over the compose.

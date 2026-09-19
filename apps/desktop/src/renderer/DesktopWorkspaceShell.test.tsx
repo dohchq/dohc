@@ -14953,7 +14953,7 @@ describe("chats panel (right side)", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 
-  it("opens a channel inside the panel and switches between channels there", async () => {
+  it("opens a clicked channel in the Chats tab and keeps the panel as the navigator", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listChatChannels.mockResolvedValue({
       channels: [
@@ -14985,25 +14985,28 @@ describe("chats panel (right side)", () => {
 
     await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     const panel = await screen.findByTestId("chats-panel");
-    const channelButtons = within(panel).getAllByTestId("chats-channel");
+    const channelButtons = await within(panel).findAllByTestId("chats-channel");
     expect(channelButtons).toHaveLength(2);
     await user.click(channelButtons[0]!);
 
-    // The panel owns chat: the channel renders in the panel, no tab opens.
-    const channelView = await within(panel).findByTestId("chats-channel-view");
-    expect(channelView.dataset.variant).toBe("panel");
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    // The panel is a navigator: the channel opens in the Chats tab and the
+    // panel keeps its list.
+    const tab = await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(tab.dataset.active).toBe("true");
+    const channelView = await screen.findByTestId("chats-channel-view");
+    expect(channelView.dataset.variant).toBe("page");
+    expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
+    expect(within(panel).getAllByTestId("chats-channel")).toHaveLength(2);
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-1",
     });
 
-    await user.click(within(panel).getByTestId("chats-channel-back"));
-    await user.click((await within(panel).findAllByTestId("chats-channel"))[1]!);
+    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
     await waitFor(() => {
-      expect(within(panel).getByTestId("chats-channel-title").textContent).toBe("random");
+      expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-2",
@@ -16488,23 +16491,23 @@ describe("workbench render cost", () => {
       expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe(
         "1",
       );
-      // The panel owns the conversation: it opens in place and performs the
-      // read itself. No Chats tab opens.
+      // The panel is a navigator: the DM opens in the Chats tab, whose page
+      // performs the read. The panel's pill follows that read.
       await user.click(screen.getByTestId("chats-dm-item"));
       await screen.findByTestId("chats-dm-view");
       await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
-      expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
 
       await act(async () => {
         markRead.resolve();
         await markRead.promise;
       });
-      await user.click(await screen.findByTestId("chats-dm-back"));
       await waitFor(() =>
         expect(screen.queryByTestId("chats-dm-unread")).toBeNull(),
       );
-      expect(screen.getByTestId("chats-view")).toBeTruthy();
-      expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+      // The page sits at the DM, so the one overview root is the panel's.
+      expect(screen.getByTestId("chats-view").dataset.variant).toBe("panel");
+      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
