@@ -368,7 +368,11 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     }, {timeout: 30000});
     for (let page = 0; page < 8; page++) {
       const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
-      if (pulled.pendingCursor) await rpc("sync.commitCursor", {workspaceId: "workspace", pendingCursor: pulled.pendingCursor});
+      if (pulled.pendingCursor) {
+        const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
+        expect((await rpc("sync.materializePendingCursor", cursor)).materialized).toBe(true);
+        expect((await rpc("sync.commitCursor", cursor)).committed).toBe(true);
+      }
       if (!pulled.hasMore) break;
       if (page === 7) throw new Error("Owner pull exceeded its eight-page bound.");
     }
