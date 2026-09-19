@@ -109,7 +109,7 @@ test("failed SMTP shows a recoverable error after signup and password reset", as
   const beforeResend = server.mail.messages.length;
   await page.getByRole("button", { name: "Send a new link" }).click();
   await expect.poll(() => server.mail.messages.length).toBe(beforeResend + 1);
-  await expect(page.getByRole("status")).toContainText("sent a new link");
+  await expect(page.getByRole("status")).toContainText("for a verification link");
   server.mail.refuseNextMessage();
   await page.goto(`${server.origin}/account/forgot-password`);
   await page.getByLabel("Email", { exact: true }).fill(email);

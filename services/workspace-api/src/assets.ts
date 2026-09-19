@@ -307,7 +307,7 @@ if (page === "verify-email") {
     const email = byId("email").value.trim();
     await call("/api/auth/send-verification-email", { email, callbackURL: samePath(document.body.dataset.next) || "/account" });
     form.hidden = true;
-    setStatus("done", "If this address needs verification, dohc sent a new link to " + email + ".");
+    setStatus("done", "Check " + email + " for a verification link. If it does not arrive, contact the server owner.");
   });
 }
 
@@ -317,7 +317,7 @@ if (page === "forgot-password") {
     const email = byId("email").value.trim();
     await call("/api/auth/request-password-reset", { email });
     form.hidden = true;
-    setStatus("done", "If that account exists, dohc sent a reset link to " + email + ".");
+    setStatus("done", "Check " + email + " for a reset link. If it does not arrive, contact the server owner.");
   });
 }
 
