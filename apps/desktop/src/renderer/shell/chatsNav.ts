@@ -55,3 +55,13 @@ export function chatsNavigationRequiresRemount(
     Boolean(next.focusMessageId)
   );
 }
+
+// Thread navigation stays within its channel, so the tab keeps that name.
+export function chatEditorTitle(nav: ChatsNav | null, agentName?: string): string {
+  if (!nav || nav.level === "feed") return "Home";
+  if (nav.level === "channel" || nav.level === "thread") {
+    return nav.channel.kind === "agent" ? agentName ?? "My agent" : `#${nav.channel.name}`;
+  }
+  if (nav.level === "dm") return nav.dm.peerLabel;
+  return nav.level === "dm-new" ? "New message" : "Chats";
+}

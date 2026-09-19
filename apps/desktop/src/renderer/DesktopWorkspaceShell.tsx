@@ -52,6 +52,7 @@ import {
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
 import {
+  chatEditorTitle,
   chatsNavigationChangesDestination,
   chatsNavigationLeavesConversation,
   chatsNavigationRequiresRemount,
@@ -828,7 +829,7 @@ export function DesktopWorkspaceShell(props: {
   // id can collide between two discovered rows.
   const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
   const {
-    tabLabels,
+    tabLabels: knownTabLabels,
     rememberWebAppTitle,
     rememberPluginDetailsTitle,
     rememberMomentDiffPath,
@@ -2208,6 +2209,14 @@ export function DesktopWorkspaceShell(props: {
   const chatsNav = useRef<ChatsNav | null>(null);
   const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
   const [chatsPageRevision, setChatsPageRevision] = useState(0);
+  const tabLabels = useMemo(
+    () => new Map(knownTabLabels).set(CHATS_TAB_PATH, chatEditorTitle(selectedChatsNav, agentSetup?.agentName)),
+    [knownTabLabels, selectedChatsNav, agentSetup?.agentName],
+  );
+  const openChatsNavigator = useCallback(() => {
+    mutateWb((state) => ({ ...state, chatsVisible: true }));
+    setChatsPanelTab("all");
+  }, [mutateWb]);
   // The navigator's unread badges come from one fetch at its mount, and the
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
@@ -4212,6 +4221,7 @@ export function DesktopWorkspaceShell(props: {
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
     onNavCommand: onChatsNavCommand,
+    onOpenNavigator: openChatsNavigator,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,

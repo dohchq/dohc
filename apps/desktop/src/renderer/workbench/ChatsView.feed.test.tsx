@@ -18,6 +18,26 @@ import {
 import { deferred } from "../../testing/deferred";
 
 describe("ChatsView hybrid feed", () => {
+  it("keeps Home in the editor while Open Groups reveals the sidebar", async () => {
+    const onOpenNavigator = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "page", onOpenNavigator });
+    const feed = await screen.findByTestId("chats-personal-feed");
+    expect(screen.queryByTestId("chats-feed-back")).toBeNull();
+    expect(screen.queryByTestId("chats-view")).toBeNull();
+    await userEvent.click(screen.getByTestId("chats-feed-empty-groups"));
+    expect(onOpenNavigator).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("chats-personal-feed")).toBe(feed);
+  });
+
+  it("does not render the sidebar catalogue for an editor destination cleared after leaving", async () => {
+    const onOpenNavigator = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "channels" }, onOpenNavigator });
+    await screen.findByTestId("chats-page-empty");
+    expect(screen.queryByTestId("chats-view")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Open Chats" }));
+    expect(onOpenNavigator).toHaveBeenCalledOnce();
+  });
+
   it("opens Groups from an empty Home", async () => {
     const onNavCommand = vi.fn();
     renderView(vi.fn(), vi.fn(), { onNavCommand });
@@ -159,7 +179,7 @@ describe("ChatsView hybrid feed", () => {
     });
     renderView(vi.fn(), vi.fn(), { variant: "page", onNavChange, onNavCommand });
 
-    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
     await userEvent.click(post.closest("button")!);
 
@@ -210,7 +230,7 @@ describe("ChatsView hybrid feed", () => {
     });
     renderView(vi.fn(), vi.fn(), { variant: "page", onNavChange });
 
-    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const selected = await screen.findByText("Selected comment");
     await userEvent.click(selected.closest("button")!);
 

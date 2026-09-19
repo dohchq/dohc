@@ -25,7 +25,6 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     }, workspaceId);
     await page.getByTestId("titlebar-chats-sidebar").click();
     await page.getByTestId("chats-channel").filter({ hasText: "List regression" }).click();
-    await page.getByTestId("chats-open-tab").click();
     await page.getByTestId("chats-panel-collapse").click();
     const view = page.locator("main");
     const list = view.getByTestId("chats-feed-column");
@@ -44,8 +43,9 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[1]}"]`)).toBeFocused();
     await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order.at(-1)}"]`)).toBeVisible();
-    await view.getByTestId("chats-channel-back").click();
-    await view.getByTestId("chats-feed-link").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId("chats-panel").getByTestId("chats-feed-link").click();
+    await page.getByTestId("chats-panel-collapse").click();
     const home = view.getByTestId("chats-personal-feed");
     await expect(home.getByTestId("chats-feed-item").first()).toBeVisible();
     await expect(home.locator('[role="listitem"]').first()).toHaveAttribute("aria-setsize", "30");

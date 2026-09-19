@@ -26,8 +26,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await openMyAgent(page);
-    await page.getByTestId("chats-channel-back").click();
-    await page.locator("main").getByTestId("chats-add-agent-open").click();
+    await page.getByTestId("chats-panel").getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await page.getByTestId("chats-add-agent-name").fill("Profile test");
     for (const name of ["Claude Code", "Codex"]) {
@@ -37,7 +36,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     }
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await page.locator("main").getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId("chats-panel").getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);

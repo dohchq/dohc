@@ -779,6 +779,7 @@ function makeBridge(
       }> => ({ channels: [], fileThreads: [] }),
     ),
     listChannelThreads: vi.fn(async () => ({ threads: [] })),
+    listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
     listChatChannelShares: vi.fn(async () => {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
@@ -6223,7 +6224,9 @@ describe("ui-state merge-on-load", () => {
     });
     renderShell(presence);
 
-    // Enter a channel in the Chats page: presence engages for its scope.
+    // Select a channel from the sidebar: presence engages in the editor.
+    await screen.findByTestId("chats-personal-feed");
+    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
     await user.click(await screen.findByTestId("chats-channel"));
     await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
     const statusQueries = bridge.cloudStatus.mock.calls.length;
@@ -6350,7 +6353,7 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // The page mounts on the Chats tab; go to the Feed.
-    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
     const postButton = post.closest("button")!;
 
@@ -6401,7 +6404,7 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // Land in a thread via the feed.
-    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
     await user.click(post.closest("button")!);
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
@@ -6444,10 +6447,12 @@ describe("ui-state merge-on-load", () => {
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);
     renderShell(bridge);
 
-    // The DM section renders only once the page's own DM sync answers.
-    await screen.findByTestId("chats-feed-link");
+    // New message lives in the sidebar; the editor holds only a destination.
+    await screen.findByTestId("chats-personal-feed");
+    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await screen.findByTestId("chats-view");
     await act(async () => {
-      bridge.syncAnswers[0]!(dmSyncResult());
+      for (const answer of bridge.syncAnswers) answer(dmSyncResult());
       await Promise.resolve();
     });
     const newDmButton = await screen.findByTestId("chats-new-dm");
@@ -6473,10 +6478,10 @@ describe("ui-state merge-on-load", () => {
       await Promise.resolve();
     });
 
-    expect(await screen.findByTestId("chats-dm-new-back")).toBeTruthy();
+    expect(await screen.findByTestId("chats-dm-new-title")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    // A DM answer that wins remounts the page: a second overview load.
-    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
+    // The sidebar command mounts once; a late DM must not remount it again.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
   }, 20_000);
 
   // The awaited form of the same click: a feed item carrying a focus target
@@ -6487,7 +6492,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
 
     await user.click(screen.getByTestId("activity-graph"));
@@ -6554,7 +6559,7 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     // Land in the thread via the feed.
-    await user.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
     await user.click(post.closest("button")!);
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
@@ -14960,7 +14965,7 @@ describe("chats panel (right side)", () => {
       channels: [
         {
           id: "channel-1",
-          name: "general",
+          name: "General",
           slug: "general",
           kind: "channel" as const,
           createdAtMs: 1_700_000_000_000,
@@ -14994,8 +14999,13 @@ describe("chats panel (right side)", () => {
     // panel keeps its list.
     const tab = await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
     expect(tab.dataset.active).toBe("true");
+    expect(tab.textContent).toContain("#General");
     const channelView = await screen.findByTestId("chats-channel-view");
     expect(channelView.dataset.variant).toBe("page");
+    expect(within(channelView).queryByRole("button", { name: "Back" })).toBeNull();
+    fireEvent.keyDown(channelView, { key: "Escape" });
+    expect(screen.getByTestId("chats-channel-view")).toBe(channelView);
+    expect(document.querySelector('main [data-testid="chats-view"]')).toBeNull();
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     expect(within(panel).getAllByTestId("chats-channel")).toHaveLength(2);
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
@@ -15007,6 +15017,7 @@ describe("chats panel (right side)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
+    expect(tab.textContent).toContain("#random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
@@ -16329,16 +16340,16 @@ describe("workbench render cost", () => {
     act(() => bridge.emitWorkspaceActivity());
     expect(bridge.syncDms.mock.calls.length).toBe(alone + 1);
 
-    // With the Chats tab live there are two mounted instances — and still
-    // exactly one poller: the page. Without the suspendPolling plumb this
-    // reads +2.
+    // The Home page refreshes its feed; the suspended navigator does not
+    // perform another DM sync.
     await user.click(await screen.findByTestId("chats-open-tab"));
-    await waitFor(() =>
-      expect(screen.getAllByTestId("chats-view")).toHaveLength(2),
-    );
+    await screen.findByTestId("chats-personal-feed");
+    expect(screen.getAllByTestId("chats-view")).toHaveLength(1);
     const paired = bridge.syncDms.mock.calls.length;
+    const feedReads = bridge.listPersonalChatFeed.mock.calls.length;
     act(() => bridge.emitWorkspaceActivity());
-    expect(bridge.syncDms.mock.calls.length).toBe(paired + 1);
+    expect(bridge.syncDms.mock.calls.length).toBe(paired);
+    expect(bridge.listPersonalChatFeed.mock.calls.length).toBe(feedReads + 1);
   });
 
   it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {

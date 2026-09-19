@@ -9,7 +9,7 @@ import {
   AgentPresenceHint,
   UnreadPill,
   ShareReadFailureNotice,
-  BackHeader,
+  ChatHeader,
   joinedChannelLabel,
   ComposerNotice,
   AddressedToMe,
@@ -402,6 +402,8 @@ export function ChatsView(props: {
   // Active editor destination, used by a persistent panel navigator to mark
   // the selected channel or DM without navigating the panel itself.
   selectedNav?: ChatsNav;
+  // Reveals the sidebar list without replacing the editor destination.
+  onOpenNavigator?: () => void;
   // Reports every draft edit (ref-cheap in the shell) so unsent input
   // survives the panel/tab handoff.
   onDraftsChange?: (drafts: ChatsDrafts) => void;
@@ -2227,7 +2229,7 @@ export function ChatsView(props: {
   // reporting those would overwrite the very state the seed is about to
   // restore (closing the tab while the overview is still loading would then
   // hand "channels" and empty drafts back to the panel).
-  const handoffReportBlocked = useRef(props.initialNav !== undefined);
+  const handoffReportBlocked = useRef(props.initialNav !== undefined || variant === "page");
   useEffect(() => {
     if (handoffReportBlocked.current) return;
     onNavChange?.(nav);
@@ -2266,7 +2268,7 @@ export function ChatsView(props: {
     if (seededRef.current || overview.status !== "ready") return;
     seededRef.current = true;
     handoffReportBlocked.current = false;
-    const seed = props.initialNav;
+    const seed = props.initialNav ?? (variant === "page" ? { level: "feed" as const } : undefined);
     if (seed) {
       if (seed.level === "feed") openFeed();
       else if (seed.level === "channel") void openChannel(seed.channel);
@@ -2297,6 +2299,7 @@ export function ChatsView(props: {
     overview.status,
     props.initialDrafts,
     props.initialNav,
+    variant,
   ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers'),
@@ -3026,7 +3029,7 @@ export function ChatsView(props: {
     // Back is an explicit command like any conversation click: report it
     // synchronously through the same seam, so a DM answer queued in this
     // tick cannot pass its isCurrent() check and remount over the place the
-    // user just went back to. Every BackHeader (and the keyboard shortcut)
+    // user just went back to. Every ChatHeader (and the keyboard shortcut)
     // routes through here.
     props.onNavCommand?.(
       nav.level === "thread"
@@ -3309,11 +3312,11 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      if (nav.level === "channels") return;
+      if (nav.level === "channels" || (variant === "page" && nav.level !== "thread")) return;
       event.stopPropagation();
       goBack();
     },
-    [goBack, nav.level, replyTarget, resolveTargetMessageId],
+    [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
   if (overview.status === "loading") {
@@ -3347,10 +3350,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label="Home"
           testId="chats-feed"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
         <PostFeedList
@@ -3365,7 +3368,7 @@ export function ChatsView(props: {
                 <button
                   type="button"
                   data-testid="chats-feed-empty-groups"
-                  onClick={goBack}
+                  onClick={variant === "page" ? props.onOpenNavigator : goBack}
                   className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
                 >
                   Open Groups
@@ -3601,10 +3604,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label="New message"
           testId="chats-dm-new"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
         />
         <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
@@ -3654,10 +3657,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={dm.peerLabel}
           testId="chats-dm"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
           // A connected participant (shareId set, not already ended) has a
           // live placement to reverse; the owner side (shareId null)
@@ -3767,7 +3770,7 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={nav.thread.title}
           testId="chats-thread"
           onBack={goBack}
@@ -4016,10 +4019,10 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <BackHeader
+        <ChatHeader
           label={nav.channel.kind === "agent" ? "My agent" : nav.channel.name}
           testId="chats-channel"
-          onBack={goBack}
+          onBack={variant === "panel" ? goBack : undefined}
           icon={
             nav.channel.kind === "agent" ? (
               <span aria-hidden className="shrink-0 font-mono text-[12px] text-agent">
@@ -4363,6 +4366,19 @@ export function ChatsView(props: {
               ? "This channel is no longer shared with you. You can still read it."
               : "This channel is read-only for you."}
           </ComposerNotice>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (variant === "page") {
+    return (
+      <div data-testid="chats-page-empty" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+        <p className="m-0 text-sm text-muted">Choose a conversation in Chats.</p>
+        {props.onOpenNavigator ? (
+          <button type="button" onClick={props.onOpenNavigator} className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-panel-2 hover:text-ink">
+            Open Chats
+          </button>
         ) : null}
       </div>
     );
