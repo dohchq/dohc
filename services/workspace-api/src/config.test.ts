@@ -45,6 +45,10 @@ describe("readConfig", () => {
     expect(config.descriptor).toMatchObject({ name: "Team server", networkAccess: "private" });
   });
 
+  it.each(["Team\tserver", "Team\u0000server", "Team\u001fserver", "Team\u007fserver", "Team\nserver"])("rejects server-name control characters %j", (name) => {
+    expect(() => readConfig(env({ DOHC_SERVER_NAME: name }))).toThrow(/without control characters/);
+  });
+
   it("refuses to start without a secret", () => {
     expect(() => readConfig(env({ BETTER_AUTH_SECRET: "short" }))).toThrow(ConfigError);
   });

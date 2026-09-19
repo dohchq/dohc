@@ -82,7 +82,7 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
   }
 
   const name = env.DOHC_SERVER_NAME?.trim();
-  if (name && (name.length > 100 || /[\r\n]/.test(name))) throw new ConfigError("DOHC_SERVER_NAME must be at most 100 characters on one line.");
+  if (name && (name.length > 100 || /[\u0000-\u001f\u007f]/.test(name))) throw new ConfigError("DOHC_SERVER_NAME must be at most 100 characters without control characters.");
   const networkAccess = env.DOHC_SERVER_NETWORK_ACCESS;
   if (networkAccess && networkAccess !== "private" && networkAccess !== "public") throw new ConfigError("DOHC_SERVER_NETWORK_ACCESS must be private or public.");
 
