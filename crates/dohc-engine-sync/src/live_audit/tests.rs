@@ -105,6 +105,7 @@ fn contact(store: &mut EngineStore) {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             refusal_report_id: None,
+            settlement_report_id: None,
         },
         &NoFaults,
         1,

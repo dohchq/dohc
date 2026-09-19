@@ -354,7 +354,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     Ok(ApplyOutcome::new(primary))
 }
 
-fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
+pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
         SyncError::LiveDocumentBindingActive => Some(RefusalReason::InvalidInput {
             reason: "live document binding is still active".to_owned(),

@@ -58,7 +58,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             ObservedOwnerBinding, append_draft_in_tx, install_observed_binding_in_tx, open_draft_in,
         },
     };
-    let (_scratch, mut store) = test_store();
+    let (scratch, mut store) = test_store();
     let fixture: Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
     ))
@@ -312,13 +312,77 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &future_text,
         ),
     );
+    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 6, &NoFaults).unwrap();
+    hydrate_texts(&mut store, &["unrelated ordinary file"]);
+    let unrelated = envelope(
+        "host",
+        3,
+        "ws",
+        absent_text_payload(
+            "unrelated",
+            "unrelated",
+            "other.md",
+            "unrelated ordinary file",
+        ),
+    );
+    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+    *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![future_moment.clone(), unrelated],
+        next_cursor: 2,
+        has_more: false,
+    });
+    let mut cache = dohc_engine_collab::WriterDocCache::default();
+    let pulled = client
+        .pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 7)
+        .unwrap();
+    let crate::SyncPassOutcome::Complete {
+        pending_cursor: Some(waiting_cursor),
+        changed_paths,
+        has_more,
+        ..
+    } = pulled
+    else {
+        panic!("pull must complete");
+    };
+    assert!(!has_more);
+    assert_eq!(changed_paths.len(), 1);
+    assert_eq!(changed_paths[0].path, "other.md");
+    assert_eq!(read_replication_acked_seq(&store, "ws", "host").unwrap(), 3);
+    let mut collision = future_moment.clone();
+    collision.origin_id = "collision".into();
+    collision.origin_seq = 0;
     assert!(matches!(
-        apply_moment_envelope(&mut store, &future_moment, &NoFaults),
-        Err(SyncError::RetryableState {
-            reason: "native-owner-settlement-pending"
-        })
+        apply_moment_envelope(&mut store, &collision, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
     ));
-    assert_eq!(read_replication_acked_seq(&store, "ws", "host").unwrap(), 1);
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    let waiting =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(waiting.report_id.is_none());
+    assert!(!waiting.has_more);
+    assert!(waiting.changes.is_empty());
+    // Advancing ordinary sync and reopening must preserve the waiting row.
+    crate::commit_relay_cursor(&mut store, "ws", &waiting_cursor, &NoFaults, 7).unwrap();
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    drop(store);
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 8).unwrap();
+    assert_eq!(read_replication_acked_seq(&store, "ws", "host").unwrap(), 3);
+    assert_eq!(
+        crate::read_relay_cursor(&store, "ws")
+            .unwrap()
+            .unwrap()
+            .cursor,
+        2
+    );
     let result = store
         .write_with(&NoFaults, |tx| {
             apply_frame_in_tx(
@@ -340,10 +404,37 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     let dohc_engine_storage::TxnOutcome::Committed(result) = result else {
         panic!("frame must commit")
     };
-    assert_eq!(
-        apply_moment_envelope(&mut store, &future_moment, &NoFaults).unwrap(),
-        ApplyOutcome::new(ApplyDisposition::Applied(0))
-    );
+    let leased = crate::moment_apply::pending::drain_and_claim(
+        &mut store,
+        "ws",
+        &NoFaults,
+        &crate::AlwaysLive,
+    )
+    .unwrap();
+    assert!(leased.changes.is_empty());
+    assert!(leased.report_id.is_none());
+    assert!(!leased.has_more);
+    *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+        ops: vec![],
+        next_cursor: 2,
+        has_more: false,
+    });
+    let caught_up = client
+        .pull_chat_workspace(&mut store, &mut cache, "ws", &NoFaults, &NoLiveLeases, 8)
+        .unwrap();
+    let crate::SyncPassOutcome::Complete {
+        pending_cursor: Some(mut applied_cursor),
+        changed_paths: settled_changes,
+        has_more,
+        ..
+    } = caught_up
+    else {
+        panic!("empty pull must publish");
+    };
+    assert!(!has_more);
+    assert_eq!(settled_changes.len(), 1);
+    assert_eq!(settled_changes[0].path, "owner.md");
+    assert!(applied_cursor.settlement_report_id.is_some());
     assert_eq!(
         store
             .read_with(|conn| conn.query_row(
@@ -362,6 +453,32 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .doc
             .encode_full_state(),
         future.encode_full_state()
+    );
+    // Crash after apply, before materialization/cursor commit: the next empty
+    // pull reclaims the same disk decision. A stale cursor cannot delete it.
+    drop(store);
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 9).unwrap();
+    let replay =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert_eq!(replay.changes, settled_changes);
+    assert_ne!(replay.report_id, applied_cursor.settlement_report_id);
+    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 10).unwrap();
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    applied_cursor.settlement_report_id = replay.report_id;
+    crate::commit_relay_cursor(&mut store, "ws", &applied_cursor, &NoFaults, 11).unwrap();
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("owner_pending_settlement_blobs")
+            .unwrap(),
+        0
     );
 }
 
@@ -963,6 +1080,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             refusal_report_id: report,
+            settlement_report_id: None,
         },
         &NoFaults,
         3_000,

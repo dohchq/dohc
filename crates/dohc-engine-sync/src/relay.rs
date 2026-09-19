@@ -1321,6 +1321,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             retryable = still_retryable;
         }
+        let settlements = match crate::moment_apply::pending::drain_and_claim(
+            store,
+            workspace_id,
+            faults,
+            leases,
+        ) {
+            Ok(settlements) => settlements,
+            Err(error) => {
+                // A fault can report failure after the transaction commits.
+                cache.clear();
+                return Err(local(error));
+            }
+        };
+        if settlements.report_id.is_some() {
+            cache.clear();
+        }
+        let has_more = has_more || settlements.has_more;
+        for change in settlements.changes {
+            insert_changed_path(&mut changed_paths, change);
+        }
+        record_facts.extend(settlements.record_facts);
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
         // pending sidecar under a unique local report token and return it here.
@@ -1360,6 +1381,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             refusal_report_id,
+            settlement_report_id: settlements.report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {

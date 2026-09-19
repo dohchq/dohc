@@ -1482,6 +1482,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
         refusal_report_id: None,
+        settlement_report_id: None,
     };
     commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, 400)
         .expect("first relay position enrolls the workspace");

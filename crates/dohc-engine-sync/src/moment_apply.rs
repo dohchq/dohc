@@ -12,6 +12,10 @@ use crate::file_search::{
 };
 use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
+pub(crate) mod pending;
+#[cfg(test)]
+mod pending_tests;
+
 /// The stored origin for every replicated snapshot head.
 ///
 /// Wire origins describe the originating peer's provenance. Local capture and
@@ -439,6 +443,19 @@ fn apply_moment_append(
             reason: "replicated plaintext moment id collides with existing history",
         });
     }
+    let pending_duplicate: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p JOIN replication_log l \
+         ON l.workspace_id=p.workspace_id AND l.origin_id=p.origin_id AND l.origin_seq=p.origin_seq \
+         WHERE p.workspace_id=?1 AND l.op_kind='moment.append' AND json_extract(l.payload_json,'$.momentId')=?2 \
+         AND (p.origin_id != ?3 OR p.origin_seq != ?4))",
+        params![envelope.workspace_id,payload.moment_id,envelope.origin_id,envelope.origin_seq],
+        |r| r.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if pending_duplicate {
+        return Err(SyncError::InvalidInput {
+            reason: "replicated plaintext moment id collides with pending history",
+        });
+    }
 
     let local = select_snapshot_by_object(
         tx,
@@ -527,8 +544,11 @@ fn apply_moment_append(
             )?
             .ok_or(SyncError::LiveDocumentBindingActive)?;
             if cursor > owner.accepted_cursor {
-                return Err(SyncError::RetryableState {
-                    reason: "native-owner-settlement-pending",
+                pending::enqueue(tx, envelope, &payload, &owner, cursor)?;
+                return Ok(MomentApplyResult {
+                    conflicts_opened: 0,
+                    materialization_changes: Vec::new(),
+                    record_facts: None,
                 });
             }
             if after_text.as_deref() != Some(accepted.as_str()) {
