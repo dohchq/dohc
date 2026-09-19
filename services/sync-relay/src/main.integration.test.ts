@@ -925,6 +925,27 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  it("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
+    const root = await tempRoot("self-host-ready"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const baseUrl = await spawnRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
+      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
+    const response = await fetch(`${baseUrl}/ready`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true});
+    expect((await fetch(`${baseUrl}/sync/workspace/live-host`)).status).toBe(404);
+  });
+
+  it.each(["true", "", "2"])("refuses an invalid self-host live flag before opening storage: %j", async value => {
+    const dbPath = join(await tempRoot("invalid-self-host"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_SELF_HOST_LIVE: value});
+    expect(code).toBe(1); expect(stderr).toContain("DOHC_SELF_HOST_LIVE must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
   it.each([
     {quota: "nope", reason: "DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT must be 0 or a positive safe integer."},
     {quota: "2", reason: "App collections require DOHC_RELAY_APP_PUBLICATIONS=1."},
