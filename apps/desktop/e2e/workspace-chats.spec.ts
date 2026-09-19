@@ -75,7 +75,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // Chats click is a reveal (the panel's visibility persists in ui-state,
     // and collapsing fully unmounts the view — no right-edge stub).
     await page
-      .getByTestId("tab-dohc://chats")
+      .getByTestId(/^tab-dohc:\/\/chats\/channel\//)
       .getByRole("button", { name: "Close #general" })
       .click();
     await page.getByTestId("chats-panel-collapse").click();
@@ -182,7 +182,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
-    const page = desktop.page;
+    let page = desktop.page;
 
     // A document tab first, so tab switching can be exercised later.
     await explorerRow(page, "notes.md").click();
@@ -194,7 +194,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const panel = page.getByTestId("chats-panel");
     await expect(panel).toBeVisible();
     await panel.getByTestId("chats-channel").click();
-    const chatsTab = page.getByTestId("tab-dohc://chats");
+    const chatsTab = page.getByTestId(/^tab-dohc:\/\/chats\/channel\//);
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
     const pageChannelView = page.locator(
@@ -235,19 +235,20 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       "draft in flight",
     );
 
-    // Closing the tab leaves the panel as it was. The next click reopens the
-    // tab at the channel.
-    await chatsTab.getByRole("button", { name: "Close #general" }).click();
-    await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
-    await expect(panel.getByTestId("chats-channel")).toBeVisible();
-    await panel.getByTestId("chats-channel").click();
-    await expect(page.getByTestId("tab-dohc://chats")).toBeVisible();
-    await expect(pageChannelView).toBeVisible();
+    // Home has its own tab; returning to General preserves the thread draft.
     await panel.getByTestId("chats-feed-link").click();
-    await expect(chatsTab).toContainText("Home");
+    const homeTab = page.getByTestId("tab-dohc://chats");
+    await expect(homeTab).toContainText("Home");
+    await expect(chatsTab).toContainText("#general");
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
     await expect(page.getByTestId("chats-feed-back")).toHaveCount(0);
     await expect(page.locator('main [data-testid="chats-view"]')).toHaveCount(0);
+    await panel.getByTestId("chats-channel").click();
+    await expect(pageThreadView).toBeVisible();
+    await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue("draft in flight");
+    await expect(chatsTab).toHaveCount(1);
+    await pageThreadView.getByTestId("chats-thread-back").click();
+    await expect(pageChannelView).toBeVisible();
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["Light", "Dark"] as const) {
       await page.getByTestId("activity-settings").click();
@@ -264,6 +265,16 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       await expect(pageChannelView).toBeVisible();
       await page.screenshot({ path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`) });
     }
+    // The durable channel identity and Home tab survive a desktop restart.
+    await desktop.close();
+    desktop = await launchDesktopApp({ workspace: temp });
+    page = desktop.page;
+    await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
+    await expect(page.getByTestId(/^tab-dohc:\/\/chats\/channel\//)).toContainText("#general");
+    await expect(page.getByTestId("tab-dohc://chats")).toContainText("Home");
+    await page.getByTestId("tab-dohc://chats").click();
+    await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
+
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

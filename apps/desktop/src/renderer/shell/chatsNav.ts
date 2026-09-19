@@ -1,3 +1,4 @@
+import { chatTabPath } from "../workbench/workbenchState";
 import type { ChatsNav } from "../workbench/ChatsView";
 
 function chatsDestinationKey(nav: ChatsNav | null): string {
@@ -64,4 +65,12 @@ export function chatEditorTitle(nav: ChatsNav | null, agentName?: string): strin
   }
   if (nav.level === "dm") return nav.dm.peerLabel;
   return nav.level === "dm-new" ? "New message" : "Chats";
+}
+
+export function chatEditorPath(nav: ChatsNav): string {
+  if (nav.level === "channel" || nav.level === "thread") {
+    return chatTabPath({ kind: "channel", id: nav.channel.id });
+  }
+  if (nav.level === "dm") return chatTabPath({ kind: "dm", id: nav.dm.channelId });
+  return chatTabPath({ kind: nav.level === "dm-new" ? "new" : "home" });
 }

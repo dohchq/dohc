@@ -46,6 +46,7 @@ import {
   clampOpenEditorsHeight,
   isCollectionTabPath,
   isChatsTabPath,
+  chatTabDefaultTitle,
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -219,7 +220,7 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 }
 
 export function editorTitle(path: string, label?: string): string {
-  if (isChatsTabPath(path)) return label ?? "Home";
+  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
   if (isGraphTabPath(path)) return "Graph";
   if (isCollectionTabPath(path)) {
     return basenameOf(parseCollectionTabPath(path) ?? "Collection");

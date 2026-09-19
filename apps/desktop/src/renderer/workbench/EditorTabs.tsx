@@ -11,6 +11,7 @@ import {
 import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
+  chatTabDefaultTitle,
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -37,7 +38,7 @@ export function momentDiffName(label?: string): string {
 function fileName(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
-  if (isChatsTabPath(path)) return label ?? "Home";
+  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
   if (isPluginPanelTabPath(path)) {
     return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
   }
@@ -61,7 +62,7 @@ function fileName(path: string, label?: string): string {
 function tabTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
-  if (isChatsTabPath(path)) return label ?? "Home";
+  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
   if (isPluginPanelTabPath(path)) {
     const panel = parsePluginPanelTabPath(path);
     return panel ? `${panel.pluginId} — ${panel.panelId}` : "Plugin panel";

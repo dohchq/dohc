@@ -104,6 +104,7 @@ import {
 } from "./workspaceActivityCoalescer";
 import {
   CHATS_TAB_PATH,
+  chatTabPath,
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
@@ -5773,7 +5774,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult());
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   }, 20_000);
 
@@ -5816,7 +5817,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
@@ -5859,13 +5860,13 @@ describe("ui-state merge-on-load", () => {
     const afterNav = await screen.findAllByTestId("graph-file-row");
     await user.click(afterNav.find((row) => row.dataset.path === fileThreadNode.path)!);
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
 
     await act(async () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
   }, 20_000);
 
   // The third seam of the same kind, and the reason the predicate now lives at
@@ -5908,7 +5909,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === first.path)!);
-    const chatsTab = await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    const chatsTab = await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: first.channelId})}`);
     expect(chatsTab.dataset.active).toBe("true");
 
     // Start a canonical DM navigation and leave it in flight.
@@ -5925,7 +5926,7 @@ describe("ui-state merge-on-load", () => {
         (row) => row.dataset.path === second.path,
       )!,
     );
-    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: second.channelId})}`).dataset.active).toBe("true");
 
     // Collapse the sidebar so the graph's own row labels stop matching, and
     // only the Chats surface answers the queries below. Re-selecting the
@@ -5973,7 +5974,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
 
-    expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
+    expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
   }, 20_000);
 
   // Cancelling on every workbench write would make this seam hostile: a user
@@ -6021,7 +6022,7 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
 
-    expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
+    expect(await screen.findByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
   }, 20_000);
 
   // A destination change inside the active file moves no tab, so the check
@@ -6085,7 +6086,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
@@ -6129,7 +6130,7 @@ describe("ui-state merge-on-load", () => {
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === channel.path)!);
-    expect((await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).dataset.active).toBe("true");
+    expect((await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: channel.channelId})}`)).dataset.active).toBe("true");
 
     // Start a canonical DM navigation and leave it in flight.
     await user.click(
@@ -6146,7 +6147,7 @@ describe("ui-state merge-on-load", () => {
         (row) => row.dataset.path === channel.path,
       )!,
     );
-    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe("true");
+    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: channel.channelId})}`).dataset.active).toBe("true");
 
     // Collapse the sidebar so the graph's own row labels stop matching and
     // only the Chats surface answers the query below.
@@ -6384,13 +6385,10 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    // The sharp assertion: the destination views alone cannot distinguish a
-    // won race from a lost one — chatsNav.current is last-write-wins, so the
-    // late report can paper over the DM destination before the remount seed
-    // reads it. A DM answer that wins calls openChatsNavInTab, which bumps
-    // chatsPageRevision and remounts the page: a second overview load. The
-    // cancel won only if no such load happened.
-    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore);
+    // The feed click opens its channel once; the delayed DM opens no tab.
+    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
+    expect(screen.queryByTestId(`tab-${chatTabPath({ kind: "dm", id: CANONICAL_DM.channelId })}`)).toBeNull();
+
   }, 20_000);
 
   // The same race through the back button: every BackHeader and the keyboard
@@ -6646,7 +6644,7 @@ describe("ui-state merge-on-load", () => {
       sync.resolve(dmSyncResult([CANONICAL_DM]));
       await sync.promise;
     });
-    expect(screen.queryByTestId(`tab-${CHATS_TAB_PATH}`)).toBeNull();
+    expect(screen.queryByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeNull();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
   }, 20_000);
 
@@ -14986,6 +14984,7 @@ describe("chats panel (right side)", () => {
       ],
       fileThreads: [],
     });
+    Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [] } })) });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -14997,7 +14996,7 @@ describe("chats panel (right side)", () => {
 
     // The panel is a navigator: the channel opens in the Chats tab and the
     // panel keeps its list.
-    const tab = await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    const tab = await screen.findByTestId(`tab-${chatTabPath({kind: "channel", id: "channel-1"})}`);
     expect(tab.dataset.active).toBe("true");
     expect(tab.textContent).toContain("#General");
     const channelView = await screen.findByTestId("chats-channel-view");
@@ -15013,16 +15012,28 @@ describe("chats panel (right side)", () => {
       channelId: "channel-1",
     });
 
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "General draft");
     await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
     await waitFor(() => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
-    expect(tab.textContent).toContain("#random");
+    expect(tab.textContent).toContain("#General");
+    expect(screen.getByTestId(`tab-${chatTabPath({kind: "channel", id: "channel-2"})}`).textContent).toContain("#random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     expect(bridge.listChannelThreads).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-2",
     });
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
+    await user.click(within(panel).getByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
+    expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).textContent).toContain("Home");
+    await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
+    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
+    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
+    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("Random draft"));
+    expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
+
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {
@@ -16504,7 +16515,7 @@ describe("workbench render cost", () => {
       await user.click(screen.getByTestId("chats-dm-item"));
       await screen.findByTestId("chats-dm-view");
       await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
-      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
+      expect(screen.getByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
 
       await act(async () => {
         markRead.resolve();
@@ -16515,7 +16526,7 @@ describe("workbench render cost", () => {
       );
       // The page sits at the DM, so the one overview root is the panel's.
       expect(screen.getByTestId("chats-view").dataset.variant).toBe("panel");
-      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
+      expect(screen.getByTestId(`tab-${chatTabPath({kind: "dm", id: CANONICAL_DM.channelId})}`)).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }

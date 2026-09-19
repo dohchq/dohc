@@ -73,7 +73,7 @@ export function clearPluginView(state: WorkbenchState): WorkbenchState {
 const DOHC_TAB_SCHEME = "dohc://";
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
-// Chats expanded to a full editor tab (singleton, graph/history precedent).
+// Home and each conversation have their own workspace-scoped tab identity.
 export const CHATS_TAB_PATH = "dohc://chats";
 const APP_TAB_PREFIX = "dohc://app/";
 const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
@@ -196,8 +196,38 @@ export function isHistoryTabPath(path: string | null): boolean {
   return path === HISTORY_TAB_PATH;
 }
 
-export function isChatsTabPath(path: string | null): boolean {
-  return path === CHATS_TAB_PATH;
+export type ChatTabTarget =
+  | { kind: "home" }
+  | { kind: "new" }
+  | { kind: "channel" | "dm"; id: string };
+
+export function chatTabPath(target: ChatTabTarget): string {
+  if (target.kind === "home") return CHATS_TAB_PATH;
+  if (target.kind === "new") return `${CHATS_TAB_PATH}/new`;
+  return `${CHATS_TAB_PATH}/${target.kind}/${encodeURIComponent(target.id)}`;
+}
+
+export function parseChatTabPath(path: string | null): ChatTabTarget | null {
+  if (path === CHATS_TAB_PATH) return { kind: "home" };
+  if (path === `${CHATS_TAB_PATH}/new`) return { kind: "new" };
+  if (!path?.startsWith(`${CHATS_TAB_PATH}/`)) return null;
+  const parts = path.slice(CHATS_TAB_PATH.length + 1).split("/");
+  if (parts.length !== 2 || (parts[0] !== "channel" && parts[0] !== "dm")) return null;
+  try {
+    const id = decodeURIComponent(parts[1]!);
+    return id ? { kind: parts[0], id } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function chatTabDefaultTitle(path: string): string {
+  const target = parseChatTabPath(path);
+  return target?.kind === "home" ? "Home" : target?.kind === "new" ? "New message" : "Chat";
+}
+
+export function isChatsTabPath(path: string | null): path is string {
+  return parseChatTabPath(path) !== null;
 }
 
 export function isSiteTabPath(path: string | null): boolean {
@@ -222,7 +252,8 @@ export function isSingletonEditorTabPath(path: string | null): boolean {
 }
 
 export function canonicalSingletonEditorTabPath(path: string | null): string | null {
-  if (isChatsTabPath(path)) return CHATS_TAB_PATH;
+  const chat = parseChatTabPath(path);
+  if (chat) return chatTabPath(chat);
   const siteRoot = parseSiteTabPath(path);
   if (siteRoot !== null) return siteTabPath(siteRoot);
   const panel = parsePluginPanelTabPath(path);

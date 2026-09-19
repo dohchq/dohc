@@ -1,3 +1,5 @@
+import { chatEditorPath } from "../shell/chatsNav";
+import { parseChatTabPath } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
@@ -382,6 +384,7 @@ export function ChatsView(props: {
   // next, so panel and tab feel like one chats surface. Applied once per
   // mount; workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
+  editorTabPath?: string;
   // Unsent drafts to restore alongside initialNav (same handoff, same
   // apply-once timing).
   initialDrafts?: ChatsDrafts;
@@ -451,6 +454,7 @@ export function ChatsView(props: {
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
+  const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
@@ -1135,6 +1139,8 @@ export function ChatsView(props: {
           }
         } catch {
           // DMs are optional: Chats stays fully usable without them.
+        } finally {
+          if (token === liveToken.current && session === sessionGeneration.current) setDmRestoreReady(true);
         }
       } while (
         mine.pending &&
@@ -1152,6 +1158,7 @@ export function ChatsView(props: {
     dmRefreshSeq.current += 1;
     paintedDmRevision.current = null;
     resetForWorkspace();
+    setDmRestoreReady(false);
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -2197,7 +2204,8 @@ export function ChatsView(props: {
         { level: "channel" | "thread" | "dm" | "feed" }
       >,
     ) => {
-      if (variant === "panel" && props.onOpenInTab) {
+      if (props.onOpenInTab && (variant === "panel" ||
+        (props.editorTabPath && chatEditorPath(target) !== props.editorTabPath))) {
         props.onOpenInTab(target);
         return;
       }
@@ -2218,6 +2226,7 @@ export function ChatsView(props: {
       openThread,
       props.onNavCommand,
       props.onOpenInTab,
+      props.editorTabPath,
       variant,
     ],
   );
@@ -2266,9 +2275,21 @@ export function ChatsView(props: {
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
+    let seed = props.initialNav;
+    const target = parseChatTabPath(props.editorTabPath ?? null);
+    if (!seed && target?.kind === "channel") {
+      const channel = overview.channels.find((entry) => entry.id === target.id);
+      seed = channel ? { level: "channel", channel } : { level: "channels" };
+    } else if (!seed && target?.kind === "dm") {
+      if (!dmRestoreReady) return;
+      const dm = dms.find((entry) => entry.channelId === target.id);
+      seed = dm ? { level: "dm", dm } : { level: "channels" };
+    } else if (!seed && target?.kind === "new") {
+      seed = { level: "dm-new" };
+    }
+    seed ??= variant === "page" ? { level: "feed" } : undefined;
     seededRef.current = true;
     handoffReportBlocked.current = false;
-    const seed = props.initialNav ?? (variant === "page" ? { level: "feed" as const } : undefined);
     if (seed) {
       if (seed.level === "feed") openFeed();
       else if (seed.level === "channel") void openChannel(seed.channel);
@@ -2299,6 +2320,10 @@ export function ChatsView(props: {
     overview.status,
     props.initialDrafts,
     props.initialNav,
+    props.editorTabPath,
+    overview,
+    dms,
+    dmRestoreReady,
     variant,
   ]);
 
@@ -2424,8 +2449,13 @@ export function ChatsView(props: {
         ...current.filter((dm) => dm.channelId !== result.dm.channelId),
       ]);
       // The completion is the user's command landing (see openConversation).
-      props.onNavCommand?.({ level: "dm", dm: result.dm });
-      void openDm(result.dm);
+      if (props.editorTabPath && props.onOpenInTab) {
+        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null });
+        props.onOpenInTab({ level: "dm", dm: result.dm });
+      } else {
+        props.onNavCommand?.({ level: "dm", dm: result.dm });
+        void openDm(result.dm);
+      }
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that conversation."));
@@ -2433,7 +2463,7 @@ export function ChatsView(props: {
       startingDmRef.current = false;
       setStartingDm(false);
     }
-  }, [dmDraft, dmRecipients, openDm, props.onError, props.onNavCommand, startingDm, workspaceId]);
+  }, [dmDraft, dmRecipients, openDm, props.onError, props.onNavCommand, props.onOpenInTab, props.editorTabPath, onDraftsChange, startingDm, workspaceId]);
 
   const acceptDmRequest = useCallback(
     async (request: DmRequestRow, chosenWorkspaceId: string) => {

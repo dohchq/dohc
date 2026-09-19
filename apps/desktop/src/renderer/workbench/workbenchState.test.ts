@@ -22,6 +22,8 @@ import {
   CHATS_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
+  chatTabPath,
+  parseChatTabPath,
   isChatsTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
@@ -314,6 +316,21 @@ describe("tabs", () => {
     expect(state.editorGroups[1].activeTab).toBe("c.md");
     expect(state.activeEditorGroup).toBe("right");
     expect(state.editorGroups[0].tabs).toEqual([]);
+  });
+
+  it("keeps distinct chat tabs and focuses the existing owner across groups", () => {
+    const channel = chatTabPath({ kind: "channel", id: "channel/with spaces" });
+    const dm = chatTabPath({ kind: "dm", id: "dm-id" });
+    let state = withTabs(CHATS_TAB_PATH, channel, "a.md");
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    state = openTab(state, dm, "right");
+    state = openTab(state, channel, "right");
+    expect(allTabs(state).filter((tab) => isChatsTabPath(tab.path)).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(parseChatTabPath(channel)).toEqual({ kind: "channel", id: "channel/with spaces" });
+    const restored = parseUiState(serializeUiState(state));
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
+    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
   });
 
   it("keeps Chats in its existing editor group", () => {
