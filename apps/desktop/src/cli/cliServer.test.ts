@@ -2077,6 +2077,24 @@ describe("CLI socket server", () => {
     expect(full.channels.find(channel => channel.id === both.id)?.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
   });
 
+  it("posts to the agent channel using the name returned by MCP discovery", async () => {
+    if (!store) throw new Error("Store is not available");
+    const agent = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
+    const listed = await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    if (!listed.ok) throw new Error(listed.reason);
+    const discovered = listed.channels.find((channel) => channel.id === agent.id);
+    expect(discovered?.name).toBe("My agent");
+    const started = await post({
+      actor: "agent",
+      channel: discovered!.name,
+      title: "Continue",
+      body: "Continue this task.",
+    });
+    expect(started.channel.kind).toBe("agent");
+    const threads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agent.id });
+    expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
+  });
+
   it("rejects post for DM streams while allowing agent-channel task posts", async () => {
     if (!store) throw new Error("Store is not available");
     const dm = await store.createChannel({

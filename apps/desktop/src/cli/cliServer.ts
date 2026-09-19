@@ -573,7 +573,7 @@ function resolveChannel(
 ): { engine: ChatChannelSummary; cli: CliChannel } {
   const normalized = withoutChannelMarker(input);
   const slugMatches = channels.filter(
-    ({ cli }) => cli.slug === normalized || cli.name === normalized,
+    ({ engine, cli }) => cli.slug === normalized || cli.name === normalized || engine.name === normalized,
   );
   if (slugMatches.length === 1) return slugMatches[0]!;
   if (slugMatches.length > 1) {
