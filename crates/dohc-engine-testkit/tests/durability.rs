@@ -297,10 +297,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
 
     let store = open(&db, 99);
     assert_eq!(moments(&store), 3);
-    // The ledger holds the baseline, groups, and agent-owner migrations once each.
+    // Each shipped migration, including the owner-settlement lookup, runs once.
     assert_eq!(
         store.table_row_count("engine_migrations").expect("ledger"),
-        3
+        4
     );
     let conflict_objects = store
         .read_with(|conn| {
