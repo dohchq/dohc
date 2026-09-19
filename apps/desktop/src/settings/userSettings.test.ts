@@ -130,6 +130,14 @@ describe("desktop user settings model", () => {
     }
   });
 
+  it("requires and validates the agent name when dispatch is enabled", () => {
+    const runner = { command: "node agent.mjs", enabled: true, timeoutMinutes: 30 };
+    for (const agentName of [undefined, "", "x".repeat(81), "Bad\u0000name"]) {
+      expect(DesktopUserSettings.safeParse({ ...DEFAULT_USER_SETTINGS, profile: { agentName }, runner }).success).toBe(false);
+    }
+    expect(DesktopUserSettings.parse({ ...DEFAULT_USER_SETTINGS, profile: { agentName: "  Nova  " }, runner }).profile.agentName).toBe("Nova");
+  });
+
   it("validates runner timeout bounds", () => {
     const next = {
       ...DEFAULT_USER_SETTINGS,

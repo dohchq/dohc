@@ -7,7 +7,7 @@ import type {
 import { asString, isRecord } from "./shared.ts";
 
 /**
- * What the `claude` CLI says, as dohc's agent events.
+ * What the `claude` CLI says, as agent events in dohc.
  *
  * Nothing here touches a process, so every rule below is readable on its own:
  * which arguments dohc starts Claude with, which stream message becomes which

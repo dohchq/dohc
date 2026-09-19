@@ -52,25 +52,25 @@ describe("engineOriginLabel", () => {
   });
 });
 
-// Agent-authored moments display as "<User Name>'s agent" — the
+// Agent-authored moments display as "the agent name" — the
 // same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("engineMomentSourceLabel", () => {
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });
-  it("shows an agent-authored moment as \"<User Name>'s agent\"", () => {
+  it("shows an agent-authored moment as \"the agent name\"", () => {
     expect(
       engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "You" })),
-    ).toBe("You's agent");
+    ).toBe("You");
     expect(
       engineMomentSourceLabel(
         moment({ id: "m2", agentAuthorName: "ice@example.com" }),
       ),
-    ).toBe("ice@example.com's agent");
+    ).toBe("ice@example.com");
   });
 
-  it("matches the chat rail's agent label exactly", () => {
+  it("matches the agent label in the chat rail exactly", () => {
     expect(
       engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "Ice de Vera" })),
     ).toBe(
@@ -193,9 +193,9 @@ describe("chatAuthorLabel", () => {
     ).toBe("user@example.com");
   });
 
-  it("shows agent-authored messages as \"<User Name>'s agent\"", () => {
+  it("shows agent-authored messages as \"the agent name\"", () => {
     expect(
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice de Vera" }),
-    ).toBe("Ice de Vera's agent");
+    ).toBe("Ice de Vera");
   });
 });

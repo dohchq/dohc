@@ -4,7 +4,6 @@ import * as Schema from "effect/Schema";
 import { PreferredName } from "./chatIdentity";
 import {
   MAX_PREFERRED_NAME_LENGTH,
-  agentDisplayLabel,
   preferredNameFromInput,
 } from "./chatIdentityValues";
 
@@ -64,9 +63,4 @@ describe("chat identity", () => {
     );
   });
 
-  it("formats agent attribution once", () => {
-    expect(agentDisplayLabel("Ice")).toBe("Ice's agent");
-    expect(agentDisplayLabel("Ice's agent")).toBe("Ice's agent");
-    expect(agentDisplayLabel("Ice’s agent")).toBe("Ice’s agent");
-  });
 });

@@ -47,6 +47,7 @@ export interface ChatDispatchWorkspace {
 
 export interface ChatDispatchIdentity {
   displayName: string;
+  ownerDisplayName: string;
   verifiedUserId?: string;
 }
 
@@ -175,9 +176,6 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
   return 1;
 }
 
-function runnerDisplayName(displayName: string): string {
-  return `${displayName}'s agent`;
-}
 
 function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
   return `${threadMarkdown.trimEnd()}
@@ -344,7 +342,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       threadId,
       clientId: `agent:${workspace.workspaceId}`,
       state: {
-        displayName: runnerDisplayName(displayName),
+        displayName: displayName,
         agent: true,
         activity: "working",
       },
@@ -368,7 +366,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await presence({
           ...base,
           state: {
-            displayName: runnerDisplayName(identity.displayName),
+            displayName: identity.displayName,
             agent: true,
             activity: "idle",
           },
@@ -417,6 +415,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         kind: "agent",
         displayName: identity.displayName,
       },
+      authorOwnerDisplayName: identity.ownerDisplayName,
       ...(identity.verifiedUserId
         ? { authorUserId: identity.verifiedUserId }
         : {}),
@@ -1421,6 +1420,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           channelId: agentChannel.id,
           title: SELF_TEST_THREAD_TITLE,
           author: { kind: "agent", displayName: identity.displayName },
+          authorOwnerDisplayName: identity.ownerDisplayName,
           ...(identity.verifiedUserId
             ? { authorUserId: identity.verifiedUserId }
             : {}),

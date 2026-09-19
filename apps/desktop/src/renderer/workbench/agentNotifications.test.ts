@@ -29,7 +29,7 @@ function input(overrides: Partial<AgentActivityInput> = {}): AgentActivityInput 
   return {
     workspaceId: "ws-a",
     workspaceName: "Personal",
-    agentName: "You's agent",
+    agentName: "You",
     runId: "run-1",
     status: "running",
     ...overrides,
@@ -237,7 +237,7 @@ describe("deriveAgentActivity", () => {
   const base = {
     workspaceId: "ws-a",
     workspaceName: "Personal",
-    agentName: "You's agent",
+    agentName: "You",
     userCandidates,
   };
 
@@ -335,7 +335,7 @@ describe("a login the agent's harness asks for", () => {
     const activity = deriveAgentActivity({
       workspaceId: "ws-a",
       workspaceName: "Personal",
-      agentName: "You's agent",
+      agentName: "You",
       userCandidates,
       session: session({
         loginRequired: true,

@@ -2258,6 +2258,7 @@ async function activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
 // derives it — the renderer never supplies identity. At alpha the desktop's
 // preferred local profile name. Email remains an auth/contact identifier and
 // is never reused as a public chat display name.
+let cachedAgentName: string | undefined;
 let cachedPreferredName: string | undefined;
 function localUserDisplayName(): string {
   return cachedPreferredName ?? "You";
@@ -2765,8 +2766,11 @@ const chatDispatchService = createChatDispatchService({
             )
           ).authorUserId
         : resolveWorkspaceRelayAuthorId(registered, cachedCredentials);
+      const settings = (await readCachedUserSettingsFile(stateDir())).settings;
+      lease.assertCurrent();
       return {
-        displayName: localUserDisplayName(),
+        displayName: settings.profile.agentName ?? "Agent",
+        ownerDisplayName: localUserDisplayName(),
         ...(verifiedUserId ? { verifiedUserId } : {}),
       };
     }),
@@ -3636,6 +3640,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
     applySettings: ({ settings }) => {
       cachedPreferredName = settings.profile.preferredName;
+      cachedAgentName = settings.profile.agentName;
       desktopWindows.seedZoomLevel(settings.appearance.zoomLevel);
     },
     prepareCli: () => {
@@ -3963,7 +3968,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localUserDisplayName, notifyRenderer,
+    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
@@ -4365,7 +4370,7 @@ function registerIpcHandlers(): void {
   const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, stateDir, enqueueUserSettingsWrite,
-    setCachedPreferredName: (preferredName) => { cachedPreferredName = preferredName; },
+    setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService, withRendererWorkspaceOperation,
     broadcastUserSettings: (result) => {

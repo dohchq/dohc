@@ -31,7 +31,7 @@ export interface AgentNotification {
   kind: AgentNotificationKind;
   workspaceId: string;
   workspaceName: string;
-  // "<User Name>'s agent" — the same label the chat surfaces use.
+  // The configured agent name, also shown in chat.
   agentName: string;
   runId: string;
   title: string;
@@ -39,7 +39,7 @@ export interface AgentNotification {
   createdAtMs: number;
 }
 
-// One poll's worth of truth about a workspace's agent session. Derived in the
+// One poll's worth of truth about an agent session in a workspace. Derived in the
 // hook from the AgentPanelSnapshot; kept flat so the reducer stays pure and
 // trivially testable.
 export interface AgentActivityInput {

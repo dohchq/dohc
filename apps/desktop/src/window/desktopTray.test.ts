@@ -24,7 +24,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const iconRoot = packaged ? resourcesPath : join(root, "build");
   await mkdir(iconRoot, { recursive: true });
   const configure = (enabled: boolean, command = "agent run") => writeUserSettingsFile(stateRoot, {
-    ...DEFAULT_USER_SETTINGS, runner: { enabled, command, timeoutMinutes: 30 },
+    ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { enabled, command, timeoutMinutes: 30 },
   });
   await configure(true);
   const service = createChatDispatchService({
@@ -32,7 +32,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
     readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,
-    identityFor: async () => ({ displayName: "Local" }), stateDir: () => stateRoot,
+    identityFor: async () => ({ displayName: "Nova", ownerDisplayName: "Local" }), stateDir: () => stateRoot,
     appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
     authorizeServiceNote: async () => false, onMessagePosted: () => undefined,
     setRunAttribution: () => undefined,
@@ -238,7 +238,7 @@ describe("desktop tray owner", () => {
 
   it("requires a nonblank runner command even when an injected settings source marks it enabled", async () => {
     const h = await harness();
-    h.readSettings.mockResolvedValue({ source: "stored", settings: { ...DEFAULT_USER_SETTINGS, runner: { enabled: true, command: " \t ", timeoutMinutes: 30 } } });
+    h.readSettings.mockResolvedValue({ source: "stored", settings: { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { enabled: true, command: " \t ", timeoutMinutes: 30 } } });
     await expect(h.owner.refreshDispatchTray()).resolves.toBe(false);
     expect(h.created).toEqual([]);
   });

@@ -224,7 +224,7 @@ describe("registered settings IPC", () => {
       await expect(zoom).resolves.toMatchObject({ settings: { appearance: { zoomLevel: -1 } } });
       await expect(reset).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2, -1, 0]);
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First"], ["Next"], [undefined]]);
+      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], [undefined, undefined]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     } finally {
@@ -278,7 +278,7 @@ describe("registered settings IPC", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => { logged.resolve(); });
     h.refreshDispatchTray.mockImplementationOnce(async () => { trayReached.resolve(); await trayRelease.promise; });
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
-    const settings = { ...DEFAULT_USER_SETTINGS, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
     const result = h.invoke(CHANNELS.setUserSettings, { settings });
     try {
       await trayReached.promise;
@@ -300,7 +300,7 @@ describe("registered settings IPC", () => {
     const h = await harness();
     const error = new Error("tray unavailable");
     h.refreshDispatchTray.mockRejectedValueOnce(error);
-    const settings = { ...DEFAULT_USER_SETTINGS, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
+    const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
     await expect(h.invoke(CHANNELS.setUserSettings, { settings })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(2);

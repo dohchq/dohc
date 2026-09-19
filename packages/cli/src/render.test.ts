@@ -58,7 +58,7 @@ describe("markdown renderers", () => {
       Right now versioning pops a merge dialog...
       [attach: q3-plan.md]
 
-      **Ice's agent** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
+      **Ice** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
       Risk: block forks need a stable blockId.
       "
     `);
@@ -160,7 +160,7 @@ describe("markdown renderers", () => {
         ],
       }),
     ).toBe(
-      "@mention · #engineering · th_8f2k1c · msg_agent · Ice's agent · 2026-07-03  Agent update\n" +
+      "@mention · #engineering · th_8f2k1c · msg_agent · Ice · 2026-07-03  Agent update\n" +
         "@mention · #engineering · th_8f2k1c · msg_human · Ice de Vera · 2026-07-03  Human update",
     );
   });
@@ -189,7 +189,7 @@ describe("markdown renderers", () => {
     };
     expect(renderGrep(result, { filesWithMatches: false, context: 1 })).toMatchInlineSnapshot(`
       "#engineering th_8f2k1c msg_root Ice de Vera 2026-07-03  - Earlier context
-      #engineering th_8f2k1c msg_reply Ice's agent 2026-07-03  stable blockId"
+      #engineering th_8f2k1c msg_reply Ice 2026-07-03  stable blockId"
     `);
     expect(renderGrep(result, { filesWithMatches: true, context: 1 })).toBe("th_8f2k1c");
     expect(

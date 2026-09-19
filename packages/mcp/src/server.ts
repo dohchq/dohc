@@ -418,7 +418,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_reply_to_chat",
     {
       description:
-        "Reply to a dohc Chat thread as the agent. The message is attributed to the user's agent and appears in the desktop file rail.",
+        "Reply to a dohc Chat thread as the agent. The message is attributed to the configured agent and appears in the desktop file rail.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         body: z.string().min(1).max(65536),

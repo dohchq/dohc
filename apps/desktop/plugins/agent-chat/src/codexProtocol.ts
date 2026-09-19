@@ -2,7 +2,7 @@ import type { PluginAgentEvent, PluginPermissionDecision, PluginPermissionOption
 import { asString, isRecord } from "./shared.ts";
 
 /**
- * What `codex app-server` says, as dohc's agent events.
+ * What `codex app-server` says, as agent events in dohc.
  *
  * Nothing here touches a process, so every rule below is readable on its own:
  * which sandbox a dohc mode asks Codex for, which notification becomes which

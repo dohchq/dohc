@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 // Main-side store for per-workspace UI state (.dohc/ui-state.json), the same
-// pattern as AgentIntegration's agent-runs.json. It lives under .dohc by
+// pattern as agent-runs.json in AgentIntegration. It lives under .dohc by
 // design: the watcher/tree/history ignore .dohc at any depth, so workbench
 // state never lands in the timeline and never syncs as user content — and the
 // renderer cannot write here through writeWorkspaceText (reserved path), so

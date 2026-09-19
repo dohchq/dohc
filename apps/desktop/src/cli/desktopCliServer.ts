@@ -1,3 +1,4 @@
+import { readCachedUserSettingsFile } from "../settings/userSettingsStore";
 import { resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
@@ -318,6 +319,7 @@ export function createDesktopCliServer<State>(
           : undefined;
         return {
           displayName: localUserDisplayName(),
+          agentName: (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
           ...(authorUserId ? { authorUserId } : {}),
           reactionAuthorId: localReactorFallbackId(),
         };

@@ -203,6 +203,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
 }
 
 interface CliMainIdentity {
+  agentName: string;
   displayName: string;
   authorUserId?: string;
   reactionAuthorId: string;
@@ -372,7 +373,7 @@ function authorForCli(message: ChatMessage): CliAuthor {
 
 function authorForActor(identity: CliMainIdentity, actor: CliActor): CliAuthor {
   return actor === "agent"
-    ? { kind: "agent", displayName: identity.displayName }
+    ? { kind: "agent", displayName: identity.agentName }
     : { kind: "human", displayName: identity.displayName };
 }
 
@@ -413,6 +414,7 @@ function rawChatMessage(message: ChatMessage) {
     threadId: message.threadId,
     authorKind: message.author.kind,
     authorDisplayName: message.author.displayName,
+    ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
   };
@@ -1764,6 +1766,7 @@ async function dispatch(
             ? { title: request.args.title }
             : {}),
           author: authorForActor(identity, request.args.actor),
+          ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
           ...(identity.authorUserId
             ? { authorUserId: identity.authorUserId }
             : {}),
@@ -1799,6 +1802,7 @@ async function dispatch(
           workspaceId: context.workspaceId,
           threadId: request.args.threadId,
           author: authorForActor(identity, request.args.actor),
+          ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
           ...(identity.authorUserId
             ? { authorUserId: identity.authorUserId }
             : {}),
@@ -2180,6 +2184,7 @@ async function dispatch(
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
         author: authorForActor(identity, request.args.actor),
+        ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
         ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),
         origin: "cli",
         body: request.args.body,
@@ -2242,6 +2247,7 @@ async function dispatch(
         workspaceId: context.workspaceId,
         threadId: thread.thread.id,
         author: authorForActor(identity, request.args.actor),
+        ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
         ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),
         ...(parent ? { parentMessageId: parent.id } : {}),
         origin: "cli",

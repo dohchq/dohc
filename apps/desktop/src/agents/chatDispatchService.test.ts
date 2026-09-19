@@ -549,7 +549,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     readRunnerSettings: async () => ({ ...runner }),
     identityFor: async () =>
       options.identity ?? {
-        displayName: "Ice",
+        displayName: "Nova",
+        ownerDisplayName: "Ice",
         verifiedUserId: "user_local",
       },
     stateDir: () => stateRoot,
@@ -747,7 +748,7 @@ describe("chatDispatchService", () => {
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
     const fixture = await createFixture({
       runner: { enabled: false },
-      identity: { displayName: "Ice", verifiedUserId: "user_local" },
+      identity: { displayName: "Nova", ownerDisplayName: "Ice", verifiedUserId: "user_local" },
     });
     const agentHuman = await createAgentThread(fixture, {
       body: "Please review the launch.",
@@ -1435,7 +1436,9 @@ describe("chatDispatchService", () => {
   });
 
   it("fails no-runner triggers and keeps one setup note per thread", async () => {
-    const fixture = await createFixture({ runner: { enabled: false } });
+    const fixture = await createFixture({
+      runner: { enabled: false },
+    });
     const trigger = await createAgentThread(fixture, {
       body: "Needs a runner.",
       authorUserId: "user_local",
@@ -1456,9 +1459,10 @@ describe("chatDispatchService", () => {
       (message) => message.body === NO_RUNNER_NOTE,
     );
     expect(setupNotes).toHaveLength(1);
+    expect(setupNotes[0]?.authorOwnerDisplayName).toBe("Ice");
     expect(setupNotes[0]?.author).toEqual({
       kind: "agent",
-      displayName: "Ice",
+      displayName: "Nova",
     });
 
     await fixture.chat.sendMessage({

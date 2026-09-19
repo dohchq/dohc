@@ -13483,7 +13483,7 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
-    // One refresh's agent read is still in flight.
+    // One agent read from a refresh is still in flight.
     holdNextRead = true;
     act(() => {
       bridge.emitWorkspaceActivity();

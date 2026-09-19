@@ -44,7 +44,7 @@ const message = {
   id: "message-1",
   threadId: thread.id,
   authorKind: "agent" as const,
-  authorDisplayName: "Ice's agent",
+  authorDisplayName: "Nova",
   body: "On it.",
   createdAtMs: 20,
 };

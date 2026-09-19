@@ -42,9 +42,7 @@ function markdownLine(value: string): string {
 }
 
 function agentLabel(message: ChatBookmarkProjectionMessage): string {
-  const name = markdownLine(message.authorDisplayName);
-  if (message.authorKind === "human") return name;
-  return /(?:['’]s agent)$/iu.test(name) ? name : `${name}'s agent`;
+  return markdownLine(message.authorDisplayName);
 }
 
 /**

@@ -1732,7 +1732,7 @@ export class PluginPipeline {
         sameRoot.id !== oldCandidate.id;
       if (!identityChanged) continue;
       // A root still on disk whose manifest is momentarily invalid — the
-      // ordinary state while a user's agent edits a plugin — has not
+      // ordinary state while an agent acting for a user edits a plugin — has not
       // departed. Deleting its record, its approval, and its plugin data
       // here uninstalled a plugin that only needed its manifest finished;
       // the invalid state has its own handling, which keeps the

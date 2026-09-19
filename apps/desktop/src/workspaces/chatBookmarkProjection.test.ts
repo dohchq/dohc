@@ -39,7 +39,7 @@ describe("formatChatBookmarkProjection", () => {
     expect(text).toContain("projection_mode: live");
     expect(text).toContain("projection_state: current");
     expect(text).toContain("Saved from #product");
-    expect(text).toContain("## Ice's agent");
+    expect(text).toContain("## Ice");
     expect(text).toContain("Reply to message message-1");
     expect(text.endsWith("\n")).toBe(true);
   });
