@@ -842,6 +842,31 @@ it("refuses an uncaptured artifact that has content, without calling it missing"
   expect(methodCount("ydoc.close")).toBe(methodCount("ydoc.open"));
 });
 
+it.each([false, true])("checks a retained document on reopen without writing, outside edit=%s", async (outsideEdit) => {
+  const previous = await openEngineYdocProviderSession({
+    transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: PATH,
+    contentKind: "richdoc", onRemoteUpdate: () => undefined, scheduleSettle: () => () => undefined,
+  });
+  const editor = new Y.Doc();
+  Y.applyUpdate(editor, previous.initialUpdate);
+  const before = Y.encodeStateVector(editor);
+  if (outsideEdit) {
+    typeIntoBody(editor, "Retained human edit.");
+    await previous.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
+  }
+  await previous.evict();
+  editor.destroy();
+  if (outsideEdit) await writeFile(join(root, PATH), "Outside edit.\n");
+  const settlesBeforeOpen = methodCount("ydoc.settle");
+  const states: string[] = [];
+  const reopened = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined,
+    onSaveState: state => states.push(state)});
+  expect(states).toEqual(outsideEdit ? ["error"] : []);
+  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
+  expect(await readFile(join(root, PATH), "utf8")).toBe(outsideEdit ? "Outside edit.\n" : INITIAL_MARKDOWN);
+  expect(reopened.doc.getXmlFragment("body").toString()).toContain(outsideEdit ? "Retained human edit." : "Start here.");
+});
+
 it("opens a crash-orphaned draft the daemon resurrects, head absent and all", async () => {
   // actor.rs keeps a never-settled local lineage alive: its CRDT rows are the
   // only copy of what the user typed before the crash, and the version has no

@@ -4380,6 +4380,24 @@ export function createWorkspaceEngineCapture(
         // register it themselves when their release fails, because the daemon
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
+        // A retained document can reopen over an outside edit. Check the file
+        // without settling: opening a document must not trigger a write retry.
+        if (head === "present" && lineage === "existing") {
+          const openingUpdates = updatesSeen;
+          let drifted = false;
+          try {
+            const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
+            if (snapshot) {
+              const disk = await digestSettledFile(rootPath, input.path);
+              drifted = disk.kind !== "sha256" || disk.sha256 !== snapshot.sha256;
+            }
+          } catch {
+            drifted = true;
+          }
+          if (drifted && updatesSeen === openingUpdates && lastSettledSha === null) {
+            reportSaveState("error", 0);
+          }
+        }
         return {
           get nativeOwner() { return session.nativeOwner; },
           get doc() {
