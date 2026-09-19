@@ -2416,7 +2416,11 @@ export async function startChannelChat(
   if ("ok" in result) return result;
   return {
     ok: true as const,
-    channel: { ...result.channel, id: engineChannelId(result.channel.id) },
+    channel: {
+      id: engineChannelId(result.channel.id),
+      slug: result.channel.slug,
+      kind: result.channel.kind,
+    },
     threadId: engineThreadId(result.threadId),
     messageId: engineMessageId(result.messageId),
     title: result.title,
@@ -2426,7 +2430,7 @@ export async function startChannelChat(
 
 // Reply in a chat thread AS THE AGENT. `to`, `resolve`, and `choose` take
 // message ids from dohc_read_chat; `resolve` closes that open decision with
-// this reply, optionally choosing one of its options.
+// this reply. A poll requires `choose` to name one of its options.
 export async function replyToChat(
   ctx: ToolContext,
   args: ChatWriteInput & {

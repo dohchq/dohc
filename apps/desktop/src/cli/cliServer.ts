@@ -407,7 +407,10 @@ function rawChatThread(thread: ChatThread) {
   };
 }
 
-function rawChatMessage(message: ChatMessage) {
+function rawChatMessage(
+  message: ChatMessage,
+  decision: Awaited<ReturnType<LinkedChatStore["listThreadDecisions"]>>[number] | undefined,
+) {
   return {
     id: message.id,
     threadId: message.threadId,
@@ -415,6 +418,18 @@ function rawChatMessage(message: ChatMessage) {
     authorDisplayName: message.author.displayName,
     body: message.body,
     createdAtMs: message.createdAtMs,
+    ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
+    attachments: message.attachments.map(({ objectId, pathHint }) => ({
+      ...(objectId ? { objectId } : {}),
+      ...(pathHint ? { pathHint } : {}),
+    })),
+    needsDecision: decision !== undefined,
+    ...(decision ? {
+      decisionState: decision.state,
+      ...(decision.options ? { options: [...decision.options] } : {}),
+      ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
+      ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
+    } : {}),
   };
 }
 
@@ -1563,6 +1578,9 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
+  if (request.verb === "reply" && request.args.choose !== undefined && request.args.resolve === undefined) {
+    throw new CliCommandError("--choose needs --resolve <message>");
+  }
   switch (request.verb) {
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
@@ -1675,10 +1693,12 @@ async function dispatch(
             ? { kind: "allowed", path: currentPath }
             : { kind: "unknown" },
         });
+        const decisions = await context.store.listThreadDecisions(context.workspaceId, thread.id);
+        const decisionByMessage = new Map(decisions.map((decision) => [decision.messageId, decision]));
         return {
           ok: true as const,
           thread: rawChatThread(thread),
-          messages: messages.map(rawChatMessage),
+          messages: messages.map((message) => rawChatMessage(message, decisionByMessage.get(message.id))),
           projection: {
             path: projection.path,
             readOnly: projection.readOnly,
@@ -1899,7 +1919,12 @@ async function dispatch(
     }
   }
 
-  const loadedChannels = await loadChannels(context);
+  const exactReplyThreadId = request.verb === "reply" && /^thread-/u.test(request.args.thread)
+    ? request.args.thread
+    : undefined;
+  const loadedChannels = exactReplyThreadId
+    ? { channels: [], provisioned: false }
+    : await loadChannels(context);
   const channels = loadedChannels.channels;
   if (loadedChannels.provisioned) await notifyWrite(options, context);
   const nowMs = options.nowMs ?? Date.now;
@@ -2120,11 +2145,11 @@ async function dispatch(
     }
 
     case "reply": {
-      const threads = await loadThreads(context, channels);
-      const thread = resolveThread(request.args.thread, threads);
+      const threadId = exactReplyThreadId ??
+        resolveThread(request.args.thread, await loadThreads(context, channels)).thread.id;
       const messages = await context.store.listMessages({
         workspaceId: context.workspaceId,
-        threadId: thread.thread.id,
+        threadId,
       });
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
@@ -2134,7 +2159,7 @@ async function dispatch(
         decisionMessage = resolveMessageInThread(request.args.resolve, messages);
         const decisions = await context.store.listThreadDecisions(
           context.workspaceId,
-          thread.thread.id,
+          threadId,
         );
         const decision = decisions.find(
           (candidate) => candidate.messageId === decisionMessage?.id,
@@ -2144,8 +2169,16 @@ async function dispatch(
             `message is not an open decision: ${cliMessageId(decisionMessage.id)}`,
           );
         }
+        const choices = decision.options ?? [];
+        const chosen = request.args.choose?.trim();
+        if (choices.length > 0 && (!chosen || !choices.includes(chosen))) {
+          throw new CliCommandError("Pick one of the poll's choices.");
+        }
+        if (choices.length === 0 && chosen) {
+          throw new CliCommandError("This question has no choices to pick from.");
+        }
       }
-      const target = { threadId: thread.thread.id };
+      const target = { threadId };
       await context.assertWritable(target);
       const identity = await options.identity(context.workspaceId, target);
       await context.assertMessageWritable(target, identity.authorUserId);
@@ -2157,7 +2190,7 @@ async function dispatch(
       await revalidateCliWrite(context, options, target, identity);
       const message = await context.store.sendMessage({
         workspaceId: context.workspaceId,
-        threadId: thread.thread.id,
+        threadId,
         author: authorForActor(identity, request.args.actor),
         ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),
         ...(parent ? { parentMessageId: parent.id } : {}),
@@ -2179,7 +2212,7 @@ async function dispatch(
           await revalidateCliWrite(context, options, target, identity);
           const resolution = await context.store.resolveChatDecision({
             workspaceId: context.workspaceId,
-            threadId: thread.thread.id,
+            threadId,
             messageId: decisionMessage.id,
             resolvedByMessageId: message.id,
             ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
@@ -2196,7 +2229,7 @@ async function dispatch(
         try {
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
-            threadId: thread.thread.id,
+            threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });
         } catch (error) {
@@ -2204,26 +2237,21 @@ async function dispatch(
         }
       }
       await notifyWrite(options, context, target);
-      if (decisionMessage && resolutionFailure) {
-        throw new CliCommandError(
-          `reply ${cliMessageId(message.id)} was posted, but decision ` +
-          `${cliMessageId(decisionMessage.id)} could not be resolved: ${resolutionFailure}`,
-        );
-      }
-      if (decisionMessage && !resolvedByReply) {
-        throw new CliCommandError(
-          `reply ${cliMessageId(message.id)} was posted, but decision ` +
-          `${cliMessageId(decisionMessage.id)} was already resolved by another message`,
-        );
-      }
+      const resolutionWarning = decisionMessage && !resolvedByReply
+        ? `reply ${cliMessageId(message.id)} was posted, but decision ${cliMessageId(decisionMessage.id)} ` +
+          (resolutionFailure
+            ? `could not be resolved: ${resolutionFailure}`
+            : "was already resolved by another message")
+        : undefined;
+      const warning = [linkWarning, resolutionWarning].filter(Boolean).join(" ");
       return {
-        threadId: cliThreadId(thread.thread.id),
+        threadId: cliThreadId(threadId),
         messageId: cliMessageId(message.id),
         ...(parent ? { parentMessageId: cliMessageId(parent.id) } : {}),
         ...(decisionMessage && resolvedByReply
           ? { resolvedMessageId: cliMessageId(decisionMessage.id) }
           : {}),
-        ...(linkWarning ? { warning: linkWarning } : {}),
+        ...(warning ? { warning } : {}),
       };
     }
 

@@ -22,7 +22,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -2931,6 +2931,97 @@ describe("CLI socket server", () => {
     expect(ambiguous.error).toContain(second.threadId);
   });
 
+  it("reads attachment, parent, and decision metadata needed to continue a chat", async () => {
+    await writeFile(join(workspaceRoot, "tracked.md"), "Agenda");
+    const opened = await invoke("post", {
+      cwd: workspaceRoot, actor: "human", channel: "general", attachments: ["tracked.md"],
+      needsDecision: true, options: ["Ship", "Hold"], body: "Choose a release date",
+    });
+    const threadId = opened.threadId.replace(/^th_/u, "thread-");
+    const before = await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId });
+    if (!before.ok) throw new Error(before.reason);
+    expect(before.messages[0]).toMatchObject({
+      needsDecision: true, decisionState: "open", options: ["Ship", "Hold"],
+      attachments: [{ objectId: "object_tracked", pathHint: "tracked.md" }],
+    });
+    const decisionId = before.messages[0]!.id;
+    const replied = await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: threadId, to: decisionId,
+      resolve: decisionId, choose: "Ship", attachments: [], needsDecision: false, body: "Ship it",
+    });
+    const after = await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId });
+    if (!after.ok) throw new Error(after.reason);
+    expect(after.messages[0]).toMatchObject({
+      decisionState: "resolved", chosenOption: "Ship",
+      resolvedByMessageId: replied.messageId.replace(/^msg_/u, "message-"),
+    });
+    expect(after.messages[1]).toMatchObject({ parentMessageId: decisionId, needsDecision: false, attachments: [] });
+  });
+
+  it("rejects invalid decision choices before posting a reply", async () => {
+    const opened = await invoke("post", {
+      cwd: workspaceRoot, actor: "human", channel: "general", attachments: [],
+      needsDecision: true, options: ["Ship", "Hold"], body: "Choose",
+    });
+    for (const choice of [
+      { choose: "Ship" },
+      { resolve: opened.messageId },
+      { resolve: opened.messageId, choose: "Invalid" },
+    ]) {
+      await expect(invoke("reply", {
+        cwd: workspaceRoot, actor: "agent", thread: opened.threadId,
+        attachments: [], needsDecision: false, body: "Must not post", ...choice,
+      })).rejects.toThrow(choice.resolve ? "Pick one of the poll's choices." : "--choose needs --resolve");
+    }
+    const bare = await post({ actor: "human", title: "Question", body: "Ready?", needsDecision: true });
+    await expect(invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: bare.threadId,
+      resolve: bare.messageId, choose: "Ship", attachments: [], needsDecision: false, body: "Must not post",
+    })).rejects.toThrow("This question has no choices to pick from.");
+    for (const posted of [opened, bare]) {
+      expect(await store!.listMessages({
+        workspaceId: WORKSPACE_ID, threadId: posted.threadId.replace(/^th_/u, "thread-"),
+      })).toHaveLength(1);
+    }
+  });
+
+  it("replies by exact engine id without enumerating channels or threads", async () => {
+    const opened = await post({ actor: "human", title: "Exact target", body: "Reply here" });
+    const threadId = opened.threadId.replace(/^th_/u, "thread-");
+    const spies = [
+      vi.spyOn(store!, "listChannels"), vi.spyOn(store!, "listChannelThreads"), vi.spyOn(store!, "listThreads"),
+    ];
+    try {
+      const result = await invoke("reply", {
+        cwd: workspaceRoot, actor: "agent", thread: threadId,
+        attachments: [], needsDecision: false, body: "Exact reply",
+      });
+      const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+      expect(result.messageId).toBe(cliMessageId(messages.at(-1)!.id));
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("refuses missing and foreign engine thread ids without posting", async () => {
+    const foreignRoot = join(tempRoot, "foreign");
+    await mkdir(foreignRoot);
+    const foreignStore = storeForWorkspace("foreign-workspace", foreignRoot);
+    const channel = await foreignStore.ensureGeneralChannel({ workspaceId: "foreign-workspace" });
+    const opened = await foreignStore.startChannelThread({
+      workspaceId: "foreign-workspace", channelId: channel.id,
+      author: { kind: "human", displayName: "Other owner" }, body: "Other workspace",
+    });
+    for (const threadId of ["thread-missing", opened.thread.id]) {
+      await expect(invoke("reply", {
+        cwd: workspaceRoot, actor: "agent", thread: threadId,
+        attachments: [], needsDecision: false, body: "Must not cross workspaces",
+      })).rejects.toThrow();
+    }
+    expect(await foreignStore.listMessages({ workspaceId: "foreign-workspace", threadId: opened.thread.id })).toHaveLength(1);
+  });
+
   it("reports an honest partial success when another resolver wins", async () => {
     const opened = await post({
       actor: "human",
@@ -2946,7 +3037,7 @@ describe("CLI socket server", () => {
     });
 
     try {
-      await expect(invoke("reply", {
+      const reply = await invoke("reply", {
         cwd: workspaceRoot,
         actor: "human",
         thread: opened.threadId,
@@ -2954,7 +3045,11 @@ describe("CLI socket server", () => {
         needsDecision: false,
         resolve: opened.messageId,
         body: "My resolving reply",
-      })).rejects.toThrow("was posted, but decision");
+      });
+      expect(reply.warning).toContain("was posted, but decision");
+      expect(reply.resolvedMessageId).toBeUndefined();
+      const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
+      expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
     } finally {
       store.resolveChatDecision = originalResolve;
     }
@@ -2991,19 +3086,19 @@ describe("CLI socket server", () => {
     };
 
     try {
-      await expect(
-        invoke("reply", {
-          cwd: workspaceRoot,
-          actor: "human",
-          thread: opened.threadId,
-          attachments: [],
-          needsDecision: false,
-          resolve: opened.messageId,
-          body: "Reply before access changed",
-        }),
-      ).rejects.toThrow(
-        "could not be resolved: This shared channel is read-only.",
-      );
+      const reply = await invoke("reply", {
+        cwd: workspaceRoot,
+        actor: "human",
+        thread: opened.threadId,
+        attachments: [],
+        needsDecision: false,
+        resolve: opened.messageId,
+        body: "Reply before access changed",
+      });
+      expect(reply.warning).toContain("could not be resolved: This shared channel is read-only.");
+      expect(reply.resolvedMessageId).toBeUndefined();
+      const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
+      expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
     } finally {
       store.sendMessage = originalSend;
     }

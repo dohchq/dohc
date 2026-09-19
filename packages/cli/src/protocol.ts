@@ -539,6 +539,16 @@ const rawChatMessageSchema = z
     authorDisplayName: z.string().min(1),
     body: z.string(),
     createdAtMs: z.number().int().nonnegative(),
+    parentMessageId: rawMessageIdSchema.optional(),
+    attachments: z.array(z.object({
+      objectId: z.string().min(1).optional(),
+      pathHint: z.string().min(1).optional(),
+    }).strict()),
+    needsDecision: z.boolean(),
+    decisionState: z.enum(["open", "resolved"]).optional(),
+    options: z.array(z.string()).optional(),
+    chosenOption: z.string().optional(),
+    resolvedByMessageId: rawMessageIdSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z

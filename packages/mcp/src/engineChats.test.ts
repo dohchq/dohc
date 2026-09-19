@@ -47,6 +47,13 @@ const message = {
   authorDisplayName: "Ice's agent",
   body: "On it.",
   createdAtMs: 20,
+  attachments: [{ objectId: "object_1", pathHint: "notes/agenda.md" }],
+  needsDecision: true,
+  decisionState: "resolved" as const,
+  options: ["Ship", "Hold"],
+  chosenOption: "Ship",
+  resolvedByMessageId: "message-2",
+  parentMessageId: "message-0",
 };
 
 const PROVENANCE_WARNING =
@@ -264,6 +271,25 @@ describe("desktop CLI proxy", () => {
     });
   });
 
+  it("omits CLI display aliases from the posted channel descriptor", async () => {
+    await withWorkspace(async (base) => {
+      const ctx: ToolContext = {
+        ...base,
+        request: async () => ({
+          ...results.post,
+          channel: { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
+        }),
+      };
+      const result = await startChannelChat(ctx, { channel: "my-agent", body: "On it." });
+      expect(result).toMatchObject({
+        ok: true,
+        channel: { id: "channel-agent", slug: "my-agent", kind: "agent" },
+      });
+      if (!result.ok) throw new Error(result.reason);
+      expect(result.channel).not.toHaveProperty("name");
+    });
+  });
+
   it("returns engine ids from chat writes so dohc_read_chat and dohc_list_channels accept them", async () => {
     await withWorkspace(async (base) => {
       const { ctx } = recordingContext(base);
@@ -272,7 +298,7 @@ describe("desktop CLI proxy", () => {
         startChannelChat(ctx, { channel: "general", body: "On it." }),
       ).resolves.toEqual({
         ok: true,
-        channel: { id: "channel-1", name: "General", slug: "general", kind: "channel" },
+        channel: { id: "channel-1", slug: "general", kind: "channel" },
         threadId: "thread-2",
         messageId: "message-2",
         title: "Agenda review",
