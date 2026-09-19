@@ -3022,6 +3022,59 @@ describe("CLI socket server", () => {
     expect(await foreignStore.listMessages({ workspaceId: "foreign-workspace", threadId: opened.thread.id })).toHaveLength(1);
   });
 
+  it("resolves unique engine-id prefixes and reports ambiguous prefixes without posting", async () => {
+    await seedDispatchThread("thread-prefix-first");
+    const replied = await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: "thread-prefix",
+      attachments: [], needsDecision: false, body: "Unique prefix reply",
+    });
+    const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-first" });
+    expect(replied.threadId).toBe("th_prefix-first");
+    expect(replied.messageId).toBe(cliMessageId(messages[0]!.id));
+
+    await seedDispatchThread("thread-prefix-second");
+    await expect(invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: "thread-prefix",
+      attachments: [], needsDecision: false, body: "Must not guess",
+    })).rejects.toThrow("ambiguous thread prefix 'thread-prefix': th_prefix-first, th_prefix-second");
+    expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-first" })).toHaveLength(1);
+    expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-second" })).toHaveLength(0);
+  });
+
+  it("reads exact persisted ids without requiring an engine-id spelling", async () => {
+    await seedDispatchThread("custom-persisted-thread");
+    const spies = [vi.spyOn(store!, "listChannels"), vi.spyOn(store!, "listThreads")];
+    try {
+      const replied = await invoke("reply", {
+        cwd: workspaceRoot, actor: "agent", thread: "custom-persisted-thread",
+        attachments: [], needsDecision: false, body: "Exact arbitrary id",
+      });
+      expect(replied.threadId).toBe("custom-persisted-thread");
+      expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "custom-persisted-thread" })).toHaveLength(1);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("does not enumerate or post after an unrelated targeted-read failure", async () => {
+    const read = vi.spyOn(store!, "listMessages").mockRejectedValue(new Error("workspace access revoked"));
+    const listed = vi.spyOn(store!, "listThreads");
+    const channels = vi.spyOn(store!, "listChannels");
+    const send = vi.spyOn(store!, "sendMessage");
+    try {
+      await expect(invoke("reply", {
+        cwd: workspaceRoot, actor: "agent", thread: "thread-target",
+        attachments: [], needsDecision: false, body: "Must not post",
+      })).rejects.toThrow("workspace access revoked");
+      expect(listed).not.toHaveBeenCalled();
+      expect(channels).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of [read, listed, channels, send]) spy.mockRestore();
+    }
+  });
+
   it("reports an honest partial success when another resolver wins", async () => {
     const opened = await post({
       actor: "human",

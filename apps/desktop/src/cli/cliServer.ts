@@ -632,6 +632,24 @@ async function loadThreads(
   return [...byId.values()];
 }
 
+async function readReplyThread(
+  context: CliWorkspaceContext,
+  input: string,
+  options: CliServerOptions,
+): Promise<{ threadId: string; messages: ChatMessage[] }> {
+  try {
+    const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId: input });
+    return { threadId: input, messages };
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "thread-not-found") throw error;
+  }
+  const loaded = await loadChannels(context);
+  if (loaded.provisioned) await notifyWrite(options, context);
+  const threadId = resolveThread(input, await loadThreads(context, loaded.channels)).thread.id;
+  const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId });
+  return { threadId, messages };
+}
+
 async function loadMessagesByThread(
   context: CliWorkspaceContext,
   threads: readonly LoadedThread[],
@@ -1919,10 +1937,7 @@ async function dispatch(
     }
   }
 
-  const exactReplyThreadId = request.verb === "reply" && /^thread-/u.test(request.args.thread)
-    ? request.args.thread
-    : undefined;
-  const loadedChannels = exactReplyThreadId
+  const loadedChannels = request.verb === "reply"
     ? { channels: [], provisioned: false }
     : await loadChannels(context);
   const channels = loadedChannels.channels;
@@ -2145,12 +2160,7 @@ async function dispatch(
     }
 
     case "reply": {
-      const threadId = exactReplyThreadId ??
-        resolveThread(request.args.thread, await loadThreads(context, channels)).thread.id;
-      const messages = await context.store.listMessages({
-        workspaceId: context.workspaceId,
-        threadId,
-      });
+      const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : undefined;
