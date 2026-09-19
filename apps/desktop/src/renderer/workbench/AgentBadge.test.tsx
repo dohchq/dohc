@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBadge, AgentSettingsContext } from "./AgentBadge";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
@@ -12,10 +12,22 @@ describe("agent badge", () => {
     </AgentSettingsContext.Provider>);
     const badge = screen.getByTestId("chats-post-agent-badge");
     expect(badge.tabIndex).toBe(0);
+    badge.focus();
     fireEvent.focus(badge);
     expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
-    expect(screen.getByRole("tooltip").textContent?.includes("local-tool --private-path")).toBe(viewer === "owner");
+    expect(screen.getByRole("tooltip").textContent?.includes("Current local command: local-tool --private-path")).toBe(viewer === "owner");
+    fireEvent.mouseLeave(badge.parentElement!);
+    expect(screen.getByRole("tooltip")).not.toBeNull();
     fireEvent.keyDown(badge, { key: "Escape" });
     expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+  it("opens its details without opening the containing post", () => {
+    const onOpen = vi.fn();
+    render(<div onClick={onOpen}>
+      <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} />
+    </div>);
+    fireEvent.click(screen.getByTestId("chats-post-agent-badge"));
+    expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });

@@ -28,7 +28,13 @@ export function AgentBadge(props: {
     <span
       className="relative inline-flex text-agent"
       onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseLeave={(event) => {
+        if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+        setOpen(true);
+      }}
     >
       <span
         data-testid={`${props.testIdPrefix}-agent-badge`}
@@ -59,7 +65,7 @@ export function AgentBadge(props: {
           <span className="text-muted">
             {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
-          {command ? <span className="break-all font-mono text-[11px] text-muted">{command}</span> : null}
+          {command ? <span className="break-all font-mono text-[11px] text-muted">Current local command: {command}</span> : null}
         </span>
       ) : null}
     </span>
