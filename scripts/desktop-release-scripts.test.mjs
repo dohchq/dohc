@@ -236,27 +236,29 @@ sha512: x64
   );
 });
 
-test("mock update server serves files and blocks traversal/symlink escapes", async () => {
+test("mock update server serves files and blocks traversal/directory-link escapes", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-update-server-"));
   const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
   await writeFile(join(root, "latest.yml"), "version: 0.1.0\n");
   await writeFile(join(outside, "secret.txt"), "nope");
-  await symlink(join(outside, "secret.txt"), join(root, "secret-link.txt"));
+  await symlink(outside, join(root, "outside-link"), process.platform === "win32" ? "junction" : "dir");
 
   assert.ok(await resolveServablePath(root, "/latest.yml"));
   assert.equal(await resolveServablePath(root, "/../secret.txt"), null);
   assert.equal(await resolveServablePath(root, "/latest%00.yml"), null);
-  assert.equal(await resolveServablePath(root, "/secret-link.txt"), null);
+  assert.equal(await resolveServablePath(root, "/outside-link/secret.txt"), null);
 
   const server = await createMockUpdateServer({ root });
   try {
     const ok = await fetch(`${server.url}/latest.yml`);
     const escaped = await fetch(`${server.url}/../secret.txt`);
+    const linked = await fetch(`${server.url}/outside-link/secret.txt`);
     const nul = await fetch(`${server.url}/latest%00.yml`);
     assert.equal(ok.status, 200);
     assert.match(ok.headers.get("content-type") ?? "", /^text\/yaml/);
     assert.equal(await ok.text(), "version: 0.1.0\n");
     assert.equal(escaped.status, 404);
+    assert.equal(linked.status, 404);
     assert.equal(nul.status, 404);
   } finally {
     await server.close();
@@ -591,7 +593,8 @@ test("release verification rejects artifact paths outside the release directory"
   const outside = await mkdtemp(join(tmpdir(), "dohc-artifact-outside-"));
   await writeFile(join(outside, name), "outside");
   await rm(join(options.directory, name));
-  await symlink(join(outside, name), join(options.directory, name));
+  // Containment must fail before the file-type check; Windows junctions need no symlink privilege.
+  await symlink(outside, join(options.directory, name), process.platform === "win32" ? "junction" : "dir");
   await writeFile(manifestPath, serializeUpdateManifest(manifest));
   await assert.rejects(verifyDesktopReleaseArtifacts(options), /escapes its directory/);
 });

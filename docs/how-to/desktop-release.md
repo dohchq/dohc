@@ -41,8 +41,11 @@ first stable release.
 
 ## Verify a downloaded artifact
 
-After downloading a release, check the installer checksum against the matching
-update manifest. Keep the installer and manifest in one directory, then run:
+Download the matching update manifest and every file it lists.
+Keep them in one directory with the installer for your target architecture.
+On macOS, include the `.dmg` installer and `.zip` update packages.
+A published macOS manifest can list packages for both architectures.
+Then run:
 
 ```powershell
 node scripts/verify-desktop-release-artifacts.mjs `
