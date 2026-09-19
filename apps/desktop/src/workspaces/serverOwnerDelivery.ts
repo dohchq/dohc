@@ -37,6 +37,7 @@ export function startServerOwnerDelivery(options: {
   const lifetime = new AbortController(), nextDocument = new Map<string, number>();
   let nextWorkspace = 0, timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
   let retryWorkspace: string | undefined;
+  let lastDocumentCount = 0;
   function schedule(delay: number) {
     if (!lifetime.signal.aborted) {timer = setTimeout(run, delay); timer.unref();}
   }
@@ -56,10 +57,16 @@ export function startServerOwnerDelivery(options: {
       const result = await options.runPass(workspaceId, index, AbortSignal.any([lifetime.signal, AbortSignal.timeout(options.attemptTimeoutMs)]));
       if (lifetime.signal.aborted) return;
       nextDocument.set(workspaceId, result.documentCount ? (index + 1) % result.documentCount : 0);
+      lastDocumentCount = result.documentCount;
       acknowledged = result.acknowledged || index + 1 < result.documentCount;
     }).catch(error => {
       if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Keep retrying after a logging failure. */ }}
-    }).finally(() => {active = undefined; schedule(acknowledged || retryWorkspace ? 0 : options.retryDelayMs);});
+    }).finally(() => {
+      active = undefined;
+      const delay = retryWorkspace ? 0 : acknowledged ? Math.min(options.retryDelayMs, 200) : lastDocumentCount === 0 ? Math.min(options.retryDelayMs * 5, 60_000) : options.retryDelayMs;
+      schedule(delay);
+      lastDocumentCount = 0;
+    });
   }
   schedule(0);
   return {

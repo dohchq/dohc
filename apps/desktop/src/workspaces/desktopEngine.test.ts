@@ -728,6 +728,16 @@ describe("private owner peer lifecycle", () => {
 });
 
 describe("server owner peer lifecycle", () => {
+  it("keeps local work available when optional owner ingress preparation fails", async () => {
+    const f = fixture();
+    f.dependencies.serverOwnerDelivery = {prepare: async () => {throw new Error("readonly profile");}, workspaceIds: () => ["owner"], connect: async () => null};
+    try {
+      expect(await f.engine.start()).toBe(true);
+      expect(f.options().privateOwnerHost).toBeUndefined();
+      expect(f.dependencies.app.quit).not.toHaveBeenCalled();
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+    } finally {await f.close();}
+  });
   it("reports preparing and retrying once, and an explicit retry clears the failed document after recovery", async () => {
     const f = fixture(), credentials = new AbortController();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

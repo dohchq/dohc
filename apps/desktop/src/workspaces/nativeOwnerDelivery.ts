@@ -95,7 +95,12 @@ export async function runNativeOwnerDeliveryPass(options: {
     if (result === "empty" && !synchronized) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();
-      if (authority.kind !== "authority") return authority.kind === "quarantine" ? "frozen" : "retry";
+      if (authority.kind === "quarantine") {
+        await outbox.quarantine({outboxId: preparation.draft.outboxId, reason: authority.reason,
+          ...(authority.observedBinding === undefined ? {} : {observedBinding: authority.observedBinding})});
+        return "frozen";
+      }
+      if (authority.kind !== "authority") return "retry";
     }
     return result;
   } finally {drainer?.dispose(); delivery.dispose(); outbox.dispose(); await Promise.allSettled([...pending]);}

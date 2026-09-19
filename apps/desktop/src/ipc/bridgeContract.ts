@@ -1203,6 +1203,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   syncFailing: z.boolean().optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.
@@ -6423,6 +6424,7 @@ export interface DohcDesktopBridge {
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
+  retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;

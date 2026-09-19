@@ -39,6 +39,7 @@ export interface ServerOwnerDelivery {
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed";
 
 type EngineAuthorityState = {
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
@@ -98,10 +99,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerDeliveryGeneration = 0;
   let serverOwnerConfig: Awaited<ReturnType<ServerOwnerDelivery["prepare"]>> | undefined;
   const ownerDeliveryStatus = new Map<string, OwnerLiveDeliveryStatus>();
+  let serverOwnerUnavailable = false;
+  let activeOwnerWorkspace: string | undefined;
   const failedOwnerDocuments = new Map<string, Set<string>>();
-  const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined) => {
-    if (ownerDeliveryStatus.get(workspaceId) === status) return;
+  const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
+  const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
+    if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
+    if (reason) ownerDeliveryReason.set(workspaceId, reason); else ownerDeliveryReason.delete(workspaceId);
     dependencies.notifyOwnerDeliveryChanged?.(workspaceId);
   };
   function stopOwnerDelivery(): Promise<void> {
@@ -123,9 +128,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const profile = serverOwnerConfig;
         ownerDelivery = startServerOwnerDelivery({workspaceIds: () => server.workspaceIds(), ...profile,
           onError: error => console.error("[desktop] server owner delivery failed:", error),
-            runPass: async (workspaceId, index, lifetime) => {
+          runPass: async (workspaceId, index, lifetime) => {
             if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
-            return workspaceAuthorities.withOperation(workspaceId, async operation => {
+            activeOwnerWorkspace = workspaceId;
+            try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
               const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
               if (!session) {setOwnerDeliveryStatus(workspaceId, undefined); return {documentCount: 0, acknowledged: false};}
               const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
@@ -138,14 +144,16 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
-              const rows = (response as {documents: {status: string}[]}).documents;
+              const rows = (response as {documents: {status: string; reason?: unknown}[]}).documents;
               const preparing = rows.some(row => row.status === "preparing");
               const unavailable = rows.some(row => row.status === "unavailable");
+              const reason = rows.some(row => row.status === "unavailable" && row.reason === "workspace-changed") ? "workspace-changed" :
+                rows.some(row => row.status === "unavailable" && row.reason === "document-unavailable") ? "document-unavailable" : undefined;
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
               if (!documents.length) {
-                setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined);
+                setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
               }
               const document = documents[index % documents.length]!;
@@ -167,13 +175,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
               else failures.delete(document.binding.currentPath);
-              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active");
+              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active", reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) setOwnerDeliveryStatus(workspaceId, "retrying");
                 throw error;
               }
-            });
+            });} finally {activeOwnerWorkspace = undefined;}
           },
         });
         return;
@@ -206,6 +214,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     }).catch(error => console.error("[desktop] owner delivery startup failed:", error));
   }
   const ownerUsesWorkspace = (workspaceId: string) => ownerHostConfig?.workspaceIds.includes(workspaceId) === true ||
+    activeOwnerWorkspace === workspaceId ||
     (serverOwnerConfig !== undefined && dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) === true) ||
     ownerDeliveryConfig?.documents.some(document => document.binding.workspaceId === workspaceId) === true;
   const stopOwnerHost = () => {
@@ -349,7 +358,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       }
       if (!ownerHostConfig && !ownerDeliveryConfig && dependencies.serverOwnerDelivery) {
         if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery authority is unavailable.");
-        serverOwnerConfig = await dependencies.serverOwnerDelivery.prepare();
+        try {
+          serverOwnerConfig = await dependencies.serverOwnerDelivery.prepare();
+          serverOwnerUnavailable = false;
+        } catch (error) {
+          serverOwnerConfig = undefined; serverOwnerUnavailable = true;
+          console.error("[desktop] owner live setup unavailable:", error);
+        }
       }
       const hostIngress = ownerHostConfig && {configPath: ownerHostConfig.nativeConfigPath,
         client: {aggregateBytes: ownerHostConfig.transport.aggregateBytes, maxUploads: ownerHostConfig.transport.maxUploads}};
@@ -514,7 +529,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
     },
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
-      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? ownerDeliveryStatus.get(workspaceId) : undefined;
+      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
+    },
+    ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
+      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? ownerDeliveryReason.get(workspaceId) : undefined;
     },
     get daemon() { return rustEngineDaemon; },
     get sessions() { return rustEngineWorkspaceSessions; },

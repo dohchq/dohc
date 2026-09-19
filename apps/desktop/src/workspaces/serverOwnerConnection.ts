@@ -13,6 +13,7 @@ export function createServerOwnerConnection(options: {
   credentials(): {value: CloudCredentials; signal: AbortSignal} | null;
   fetch(input: string, init: RequestInit): Promise<Response>;
 }): ServerOwnerDelivery {
+  const discovery = new Map<string, {credentials: CloudCredentials; until: number; value: unknown}>();
   const eligible = (workspace: RegistryEntry, credentials: CloudCredentials) => !!workspace.remote &&
     !workspace.shareView && !workspace.joinBootstrapPending && workspaceRemoteMatchesCredentials(workspace.remote, credentials);
   return {
@@ -20,13 +21,15 @@ export function createServerOwnerConnection(options: {
       const dir = options.stateDir(), nativeConfigPath = join(dir, "owner-live-ingress.json");
       await mkdir(dir, {recursive: true});
       await writeFile(nativeConfigPath, JSON.stringify(selfHostedLiveProfile.nativeIngress), {mode: 0o600});
-      const {nativeIngress: _ingress, ...profile} = selfHostedLiveProfile;
+      const {nativeIngress: _ingress, ...profile} = structuredClone(selfHostedLiveProfile);
       return {...profile, nativeConfigPath};
     },
     workspaceIds() {
       const session = options.credentials();
-      if (!session || session.signal.aborted || !session.value.relayUrl) return [];
-      return options.workspaces().filter(workspace => eligible(workspace, session.value)).map(workspace => workspace.workspaceId);
+      if (!session || session.signal.aborted || !session.value.relayUrl) {discovery.clear(); return [];}
+      const ids = options.workspaces().filter(workspace => eligible(workspace, session.value)).map(workspace => workspace.workspaceId);
+      for (const [id, cached] of discovery) if (!ids.includes(id) || cached.credentials !== session.value) discovery.delete(id);
+      return ids;
     },
     async connect(workspace, lifetime) {
       const session = options.credentials();
@@ -46,6 +49,9 @@ export function createServerOwnerConnection(options: {
         async documents(attempt) {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]);
+          requestSignal.throwIfAborted();
+          const cached = discovery.get(workspace.workspaceId);
+          if (cached?.credentials === session.value && cached.until > Date.now()) return cached.value;
           const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`, {
             headers: {authorization: `Bearer ${session.value.token}`}, signal: requestSignal, redirect: "error",
           });
@@ -63,7 +69,9 @@ export function createServerOwnerConnection(options: {
               chunks.push(next.value);
             }
           } finally {await reader.cancel().catch(() => undefined); reader.releaseLock();}
-          return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")) as unknown;
+          const value: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
+          discovery.set(workspace.workspaceId, {credentials: session.value, until: Date.now() + 2_000, value});
+          return value;
         },
       };
     },

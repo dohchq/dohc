@@ -25,6 +25,8 @@ it("discovers only owned synced workspaces and sends credentials only to their p
   expect(f.connection.workspaceIds()).toEqual(["workspace"]);
   const session = await f.connection.connect(f.workspace, new AbortController().signal);
   expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
+  expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
+  expect(f.fetch).toHaveBeenCalledTimes(1);
   expect(f.fetch).toHaveBeenCalledWith("https://relay.test/sync/workspace/live-host", expect.objectContaining({headers: {authorization: "Bearer secret"}, redirect: "error"}));
   f.setCredentials(null);
   expect(f.connection.workspaceIds()).toEqual([]);

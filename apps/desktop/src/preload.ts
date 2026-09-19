@@ -571,6 +571,7 @@ const bridge: DohcDesktopBridge = {
   presencePoll: (payload) => ipcRenderer.invoke(CHANNELS.presencePoll, payload),
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
+  retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
   rebuildEngineStore: (payload) =>
     ipcRenderer.invoke(CHANNELS.rebuildEngineStore, payload),
   startAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.startAgentRun, payload),

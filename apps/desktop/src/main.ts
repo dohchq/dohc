@@ -1815,6 +1815,7 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease, workspace) => ({
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
+      ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
     })),
   listOpenWorkspaceIds: () =>
     workspaceAuthorities.workspaceIds().filter((workspaceId) =>
@@ -3978,6 +3979,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
+    retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
