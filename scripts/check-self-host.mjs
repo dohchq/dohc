@@ -1,124 +1,63 @@
-import { existsSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { parseArgs } from 'node:util';
+import { composeArgs, readSettings, validateSettings } from '../tools/self-host/config.mjs';
 
-const COMPOSE_FILE = 'docker-compose.self-host.yml'
-const ENV_FILE = '.env.self-host.example'
-const REQUIRED_SERVICES = [
-  'workspace-api',
-  'sync-relay',
-  'postgres',
-]
-// A one-shot init container (runs to completion, then exits) — verified for
-// presence but never expected to stay running, so it is not in
-// REQUIRED_SERVICES (which drives the "still running" assertions).
-const MIGRATION_SERVICE = 'postgres-migrate'
-
-const startRequested =
-  process.argv.includes('--start') || process.env.DOHC_SELF_HOST_START === '1'
-
-const results = []
-
-function record(name, ok, detail) {
-  results.push({ name, ok, detail })
-  const marker = ok ? 'ok' : 'missing'
-  console.log(`[${marker}] ${name}${detail ? ` - ${detail}` : ''}`)
-}
-
-function run(command, args) {
-  return spawnSync(command, args, {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-}
-
-function requireCommand(command, args, label) {
-  const result = run(command, args)
-  if (result.status === 0) {
-    record(label, true, (result.stdout || result.stderr).trim().split(/\r?\n/)[0])
-    return true
-  }
-  record(label, false, `${command} ${args.join(' ')} failed or is unavailable`)
-  return false
-}
-
-function composeArgs(...args) {
-  return ['compose', '--env-file', ENV_FILE, '-f', COMPOSE_FILE, ...args]
-}
-
-function checkComposeConfig() {
-  if (!existsSync(COMPOSE_FILE)) {
-    record('self-host compose file', false, COMPOSE_FILE)
-    return false
-  }
-  if (!existsSync(ENV_FILE)) {
-    record('self-host env example', false, ENV_FILE)
-    return false
-  }
-  const config = run('docker', composeArgs('config', '--services'))
-  if (config.status !== 0) {
-    record(
-      'docker compose config',
-      false,
-      (config.stderr || config.stdout).trim() || 'compose config failed',
-    )
-    return false
-  }
-  const services = new Set(config.stdout.trim().split(/\r?\n/).filter(Boolean))
-  for (const service of REQUIRED_SERVICES) {
-    record(`compose service:${service}`, services.has(service), service)
-  }
-  record(
-    `compose service:${MIGRATION_SERVICE}`,
-    services.has(MIGRATION_SERVICE),
-    'one-shot Postgres migration init container',
-  )
-  return (
-    REQUIRED_SERVICES.every((service) => services.has(service)) &&
-    services.has(MIGRATION_SERVICE)
-  )
-}
-
-function startComposeStack() {
-  const initialized = run('docker', composeArgs('run', '--rm', '-T', '--no-deps', '--entrypoint', 'node', 'sync-relay',
-    '-e', "require('node:fs').accessSync(process.env.DOHC_RELAY_DEPLOYMENT_CONFIG)"))
-  if (initialized.status !== 0) {
-    record('relay deployment probe', false, (initialized.stderr || initialized.stdout).trim() || 'The deployment probe failed. Check Docker and the configured relay path; see services/share-web/README.md.')
-    return
-  }
-  const up = spawnSync('docker', composeArgs('up', '-d', ...REQUIRED_SERVICES), {
-    stdio: 'inherit',
-  })
-  if (up.status !== 0) {
-    record('compose up', false, 'docker compose up failed')
-    return
-  }
-  const ps = run('docker', composeArgs('ps', '--services', '--filter', 'status=running'))
-  if (ps.status !== 0) {
-    record('compose ps', false, (ps.stderr || ps.stdout).trim())
-    return
-  }
-  const running = new Set(ps.stdout.trim().split(/\r?\n/).filter(Boolean))
-  for (const service of REQUIRED_SERVICES) {
-    record(`running service:${service}`, running.has(service), service)
+const { values } = parseArgs({ options: { start: { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
+const envFile = values['env-file'];
+const checks = [];
+const record = (name, ok, detail = '') => { checks.push(ok); console.log(`[${ok ? 'ok' : 'missing'}] ${name}${detail ? ` - ${detail}` : ''}`); };
+if (!existsSync(envFile)) record('self-host env file', false, `${envFile} is missing. Run: node tools/self-host/bootstrap.mjs init --origin https://HOST`);
+else {
+  let settings;
+  try { settings = readSettings(envFile); } catch (error) { record('self-host env file', false, error.message); settings = null; }
+  if (settings) {
+    const errors = validateSettings(settings);
+    record('self-host env values', errors.length === 0, errors.join(' '));
+    const compose = spawnSync('docker', composeArgs(envFile, settings, 'config', '--services'), { encoding: 'utf8' });
+    const services = new Set((compose.stdout ?? '').trim().split(/\r?\n/).filter(Boolean));
+    for (const service of ['postgres', 'postgres-migrate', 'relay-initialize', 'workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`compose service:${service}`, compose.status === 0 && services.has(service));
+    if ((values.start || values.running) && compose.status === 0 && errors.length === 0) {
+      let upOk = true;
+      if (values.start) {
+        const up = spawnSync('docker', composeArgs(envFile, settings, 'up', '-d', '--wait', '--wait-timeout', '180'), { stdio: 'inherit' });
+        upOk = up.status === 0;
+        record('compose startup', upOk);
+      }
+      if (upOk) {
+        const ready = spawnSync('docker', composeArgs(envFile, settings, 'ps', '--status', 'running', '--services'), { encoding: 'utf8' });
+        const running = new Set((ready.stdout ?? '').trim().split(/\r?\n/).filter(Boolean));
+        for (const service of ['workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`running service:${service}`, ready.status === 0 && running.has(service));
+      }
+    }
+    if ((values.start || values.running) && checks.every(Boolean)) {
+      let lastError = 'The public server did not respond.';
+      const deadline = Date.now() + 60_000;
+      let ok = false;
+      do {
+        try {
+          const response = await fetch(`${settings.DOHC_PUBLIC_ORIGIN}/.well-known/dohc-server`, { signal: AbortSignal.timeout(5000), redirect: 'error' });
+          if (!response.ok) throw new Error(`Connection descriptor returned HTTP ${response.status}.`);
+          const descriptor = await response.json();
+          if (descriptor.version !== 1 || ['authUrl', 'relayUrl', 'shareUrl'].some(key => descriptor[key] !== settings.DOHC_PUBLIC_ORIGIN)) throw new Error('The connection descriptor does not match the configured origin.');
+          const page = await fetch(`${settings.DOHC_PUBLIC_ORIGIN}/device`, { signal: AbortSignal.timeout(5000), redirect: 'manual' });
+          if (page.status !== 200 || !(page.headers.get('content-type') ?? '').includes('text/html')) throw new Error('The device approval page is unavailable.');
+          ok = true;
+        } catch (error) { lastError = error.message; }
+        if (!ok && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 2000));
+      } while (!ok && Date.now() < deadline);
+      record('public HTTPS connection and device approval', ok, ok ? settings.DOHC_PUBLIC_ORIGIN : lastError);
+      if (!ok && settings.DOHC_SERVER_NETWORK_ACCESS === 'private') console.log('Configure the private route with: node tools/self-host/bootstrap.mjs network');
+      const hairpinScript = `
+        const {accessSync,constants} = require('node:fs');
+        accessSync(process.env.DOHC_RELAY_ENGINE_EXECUTABLE,constants.X_OK);
+        (async()=>{const response=await fetch(process.env.DOHC_RELAY_PUBLIC_ORIGIN+'/.well-known/dohc-server',{signal:AbortSignal.timeout(15000),redirect:'error'});
+        if(!response.ok)throw Error('HTTP '+response.status);const value=await response.json();
+        if(value.version!==1||value.relayUrl!==process.env.DOHC_RELAY_PUBLIC_ORIGIN)throw Error('Unexpected descriptor');})().catch(()=>{console.error('Relay cannot verify its public HTTPS origin. Check DNS, TLS, and host routing.');process.exitCode=1;});`;
+      const hairpin = spawnSync('docker', composeArgs(envFile, settings, 'exec', '-T', 'sync-relay', 'node', '-e', hairpinScript), {stdio: 'inherit'});
+      record('native executable and relay HTTPS reachability', hairpin.status === 0);
+    }
   }
 }
-
-requireCommand('docker', ['--version'], 'Docker CLI')
-requireCommand('docker', ['compose', 'version'], 'Docker Compose')
-const composeOk = checkComposeConfig()
-
-if (startRequested && composeOk) {
-  startComposeStack()
-} else if (composeOk) {
-  console.log(
-    'Self-host preflight passed. To start the stack, run: pnpm check:self-host -- --start',
-  )
-}
-
-const passed = results.filter((result) => result.ok).length
-console.log(`Self-host check summary: ${passed}/${results.length} checks passed.`)
-
-if (results.some((result) => !result.ok)) {
-  console.error('Self-host check failed. Missing dependencies are listed above.')
-  process.exit(1)
-}
+if (checks.some(ok => !ok)) process.exitCode = 1;
+console.log(`Self-host check summary: ${checks.filter(Boolean).length}/${checks.length} checks passed.`);
