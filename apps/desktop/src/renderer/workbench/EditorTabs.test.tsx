@@ -262,9 +262,11 @@ describe("EditorTabs pointer drag", () => {
   const flushFrames = () => {
     for (const frame of frames.splice(0)) frame(0);
   };
-  // jsdom has no Web Animations: the settle returns an inert animation.
+  // jsdom has no Web Animations: the settle returns an inert animation. The
+  // prototype assignment is not a Vitest stub, so it is restored by hand.
   const inertAnimation = () =>
     ({ cancel: vi.fn(), commitStyles: vi.fn(), addEventListener: vi.fn() }) as unknown as Animation;
+  const animateDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "animate");
   beforeEach(() => {
     vi.stubGlobal("requestAnimationFrame", (frame: FrameRequestCallback) =>
       frames.push(frame),
@@ -277,6 +279,11 @@ describe("EditorTabs pointer drag", () => {
   afterEach(() => {
     frames.length = 0;
     vi.unstubAllGlobals();
+    if (animateDescriptor) {
+      Object.defineProperty(Element.prototype, "animate", animateDescriptor);
+    } else {
+      delete (Element.prototype as { animate?: unknown }).animate;
+    }
   });
 
   // jsdom has no layout: lay the tabs out as 100px slots and give the strip
