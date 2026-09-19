@@ -10,14 +10,15 @@ import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, RelayError} from "./errors";
 
-export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string}): string[] {
+export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
   const selector = parsed && effectiveShareSelector(parsed, "edit");
   if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId ||
     !storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId) || !selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector)) throw notFound();
   const files = storage.readCurrentFileState({workspaceId: input.workspaceId, versionId: "main", selectorPaths: selector.paths, limit: 5_000});
   if (files.tooMany) throw badRequest("This share has too many files for live editing.");
-  const paths = files.files.filter(file => file.contentKind === "text" && liveDocumentKindForPath(file.path) === "richdoc").map(file => file.path);
+  const paths = files.files.filter(file => file.contentKind === "text" && liveDocumentKindForPath(file.path) === "richdoc" &&
+    (!input.missingOnly || !storage.hasServiceHostEnrollment(input.workspaceId, file.path))).map(file => file.path);
   if (paths.length > 64) throw badRequest("This server supports up to 64 live documents.");
   return paths;
 }
@@ -29,7 +30,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
   for (const share of page.shares) {
     const ownerUserId = share.granterUserId;
     let paths: string[];
-    try {paths = serviceHostSharePaths(storage, {...share, ownerUserId});}
+    try {paths = serviceHostSharePaths(storage, {...share, ownerUserId, missingOnly: true});}
     catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
     for (const path of paths) {
       const key = JSON.stringify([share.workspaceId, path]);
@@ -51,7 +52,7 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
     const selector = parsed && effectiveShareSelector(parsed, "edit");
     if (!selector || !isLiveEditShareSelector(selector)) continue;
     try {
-      const paths = serviceHostSharePaths(storage, {workspaceId, ownerUserId, shareId: share.shareId});
+      const paths = serviceHostSharePaths(storage, {workspaceId, ownerUserId, shareId: share.shareId, missingOnly: true});
       storage.checkServiceHostDocuments({workspaceId, ownerUserId, shareId: share.shareId, paths});
     } catch (error) {
       if (!(error instanceof RelayError)) throw error;
@@ -121,8 +122,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       const retained = input.shareId === undefined ? storage.readServiceHostEnrollment(workspaceId, input.path as string) : undefined;
       if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
-      const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId})
-        .filter(path => input.retry !== true || !storage.readServiceHostEnrollment(workspaceId, path)) : [input.path as string];
+      const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
       host.reconcile();
       const documents = rows.map(state);
