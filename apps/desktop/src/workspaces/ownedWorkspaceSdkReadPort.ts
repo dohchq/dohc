@@ -12,6 +12,7 @@ import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import type { WorkspaceTextReadResult } from "./workspaceAssets";
 import type { DatabaseSnapshotView } from "./workspaceDatabase";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
+import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 import type {
   WorkspaceSdkReadPort,
   WorkspaceSdkSearchView,
@@ -39,7 +40,7 @@ export interface OwnedWorkspaceCollectionReadSource {
 
 export interface OwnedWorkspaceSdkReadPortInput {
   readText(path: string): Promise<WorkspaceTextReadResult>;
-  listFiles(): Promise<ListWorkspaceFilesResult>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
   collections: OwnedWorkspaceCollectionReadSource;
   hasShareState: boolean;

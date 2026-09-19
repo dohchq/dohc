@@ -30,6 +30,10 @@ import {
 } from "./workspaceDatabase";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import {
+  matchesFileListingScope,
+  type WorkspaceFileListingScope,
+} from "./workspaceFileListingScope";
+import {
   SEARCH_MAX_TOTAL_MATCHES,
   startRipgrepSearch,
   type SearchResultEntry,
@@ -103,7 +107,7 @@ export type SdkSearchStarter = typeof startRipgrepSearch;
 
 export interface WorkspaceSdkReadPort {
   readText(path: string): Promise<WorkspaceTextReadResult>;
-  listFiles(): Promise<{
+  listFiles(scope?: WorkspaceFileListingScope): Promise<{
     files: ListWorkspaceFilesResult["files"];
     folders?: readonly string[];
   }>;
@@ -227,16 +231,12 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
   const requestedRoot =
     input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
-  const listed = await context.reads.listFiles();
+  const scope = { path: requestedRoot, recursive };
+  const listed = await context.reads.listFiles(scope);
   const files = [];
   for (const entry of listed.files) {
     const path = entry.path;
-    if (!isAtOrBelow(path, requestedRoot)) continue;
-
-    if (!recursive) {
-      const remainder = requestedRoot === "." ? path : path.slice(requestedRoot.length + 1);
-      if (remainder.includes("/")) continue;
-    }
+    if (!matchesFileListingScope(path, scope)) continue;
     files.push({ ...entry, name: basename(path) });
     if (files.length >= MAX_LIST_RESULTS) break;
   }

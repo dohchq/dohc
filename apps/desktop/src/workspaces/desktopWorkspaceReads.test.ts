@@ -109,6 +109,31 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
 }
 
 describe("desktop workspace reads", () => {
+  it("narrows ordinary SDK listings while complete workspace listings stay complete", async () => {
+    const test = await fixture();
+    await test.disk("notes/a.md", "---\nicon: 🚀\n---\n");
+    await test.disk("notes/deep/b.md", "nested");
+    await test.disk("other/c.md", "unrelated");
+    const port = test.reads.ownedWorkspaceReadsFor(test.attached);
+    const listed = await port.listFiles({ path: "notes", recursive: false });
+    expect(listed.files).toEqual([
+      expect.objectContaining({ path: "notes/a.md", icon: "🚀", contentIdentity: expect.any(String) }),
+    ]);
+    expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files).toHaveLength(3);
+  });
+
+  it.each(["standalone", "mount"] as const)("keeps the complete canonical %s listing for scoped SDK reads", async (mode) => {
+    const test = await fixture(mode);
+    await test.disk("local.md", "local");
+    await test.disk(test.path("recipient-only.md"), "stale disk");
+    test.canonical.set("owner.md", { kind: "text", bytes: Buffer.from("owner") });
+    test.canonical.set("deep/other.md", { kind: "text", bytes: Buffer.from("other") });
+    const complete = await test.reads.listOwnedWorkspaceFilesFor(test.attached);
+    const port = test.reads.ownedWorkspaceReadsFor(test.attached);
+    expect(await port.listFiles({ path: test.path("owner.md"), recursive: false })).toEqual(complete);
+    expect(complete.files.map((file) => file.path)).not.toContain(test.path("recipient-only.md"));
+  });
+
   it("constructs before late owners exist and keeps local reads concurrent with startup", async () => {
     const test = await fixture();
     expect(test.lateReads).toEqual([]);
@@ -175,6 +200,7 @@ describe("desktop workspace reads", () => {
   });
 
   it.each([
+    { shareMounts: [] },
     { shareMounts: null },
     { shareMounts: [null] },
     { shareMounts: [{ ...mount, label: "../escape" }] },
@@ -187,10 +213,14 @@ describe("desktop workspace reads", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
     expect(listed.files.map((file) => file.path)).toEqual(["local.md"]);
+    expect(await test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "shared-with-me", recursive: false }))
+      .toEqual(listed);
     await expect(test.reads.readOwnedWorkspaceTextFor(attached, "shared-with-me/alice/stale.md")).rejects.toThrow();
     expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
     expect(test.lateReads).toContain("engine");
-    if (Array.isArray(shareMounts)) expect(logged).toHaveBeenCalledOnce();
+    if (Array.isArray(shareMounts) && shareMounts.length > 0) {
+      expect(logged).toHaveBeenCalledTimes(2);
+    }
   });
 
   it("rejects a share read completed after the physical attachment retires", async () => {
@@ -214,7 +244,9 @@ describe("desktop workspace reads", () => {
     await test.disk("note.md", "projection bytes");
     await expect(test.reads.readOwnedWorkspaceTextFor(attached, "note.md")).rejects.toThrow();
     await expect(test.reads.listOwnedWorkspaceFilesFor(attached)).resolves.toEqual({ files: [], folders: [] });
-    expect(test.store.listTextFileMetadata).toHaveBeenCalledOnce();
+    await expect(test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "note.md" }))
+      .resolves.toEqual({ files: [], folders: [] });
+    expect(test.store.listTextFileMetadata).toHaveBeenCalledTimes(2);
     const routes: EngineWorkspace[] = [];
     test.adapterRoute.run = async (location) => { routes.push(location); return null; };
     const port = test.reads.ownedWorkspaceReadsFor(attached);
