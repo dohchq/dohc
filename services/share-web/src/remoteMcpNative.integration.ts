@@ -62,6 +62,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
   const ownerDoc = markdownToYDoc("Hello **world**."), frameChanges = createNamedFrameChanges(16);
   const clients: Client[] = [], closes: (() => Promise<void>)[] = [], upgrades: Promise<void>[] = [];
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
+  let acknowledgement: unknown;
   try {
     const {storage} = deployment;
     expect(storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1})).toBe("created");
@@ -174,12 +175,18 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe("Hello **agent**.");
     expect(hash(readFileSync(executable))).toBe(expectedHash);
-    writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Real MCP HTTP, relay HTTP/WS, native service host, disk settlement; test owner identity", acknowledgement: ack}, null, 2));
+    acknowledgement = ack;
   } finally {
-    await Promise.all(clients.map(client => client.close()));
-    for (const close of closes.reverse()) await close();
-    await Promise.allSettled(upgrades);
-    await active?.close(); deployment.storage.close(); ownerDoc.destroy();
+    const errors: unknown[] = [];
+    for (const close of [
+      ...clients.map(client => () => client.close()), ...closes.reverse(),
+      () => Promise.all(upgrades), () => active?.close(),
+      () => deployment.storage.close(), () => ownerDoc.destroy(),
+    ]) {
+      try {await close();} catch (error) {errors.push(error);}
+    }
+    if (errors.length) throw new AggregateError(errors, "Native MCP cleanup failed.");
   }
+  writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
+    scope: "Real MCP HTTP, relay HTTP/WS, native service host, disk settlement; test owner identity", acknowledgement}, null, 2));
 }, 90000);
