@@ -69,7 +69,10 @@ export async function startSelfHostedLiveHost(options: {
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
       const rows = selection(), next = selectionSignature(rows);
-      if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) return;
+      if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) {
+        lastError = undefined;
+        return;
+      }
       const grouped = new Map<string, ServiceHostEnrollment>();
       for (const row of rows) if (!grouped.has(row.workspaceId)) grouped.set(row.workspaceId, row);
       const workspaces = [];

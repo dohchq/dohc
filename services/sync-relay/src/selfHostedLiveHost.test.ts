@@ -100,6 +100,25 @@ it("retries runtime checks without rescanning unchanged shares and rescans after
   expect(scans).toHaveBeenCalled();
 });
 
+it.each([false, true])("clears a transient reconciliation failure after returning to a healthy selection (empty: %s)", async empty => {
+  const f = await fixture(); await f.waitStarted(1);
+  if (empty) {
+    f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+    await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalledTimes(1), {timeout: 3_000});
+  }
+  const current = f.host.current();
+  const selection = vi.spyOn(f.storage, "listServiceHostEnrollments");
+  selection.mockImplementationOnce(() => {throw new Error("Temporary enrollment read failure");});
+  f.host.reconcile();
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(true), {timeout: 3_000});
+  expect(f.onError).toHaveBeenCalledTimes(1);
+  f.host.reconcile();
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 3_000});
+  expect(f.host.current()).toBe(current);
+  expect(f.starts).toHaveLength(1);
+  expect(f.starts[0]!.close).toHaveBeenCalledTimes(empty ? 1 : 0);
+});
+
 it("pauses the final document without restarting it and closes owned daemons", async () => {
   const f = await fixture(); await f.waitStarted(1); const first = f.starts[0]!;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
