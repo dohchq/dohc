@@ -1,6 +1,7 @@
 import { createContext, useContext, useId, useState } from "react";
 import { Sparkles } from "lucide-react";
 import type { DesktopUserSettings } from "../../settings/userSettings";
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 
 export const AgentSettingsContext = createContext<DesktopUserSettings | null>(null);
 
@@ -23,7 +24,7 @@ export function AgentBadge(props: {
     ? author.authorUserId === props.viewerAuthorId
     : author.authorDisplayName === settings?.profile.agentName &&
       author.authorOwnerDisplayName === (settings?.profile.preferredName ?? "You");
-  const command = ownAgent ? settings?.runner.command.trim() : undefined;
+  const command = ownAgent && settings ? configuredRunnerCommand(settings.runner) : undefined;
   return (
     <span
       className="relative inline-flex text-agent"

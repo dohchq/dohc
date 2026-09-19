@@ -1,4 +1,6 @@
 import { AgentNameControl } from "./AgentNameControl";
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { AgentToolPicker } from "./AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
@@ -12,6 +14,7 @@ import type { RunnerSelfTestResult } from "../../ipc/bridgeContract";
 import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
+import { SecondaryButton } from "../ui/controls";
 
 const RUNNER_COMMAND_PLACEHOLDER = "Enter the command that starts your agent";
 
@@ -30,6 +33,8 @@ function validTimeoutMinutes(value: string, fallback: number): number {
 function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boolean {
   return (
     left.command === right.command &&
+    left.profile?.tool === right.profile?.tool &&
+    left.profile?.executable === right.profile?.executable &&
     left.enabled === right.enabled &&
     left.timeoutMinutes === right.timeoutMinutes
   );
@@ -58,6 +63,7 @@ function runnerEngineNote(
 
 export function RunnerSettingsCard(props: {
   workspaceId: string;
+  onError?: (message: string) => void;
   runner: RunnerSettings;
   agentName?: string;
   onAgentNameChange?: (name: string) => Promise<void>;
@@ -76,14 +82,23 @@ export function RunnerSettingsCard(props: {
     onRunnerChange,
   } = props;
   const [commandDraft, setCommandDraft] = useState(runner.command);
+  const [profile, setProfile] = useState(runner.profile);
+  const [advanced, setAdvanced] = useState(!runner.profile && runner.command.length > 0);
   const [timeoutDraft, setTimeoutDraft] = useState(String(runner.timeoutMinutes));
   const [selfTest, setSelfTest] = useState<SelfTestState>({ status: "idle" });
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const editedCommandRef = useRef<string | null>(null);
   const requestVersionRef = useRequestSequence();
 
   useEffect(() => {
+    const editedCommand = editedCommandRef.current;
+    if (editedCommand !== null) {
+      if (runner.command !== editedCommand || runner.profile) return;
+      editedCommandRef.current = null;
+    }
     setCommandDraft(runner.command);
-  }, [runner.command]);
+    setProfile(runner.profile);
+  }, [runner.command, runner.profile?.tool, runner.profile?.executable]);
 
   useEffect(() => {
     setTimeoutDraft(String(runner.timeoutMinutes));
@@ -117,6 +132,7 @@ export function RunnerSettingsCard(props: {
       const command = commandDraft.trim();
       const next: RunnerSettings = {
         command,
+        profile,
         enabled,
         timeoutMinutes,
       };
@@ -126,7 +142,7 @@ export function RunnerSettingsCard(props: {
         ? saveQueueRef.current
         : queueSave(next);
     },
-    [commandDraft, queueSave, runner, timeoutDraft],
+    [commandDraft, profile, queueSave, runner, timeoutDraft],
   );
 
   const handleInputKeyDown = useCallback(
@@ -141,16 +157,19 @@ export function RunnerSettingsCard(props: {
     setSelfTest({ status: "running" });
     try {
       await commitDrafts();
+      if (!requestVersionRef.isCurrent(version)) return;
       const result: RunnerSelfTestResult = await bridge().runnerSelfTest({
         workspaceId,
       });
       if (!requestVersionRef.isCurrent(version)) return;
+      if (!result.ok) props.onError?.(result.detail);
       setSelfTest({
         status: result.ok ? "success" : "error",
         detail: result.detail,
       });
     } catch (cause) {
       if (!requestVersionRef.isCurrent(version)) return;
+      props.onError?.(cause instanceof Error ? cause.message : "Runner self-test could not start.");
       setSelfTest({
         status: "error",
         detail:
@@ -161,7 +180,7 @@ export function RunnerSettingsCard(props: {
     }
   }, [commitDrafts, workspaceId]);
 
-  const configured = commandDraft.trim().length > 0 && Boolean(props.agentName?.trim());
+  const configured = configuredRunnerCommand({ command: commandDraft, profile }).length > 0 && Boolean(props.agentName?.trim());
   const selfTestRunning = selfTest.status === "running";
   const engineNote = runnerEngineNote(Boolean(sharedView), sessionRecorderOn);
 
@@ -200,6 +219,24 @@ export function RunnerSettingsCard(props: {
 
       {props.onAgentNameChange ? <div className="px-4 pt-3"><AgentNameControl value={props.agentName} onChange={props.onAgentNameChange} /></div> : null}
       <div className="px-4 py-3">
+        <AgentToolPicker workspaceId={workspaceId} profile={profile} disabled={selfTestRunning} checkLabel="Test runner"
+          onError={(message) => props.onError?.(message)} onChange={(value) => {
+            const timeoutMinutes = validTimeoutMinutes(timeoutDraft, runner.timeoutMinutes);
+            editedCommandRef.current = null;
+            setProfile(value);
+            setTimeoutDraft(String(timeoutMinutes));
+            setSelfTest({ status: "idle" });
+            void queueSave({ ...runner, command: commandDraft.trim(), profile: value, timeoutMinutes }).catch((cause: unknown) => props.onError?.(cause instanceof Error ? cause.message : "Could not save the agent."));
+          }} />
+        <details className="mt-3" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
+        <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
+        {profile && commandDraft.trim() ? <SecondaryButton size="compact" disabled={selfTestRunning} onClick={() => {
+          const timeoutMinutes = validTimeoutMinutes(timeoutDraft, runner.timeoutMinutes);
+          setProfile(undefined);
+          setTimeoutDraft(String(timeoutMinutes));
+          setSelfTest({ status: "idle" });
+          void queueSave({ ...runner, command: commandDraft.trim(), profile: undefined, timeoutMinutes }).catch((cause: unknown) => props.onError?.(cause instanceof Error ? cause.message : "Could not save the agent."));
+        }}>Use saved command</SecondaryButton> : null}
         <label
           htmlFor="runner-command"
           className="text-[11px] font-medium text-ink"
@@ -209,21 +246,21 @@ export function RunnerSettingsCard(props: {
         <input
           id="runner-command"
           data-testid="runner-command-input"
-          value={commandDraft}
+          value={profile ? configuredRunnerCommand({ command: commandDraft, profile }) : commandDraft}
           maxLength={4096}
           spellCheck={false}
           autoCapitalize="none"
           autoComplete="off"
           placeholder={RUNNER_COMMAND_PLACEHOLDER}
-          onChange={(event) => setCommandDraft(event.currentTarget.value)}
+          onChange={(event) => { editedCommandRef.current = event.currentTarget.value.trim(); setCommandDraft(event.currentTarget.value); setProfile(undefined); setSelfTest({ status: "idle" }); }}
           onBlur={() => void commitDrafts()}
           onKeyDown={handleInputKeyDown}
           className="mt-1 w-full rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink"
         />
         <p className="m-0 mt-1.5 text-[10px] leading-relaxed text-subtle">
-          The prompt is appended to this command when a run starts. Double quotes
-          are supported for grouped arguments.
+          Editing this command turns off the tool profile. The conversation arrives through stdin.
         </p>
+        </details>
       </div>
 
       <div className="grid grid-cols-2 border-y border-line max-[720px]:grid-cols-1">
@@ -332,7 +369,7 @@ export function RunnerSettingsCard(props: {
             selfTest.status === "success" ? "text-success" : "text-danger"
           }`}
         >
-          {selfTest.detail}
+          {selfTest.status === "success" ? selfTest.detail : "Test failed."}
         </p>
       ) : null}
     </section>

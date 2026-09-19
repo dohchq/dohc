@@ -2,6 +2,7 @@ import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
+import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -23,7 +24,7 @@ export interface RunnerProcess {
 export interface RunnerSpawnOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
-  detached: true;
+  detached: boolean;
   stdio: ["pipe", number, number];
   windowsHide: true;
   windowsVerbatimArguments?: boolean;
@@ -193,9 +194,12 @@ export function createChatRunnerProcess(
     runId: string;
     logPath: string;
     command: string;
+    profile?: AgentLaunchProfile;
     prompt: string;
   }): RunnerProcess {
-    const commandParts = tokenizeRunnerCommand(input.command);
+    const commandParts = input.profile
+      ? [input.profile.executable, ...agentProfileArguments(input.profile)]
+      : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered
     // thread, so it is unbounded in both length and content, and a command
@@ -224,7 +228,9 @@ export function createChatRunnerProcess(
       const child = spawnRunner(resolved.command, resolved.args, {
         cwd: input.rootPath,
         env,
-        detached: true,
+        // Detached cmd.exe shims can leave their child waiting for stdin on Windows.
+        // Windows cleanup uses taskkill; only POSIX needs a separate process group.
+        detached: platform !== "win32",
         stdio: ["pipe", logFd, logFd],
         windowsHide: true,
         ...(resolved.windowsVerbatimArguments

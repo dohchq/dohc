@@ -83,6 +83,7 @@ function StatusPill(props: { state: SaveState }) {
 }
 
 export function SettingsDialog(props: {
+  onError?: (message: string) => void;
   workspaceId: string;
   workspacePath: string;
   /**
@@ -546,6 +547,7 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-agents">
             <AgentsMcpSettings
+              onError={props.onError}
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
               preferredName={userSettings.profile.preferredName}

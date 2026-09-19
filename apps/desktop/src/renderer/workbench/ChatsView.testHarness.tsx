@@ -131,6 +131,7 @@ export function dm(overrides: Partial<DmRecord> = {}): DmRecord {
 }
 
 export const bridgeMock = {
+  detectAgentTools: vi.fn(),
   listChatChannels: vi.fn(),
   listChatChannelShares: vi.fn(),
   listJoinedSharedChannels: vi.fn(),
@@ -266,6 +267,7 @@ beforeEach(() => {
       };
     },
   );
+  bridgeMock.detectAgentTools.mockResolvedValue({ workingDirectory: "/workspace", tools: [] });
   bridgeMock.listChatChannels.mockResolvedValue({
     channels: [channel()],
     fileThreads: [],

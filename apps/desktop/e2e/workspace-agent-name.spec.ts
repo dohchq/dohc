@@ -16,6 +16,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await page.getByTestId("chats-add-agent-name").fill("Ada");
     const command = `node "${resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs")}" report`;
+    await page.getByText("Advanced", { exact: true }).click();
     await page.getByTestId("chats-add-agent-command").fill(command);
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);

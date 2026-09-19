@@ -1,4 +1,3 @@
-import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { FlaskConical } from "lucide-react";
 import {
@@ -6,17 +5,20 @@ import {
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
 import type { DesktopUserSettings } from "../../settings/userSettings";
+import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { AgentToolPicker } from "../settings/AgentToolPicker";
+import { useRequestSequence } from "../useRequestSequence";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { Overlay } from "../Overlay";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { ChatAvatar } from "./ChatAvatar";
+import { Overlay } from "../Overlay";
 
 const COMMAND_PLACEHOLDER = "node agent.mjs";
 const LABEL_CLASS = "text-[11px] font-medium text-muted";
 const INPUT_CLASS =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
-const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-subtle";
+const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-muted";
 
 type CheckState =
   | { status: "idle" }
@@ -28,20 +30,16 @@ export function AddAgentForm(props: {
   settings: DesktopUserSettings;
   // Saves the whole settings object, the way the settings dialog does.
   onSave: (settings: DesktopUserSettings) => Promise<void>;
+  onError: (message: string) => void;
   onDone: () => void;
   onCancel: () => void;
 }) {
   const { settings, onSave } = props;
-  const request = useRequestSequence();
-  useEffect(() => {
-    request.next();
-    setSaving(false);
-    setCheck({ status: "idle" });
-    setError(null);
-    return () => { request.next(); };
-  }, [props.workspaceId]);
   const [agentName, setAgentName] = useState(settings.profile.agentName ?? "");
   const [name, setName] = useState(settings.profile.preferredName ?? "");
+  const [profile, setProfile] = useState(settings.runner.profile);
+  const [advanced, setAdvanced] = useState(!settings.runner.profile && settings.runner.command.length > 0);
+  const requests = useRequestSequence([props.workspaceId]);
   const [command, setCommand] = useState(settings.runner.command);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -51,16 +49,16 @@ export function AddAgentForm(props: {
     setName(settings.profile.preferredName ?? "");
     setAgentName(settings.profile.agentName ?? "");
     setCommand(settings.runner.command);
-  }, [settings.profile.preferredName, settings.profile.agentName, settings.runner.command]);
+    setProfile(settings.runner.profile);
+  }, [settings.profile.preferredName, settings.profile.agentName, settings.runner.command, settings.runner.profile?.tool, settings.runner.profile?.executable]);
 
   const trimmedName = name.trim();
-  const trimmedCommand = command.trim();
+  const trimmedCommand = configuredRunnerCommand({ command, profile });
   const preview = agentName.trim() || "Your agent";
 
   // Writes the name and the command, dispatch on. Returns false when the
   // input is not a name or the write failed; the message is on screen.
   const save = useCallback(async (): Promise<boolean> => {
-    const token = request.current();
     let preferredName: string | undefined;
     let validAgentName: string | undefined;
     try {
@@ -82,40 +80,42 @@ export function AddAgentForm(props: {
       setError("Enter the command that starts your agent.");
       return false;
     }
+    const token = requests.current();
     setSaving(true);
     setError(null);
     try {
       await onSave({
         ...settings,
         profile: { ...settings.profile, preferredName, agentName: validAgentName },
-        runner: { ...settings.runner, command: trimmedCommand, enabled: true },
+        runner: { ...settings.runner, command: command.trim(), profile, enabled: true },
       });
-      return request.isCurrent(token);
+      return requests.isCurrent(token);
     } catch (cause) {
-      if (!request.isCurrent(token)) return false;
-      setError(ipcErrorMessage(cause, "Could not save the agent."));
+      if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."));
       return false;
     } finally {
-      if (request.isCurrent(token)) setSaving(false);
+      if (requests.isCurrent(token)) setSaving(false);
     }
-  }, [agentName, name, onSave, settings, trimmedCommand]);
+  }, [agentName, name, onSave, settings, trimmedCommand, command, profile, requests, props.onError]);
 
   const runCheck = useCallback(async () => {
-    const token = request.current();
-    if (!(await save()) || !request.isCurrent(token)) return;
+    const token = requests.current();
+    if (!(await save()) || !requests.isCurrent(token)) return;
     setCheck({ status: "running" });
     try {
       const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId });
-      if (!request.isCurrent(token)) return;
+      if (!requests.isCurrent(token)) return;
+      if (!result.ok) props.onError(result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
-      if (!request.isCurrent(token)) return;
+      if (!requests.isCurrent(token)) return;
+      props.onError(ipcErrorMessage(cause, "The check could not start."));
       setCheck({
         status: "failed",
         detail: ipcErrorMessage(cause, "The check could not start."),
       });
     }
-  }, [props.workspaceId, save]);
+  }, [props.workspaceId, props.onError, requests, save]);
 
   const submit = useCallback(
     async (event: FormEvent) => {
@@ -128,8 +128,6 @@ export function AddAgentForm(props: {
 
   const busy = saving || check.status === "running";
 
-  // The form owns its overlay so Escape and the backdrop follow the same
-  // busy state as the Cancel button.
   return (
     <Overlay onClose={busy ? undefined : props.onCancel}>
       <form
@@ -138,7 +136,7 @@ export function AddAgentForm(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="chats-add-agent-title"
-        className="dohc-elevated flex w-[min(420px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
           <ChatAvatar name={preview} kind="agent" size="strip" />
@@ -179,28 +177,34 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <div className="flex flex-col gap-1">
+        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy} checkLabel="Check"
+          onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
+        <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
+          <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
+          {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
+        <div className="mt-2 flex flex-col gap-1">
           <label htmlFor="chats-add-agent-command" className={LABEL_CLASS}>
             Runner command
           </label>
           <input
             id="chats-add-agent-command"
             data-testid="chats-add-agent-command"
-            value={command}
+            value={profile ? configuredRunnerCommand({ command, profile }) : command}
             maxLength={4096}
             disabled={busy}
             spellCheck={false}
             autoCapitalize="none"
             autoComplete="off"
             placeholder={COMMAND_PLACEHOLDER}
-            onChange={(event) => setCommand(event.currentTarget.value)}
+            onChange={(event) => { setCommand(event.currentTarget.value); setProfile(undefined); setCheck({ status: "idle" }); }}
             className={`${INPUT_CLASS} font-mono text-[12px]`}
           />
           <p className={HINT_CLASS}>
-            dohc starts this command when someone mentions the agent, with the
-            conversation on its input. Use a sandboxed command.
+            Editing this command turns off the tool profile. The conversation arrives through stdin.
           </p>
         </div>
+
+        </details>
 
         {error ? (
           <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
@@ -214,7 +218,7 @@ export function AddAgentForm(props: {
             role={check.status === "failed" ? "alert" : "status"}
             className={`m-0 text-[11px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
           >
-            {check.detail}
+            {check.status === "ok" ? check.detail : "Check failed. See Notices."}
           </p>
         ) : null}
 

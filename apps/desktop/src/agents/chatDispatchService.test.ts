@@ -1,3 +1,4 @@
+import { agentProfileArguments } from "./agentToolCatalog";
 import {
   APP_QUIT_KILL_GRACE_MS,
   RUNNER_KILL_GRACE_MS,
@@ -2729,9 +2730,10 @@ describe("chatDispatchService", () => {
     expect(fixture.errors).toContain(noteError);
   });
 
-  it("passes the real spawn contract in a successful runner self-test", async () => {
+  it.each([undefined, "claude", "codex"] as const)("passes the spawn contract in a %s runner self-test", async (tool) => {
+    const profile = tool ? { tool, executable: resolve(`test-${tool}.exe`) } : undefined;
     const fixture = await createFixture({
-      runner: { command: "claude -p" },
+      runner: { command: profile ? "" : "claude -p", profile },
     });
 
     const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID);
@@ -2745,6 +2747,11 @@ describe("chatDispatchService", () => {
     const threadId = call.options.env.DOHC_CHAT_THREAD;
     const runId = call.options.env.DOHC_RUN_ID;
     if (!threadId || !runId) throw new Error("Expected self-test attribution.");
+    if (profile) {
+      expect(call.command).toBe(profile.executable);
+      expect(call.args).toEqual(agentProfileArguments(profile));
+      expect(call.options.cwd).toBe(fixture.workspace.rootPath);
+    }
     const marker = `dohc-runner-self-test:${runId}`;
     expect(call.process.stdinText).toContain(
       `dohc chat reply ${threadId} --as-agent "${marker}"`,

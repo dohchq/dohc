@@ -10,6 +10,7 @@ import {
   ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { AgentToolsResult } from "../agents/agentToolCatalog";
 import { unacknowledgedAutomationFailures } from "../workspaces/registryStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
@@ -55,6 +56,7 @@ export function createAgentRunsIpc<
   chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
+  detectAgentTools(workspaceRoot: string): Promise<AgentToolsResult["tools"]>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
@@ -168,6 +170,16 @@ export function createAgentRunsIpc<
   }
 
   function registerAgentRuns(): void {
+    registerHandler(CHANNELS.detectAgentTools, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = AgentRunPayload.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+        "Agent detection stopped because this window changed workspaces.",
+        async (operation) => AgentToolsResult.parse({
+          workingDirectory: operation.workspace.rootPath,
+          tools: await dependencies.detectAgentTools(operation.workspace.rootPath),
+        }));
+    });
     // Enabling agents starts a local run: the workspace must already be open (the
     // watcher must be live for the run slot to attach), so open it first.
     registerHandler(CHANNELS.startAgentRun, async (event, payload) => {

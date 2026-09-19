@@ -6,6 +6,14 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
 afterEach(cleanup);
 describe("agent badge", () => {
+  it("shows the selected tool instead of the saved Advanced command", () => {
+    render(<AgentSettingsContext.Provider value={{ ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova", preferredName: "Ada" }, runner: { ...DEFAULT_USER_SETTINGS.runner, command: "old-tool", profile: { tool: "codex", executable: "/tools/codex" } } }}>
+      <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "owner" }} viewerAuthorId="owner" />
+    </AgentSettingsContext.Provider>);
+    fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+    expect(screen.getByRole("tooltip").textContent).toContain("/tools/codex");
+    expect(screen.getByRole("tooltip").textContent).not.toContain("old-tool");
+  });
   it.each(["owner", "someone-else"])("shows the stored owner and limits the local command for viewer %s", (viewer) => {
     render(<AgentSettingsContext.Provider value={{ ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova", preferredName: "Ada" }, runner: { ...DEFAULT_USER_SETTINGS.runner, command: "local-tool --private-path" } }}>
       <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "owner" }} viewerAuthorId={viewer} />

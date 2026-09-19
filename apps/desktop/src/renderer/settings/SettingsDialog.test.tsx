@@ -72,6 +72,7 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 }
 
 const bridge = {
+  detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
     mcpEnabled,
@@ -780,6 +781,7 @@ describe("SettingsDialog", () => {
   });
 
   it("surfaces a failed runner self-test without enabling dispatch", async () => {
+    const onError = vi.fn();
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
       detail: "Runner did not report within 120 seconds.",
@@ -790,6 +792,7 @@ describe("SettingsDialog", () => {
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
+        onError={onError}
         onClose={() => {}}
       />,
     );
@@ -800,7 +803,8 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByTestId("runner-self-test-button"));
 
     const result = await screen.findByRole("alert");
-    expect(result.textContent).toContain("did not report within 120 seconds");
+    expect(result.textContent).toBe("Test failed.");
+    expect(onError).toHaveBeenCalledWith("Runner did not report within 120 seconds.");
     expect(screen.getByRole("switch", { name: "Enable chat runner" }).getAttribute(
       "aria-checked",
     )).toBe("false");

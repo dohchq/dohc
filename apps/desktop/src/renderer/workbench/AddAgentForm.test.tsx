@@ -8,6 +8,7 @@ import { AddAgentForm } from "./AddAgentForm";
 
 const bridgeMock = {
   runnerSelfTest: vi.fn(),
+  detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
 };
 
 vi.mock("../bridge", () => ({
@@ -45,6 +46,7 @@ describe("AddAgentForm", () => {
     render(
       <AddAgentForm
         workspaceId="ws-1"
+        onError={vi.fn()}
         settings={FILLED_SETTINGS}
         onSave={vi.fn()}
         onDone={vi.fn()}
@@ -68,6 +70,7 @@ describe("AddAgentForm", () => {
     render(
       <AddAgentForm
         workspaceId="ws-1"
+        onError={vi.fn()}
         settings={FILLED_SETTINGS}
         onSave={onSave}
         onDone={onDone}
@@ -97,6 +100,7 @@ describe("AddAgentForm", () => {
     render(
       <AddAgentForm
         workspaceId="ws-1"
+        onError={vi.fn()}
         settings={FILLED_SETTINGS}
         onSave={vi.fn().mockResolvedValue(undefined)}
         onDone={vi.fn()}
