@@ -32,7 +32,7 @@ function LayoutToggle(props: {
         aria-label={props.label}
         aria-pressed={props.pressed}
         aria-describedby={props.agentActive ? statusId : undefined}
-        title={props.label}
+        title={props.agentActive ? `${props.label}: Agent running` : props.label}
         onClick={props.onClick}
         className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
           props.pressed
@@ -48,7 +48,6 @@ function LayoutToggle(props: {
           data-testid="agent-run-indicator"
           role="status"
           aria-label="Agent running"
-          title="Agent running"
           className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-agent"
         ><span className="sr-only">Agent running</span></span>
       ) : null}

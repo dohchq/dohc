@@ -728,6 +728,7 @@ export function NoticeCenter(props: {
                           type="button"
                           disabled={notice.action.disabled}
                           onClick={() => {
+                            toggleRef.current?.focus({ preventScroll: true });
                             notice.action?.onClick();
                             setOpen(false);
                           }}

@@ -203,6 +203,17 @@ describe("notice center", () => {
 
     await userEvent.click(within(notice).getByRole("button", { name: "Refresh" }));
     expect(onRefreshShareView).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it("preserves focus assigned by a notice action", async () => {
+    render(<input aria-label="History filter" />);
+    const destination = screen.getByRole("textbox", { name: "History filter" });
+    renderNotices({ agentActive: true, onOpenHistory: () => destination.focus() });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open History" }));
+    expect(document.activeElement).toBe(destination);
+    expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
   it("keeps a clear notice for each file that is too large to sync", async () => {
