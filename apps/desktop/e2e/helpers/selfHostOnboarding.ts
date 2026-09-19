@@ -178,6 +178,7 @@ export async function createVerifiedAccount(page: Page, server: Awaited<ReturnTy
   await page.getByLabel(/^email$/i).fill(account.email);
   await page.getByLabel(/^password$/i).fill(account.password);
   await page.getByRole("button", { name: /create account|sign up/i }).click();
+  await expect(page).toHaveURL(/\/account\/verify-email\?next=/);
   await expect.poll(() => server.mail.messages.length).toBeGreaterThan(before);
   const verification = mailLinks(server.mail.messages[before]!).find(link => link.includes("verify-email"));
   expect(verification).toBeTruthy();
