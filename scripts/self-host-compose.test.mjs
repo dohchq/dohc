@@ -39,6 +39,11 @@ test('startup gates data services on their single-use initialization jobs', () =
   for (const name of ['workspace-api', 'sync-relay', 'share-web']) assert.equal(compose.services.gateway.depends_on[name].condition, 'service_healthy');
 });
 
+test('database readiness waits for TCP after the temporary initialization server stops', () => {
+  assert.match(compose.services.postgres.healthcheck.test[1], /pg_isready\s+-h\s+127\.0\.0\.1\s/);
+  assert.equal(compose.services['postgres-migrate'].depends_on.postgres.condition, 'service_healthy');
+});
+
 test('auth, relay, and share links advertise the same public origin and exchange key', () => {
   const api = compose.services['workspace-api'].environment, relay = compose.services['sync-relay'].environment;
   const viewer = compose.services['share-web'].environment;
