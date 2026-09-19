@@ -3039,6 +3039,12 @@ describe("CLI socket server", () => {
     })).rejects.toThrow("ambiguous thread prefix 'thread-prefix': th_prefix-first, th_prefix-second");
     expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-first" })).toHaveLength(1);
     expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-second" })).toHaveLength(0);
+    const short = await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread: "th_prefix-sec",
+      attachments: [], needsDecision: false, body: "Short display prefix reply",
+    });
+    expect(short.threadId).toBe("th_prefix-second");
+    expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: "thread-prefix-second" })).toHaveLength(1);
   });
 
   it("reads exact persisted ids without requiring an engine-id spelling", async () => {
