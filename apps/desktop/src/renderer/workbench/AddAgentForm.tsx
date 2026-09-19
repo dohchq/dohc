@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Bot, FlaskConical } from "lucide-react";
+import { FlaskConical } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   agentDisplayLabel,
@@ -8,8 +8,14 @@ import {
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import { ChatAvatar } from "./ChatAvatar";
 
-const COMMAND_PLACEHOLDER = "The command that starts your agent";
+const COMMAND_PLACEHOLDER = "node agent.mjs";
+const LABEL_CLASS = "text-[11px] font-medium text-muted";
+const INPUT_CLASS =
+  "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
+const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-subtle";
 
 type CheckState =
   | { status: "idle" }
@@ -108,55 +114,62 @@ export function AddAgentForm(props: {
     <form
       data-testid="chats-add-agent"
       onSubmit={(event) => void submit(event)}
-      className="mx-2 mb-2 rounded-md border border-line bg-panel-2/40 p-2.5"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="chats-add-agent-title"
+      className="dohc-elevated flex w-[min(420px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
     >
-      <div className="mb-2 flex items-center gap-2">
-        <span className="grid size-6 shrink-0 place-items-center rounded-md border border-agent/30 bg-bg text-agent">
-          <Bot size={13} aria-hidden />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
+      <div className="flex items-center gap-2">
+        <ChatAvatar name={preview} kind="agent" size="strip" />
+        <h3 id="chats-add-agent-title" className="m-0 text-sm font-semibold text-ink">
           Add an agent
-        </span>
+        </h3>
       </div>
-      <label className="sr-only" htmlFor="chats-add-agent-name">
-        Your name
-      </label>
-      <input
-        id="chats-add-agent-name"
-        data-testid="chats-add-agent-name"
-        value={name}
-        maxLength={MAX_PREFERRED_NAME_LENGTH}
-        disabled={busy}
-        placeholder="Your name"
-        autoComplete="name"
-        onChange={(event) => setName(event.currentTarget.value)}
-        className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-      />
-      <p data-testid="chats-add-agent-preview" className="m-0 mt-1 text-[10px] text-subtle">
-        Posts as <span className="font-medium text-ink">{preview}</span>.
-      </p>
-      <label className="sr-only" htmlFor="chats-add-agent-command">
-        Runner command
-      </label>
-      <input
-        id="chats-add-agent-command"
-        data-testid="chats-add-agent-command"
-        value={command}
-        maxLength={4096}
-        disabled={busy}
-        spellCheck={false}
-        autoCapitalize="none"
-        autoComplete="off"
-        placeholder={COMMAND_PLACEHOLDER}
-        onChange={(event) => setCommand(event.currentTarget.value)}
-        className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
-      />
-      <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
-        dohc starts this command when the agent is mentioned, with the conversation on
-        its input. Use a sandboxed command.
-      </p>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor="chats-add-agent-name" className={LABEL_CLASS}>
+          Your name
+        </label>
+        <input
+          id="chats-add-agent-name"
+          data-testid="chats-add-agent-name"
+          value={name}
+          maxLength={MAX_PREFERRED_NAME_LENGTH}
+          disabled={busy}
+          autoComplete="name"
+          onChange={(event) => setName(event.currentTarget.value)}
+          className={INPUT_CLASS}
+        />
+        <p data-testid="chats-add-agent-preview" className={HINT_CLASS}>
+          Posts as <span className="font-medium text-muted">{preview}</span>
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label htmlFor="chats-add-agent-command" className={LABEL_CLASS}>
+          Runner command
+        </label>
+        <input
+          id="chats-add-agent-command"
+          data-testid="chats-add-agent-command"
+          value={command}
+          maxLength={4096}
+          disabled={busy}
+          spellCheck={false}
+          autoCapitalize="none"
+          autoComplete="off"
+          placeholder={COMMAND_PLACEHOLDER}
+          onChange={(event) => setCommand(event.currentTarget.value)}
+          className={`${INPUT_CLASS} font-mono text-[12px]`}
+        />
+        <p className={HINT_CLASS}>
+          dohc starts this command when someone mentions the agent, with the
+          conversation on its input. Use a sandboxed command.
+        </p>
+      </div>
+
       {error ? (
-        <p data-testid="chats-add-agent-error" role="alert" className="m-0 mt-1.5 text-[10px] text-danger">
+        <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
           {error}
         </p>
       ) : null}
@@ -165,40 +178,41 @@ export function AddAgentForm(props: {
           data-testid="chats-add-agent-check-result"
           data-state={check.status}
           role={check.status === "failed" ? "alert" : "status"}
-          className={`m-0 mt-1.5 text-[10px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
+          className={`m-0 text-[11px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
         >
           {check.detail}
         </p>
       ) : null}
-      <div className="mt-2 flex items-center gap-1.5">
-        <button
-          type="button"
+
+      <div className="flex items-center gap-1.5">
+        <SecondaryButton
+          size="compact"
           data-testid="chats-add-agent-check"
           disabled={busy || trimmedCommand.length === 0 || trimmedName.length === 0}
           onClick={() => void runCheck()}
-          className="flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
+          className="flex items-center gap-1"
         >
           <FlaskConical size={12} aria-hidden />
           {check.status === "running" ? "Checking…" : "Check"}
-        </button>
+        </SecondaryButton>
         <span className="flex-1" />
         <button
           type="button"
           data-testid="chats-add-agent-cancel"
           disabled={busy}
           onClick={props.onCancel}
-          className="h-7 rounded-md px-2 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:opacity-50 dohc-focus-visible"
+          className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50 dohc-focus-visible"
         >
           Cancel
         </button>
-        <button
+        <PrimaryButton
+          size="compact"
           type="submit"
           data-testid="chats-add-agent-submit"
           disabled={busy || trimmedCommand.length === 0 || trimmedName.length === 0}
-          className="h-7 rounded-md bg-ink px-2.5 text-[11px] font-medium text-bg hover:opacity-90 disabled:opacity-40 dohc-focus-visible"
         >
           {saving ? "Saving…" : "Add agent"}
-        </button>
+        </PrimaryButton>
       </div>
     </form>
   );
