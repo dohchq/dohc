@@ -13036,7 +13036,7 @@ describe("history page", () => {
   // A failure reports, and it takes nothing. The lane's watermark is what an
   // answer earns: a read that failed proves nothing, and the older read still
   // in flight may be the only answer anyone gets. Moving the watermark on a
-  // rejection would reject that answer when it lands, and the status bar would
+  // rejection would reject that answer when it lands, and the workspace status would
   // sit on a value the workspace has left with nothing to correct it.
   it("commits an older sync status when the newer read failed", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
@@ -13376,7 +13376,7 @@ describe("history page", () => {
 
   // Supersession is per LANE. The user dismissed a review; that says nothing
   // about sync or agent state, and the dismiss emits no activity event, so
-  // rejecting those lanes too would strand the status bar with no other source.
+  // rejecting those lanes too would strand the workspace status with no other source.
   it("suppresses only the lane the user wrote when a refresh answers late", async () => {
     const first = deferred<ListEngineMomentsResult>();
     const refreshed = deferred<ListEngineMomentsResult>();
@@ -15229,7 +15229,7 @@ describe("native workbench context menus", () => {
     });
   });
 
-  it("routes status bar context menu commands to panel actions", async () => {
+  it("routes workspace status context menu commands to panel actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("open-history");
     renderShell(bridge);
@@ -15250,7 +15250,7 @@ describe("native workbench context menus", () => {
     });
   });
 
-  it("routes status bar update commands to the updater bridge", async () => {
+  it("routes workspace status update commands to the updater bridge", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("install-update");
 
@@ -15263,7 +15263,7 @@ describe("native workbench context menus", () => {
     });
   });
 
-  it("opens settings from the status bar context menu", async () => {
+  it("opens settings from the workspace status context menu", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("settings");
     renderShell(bridge);
@@ -15275,16 +15275,12 @@ describe("native workbench context menus", () => {
 });
 
 describe("settings entry points", () => {
-  it("opens settings from the status bar and activity bar", async () => {
+  it("opens settings from the activity bar", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("open-settings"));
-    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
-    await user.click(screen.getByLabelText("Close settings"));
-
-    await user.click(screen.getByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("activity-settings"));
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 

@@ -33,7 +33,7 @@ async function openWorkspace(temp: TempWorkspace): Promise<LaunchedDesktopApp> {
 }
 
 async function openSettings(page: Page) {
-  await page.getByTestId("open-settings").click();
+  await page.getByTestId("activity-settings").click();
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
 }
 

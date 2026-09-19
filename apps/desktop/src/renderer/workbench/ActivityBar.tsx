@@ -129,6 +129,8 @@ export function ActivityBar(props: {
   onSelectView: (view: ActivityViewId) => void;
   onOpenCloud?: () => void;
   onOpenSettings?: () => void;
+  notices?: ReactNode;
+  viewsDisabled?: boolean;
 }) {
   return (
     <nav
@@ -138,7 +140,7 @@ export function ActivityBar(props: {
     >
       {/* The view list scrolls, so enough contributed views never push the
           Cloud and Settings buttons off the rail. */}
-      <div className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
+      <div inert={props.viewsDisabled || undefined} className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
         {VIEW_IDS.map((view) => (
           <RailButton
             key={view}
@@ -172,9 +174,6 @@ export function ActivityBar(props: {
         ))}
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
-        {/* Labels deliberately differ from the status bar's "Connect dohc
-            Cloud" button and "Settings" button — several specs pin those
-            accessible names and must keep matching exactly one element. */}
         <RailButton
           testId="activity-cloud"
           label="dohc Drive"
@@ -182,6 +181,7 @@ export function ActivityBar(props: {
           onClick={props.onOpenCloud}
           icon={<RailGlyph Icon={Cloud} />}
         />
+        {props.notices}
         <RailButton
           testId="activity-settings"
           label="Open settings"

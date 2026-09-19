@@ -158,7 +158,8 @@ import {
 import { usePluginCatalog } from "./workbench/pluginCatalog";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
-import { StatusBar } from "./workbench/StatusBar";
+import { NoticeCenter } from "./workbench/NoticeCenter";
+import { WorkspaceSyncStatus } from "./workbench/WorkspaceSyncStatus";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
@@ -4400,6 +4401,9 @@ export function DesktopWorkspaceShell(props: {
         onOpenShare={() => setOpenShareOpen(true)}
         onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
         onQuickOpen={() => setQuickOpenOpen(true)}
+        workspaceStatus={<WorkspaceSyncStatus syncStatus={syncStatus} />}
+        onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
+        agentActive={agentActive}
         primarySidebar={{
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
@@ -4617,11 +4621,7 @@ export function DesktopWorkspaceShell(props: {
           ) : null}
         </div>
       ) : null}
-      <div
-        data-testid="workspace-workbench"
-        inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
-        className="flex min-h-0 flex-1"
-      >
+      <div className="flex min-h-0 flex-1">
         <ActivityBar
           workspaceId={workspaceId}
           activeView={wb.activeView}
@@ -4634,7 +4634,42 @@ export function DesktopWorkspaceShell(props: {
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenCloud={() => setCloudOpen(true)}
           onOpenSettings={() => openSettings()}
+          viewsDisabled={!workspaceIsReady || storeUpdateRequired}
+          notices={
+            <NoticeCenter
+              workspaceId={workspaceId}
+              syncStatus={syncStatus}
+              agentActive={agentActive}
+              conflictSummaries={conflictSummaries}
+              onOpenHistory={openHistoryView}
+              onOpenConflicts={() => setConflictReviewOpen(true)}
+              onRefreshShareView={() => void refreshShareView()}
+              shareChangeNotices={shareChangeNotices}
+              onReviewShareChanges={setReviewProposalId}
+              onOpenSettings={() => openSettings()}
+              onRebuildEngineStore={(returnFocus) => {
+                const refusal = syncStatus?.engineStoreRefused;
+                if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;
+                engineRebuildReturnFocusRef.current = returnFocus;
+                setEngineRebuild({ phase: "confirm", refusal });
+              }}
+              onRestartToUpdate={openRestartPrompt}
+              workspaceErrors={workspaceErrors}
+              onRetryWorkspaceError={retryShellError}
+              onHideWorkspaceError={hideShellError}
+              onDismissWorkspaceError={dismissShellError}
+              agentNotifications={agentNotifs.notifications}
+              onDismissAgentNotification={agentNotifs.dismiss}
+              automationFailures={automationFailures}
+              onDismissAutomationFailure={dismissAutomationFailure}
+            />
+          }
         />
+        <div
+          data-testid="workspace-workbench"
+          inert={!workspaceIsReady || storeUpdateRequired ? true : undefined}
+          className="flex min-w-0 flex-1"
+        >
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
         {wb.sidebarVisible ? (
@@ -5336,12 +5371,13 @@ export function DesktopWorkspaceShell(props: {
             </ErrorBoundary>
           </ChatsPanel>
         ) : null}
+        </div>
       </div>
       {storeUpdateRequired ? (
         <div
           data-testid="workspace-update-required"
           role="alert"
-          className="absolute inset-x-0 bottom-0 top-10 z-10 grid grid-rows-[1fr_auto_1fr] justify-items-center overflow-y-auto bg-bg px-6 text-center"
+          className="absolute left-12 right-0 bottom-0 top-10 z-10 grid grid-rows-[1fr_auto_1fr] justify-items-center overflow-y-auto bg-bg px-6 text-center"
         >
           {/* The middle row holds what everyone reads. It is centered by the
               two equal rows around it, so opening the technical details in
@@ -5447,7 +5483,7 @@ export function DesktopWorkspaceShell(props: {
         <div
           data-testid="workspace-open-failed"
           role="alert"
-          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+          className="absolute left-12 right-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
         >
           <div className="max-w-md select-text cursor-text space-y-1.5">
             <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
@@ -5479,7 +5515,7 @@ export function DesktopWorkspaceShell(props: {
           data-testid="workspace-preparing"
           role="status"
           aria-live="polite"
-          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-2 bg-bg px-6 text-center"
+          className="absolute left-12 right-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-2 bg-bg px-6 text-center"
         >
           <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
           <p className="text-sm font-medium text-ink">Preparing this workspace</p>
@@ -5488,38 +5524,6 @@ export function DesktopWorkspaceShell(props: {
           </p>
         </div>
       ) : null}
-
-      <StatusBar
-        workspaceId={workspaceId}
-        workspaceName={workspaceName(props.workspace)}
-        syncStatus={syncStatus}
-        agentActive={agentActive}
-        conflictSummaries={conflictSummaries}
-        onConnectCloud={() => setCloudOpen(true)}
-        onOpenHistory={openHistoryView}
-        onOpenConflicts={() => setConflictReviewOpen(true)}
-        onRefreshShareView={() => void refreshShareView()}
-        shareChangeNotices={shareChangeNotices}
-        onReviewShareChanges={setReviewProposalId}
-        onOpenSettings={() => openSettings()}
-        onRebuildEngineStore={(returnFocus) => {
-          const refusal = syncStatus?.engineStoreRefused;
-          if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;
-          engineRebuildReturnFocusRef.current = returnFocus;
-          setEngineRebuild({ phase: "confirm", refusal });
-        }}
-        onRestartToUpdate={openRestartPrompt}
-        workspaceErrors={workspaceErrors}
-        onRetryWorkspaceError={retryShellError}
-        onHideWorkspaceError={hideShellError}
-        onDismissWorkspaceError={dismissShellError}
-        onToggleTheme={toggleTheme}
-        onContextMenu={() => void showWorkbenchMenu("status")}
-        agentNotifications={agentNotifs.notifications}
-        onDismissAgentNotification={agentNotifs.dismiss}
-        automationFailures={automationFailures}
-        onDismissAutomationFailure={dismissAutomationFailure}
-      />
 
       {restartPrompt !== "closed" ? (
         <Overlay
