@@ -1527,6 +1527,14 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     assert_no_initial_settled_event(&mut events);
     probe.release();
     wait_for_initial_settled_event(&mut events).await;
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(19, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture status is readable after settlement");
+    assert_eq!(status.result["phase"], json!("ready"));
     transport
         .call(
             RequestContext::unbounded(),

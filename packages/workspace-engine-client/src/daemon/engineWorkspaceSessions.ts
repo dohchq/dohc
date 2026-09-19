@@ -446,6 +446,8 @@ export class EngineWorkspaceSessions {
           this.activeBudget() !== undefined &&
           binding.client.onEvent
         ) {
+          // Subscribe before the operation: settlement can occur while the
+          // daemon's refusal is travelling back to this client.
           initialCaptureWake = new Promise<void>((resolve) => {
             unsubscribeInitialCapture = binding.client.onEvent?.((event) => {
               if (!isInitialCaptureSettledEvent(event, workspace.workspaceId)) return;
