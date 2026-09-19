@@ -1,6 +1,13 @@
 import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
@@ -77,6 +84,58 @@ function tabTitle(path: string, label?: string): string {
   return path;
 }
 
+// The active tab and the editor body below it share one surface. The tab's
+// bottom outer corners curve out into the strip's hairline (the joins) and
+// the body's top corners curve up into it (the pane corners). Both radii
+// follow the active tab's distance from the pane edge: a tab at the edge
+// leaves one straight line, a tab further in sits on a rounded pane, and a
+// dragged tab morphs between the two as it passes.
+const CORNER_RADIUS = 8;
+const MORPH_RANGE = 20;
+const DRAG_THRESHOLD = 4;
+const SETTLE_MS = 160;
+const SETTLE_EASING = "cubic-bezier(0.2, 0.8, 0.3, 1)";
+
+export function cornerRadius(distance: number): number {
+  return CORNER_RADIUS * Math.min(1, Math.max(0, distance / MORPH_RANGE));
+}
+
+// Each decoration is a fixed square of the full radius plus its hairline,
+// holding an arc child whose one rounded corner is the morph. Only the
+// radius changes: a border radius is paint-only, whereas resizing even a
+// tiny absolute box invalidates layout up the tree, and with a large
+// document open that is milliseconds per frame. Below the full radius the
+// straight remainder of the two bordered sides lies on lines that are
+// already there: the strip hairline, the tab outline, or the pane edge.
+type Arc = "tl" | "tr" | "br" | "bl";
+
+function setCornerRadius(el: Element | null, radius: number) {
+  const arc = el?.firstElementChild;
+  if (!(el instanceof HTMLElement) || !(arc instanceof HTMLElement)) return;
+  const r = `${radius + 1}px`;
+  const corners: Record<Arc, string> = {
+    tl: `${r} 0px 0px 0px`,
+    tr: `0px ${r} 0px 0px`,
+    br: `0px 0px ${r} 0px`,
+    bl: `0px 0px 0px ${r}`,
+  };
+  const value = corners[(el.dataset.arc ?? "tl") as Arc];
+  if (arc.style.borderRadius !== value) arc.style.borderRadius = value;
+}
+
+// The arc is a rounded, hairlined child filling the square; its spread
+// shadow is the chrome or paper fill outside the arc, and the square clips
+// it with overflow, which Chromium snaps to whole pixels. A clip-path here
+// would antialias the edge of a fractionally placed square and leak a
+// half-pixel of fill along it.
+const DECORATION = "pointer-events-none absolute size-[9px] overflow-hidden";
+const DECORATION_ARC =
+  "absolute inset-0 border-line transition-[border-radius] duration-[160ms] ease-[cubic-bezier(0.2,0.8,0.3,1)]";
+const TAB_JOIN = `${DECORATION} -bottom-px`;
+const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--color-bg)]`;
+const PANE_CORNER = `${DECORATION} top-0`;
+const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel-2)]`;
+
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
 // re-render only the active tab, not the whole strip (FileRow precedent —
 // typingLongTaskMs budget). All callbacks must be referentially stable.
@@ -88,32 +147,12 @@ const Tab = memo(function Tab(props: {
   label?: string;
   active: boolean;
   dirty: boolean;
-  dragging: boolean;
-  dropBefore: boolean;
   onActivate: (groupId: string, path: string) => void;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
-  setDragPreview: (preview: DragPreview) => void;
-  onMove: (groupId: string, path: string, toIndex: number) => void;
-  onMoveToGroup: (
-    sourceGroupId: string,
-    targetGroupId: string,
-    path: string,
-    toIndex: number,
-  ) => void;
+  onDragStart: (event: ReactPointerEvent<HTMLDivElement>, path: string) => void;
 }) {
   const name = fileName(props.path, props.label);
-  // Pointer-drag reorder (no dnd dep): a press only becomes a drag after 4px
-  // of travel, so plain clicks never reorder. While captured, the tab lives
-  // at "how many sibling midpoints sit left of the cursor" (live reorder,
-  // VS Code-style); moveTab no-ops same-slot moves so the stream is cheap.
-  const drag = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    active: boolean;
-  } | null>(null);
-  const cancelDrag = useRef<() => void>(() => undefined);
   // Reveal on activation, however it happened (sidebar click, open-file,
   // Ctrl+Tab, close-neighbor). `nearest` makes it a no-op when already
   // visible, so plain clicks on visible tabs never nudge the strip.
@@ -126,12 +165,6 @@ const Tab = memo(function Tab(props: {
       inline: "nearest",
     });
   }, [props.active]);
-  useEffect(
-    () => () => {
-      cancelDrag.current();
-    },
-    [],
-  );
   return (
     <div
       ref={ref}
@@ -158,120 +191,37 @@ const Tab = memo(function Tab(props: {
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
-        // Finish the previous pointer's drag before assigning this pointer's
-        // state. Otherwise its stale cancel closure clears the new drag.
-        cancelDrag.current();
         // Activate on press (VS Code behavior) — click can't be relied on
-        // after a drag: the live reorder re-inserts the DOM node, which
-        // cancels both pointer capture and click synthesis in Chromium.
+        // after a drag: the reorder re-inserts the DOM node, which cancels
+        // both pointer capture and click synthesis in Chromium.
         if (!props.active) props.onActivate(props.groupId, props.path);
-        drag.current = {
-          pointerId: event.pointerId,
-          startX: event.clientX,
-          startY: event.clientY,
-          active: false,
-        };
-
-        const detach = () => {
-          window.removeEventListener("pointermove", onMove);
-          window.removeEventListener("pointerup", finish);
-          window.removeEventListener("pointercancel", onCancel);
-        };
-        const finish = (pointerEvent: PointerEvent | null) => {
-          const state = drag.current;
-          if (
-            !state ||
-            (pointerEvent !== null && state.pointerId !== pointerEvent.pointerId)
-          ) {
-            return;
-          }
-          drag.current = null;
-          detach();
-          cancelDrag.current = () => undefined;
-          if (!state.active) return;
-          props.setDragPreview(null);
-          if (pointerEvent === null) return;
-          const target = editorGroupAtPoint(
-            pointerEvent.clientX,
-            pointerEvent.clientY,
-          );
-          if (target && target.groupId !== props.groupId) {
-            props.onMoveToGroup(
-              props.groupId,
-              target.groupId,
-              props.path,
-              target.toIndex,
-            );
-          }
-        };
-        const onMove = (pointerEvent: PointerEvent) => {
-          const state = drag.current;
-          if (!state || state.pointerId !== pointerEvent.pointerId) return;
-          // A mouse keeps one pointerId for life. If release was missed, a
-          // buttons-up move must end the drag before hovering can reorder.
-          if ((pointerEvent.buttons & 1) === 0) {
-            finish(null);
-            return;
-          }
-          if (!state.active) {
-            if (
-              Math.hypot(
-                pointerEvent.clientX - state.startX,
-                pointerEvent.clientY - state.startY,
-              ) < 4
-            ) {
-              return;
-            }
-            state.active = true;
-          }
-          const target = editorGroupAtPoint(
-            pointerEvent.clientX,
-            pointerEvent.clientY,
-          );
-          // Crossing into another group is committed on release. Do not keep
-          // shuffling the source strip while the pointer is over its destination.
-          if (target && target.groupId !== props.groupId) return;
-          const current = ref.current;
-          const siblings = current?.parentElement?.querySelectorAll<HTMLElement>(
-            '[role="tab"]',
-          );
-          if (!current || !siblings) return;
-          const toIndex = tabInsertionIndex(
-            siblings,
-            pointerEvent.clientX,
-            current,
-          );
-          props.setDragPreview({ path: props.path, toIndex });
-          props.onMove(props.groupId, props.path, toIndex);
-        };
-        const onCancel = (pointerEvent: PointerEvent) => {
-          if (drag.current?.pointerId !== pointerEvent.pointerId) return;
-          finish(null);
-        };
-        cancelDrag.current = () => finish(null);
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", finish);
-        window.addEventListener("pointercancel", onCancel);
+        props.onDragStart(event, props.path);
       }}
-      // The strip's bottom hairline is drawn PER TAB so the active one can
-      // break it: transparent bottom border + the editor's bg merge the tab
-      // with its document (VS Code/Zed treatment) instead of severing it.
-      className={`group relative flex h-9 shrink-0 select-none items-center gap-1.5 border-b border-r border-line px-3 text-[13px] transition-[background-color,box-shadow,color,transform] ${
-        props.dragging
-          ? "z-10 -translate-y-px cursor-grabbing border-b-transparent bg-bg text-ink shadow-md ring-1 ring-inset ring-ink/20"
-          : `cursor-default ${
-              props.active
-                ? "border-b-transparent bg-bg text-ink"
-                : "bg-panel-2 text-muted hover:bg-line/50 hover:text-ink"
-            }`
+      // Every tab carries a 1px border on all sides so activation never
+      // changes its size: an inactive tab shows only the strip's bottom
+      // hairline, the active tab shows its outline and paints its bottom
+      // edge paper so it merges with the editor and covers the pane
+      // corner's straight edge beneath it. Tabs stand on the strip's floor
+      // (self-end) under a band of chrome, browser style. Every tab keeps a
+      // transform, so the drag's writes never toggle it from none, which
+      // would re-layout the strip on every crossing. `transform`
+      // transitions slide displaced neighbours; the dragged tab itself
+      // follows the pointer with no interpolation.
+      className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
+        props.active
+          ? "z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink"
+          : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-line/50 hover:text-ink"
       }`}
     >
-      {props.dropBefore ? (
-        <span
-          data-testid="tab-drop-marker"
-          aria-hidden
-          className="absolute -left-px bottom-1.5 top-1.5 z-20 w-0.5 rounded-full bg-ink"
-        />
+      {props.active ? (
+        <>
+          <span aria-hidden data-tab-join="left" data-arc="br" className={`${TAB_JOIN} right-full`}>
+            <span className={`${TAB_JOIN_ARC} border-r`} />
+          </span>
+          <span aria-hidden data-tab-join="right" data-arc="bl" className={`${TAB_JOIN} left-full`}>
+            <span className={`${TAB_JOIN_ARC} border-l`} />
+          </span>
+        </>
       ) : null}
       {props.dirty ? (
         <span
@@ -313,18 +263,399 @@ function editorGroupAtPoint(
   return { groupId, toIndex: tabInsertionIndex(tabs, clientX) };
 }
 
-function tabInsertionIndex(
-  tabs: Iterable<HTMLElement>,
-  clientX: number,
-  skippedTab?: HTMLElement,
-): number {
+function tabInsertionIndex(tabs: Iterable<HTMLElement>, clientX: number): number {
   let toIndex = 0;
   for (const tab of tabs) {
-    if (tab === skippedTab) continue;
     const box = tab.getBoundingClientRect();
     if (box.left + box.width / 2 < clientX) toIndex += 1;
   }
   return toIndex;
+}
+
+// Clears the tab's drag translation and animates it from where the pointer
+// left it into the slot it now occupies. The animation is kept so a grab
+// during those 160ms can stop it in place instead of fighting it.
+const settling = new WeakMap<HTMLElement, Animation>();
+
+function settleTab(tab: HTMLElement, visualLeft: number) {
+  tab.style.transform = "";
+  const delta = visualLeft - tab.offsetLeft;
+  if (
+    Math.abs(delta) < 0.5 ||
+    prefersReducedMotion() ||
+    typeof tab.animate !== "function"
+  ) {
+    return;
+  }
+  const animation = tab.animate(
+    [{ transform: `translateX(${delta}px)` }, { transform: "none" }],
+    { duration: SETTLE_MS, easing: SETTLE_EASING },
+  );
+  settling.set(tab, animation);
+  animation.addEventListener("finish", () => settling.delete(tab));
+}
+
+// Stops a settling tab. Frozen, the animated transform becomes its inline
+// transform so the next drag starts from there; otherwise it lands in its
+// slot at once, so a drag preview can own its transform.
+function stopSettling(tab: HTMLElement, freeze: boolean) {
+  const animation = settling.get(tab);
+  if (!animation) return;
+  settling.delete(tab);
+  if (freeze) animation.commitStyles();
+  animation.cancel();
+}
+
+function inlineTranslateX(el: HTMLElement): number {
+  if (!el.style.transform || typeof DOMMatrix === "undefined") return 0;
+  try {
+    return new DOMMatrix(el.style.transform).m41;
+  } catch {
+    return 0;
+  }
+}
+
+interface DragSlot {
+  el: HTMLElement;
+  // Content-space geometry from offsetLeft/offsetWidth: unaffected by the
+  // strip's scroll and by the translations this drag applies.
+  left: number;
+  width: number;
+  offset: number;
+}
+
+interface DragSession {
+  pointerId: number;
+  path: string;
+  tab: HTMLElement;
+  startX: number;
+  startY: number;
+  pointerX: number;
+  pointerY: number;
+  active: boolean;
+  slots: DragSlot[];
+  index: number;
+  toIndex: number;
+  // Pointer x minus the tab's visual left, both in content space, fixed at
+  // activation so the tab keeps the same spot under the pointer.
+  grab: number;
+  dx: number;
+  frameLeft: number;
+  paneWidth: number;
+  viewWidth: number;
+  multiGroup: boolean;
+  frame: number;
+  joins: [Element | null, Element | null];
+}
+
+interface TabDragHost {
+  frame: () => HTMLElement | null;
+  scroller: () => HTMLElement | null;
+  paneCorners: () => [Element | null, Element | null];
+  groupId: () => string;
+  move: (path: string, toIndex: number) => void;
+  moveToGroup: (targetGroupId: string, path: string, toIndex: number) => void;
+  // The order commit re-renders the strip; the host settles the tab into its
+  // new slot once that render has landed.
+  settle: (tab: HTMLElement, visualLeft: number) => void;
+  sync: () => void;
+}
+
+// Pointer-drag reorder (no dnd dep). A press only becomes a drag after 4px
+// of travel, so plain clicks never reorder. While captured, the tab follows
+// the pointer as a transform, the tabs it has passed slide aside by its
+// width, and the corner decorations morph with its distance from the pane
+// edge — all direct DOM writes, coalesced per frame, with no React state
+// and no layout reads: geometry is cached at activation and refreshed only
+// when the tab list or strip size changes. The order commits once, on
+// release; terminal events commit the last position, unmount drops it.
+function createTabDrag(host: TabDragHost) {
+  let session: DragSession | null = null;
+
+  // The arc children carry the radius transition that a drag must suspend.
+  const decorations = (s: DragSession): Array<Element | null> =>
+    [...s.joins, ...host.paneCorners()].map((el) => el?.firstElementChild ?? null);
+
+  const measure = (s: DragSession): boolean => {
+    const frame = host.frame();
+    const scroller = host.scroller();
+    if (!frame || !scroller || !s.tab.isConnected) return false;
+    s.slots = Array.from(
+      scroller.querySelectorAll<HTMLElement>('[role="tab"]'),
+      (el) => ({ el, left: el.offsetLeft, width: el.offsetWidth, offset: 0 }),
+    );
+    s.index = s.slots.findIndex((slot) => slot.el === s.tab);
+    if (s.index < 0) return false;
+    s.frameLeft = frame.getBoundingClientRect().left;
+    s.paneWidth = frame.clientWidth;
+    s.viewWidth = scroller.clientWidth;
+    return true;
+  };
+
+  const applyFrame = (s: DragSession) => {
+    const scroller = host.scroller();
+    const slot = s.slots[s.index];
+    if (!scroller || !slot) return;
+    const scrollLeft = scroller.scrollLeft;
+    // Crossing into another group is committed on release. While the
+    // pointer is over its destination, the source shows its committed order
+    // again instead of a stale preview; the grab offset survives, so coming
+    // back resumes under the pointer.
+    if (s.multiGroup) {
+      const target = editorGroupAtPoint(s.pointerX, s.pointerY);
+      if (target && target.groupId !== host.groupId()) {
+        placeNeighbours(s, s.index);
+        placeTab(s, slot.left, scrollLeft);
+        return;
+      }
+    }
+    const wanted = s.pointerX - s.frameLeft + scrollLeft - s.grab;
+    // The tab stays inside the visible strip: the scroller would clip it
+    // anyway, and the clamp keeps its joins inside the pane. The insertion
+    // slot follows the unclamped position, or a tab wider than the room
+    // left beside it could never reach the end.
+    const min = scrollLeft;
+    const max = Math.max(min, scrollLeft + s.viewWidth - slot.width);
+    placeTab(s, Math.min(max, Math.max(min, wanted)), scrollLeft);
+    const center = wanted + slot.width / 2;
+    let toIndex = 0;
+    for (const other of s.slots) {
+      if (other !== slot && other.left + other.width / 2 < center) toIndex += 1;
+    }
+    placeNeighbours(s, toIndex);
+  };
+
+  // Moves the dragged tab to a content-space left edge and morphs the
+  // corners with its distance from each pane edge.
+  const placeTab = (s: DragSession, left: number, scrollLeft: number) => {
+    const slot = s.slots[s.index];
+    if (!slot) return;
+    const dx = left - slot.left;
+    if (dx !== s.dx) {
+      s.dx = dx;
+      s.tab.style.transform = dx === 0 ? "" : `translateX(${dx}px)`;
+    }
+    const distanceLeft = left - scrollLeft;
+    const distanceRight = s.paneWidth - (left + slot.width - scrollLeft);
+    const [joinLeft, joinRight] = s.joins;
+    const [cornerLeft, cornerRight] = host.paneCorners();
+    setCornerRadius(joinLeft, cornerRadius(distanceLeft));
+    setCornerRadius(cornerLeft, cornerRadius(distanceLeft));
+    setCornerRadius(joinRight, cornerRadius(distanceRight));
+    setCornerRadius(cornerRight, cornerRadius(distanceRight));
+  };
+
+  // Slides the tabs between the dragged tab's slot and its insertion slot
+  // aside by its width; every other tab returns home.
+  const placeNeighbours = (s: DragSession, toIndex: number) => {
+    if (toIndex === s.toIndex) return;
+    s.toIndex = toIndex;
+    const slot = s.slots[s.index];
+    if (!slot) return;
+    s.slots.forEach((other, i) => {
+      const offset =
+        i > s.index && i <= toIndex
+          ? -slot.width
+          : i < s.index && i >= toIndex
+            ? slot.width
+            : 0;
+      if (other === slot || other.offset === offset) return;
+      other.offset = offset;
+      other.el.style.transform = offset === 0 ? "" : `translateX(${offset}px)`;
+    });
+  };
+
+  const scheduleFrame = (s: DragSession) => {
+    if (s.frame !== 0) return;
+    s.frame = requestAnimationFrame(() => {
+      s.frame = 0;
+      if (session === s) applyFrame(s);
+    });
+  };
+
+  const activate = (s: DragSession): boolean => {
+    if (!measure(s)) return false;
+    const scroller = host.scroller();
+    const slot = s.slots[s.index];
+    if (!scroller || !slot) return false;
+    s.active = true;
+    s.toIndex = s.index;
+    s.dx = inlineTranslateX(s.tab);
+    s.grab = s.startX - s.frameLeft + scroller.scrollLeft - (slot.left + s.dx);
+    s.multiGroup = document.querySelectorAll("[data-editor-group-id]").length > 1;
+    s.joins = [
+      s.tab.querySelector('[data-tab-join="left"]'),
+      s.tab.querySelector('[data-tab-join="right"]'),
+    ];
+    s.tab.dataset.dragging = "";
+    // A neighbour still settling from the last reorder lands now, or its
+    // animation would override the translation this drag writes.
+    for (const other of s.slots) {
+      if (other.el !== s.tab) stopSettling(other.el, false);
+    }
+    // Pointer-driven writes must land as written; a transition would trail.
+    for (const el of decorations(s)) {
+      if (el instanceof HTMLElement) el.style.transition = "none";
+    }
+    return true;
+  };
+
+  const detach = () => {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+    window.removeEventListener("blur", onBlur);
+  };
+
+  const finish = (commit: boolean, release: PointerEvent | null) => {
+    const s = session;
+    if (!s) return;
+    session = null;
+    detach();
+    if (s.frame !== 0) {
+      cancelAnimationFrame(s.frame);
+      s.frame = 0;
+    }
+    if (!s.active) {
+      // A press that never became a drag may still hold a frozen settle.
+      s.tab.style.transform = "";
+      return;
+    }
+    // A release counts where it happened, even when its frame never ran. A
+    // cancel, a missed release, or blur keeps the last painted preview.
+    if (release) {
+      s.pointerX = release.clientX;
+      s.pointerY = release.clientY;
+      applyFrame(s);
+    }
+    delete s.tab.dataset.dragging;
+    for (const el of decorations(s)) {
+      if (el instanceof HTMLElement) el.style.transition = "";
+    }
+    // Every tab resets without a slide: the displaced neighbours are about to
+    // re-render in their new slots, and the dragged tab settles through its
+    // own animation. Transitions return next frame, once the commit's render
+    // has landed and nothing is left to interpolate.
+    const slot = s.slots[s.index];
+    for (const other of s.slots) {
+      other.el.style.transition = "none";
+      if (other !== slot) other.el.style.transform = "";
+    }
+    requestAnimationFrame(() => {
+      for (const other of s.slots) other.el.style.transition = "";
+    });
+    const target = release && editorGroupAtPoint(release.clientX, release.clientY);
+    if (commit && target && target.groupId !== host.groupId()) {
+      s.tab.style.transform = "";
+      host.moveToGroup(target.groupId, s.path, target.toIndex);
+      return;
+    }
+    const visualLeft = slot ? slot.left + s.dx : 0;
+    if (!commit || !slot || s.toIndex === s.index) {
+      settleTab(s.tab, visualLeft);
+      host.sync();
+      return;
+    }
+    host.settle(s.tab, visualLeft);
+    host.move(s.path, s.toIndex);
+  };
+
+  const onPointerMove = (event: PointerEvent) => {
+    const s = session;
+    if (!s || s.pointerId !== event.pointerId) return;
+    // A mouse keeps one pointerId for life. If release was missed, a
+    // buttons-up move must end the drag before hovering can reorder.
+    if ((event.buttons & 1) === 0) {
+      finish(true, null);
+      return;
+    }
+    if (!s.active) {
+      if (
+        Math.hypot(event.clientX - s.startX, event.clientY - s.startY) <
+        DRAG_THRESHOLD
+      ) {
+        return;
+      }
+      if (!activate(s)) {
+        finish(false, null);
+        return;
+      }
+    }
+    s.pointerX = event.clientX;
+    s.pointerY = event.clientY;
+    scheduleFrame(s);
+  };
+  const onPointerUp = (event: PointerEvent) => {
+    if (session?.pointerId === event.pointerId) finish(true, event);
+  };
+  const onPointerCancel = (event: PointerEvent) => {
+    if (session?.pointerId === event.pointerId) finish(true, null);
+  };
+  const onBlur = () => finish(true, null);
+
+  return {
+    begin(event: ReactPointerEvent<HTMLElement>, path: string) {
+      // Finish the previous pointer's drag before arming this one; its
+      // listeners would otherwise end the new drag.
+      finish(true, null);
+      stopSettling(event.currentTarget, true);
+      session = {
+        pointerId: event.pointerId,
+        path,
+        tab: event.currentTarget,
+        startX: event.clientX,
+        startY: event.clientY,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
+        active: false,
+        slots: [],
+        index: -1,
+        toIndex: -1,
+        grab: 0,
+        dx: 0,
+        frameLeft: 0,
+        paneWidth: 0,
+        viewWidth: 0,
+        multiGroup: false,
+        frame: 0,
+        joins: [null, null],
+      };
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerCancel);
+      window.addEventListener("blur", onBlur);
+    },
+    active() {
+      return session?.active === true;
+    },
+    // The strip scrolled under the pointer: the tab's position and the
+    // corner radii depend on scrollLeft, so the next frame re-derives them.
+    scrolled() {
+      if (session?.active) scheduleFrame(session);
+    },
+    // The tab list or the strip's size changed under the drag: re-measure
+    // from clean positions and rebuild the preview. A dragged tab that left
+    // the strip (closed mid-drag) ends its drag without a commit.
+    refresh() {
+      const s = session;
+      if (!s?.active) return;
+      for (const other of s.slots) {
+        other.el.style.transform = "";
+        other.offset = 0;
+      }
+      if (!measure(s)) {
+        finish(false, null);
+        return;
+      }
+      s.toIndex = s.index;
+      // Force the transform write: the tab's own slot may have moved.
+      s.dx = Number.NaN;
+      applyFrame(s);
+    },
+    dispose() {
+      finish(false, null);
+    },
+  };
 }
 
 // The overlay thumb never shrinks below a grabbable pill (VS Code's minimum
@@ -352,8 +683,6 @@ function thumbWidth(strip: HTMLElement): number {
 // runtime-only and known for the active tab (the one mounted inspector
 // reports its save state). h-9: one header band height with the side panel
 // and Chats panel, so the three hairlines meet at the vertical seams.
-type DragPreview = { path: string; toIndex: number } | null;
-
 export const EditorTabs = memo(function EditorTabs(props: {
   groupId: string;
   groupNumber: number;
@@ -381,13 +710,23 @@ export const EditorTabs = memo(function EditorTabs(props: {
   onCloseGroup?: (groupId: string) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
-  const [dragPreview, setDragPreview] = useState<DragPreview>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  // The strip's frame spans the pane's full width; the scroller inside it
+  // starts at the pane's left edge, so a tab's offsetLeft is its content
+  // position and offsetLeft minus scrollLeft its distance from that edge.
+  const frameRef = useRef<HTMLDivElement | null>(null);
   // VS Code wheel behavior: a vertical wheel over the strip scrolls it
   // horizontally. Native listener because React registers `wheel` passive,
   // so preventDefault (needed once we consume the gesture) is a no-op there.
   // Keyed on `empty` — the strip renders null until a tab opens, so the
   // ref is only populated after that flip.
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const leftCornerRef = useRef<HTMLSpanElement | null>(null);
+  const rightCornerRef = useRef<HTMLSpanElement | null>(null);
+  // A committed reorder settles in the layout effect below, once the new
+  // order has rendered; a commit the shell rejects settles next frame.
+  const pendingSettle = useRef<{ tab: HTMLElement; left: number } | null>(null);
   // Overlay scrollbar (VS Code treatment): the native bar stays hidden
   // because a painted bar eats the 36px strip, so the visible affordance is
   // a thin thumb drawn over the strip's bottom edge — zero layout height,
@@ -404,6 +743,69 @@ export const EditorTabs = memo(function EditorTabs(props: {
   } | null>(null);
   const [thumbDragging, setThumbDragging] = useState(false);
   const empty = props.tabs.length === 0;
+
+  // Resting corner radii: the active tab's distance from each pane edge, or
+  // the full radius when no tab is near it. Skipped during a drag, which
+  // writes the same elements per frame.
+  const syncCorners = useRef<() => void>(() => {});
+  const tabDrag = useRef<ReturnType<typeof createTabDrag> | null>(null);
+  if (tabDrag.current === null) {
+    tabDrag.current = createTabDrag({
+      frame: () => frameRef.current,
+      scroller: () => stripRef.current,
+      paneCorners: () => [leftCornerRef.current, rightCornerRef.current],
+      groupId: () => latest.current.groupId,
+      move: (path, toIndex) =>
+        latest.current.onMove(latest.current.groupId, path, toIndex),
+      moveToGroup: (targetGroupId, path, toIndex) =>
+        latest.current.onMoveToGroup(
+          latest.current.groupId,
+          targetGroupId,
+          path,
+          toIndex,
+        ),
+      settle: (tab, left) => {
+        pendingSettle.current = { tab, left };
+        requestAnimationFrame(() => {
+          if (pendingSettle.current?.tab !== tab) return;
+          pendingSettle.current = null;
+          tab.style.transform = "";
+          syncCorners.current();
+        });
+      },
+      sync: () => syncCorners.current(),
+    });
+  }
+  const drag = tabDrag.current;
+  syncCorners.current = () => {
+    const frame = frameRef.current;
+    const scroller = stripRef.current;
+    if (!frame || !scroller || drag.active()) return;
+    const active = scroller.querySelector<HTMLElement>('[role="tab"][data-active]');
+    let left = Number.POSITIVE_INFINITY;
+    let right = Number.POSITIVE_INFINITY;
+    if (active) {
+      left = active.offsetLeft - scroller.scrollLeft;
+      right = frame.clientWidth - (left + active.offsetWidth);
+    }
+    setCornerRadius(active?.querySelector('[data-tab-join="left"]') ?? null, cornerRadius(left));
+    setCornerRadius(leftCornerRef.current, cornerRadius(left));
+    setCornerRadius(active?.querySelector('[data-tab-join="right"]') ?? null, cornerRadius(right));
+    setCornerRadius(rightCornerRef.current, cornerRadius(right));
+  };
+  useEffect(() => () => drag.dispose(), [drag]);
+  useLayoutEffect(() => {
+    if (drag.active()) {
+      drag.refresh();
+      return;
+    }
+    const pending = pendingSettle.current;
+    if (!pending) return;
+    pendingSettle.current = null;
+    if (pending.tab.isConnected) settleTab(pending.tab, pending.left);
+    syncCorners.current();
+  }, [drag, props.tabs]);
+
   useEffect(() => {
     const strip = stripRef.current;
     if (empty || !strip) return;
@@ -429,8 +831,10 @@ export const EditorTabs = memo(function EditorTabs(props: {
   useEffect(() => {
     const strip = stripRef.current;
     const thumb = thumbRef.current;
-    if (empty || !strip || !thumb) return;
+    if (!strip || !thumb) return;
     const measure = () => {
+      drag.scrolled();
+      syncCorners.current();
       const maxScroll = strip.scrollWidth - strip.clientWidth;
       if (maxScroll <= 0) {
         thumb.style.display = "none";
@@ -449,15 +853,21 @@ export const EditorTabs = memo(function EditorTabs(props: {
     // tab width — the observer covers the container resizing under the same
     // tabs (panel toggle, window resize).
     const resize =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            drag.refresh();
+            measure();
+          });
     resize?.observe(strip);
     return () => {
       strip.removeEventListener("scroll", measure);
       resize?.disconnect();
     };
-  }, [empty, props.tabs, props.activeTabDirty]);
+  }, [drag, props.tabs, props.activeTab, props.activeTabDirty]);
   return (
     <div
+      ref={frameRef}
       data-testid="editor-tabs"
       className="group/strip relative flex h-9 shrink-0 bg-panel-2"
     >
@@ -478,17 +888,10 @@ export const EditorTabs = memo(function EditorTabs(props: {
               (tab.path === props.activeTab && props.activeTabDirty) ||
               props.recoveryPaths.has(tab.path)
             }
-            dragging={dragPreview?.path === tab.path}
-            dropBefore={
-              dragPreview !== null &&
-              props.tabs[dragPreview.toIndex]?.path === tab.path
-            }
             onActivate={props.onActivate}
             onClose={props.onClose}
             onContextMenu={props.onContextMenu}
-            setDragPreview={setDragPreview}
-            onMove={props.onMove}
-            onMoveToGroup={props.onMoveToGroup}
+            onDragStart={drag.begin}
           />
         ))}
         {/* Continues the hairline across the empty strip — only the active
@@ -517,6 +920,35 @@ export const EditorTabs = memo(function EditorTabs(props: {
       >
         <Columns2 size={14} aria-hidden />
       </button>
+      {/* The pane's top corners, drawn over the editor body just below the
+          strip. They hang off the strip so the drag that morphs them writes
+          one element tree; the editor's own box keeps square corners and
+          never repaints for them. Each sits one pixel past the pane edge so
+          its arc meets the neighbouring line, and the band clips that pixel
+          horizontally: past the window edge it would give the document a
+          scrollbar. The band stacks under the active tab (z-10) and over
+          the editor body. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-[calc(100%-1px)] z-[5] h-[9px] overflow-x-clip"
+      >
+        <span
+          ref={leftCornerRef}
+          data-pane-corner="left"
+          data-arc="tl"
+          className={`${PANE_CORNER} -left-px`}
+        >
+          <span className={`${PANE_CORNER_ARC} border-l`} />
+        </span>
+        <span
+          ref={rightCornerRef}
+          data-pane-corner="right"
+          data-arc="tr"
+          className={`${PANE_CORNER} -right-px`}
+        >
+          <span className={`${PANE_CORNER_ARC} border-r`} />
+        </span>
+      </div>
       {/* The overlay scrollbar thumb. Sibling of the scroller (a child would
           scroll away with the content); width/position are set by the
           measure effect, so it only ever paints when the strip overflows.
