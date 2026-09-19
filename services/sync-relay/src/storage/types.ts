@@ -567,7 +567,7 @@ export interface SyncRelayStorage {
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   listCurrentServiceHostEnrollments(workspaceId: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  listServiceHostCandidateShares(limit?: number): readonly SyncRelayShareRow[];
+  scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   publishAppPublication(input: import("./publications").PublishAppPublicationInput): import("./publications").AppPublicationRow;
   approveAppCollection(input: import("./appCollections").ApproveAppCollectionInput): {publicationId:string;authorityRevision:number;capability:import("@dohc/security-contract/app-publication").AppCollectionCapability|null};

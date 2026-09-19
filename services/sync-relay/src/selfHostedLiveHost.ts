@@ -38,6 +38,7 @@ export async function startSelfHostedLiveHost(options: {
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined, closing = false, active: Promise<void> | undefined, timer: ReturnType<typeof setTimeout> | undefined;
   let signature = "", lastError: unknown, requested = false;
+  let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   const lifetime = new AbortController();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
@@ -61,7 +62,7 @@ export async function startSelfHostedLiveHost(options: {
     requested = false;
     try {
       signal.throwIfAborted();
-      discoverServiceHostDocuments(storage, options.onError);
+      discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
       const rows = selection(), next = selectionSignature(rows);
       if (next === signature && (rows.length === 0 || (current && !current.invalidated.aborted))) return;
       const grouped = new Map<string, ServiceHostEnrollment>();

@@ -37,6 +37,8 @@ const ACTIVE_INDEX = "idx_sync_relay_service_host_enrollments_active";
 const ACTIVE_INDEX_SQL = `CREATE INDEX ${ACTIVE_INDEX} ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=0`;
 const RETIRED_INDEX = "idx_sync_relay_service_host_enrollments_retired";
 const RETIRED_INDEX_SQL = `CREATE INDEX ${RETIRED_INDEX} ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1`;
+const CANDIDATE_INDEX = "idx_sync_relay_shares_service_candidates";
+const CANDIDATE_INDEX_SQL = `CREATE INDEX ${CANDIDATE_INDEX} ON sync_relay_shares(workspace_id,share_id)`;
 
 export interface ServiceHostEnrollment {
   readonly workspaceId: string;
@@ -58,6 +60,8 @@ export interface EnrollServiceHostDocumentInput {
 export interface SetServiceHostEnrollmentEnabledInput {
   workspaceId: string; path: string; ownerUserId: string; enabled: boolean; retire?: boolean; nowMs: number; guard(): void;
 }
+export interface ServiceHostCandidateCursor {workspaceId: string; shareId: string}
+export interface ServiceHostCandidatePage {shares: readonly SyncRelayShareRow[]; nextCursor: ServiceHostCandidateCursor | null}
 function timestamp(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Invalid service host enrollment timestamp.");
   return value;
@@ -85,16 +89,19 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
     db.exec(SQL);
     db.exec(ACTIVE_INDEX_SQL);
     db.exec(RETIRED_INDEX_SQL);
+    db.exec(CANDIDATE_INDEX_SQL);
   } else if (!existing || existing.type !== "table" || typeof existing.sql !== "string" ||
     existing.sql.replace(/\s+/g, " ").trim() !== SQL.replace(/\s+/g, " ").trim()) throw new Error("Service host enrollment storage is damaged.");
   const indexes = db.prepare(`PRAGMA index_list(${SERVICE_HOST_ENROLLMENTS})`).all();
   const activeIndex = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(ACTIVE_INDEX);
   const retiredIndex = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(RETIRED_INDEX);
+  const candidateIndex = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(CANDIDATE_INDEX);
   if (indexes.length !== 4 || indexes.some(index => index.name === ACTIVE_INDEX || index.name === RETIRED_INDEX
     ? index.unique !== 0 || index.partial !== 1 || index.origin !== "c"
     : index.unique !== 1 || index.partial !== 0 || (index.origin !== "pk" && index.origin !== "u")) ||
     typeof activeIndex?.sql !== "string" || activeIndex.sql.replace(/\s+/g, " ").trim() !== ACTIVE_INDEX_SQL.replace(/\s+/g, " ").trim() ||
     typeof retiredIndex?.sql !== "string" || retiredIndex.sql.replace(/\s+/g, " ").trim() !== RETIRED_INDEX_SQL.replace(/\s+/g, " ").trim() ||
+    typeof candidateIndex?.sql !== "string" || candidateIndex.sql.replace(/\s+/g, " ").trim() !== CANDIDATE_INDEX_SQL.replace(/\s+/g, " ").trim() ||
     db.prepare(`PRAGMA foreign_key_check(${SERVICE_HOST_ENROLLMENTS})`).all().length ||
     db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name=?").get(SERVICE_HOST_ENROLLMENTS)) throw new Error("Service host enrollment constraints are damaged.");
   if (!marked) db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(MIGRATION, Date.now());
@@ -239,19 +246,20 @@ export function serviceHostDocumentEnabled(storage: StorageContext, document: {w
     value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream);
 }
 
-export function listServiceHostCandidateShares(storage: StorageContext, limit = SERVICE_HOST_MAX_DOCUMENTS): readonly SyncRelayShareRow[] {
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SERVICE_HOST_MAX_DOCUMENTS) throw new Error("Invalid service host discovery limit.");
+export function scanServiceHostCandidateShares(storage: StorageContext, after?: ServiceHostCandidateCursor): ServiceHostCandidatePage {
+  const workspaceId = after === undefined ? "" : parseWorkspaceId(after.workspaceId), shareId = after === undefined ? "" : parseLiveUpdateIdentifier(after.shareId, "share ID");
   return storage.readTx(() => {
-    const values = storage.db.prepare(`SELECT s.* FROM sync_relay_shares s JOIN sync_relay_workspaces w USING(workspace_id)
-      WHERE s.granter_user_id=w.owner_user_id AND w.replication_epoch IS NOT NULL AND w.stream_identity IS NOT NULL
+    const values = storage.db.prepare(`SELECT s.* FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX} JOIN sync_relay_workspaces w USING(workspace_id)
+      WHERE (s.workspace_id,s.share_id)>(?,?) AND s.granter_user_id=w.owner_user_id AND w.replication_epoch IS NOT NULL AND w.stream_identity IS NOT NULL
         AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')
-      ORDER BY s.workspace_id,s.share_id LIMIT ?`).all(limit + 1);
-    if (values.length > limit) throw new Error("Service host share discovery capacity is full.");
-    return values.flatMap(value => {
+      ORDER BY s.workspace_id,s.share_id LIMIT ?`).all(workspaceId, shareId, SERVICE_HOST_MAX_DOCUMENTS + 1);
+    const page = values.slice(0, SERVICE_HOST_MAX_DOCUMENTS), last = page.at(-1);
+    const shares = page.flatMap(value => {
       const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
         selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
       const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
       return selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) ? [share] : [];
     });
+    return {shares, nextCursor: values.length > SERVICE_HOST_MAX_DOCUMENTS && last ? {workspaceId: String(last.workspace_id), shareId: String(last.share_id)} : null};
   });
 }

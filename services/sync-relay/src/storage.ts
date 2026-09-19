@@ -356,8 +356,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listCurrentServiceHostEnrollments(workspaceId: string) {
     return serviceHostEnrollmentStorage.listCurrentServiceHostEnrollments(this, workspaceId);
   }
-  listServiceHostCandidateShares(limit?: number) {
-    return serviceHostEnrollmentStorage.listServiceHostCandidateShares(this, limit);
+  scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor) {
+    return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after);
   }
   setServiceHostEnrollmentEnabled(input: serviceHostEnrollmentStorage.SetServiceHostEnrollmentEnabledInput) {
     return serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);

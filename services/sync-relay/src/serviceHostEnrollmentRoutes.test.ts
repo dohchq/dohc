@@ -177,3 +177,21 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   expect((await f.handle(f.request("POST", {path: "docs/missing.md"}))).status).toBe(404);
   expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&retired=1"))).status).toBe(404);
 });
+
+it("discovers a new document after more than 64 prior shares without reviving retired enrollment", async () => {
+  const f = await fixture(); f.storage.enrollServiceHostDocument(f.input);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
+  for (let index = 0; index < 65; index++) {
+    const shareId = `old-${String(index).padStart(3, "0")}`;
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
+    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?")
+      .run(`grant-${index}`, shareId, scope.grantId);
+  }
+  const cursor = discoverServiceHostDocuments(f.storage);
+  expect(cursor).not.toBeNull(); expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  f.seed("docs/b.md", "object-b");
+  const last = discoverServiceHostDocuments(f.storage, undefined, cursor!);
+  expect(last).toBeNull();
+  expect(f.storage.listServiceHostEnrollments().map(row => row.path)).toEqual(["docs/b.md"]);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)?.retired).toBe(true);
+});

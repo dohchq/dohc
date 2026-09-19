@@ -126,17 +126,17 @@ it("service tokens are workspace, deployment and key bound and never authorize a
 it("discovers only current owner main-path edit shares and leaves paused enrollments paused", async () => {
   const f = await fixture();
   f.enroll(); f.setEnabled(false);
-  expect(f.storage.listServiceHostCandidateShares().map(row => row.shareId)).toEqual([scope.shareId]);
+  expect(f.storage.scanServiceHostCandidateShares().shares.map(row => row.shareId)).toEqual([scope.shareId]);
   expect(f.storage.listServiceHostEnrollments()[0]!.enabled).toBe(false);
   f.raw.prepare("UPDATE sync_relay_share_grants SET access='read' WHERE share_id=?").run(scope.shareId);
-  expect(f.storage.listServiceHostCandidateShares()).toEqual([]);
+  expect(f.storage.scanServiceHostCandidateShares().shares).toEqual([]);
   f.raw.prepare("UPDATE sync_relay_share_grants SET access='edit',status='revoked',revoked_at_ms=20 WHERE share_id=?").run(scope.shareId);
-  expect(f.storage.listServiceHostCandidateShares()).toEqual([]);
+  expect(f.storage.scanServiceHostCandidateShares().shares).toEqual([]);
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='active',revoked_at_ms=NULL WHERE share_id=?").run(scope.shareId);
   f.raw.prepare("UPDATE sync_relay_shares SET granter_user_id='other' WHERE share_id=?").run(scope.shareId);
-  expect(f.storage.listServiceHostCandidateShares()).toEqual([]);
+  expect(f.storage.scanServiceHostCandidateShares().shares).toEqual([]);
   f.raw.prepare("UPDATE sync_relay_shares SET granter_user_id='owner-1',selector_json=? WHERE share_id=?").run(JSON.stringify({paths: ["docs"], versionId: "branch"}), scope.shareId);
-  expect(f.storage.listServiceHostCandidateShares()).toEqual([]);
+  expect(f.storage.scanServiceHostCandidateShares().shares).toEqual([]);
 });
 
 it("does not replace a retained object when its path is reused or follow its rename implicitly", async () => {
@@ -250,4 +250,21 @@ it("pages retired documents by path without mixing workspaces or active rows", a
   expect(f.storage.listRetiredServiceHostEnrollments("other")).toEqual({documents: [], nextCursor: null});
   expect(() => f.storage.listRetiredServiceHostEnrollments(scope.workspaceId, "docs/../bad.md")).toThrow();
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
+});
+
+it("candidate scanning advances past a full page of noncanonical shares", async () => {
+  const f = await fixture();
+  for (let i = 0; i < 65; i++) {
+    const shareId = `candidate-${String(i).padStart(2,"0")}`;
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
+      .run(shareId, scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: i < 64 ? "branch" : null}));
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES (?,?,'user','reader',NULL,'edit',1,'active',0,NULL,NULL)`).run(`grant-${shareId}`, shareId);
+  }
+  const first = f.storage.scanServiceHostCandidateShares();
+  expect(first.shares).toEqual([]);
+  expect(first.nextCursor).toEqual({workspaceId: scope.workspaceId, shareId: "candidate-63"});
+  const second = f.storage.scanServiceHostCandidateShares(first.nextCursor!);
+  expect(second.shares.map(share => share.shareId)).toEqual(["candidate-64", scope.shareId]);
+  expect(second.nextCursor).toBeNull();
 });

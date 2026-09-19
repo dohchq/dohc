@@ -22,9 +22,11 @@ export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspa
   return paths;
 }
 
-export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefused?: (error: RelayError) => void): void {
+export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefused?: (error: RelayError) => void,
+  after?: {workspaceId: string; shareId: string}): {workspaceId: string; shareId: string} | null {
   const existing = new Set(storage.listServiceHostEnrollments().map(row => JSON.stringify([row.workspaceId, row.path])));
-  for (const share of storage.listServiceHostCandidateShares()) {
+  const page = storage.scanServiceHostCandidateShares(after);
+  for (const share of page.shares) {
     const ownerUserId = share.granterUserId;
     let paths: string[];
     try {paths = serviceHostSharePaths(storage, {...share, ownerUserId});}
@@ -37,6 +39,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
       existing.add(key);
     }
   }
+  return page.nextCursor;
 }
 
 export function createServiceHostEnrollmentRoutes(options: {

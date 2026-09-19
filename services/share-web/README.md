@@ -138,6 +138,8 @@ Pausing retains its state and stops live authorization immediately.
 
 The profile runs up to 64 documents across 16 workspaces, including paused documents.
 Stopping live editing retires an enrollment and frees its slot. The server keeps acknowledged history and native state.
+In desktop Settings, open **Sync and sharing**, then **Live documents**.
+Choose **Stop live editing** for a document, or **Resume live editing** for a stopped document.
 Retirement stops live editing for that document. It does not revoke its share grants or delete settled shared files.
 An owner can resume the same document at the same path while capacity is available.
 Active live documents must keep their original paths. Moving, deleting, or replacing one makes its live enrollment unavailable.
