@@ -12,6 +12,7 @@ installer has passed the [release rehearsal](../how-to/desktop-release.md).
 | Browser access through a share link | Reachable share-web and relay services, with the owner's selected access. |
 | Shared live document editing | A configured session host and the relay's required admission settings. |
 | Publish an app from the packaged desktop | Windows x64 and a server configured to accept app publishing. |
+| Run the bundled MCP launcher | Node.js installed and available on `PATH`. The desktop runtime does not supply Node to MCP. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 
 The release workflow builds Windows x64, macOS x64, macOS arm64, and Linux x64.
