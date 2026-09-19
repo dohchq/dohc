@@ -4625,6 +4625,7 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
 
     await screen.findByTestId("view-csv");
+    await act(async () => Promise.resolve());
     const parse = vi.spyOn(delimitedTextCodec, "parse");
     const serialize = vi.spyOn(delimitedTextCodec, "serialize");
     try {
