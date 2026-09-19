@@ -47,7 +47,17 @@ const message = {
   authorDisplayName: "Nova",
   body: "On it.",
   createdAtMs: 20,
+  attachments: [{ objectId: "object_1", pathHint: "notes/agenda.md" }],
+  needsDecision: true,
+  decisionState: "resolved" as const,
+  options: ["Ship", "Hold"],
+  chosenOption: "Ship",
+  resolvedByMessageId: "message-2",
+  parentMessageId: "message-0",
 };
+
+const PROVENANCE_WARNING =
+  "Message posted, but agent-run provenance could not be recorded after 3 attempts; recovery will continue in the background.";
 
 const results = {
   moments: {
@@ -100,26 +110,24 @@ const results = {
       },
     ],
   },
-  startChannelChat: {
-    ok: true,
-    channel: { id: "channel-1", name: "General", slug: "general" },
-    thread,
-    message,
+  // The desktop answers post/reply with the CLI's short display handles.
+  post: {
+    channel: { id: "ch_1", name: "General", slug: "general", kind: "channel" as const },
+    threadId: "th_2",
+    messageId: "msg_2",
+    title: "Agenda review",
   },
-  replyToChat: {
-    ok: true,
-    message,
+  reply: {
+    threadId: "th_1",
+    messageId: "msg_3",
+    parentMessageId: "msg_1",
+    resolvedMessageId: "msg_1",
+    warning: PROVENANCE_WARNING,
   },
 } satisfies {
   [Verb in Extract<
     CliVerb,
-    | "moments"
-    | "moment"
-    | "fileChats"
-    | "chat"
-    | "channelsFull"
-    | "startChannelChat"
-    | "replyToChat"
+    "moments" | "moment" | "fileChats" | "chat" | "channelsFull" | "post" | "reply"
   >]: CliResultByVerb[Verb];
 };
 
@@ -136,17 +144,25 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   }
 }
 
+function recordingContext(base: ToolContext): {
+  ctx: ToolContext;
+  requests: CliRequestWithoutToken[];
+} {
+  const requests: CliRequestWithoutToken[] = [];
+  const ctx: ToolContext = {
+    ...base,
+    request: vi.fn(async (request: CliRequestWithoutToken) => {
+      requests.push(request);
+      return results[request.verb as keyof typeof results];
+    }),
+  };
+  return { ctx, requests };
+}
+
 describe("desktop CLI proxy", () => {
-  it("maps all seven engine-backed tools to their CLI verbs with the MCP workspace and agent actor", async () => {
+  it("maps the engine-backed read tools to their CLI verbs with the MCP workspace and agent actor", async () => {
     await withWorkspace(async (base) => {
-      const requests: CliRequestWithoutToken[] = [];
-      const ctx: ToolContext = {
-        ...base,
-        request: vi.fn(async (request: CliRequestWithoutToken) => {
-          requests.push(request);
-          return results[request.verb as keyof typeof results];
-        }),
-      };
+      const { ctx, requests } = recordingContext(base);
 
       await expect(listChanges(ctx, { sinceMs: 5, limit: 20, includeFiles: true }))
         .resolves.toEqual(results.moments);
@@ -154,12 +170,6 @@ describe("desktop CLI proxy", () => {
       await expect(listFileChats(ctx, { path: moment.path })).resolves.toEqual(results.fileChats);
       await expect(readChat(ctx, { threadId: thread.id })).resolves.toEqual(results.chat);
       await expect(listChannels(ctx)).resolves.toEqual(results.channelsFull);
-      await expect(
-        startChannelChat(ctx, { channel: "general", title: "Agenda review", body: "On it." }),
-      ).resolves.toEqual(results.startChannelChat);
-      await expect(
-        replyToChat(ctx, { threadId: thread.id, body: "On it." }),
-      ).resolves.toEqual(results.replyToChat);
 
       expect(requests.map((request) => request.verb)).toEqual([
         "moments",
@@ -167,42 +177,17 @@ describe("desktop CLI proxy", () => {
         "fileChats",
         "chat",
         "channelsFull",
-        "startChannelChat",
-        "replyToChat",
       ]);
-      expect(requests).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            verb: "moments",
-            args: {
-              cwd: base.root,
-              actor: "agent",
-              sinceMs: 5,
-              limit: 20,
-              includeFiles: true,
-            },
-          }),
-          expect.objectContaining({
-            verb: "startChannelChat",
-            args: {
-              cwd: base.root,
-              actor: "agent",
-              channel: "general",
-              title: "Agenda review",
-              body: "On it.",
-            },
-          }),
-          expect.objectContaining({
-            verb: "replyToChat",
-            args: {
-              cwd: base.root,
-              actor: "agent",
-              threadId: thread.id,
-              body: "On it.",
-            },
-          }),
-        ]),
-      );
+      expect(requests[0]).toMatchObject({
+        verb: "moments",
+        args: {
+          cwd: base.root,
+          actor: "agent",
+          sinceMs: 5,
+          limit: 20,
+          includeFiles: true,
+        },
+      });
       for (const request of requests) {
         expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
         expect(request.args).toMatchObject({ cwd: base.root, actor: "agent" });
@@ -210,16 +195,150 @@ describe("desktop CLI proxy", () => {
     });
   });
 
-  it("preserves structured desktop failures instead of replacing them", async () => {
+  it("sends chat writes as the CLI post and reply verbs with every option the CLI accepts", async () => {
+    await withWorkspace(async (base) => {
+      const { ctx, requests } = recordingContext(base);
+
+      await startChannelChat(ctx, { channel: "general", title: "Agenda review", body: "On it." });
+      await startChannelChat(ctx, {
+        channel: "#general",
+        body: "Ship it?",
+        attachments: ["notes/agenda.md"],
+        needsDecision: true,
+        options: ["Ship", "Hold"],
+        runId: "run_1",
+      });
+      await replyToChat(ctx, { threadId: thread.id, body: "On it." });
+      await replyToChat(ctx, {
+        threadId: thread.id,
+        to: message.id,
+        resolve: message.id,
+        choose: "Ship",
+        attachments: ["notes/agenda.md"],
+        needsDecision: true,
+        options: ["Ship", "Hold"],
+        runId: "run_1",
+        body: "Shipping.",
+      });
+
+      // The bare call carries the CLI's own defaults: no attachments, no
+      // decision, no run. Nothing is invented on the agent's behalf.
+      expect(requests.map((request) => [request.verb, request.args])).toEqual([
+        ["post", {
+          cwd: base.root,
+          actor: "agent",
+          channel: "general",
+          title: "Agenda review",
+          attachments: [],
+          needsDecision: false,
+          body: "On it.",
+        }],
+        ["post", {
+          cwd: base.root,
+          actor: "agent",
+          runId: "run_1",
+          channel: "#general",
+          attachments: ["notes/agenda.md"],
+          needsDecision: true,
+          options: ["Ship", "Hold"],
+          body: "Ship it?",
+        }],
+        ["reply", {
+          cwd: base.root,
+          actor: "agent",
+          thread: thread.id,
+          attachments: [],
+          needsDecision: false,
+          body: "On it.",
+        }],
+        ["reply", {
+          cwd: base.root,
+          actor: "agent",
+          runId: "run_1",
+          thread: thread.id,
+          to: message.id,
+          resolve: message.id,
+          choose: "Ship",
+          attachments: ["notes/agenda.md"],
+          needsDecision: true,
+          options: ["Ship", "Hold"],
+          body: "Shipping.",
+        }],
+      ]);
+      for (const request of requests) {
+        expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
+      }
+    });
+  });
+
+  it("omits CLI display aliases from the posted channel descriptor", async () => {
     await withWorkspace(async (base) => {
       const ctx: ToolContext = {
         ...base,
-        request: async () => ({ ok: false, reason: "channel is read-only" }),
+        request: async () => ({
+          ...results.post,
+          channel: { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent" },
+        }),
+      };
+      const result = await startChannelChat(ctx, { channel: "my-agent", body: "On it." });
+      expect(result).toMatchObject({
+        ok: true,
+        channel: { id: "channel-agent", slug: "my-agent", kind: "agent" },
+      });
+      if (!result.ok) throw new Error(result.reason);
+      expect(result.channel).not.toHaveProperty("name");
+    });
+  });
+
+  it("returns engine ids from chat writes so dohc_read_chat and dohc_list_channels accept them", async () => {
+    await withWorkspace(async (base) => {
+      const { ctx } = recordingContext(base);
+
+      await expect(
+        startChannelChat(ctx, { channel: "general", body: "On it." }),
+      ).resolves.toEqual({
+        ok: true,
+        channel: { id: "channel-1", slug: "general", kind: "channel" },
+        threadId: "thread-2",
+        messageId: "message-2",
+        title: "Agenda review",
+      });
+      // A partial success (posted, provenance still pending) stays visible.
+      await expect(
+        replyToChat(ctx, { threadId: thread.id, body: "On it." }),
+      ).resolves.toEqual({
+        ok: true,
+        threadId: "thread-1",
+        messageId: "message-3",
+        parentMessageId: "message-1",
+        resolvedMessageId: "message-1",
+        warning: PROVENANCE_WARNING,
+      });
+    });
+  });
+
+  it("reports a desktop refusal as a failed tool result carrying the desktop's reason", async () => {
+    await withWorkspace(async (base) => {
+      const ctx: ToolContext = {
+        ...base,
+        request: async (request) => {
+          throw new DohcCliError(
+            request.verb === "post"
+              ? "dohc: no such channel: nope"
+              : "dohc: message is not an open decision: msg_1",
+          );
+        },
       };
 
       await expect(
-        startChannelChat(ctx, { channel: "general", body: "Must not post" }),
-      ).resolves.toEqual({ ok: false, reason: "channel is read-only" });
+        startChannelChat(ctx, { channel: "nope", body: "Must not post" }),
+      ).resolves.toEqual({ ok: false, reason: "dohc: no such channel: nope" });
+      await expect(
+        replyToChat(ctx, { threadId: thread.id, resolve: message.id, body: "Must not post" }),
+      ).resolves.toEqual({
+        ok: false,
+        reason: "dohc: message is not an open decision: msg_1",
+      });
     });
   });
 
@@ -234,6 +353,10 @@ describe("desktop CLI proxy", () => {
         ok: false,
         reason: expect.stringContaining("Invalid discriminator value"),
       });
+      // A malformed write response is never widened into a success.
+      await expect(
+        startChannelChat(ctx, { channel: "general", body: "On it." }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });
     });
   });
 
@@ -241,19 +364,19 @@ describe("desktop CLI proxy", () => {
     await withWorkspace(async (base) => {
       await writeFile(join(base.home, "dohc-cloud.json"), "{ deliberately invalid");
       await writeFile(join(base.home, "dohc-settings.json"), "{ deliberately invalid");
-      const request = vi.fn(async () => results.replyToChat);
+      const request = vi.fn(async () => results.reply);
       const ctx: ToolContext = { ...base, request };
 
       await expect(
         replyToChat(ctx, { threadId: thread.id, body: "Identity belongs to main." }),
-      ).resolves.toEqual(results.replyToChat);
+      ).resolves.toMatchObject({ ok: true, messageId: "message-3" });
       expect(request).toHaveBeenCalledOnce();
     });
   });
 });
 
 describe("desktop unavailable failures", () => {
-  it("write tool with desktop down returns ok:false and does not touch the filesystem", async () => {
+  it("write tools with desktop down return ok:false and do not touch the filesystem", async () => {
     await withWorkspace(async (base) => {
       const ctx: ToolContext = {
         ...base,
@@ -262,6 +385,12 @@ describe("desktop unavailable failures", () => {
         },
       };
 
+      await expect(
+        startChannelChat(ctx, { channel: "general", body: "Must not be stored" }),
+      ).resolves.toEqual({
+        ok: false,
+        reason: DOHC_TRANSPORT_UNAVAILABLE_REASON,
+      });
       await expect(
         replyToChat(ctx, { threadId: thread.id, body: "Must not be stored" }),
       ).resolves.toEqual({

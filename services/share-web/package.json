@@ -27,6 +27,7 @@
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "@excalidraw/excalidraw": "0.18.1",
+    "@modelcontextprotocol/server": "2.0.0",
     "better-auth": "^1.6.26",
     "dompurify": "3.4.13",
     "marked": "17.0.6",
@@ -34,11 +35,13 @@
     "react-dom": "^19.2.8",
     "tldts": "7.0.30",
     "ws": "8.21.3",
-    "yjs": "13.6.30"
+    "yjs": "13.6.30",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@dohc/sync-relay": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
     "@types/pg": "^8.20.4",
