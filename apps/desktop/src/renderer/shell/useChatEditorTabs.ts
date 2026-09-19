@@ -97,7 +97,12 @@ export function useChatEditorTabs(input: {
     const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
       (nav.level === "channel" || nav.level === "feed" ||
         (nav.level === "dm" && !nav.focusMessageId));
-    if (!focusOnly) {
+    if (focusOnly && nav.level === "dm" && entry.nav?.level === "dm" &&
+      JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)) {
+      entry.nav = { ...entry.nav, dm: nav.dm };
+      entry.revision += 1;
+      render((value) => value + 1);
+    } else if (!focusOnly) {
       if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) entry.drafts = undefined;
       if (chatsNavigationRequiresRemount(entry.nav ?? null, nav)) entry.revision += 1;
       entry.nav = nav;

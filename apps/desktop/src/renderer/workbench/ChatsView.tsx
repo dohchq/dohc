@@ -1132,6 +1132,7 @@ export function ChatsView(props: {
           setDms(keepIfUnchanged(result.dms));
           setPendingDmRequests(keepIfUnchanged(result.pending));
           setDeclinedDmRequests(keepIfUnchanged(result.declined));
+          setDmRestoreReady(true);
           if (keepAcceptedNoticeRef.current) {
             keepAcceptedNoticeRef.current = false;
           } else {
@@ -1139,8 +1140,6 @@ export function ChatsView(props: {
           }
         } catch {
           // DMs are optional: Chats stays fully usable without them.
-        } finally {
-          if (token === liveToken.current && session === sessionGeneration.current) setDmRestoreReady(true);
         }
       } while (
         mine.pending &&

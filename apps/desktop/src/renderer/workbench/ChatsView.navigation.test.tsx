@@ -24,6 +24,19 @@ import {
 // conversation via initialNav — consumed once, loaded through the same
 // openChannel/openThread path a click would take.
 describe("ChatsView expand-to-tab", () => {
+  it("restores a DM after a failed lookup succeeds on an activity retry", async () => {
+    bridgeMock.syncDms.mockRejectedValueOnce(new Error("offline"));
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+    });
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByTestId("chats-page-empty")).toBeNull();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    await act(async () => emitWorkspaceActivity());
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+  });
+
   it("keeps a restored DM loading until its lookup settles", async () => {
     const pending = deferred<{ available: boolean; dms: ReturnType<typeof dm>[] }>();
     bridgeMock.syncDms.mockImplementation(() => pending.promise);

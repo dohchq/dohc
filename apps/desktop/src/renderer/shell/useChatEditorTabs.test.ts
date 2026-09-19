@@ -181,6 +181,26 @@ describe("chat editor tabs", () => {
     expect(editor.drafts).toBe(draft);
   });
 
+  it("refreshes a focused DM's metadata while keeping its draft and message position", () => {
+    const onOpen = vi.fn();
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
+    }));
+    act(() => result.current.open({ ...dm, focusMessageId: "message" }));
+    const editor = result.current.get(chatEditorPath(dm));
+    act(() => editor.onDraftsChange(draft));
+    const before = editor.revision;
+    const ended = { ...dm.dm, connected: false, peerLabel: "Alice updated" };
+    act(() => result.current.open({ level: "dm", dm: ended }));
+    expect(result.current.get(chatEditorPath(dm))).toBe(editor);
+    expect(editor.nav).toEqual({ level: "dm", dm: ended, focusMessageId: "message" });
+    expect(editor.drafts).toBe(draft);
+    expect(editor.revision).toBe(before + 1);
+    expect(result.current.titles.get(chatEditorPath(dm))).toBe("Alice updated");
+    act(() => result.current.open({ level: "dm", dm: { ...ended } }));
+    expect(editor.revision).toBe(before + 1);
+  });
+
   it("drops callbacks and restored titles from a previous workspace", async () => {
     const pending = deferred<{ channels: typeof general.channel[]; fileThreads: [] }>();
     vi.stubGlobal("dohcDesktop", { onCloudSessionChanged: () => () => {}, listChatChannels: vi.fn(() => pending.promise) });
