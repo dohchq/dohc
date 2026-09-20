@@ -1,5 +1,6 @@
 {
   "name": "@dohc/yrs-spike-scripts",
+  "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "description": "Node driver for the yrs/Yjs interoperability spike (R11 abort criterion). Runs the fidelity corpus + harvested fixtures through the Rust yrs harness and the seeded alternating-driver fuzz.",

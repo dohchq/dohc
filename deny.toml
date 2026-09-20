@@ -49,8 +49,8 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
-# Our own workspace crates are unpublished (publish = false) and carry no
-# `license` field; skip license evaluation for them.
+# Our own unpublished workspace crates declare AGPL-3.0-only. This allowlist
+# checks third-party dependencies, so skip those workspace crates.
 private = { ignore = true }
 
 [bans]

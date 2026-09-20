@@ -40,6 +40,7 @@ file-guard = { path = "vendor/file-guard-0.2.0" }
 # baseline), so each crate declares its own edition.
 [workspace.package]
 version = "0.1.0"
+license = "AGPL-3.0-only"
 rust-version = "1.85"
 publish = false
 

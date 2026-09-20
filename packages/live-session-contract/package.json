@@ -1,5 +1,6 @@
 {
   "name": "@dohc/live-session-contract",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

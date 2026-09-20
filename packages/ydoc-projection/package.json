@@ -1,5 +1,6 @@
 {
   "name": "@dohc/ydoc-projection",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

@@ -6,6 +6,7 @@
 # silently reopen interop divergence):
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below)
 [package]
+license.workspace = true
 name = "dohc-yrs-spike"
 version.workspace = true
 # edition/rust-version stay pinned to this crate's yrs 0.27.3 spike baseline

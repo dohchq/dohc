@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "dohc-fuzz-targets"
 version.workspace = true
 edition = "2024"
