@@ -2,8 +2,15 @@ import type { IncomingHttpHeaders } from "node:http";
 import { isIP } from "node:net";
 
 function address(value: string): string | null {
-  const normalized = value.startsWith("::ffff:") ? value.slice(7) : value;
-  return isIP(normalized) && !normalized.includes("%") ? normalized : null;
+  const version = isIP(value);
+  if (!version || value.includes("%")) return null;
+  if (version === 4) return value;
+  const normalized = new URL(`http://[${value}]`).hostname.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(normalized);
+  if (!mapped) return normalized;
+  const high = Number.parseInt(mapped[1]!, 16);
+  const low = Number.parseInt(mapped[2]!, 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join(".");
 }
 
 export function trustedAuthProxies(value: string | undefined): Set<string> {

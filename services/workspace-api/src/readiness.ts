@@ -38,10 +38,13 @@ export function createReadinessProbe(
   options: { timeoutMs?: number; emailConfigured?: boolean } = {},
 ): () => Promise<ReadinessReport> {
   const timeoutMs = options.timeoutMs ?? 3000;
+  let pending: ReturnType<TableQuery["query"]> | undefined;
   return async () => {
     let rows: Array<Record<string, unknown>>;
     try {
-      rows = (await withTimeout(client.query(PRESENT_TABLES, [[...REQUIRED_TABLES]]), timeoutMs)).rows;
+      // Keep one probe until the database settles, even after an HTTP timeout.
+      pending ??= client.query(PRESENT_TABLES, [[...REQUIRED_TABLES]]).finally(() => { pending = undefined; });
+      rows = (await withTimeout(pending, timeoutMs)).rows;
     } catch {
       return {
         ok: false,

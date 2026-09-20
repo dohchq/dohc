@@ -27,9 +27,11 @@ test("a new account verifies email, approves desktop, denies another device, and
   expect(verification).toBeTruthy();
   await page.goto(verification!);
   await page.getByRole("link", { name: "Continue connecting your device" }).click();
-  if (await page.getByLabel(/^password$/i).isVisible()) {
+  const signInPassword = page.getByLabel(/^password$/i);
+  await expect(signInPassword.or(page.getByRole("button", { name: /^approve|allow/i })).first()).toBeVisible();
+  if (await signInPassword.isVisible()) {
     await page.getByLabel(/^email$/i).fill(email);
-    await page.getByLabel(/^password$/i).fill(password);
+    await signInPassword.fill(password);
     await page.getByRole("button", { name: /^sign in$/i }).click();
   }
   await page.getByRole("button", { name: /^approve|allow/i }).click();

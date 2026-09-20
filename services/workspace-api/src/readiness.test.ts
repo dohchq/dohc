@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createReadinessProbe, REQUIRED_TABLES, type TableQuery } from "./readiness";
 
 function answering(tables: readonly string[]): TableQuery {
@@ -47,5 +47,29 @@ describe("createReadinessProbe", () => {
     const report = await createReadinessProbe({ query: () => new Promise(() => {}) }, { timeoutMs: 5 })();
     expect(report.database).toBe("unreachable");
     expect(report.detail).toBe("The account database is unavailable.");
+  });
+  it("shares a stalled query across requests and retries after it settles", async () => {
+    vi.useFakeTimers();
+    try {
+      let reject!: (error: Error) => void;
+      const stalled = new Promise<{ rows: Array<Record<string, unknown>> }>((_resolve, fail) => {
+        reject = fail;
+      });
+      const query = vi.fn().mockReturnValueOnce(stalled).mockResolvedValue({ rows: REQUIRED_TABLES.map(name => ({ name })) });
+      const probe = createReadinessProbe({ query }, { timeoutMs: 5 });
+      const first = Array.from({ length: 20 }, () => probe());
+      await vi.advanceTimersByTimeAsync(5);
+      expect((await Promise.all(first)).every(report => report.database === "unreachable")).toBe(true);
+      const second = probe();
+      await vi.advanceTimersByTimeAsync(5);
+      expect((await second).database).toBe("unreachable");
+      expect(query).toHaveBeenCalledTimes(1);
+      reject(new Error("database timeout"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await probe()).ok).toBe(true);
+      expect(query).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

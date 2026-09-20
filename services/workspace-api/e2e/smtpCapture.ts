@@ -53,10 +53,11 @@ export async function startSmtpCapture() {
 
 export function mailLinks(message: string): string[] {
   const separator = message.indexOf("\r\n\r\n");
+  if (separator === -1) throw new Error("Captured message has no header/body separator.");
   const headers = message.slice(0, separator);
   const body = message.slice(separator + 4);
   const decoded = /content-transfer-encoding:\s*base64/i.test(headers)
     ? Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf8")
-    : message.replace(/=\r\n/g, "").replace(/=([0-9A-F]{2})/gi, (_, value: string) => String.fromCharCode(Number.parseInt(value, 16)));
+    : body.replace(/=\r\n/g, "").replace(/=([0-9A-F]{2})/gi, (_, value: string) => String.fromCharCode(Number.parseInt(value, 16)));
   return [...decoded.matchAll(/https?:\/\/[^\s<>"']+/g)].map(match => match[0]!);
 }
