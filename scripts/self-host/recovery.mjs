@@ -9,9 +9,9 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 const usage = `node scripts/self-host/recovery.mjs <backup|check-backup|restore|archive> <directory>
   [--env-file PATH] [--compose-file PATH] [--project-name NAME]
 
-The command stops this Compose project. Backup and check restart its previously running services after success.
+The command stops this Compose project. Backup, check-backup, and archive restart its previously running services after success.
 Restore leaves services stopped for inspection. Replaced relay files remain in the relay volume.
-Only relay data is backed up or restored. Auth, service-host data and independent continuity stay untouched.
+Backup, check-backup, and restore affect only relay data. Archive preserves all declared deployment volumes and configuration.
 The snapshot must match current continuity on the original host. Old snapshots and host loss are not supported.
 Archive saves all stopped named volumes and configuration, including private credentials. It provides no full-deployment restore.`;
 

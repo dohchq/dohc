@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseRecoveryArguments, runRecovery } from "./recovery.mjs";
 
 const config = { name: "recovery-test", services: { "sync-relay": { image: "image", environment: { DOHC_RELAY_DEPLOYMENT_CONFIG: "/continuity/deployment.json" } } }, volumes: { data: { name: "recovery_data" } } };
+
+test("help describes archive scope and service restart behavior", () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./recovery.mjs", import.meta.url)), "--help"], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 0, result.stderr);
+  const usage = result.stdout;
+  assert.match(usage, /Backup, check-backup, and archive restart its previously running services after success\./);
+  assert.match(usage, /Backup, check-backup, and restore affect only relay data\. Archive preserves all declared deployment volumes and configuration\./);
+});
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "dohc-recovery-wrapper-"));
   t.after(() => rm(root, { recursive: true, force: true }));
