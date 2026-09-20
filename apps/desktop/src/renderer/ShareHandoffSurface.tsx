@@ -7,14 +7,15 @@ import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { OpenSharedView } from "./OpenSharedView";
+import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
-  "dohc couldn't reach dohc Drive. Check your connection, then choose Try again.";
+  "dohc couldn't reach the server. Check your connection, then choose Try again.";
 const BUSY_COPY =
-  "dohc Drive is busy right now. Wait a moment, then choose Try again.";
+  "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 
@@ -58,7 +59,7 @@ export function ShareHandoffSurface(props: {
     workspaceId: string;
     onMounted: (label: string) => void;
   };
-}) {
+} & ConnectionNoticeHost) {
   const shareId = props.status.status === "done" ? props.status.shareId : null;
   const [lookupAttempt, setLookupAttempt] = useState(0);
   const [receivedShare, setReceivedShare] = useState<ReceivedShareState>({
@@ -108,9 +109,15 @@ export function ShareHandoffSurface(props: {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p className="m-0 text-xs leading-relaxed text-muted">
-          Sign in to open the share from your browser.
+          Connect your server to open the share from your browser.
         </p>
-        <CloudLogin onConnected={() => undefined} embedded />
+        <CloudLogin
+          onConnected={() => undefined}
+          embedded
+          untitled
+          onConnectionError={props.onConnectionError}
+          initialServerUrl={props.initialServerUrl}
+        />
       </HandoffCard>
     );
   }
@@ -204,6 +211,8 @@ export function ShareHandoffSurface(props: {
         onWorkspaceReady={props.onWorkspaceReady}
         onBack={props.onBack}
         onOpened={props.onOpened}
+        onConnectionError={props.onConnectionError}
+        initialServerUrl={props.initialServerUrl}
         {...(props.mountInto ? { mountInto: props.mountInto } : {})}
       />
     );

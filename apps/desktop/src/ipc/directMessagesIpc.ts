@@ -311,7 +311,7 @@ export function registerDirectMessagesIpcHandlers<
           const acceptCredentialGeneration = currentCredentialGeneration();
           if (!acceptCredentials.relayUrl) {
             throw new Error(
-              "Reconnect dohc Drive with a sync relay URL, then try again.",
+              "Reconnect your server to refresh its connection settings, then try again.",
             );
           }
           const acceptedRelayUrl = acceptCredentials.relayUrl;
@@ -473,7 +473,7 @@ export function registerDirectMessagesIpcHandlers<
           credentials,
         );
         if (!credentials.relayUrl || !authorUserId) {
-          throw new Error("Sign in to dohc Drive to start a direct message.");
+          throw new Error("Sign in to your server to start a direct message.");
         }
         const recipients = parseDmRecipients(input.recipients);
         const selfEmail = credentials.email.toLowerCase();

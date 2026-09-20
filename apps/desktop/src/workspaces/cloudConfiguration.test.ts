@@ -1,72 +1,11 @@
 import { describe, expect, it } from "vitest";
-import {
-  canonicalCloudOrigin,
-  resolveManagedCloudConfiguration,
-} from "./cloudConfiguration";
+import { canonicalCloudOrigin } from "./cloudConfiguration";
 
-describe("managed cloud configuration", () => {
-  it("requires an explicit server and relay pair", () => {
-    expect(resolveManagedCloudConfiguration({})).toEqual({
-      status: "unconfigured",
-    });
-    expect(
-      resolveManagedCloudConfiguration({ DOHC_CLOUD_URL: "https://cloud.example.test" }),
-    ).toEqual({ status: "invalid" });
-    expect(
-      resolveManagedCloudConfiguration({
-        DOHC_CLOUD_RELAY_URL: "https://relay.example.test",
-      }),
-    ).toEqual({ status: "invalid" });
+describe("server origin", () => {
+  it.each(["https://cloud.example.test", "http://localhost:1786", "http://127.0.0.1:1786", "http://[::1]:1786"])("accepts secure or loopback origin %s", origin => {
+    expect(canonicalCloudOrigin(origin + "/")).toBe(origin);
   });
-
-  it("canonicalizes a valid managed pair", () => {
-    expect(
-      resolveManagedCloudConfiguration({
-        DOHC_CLOUD_URL: " HTTPS://Cloud.Example.Test:443/ ",
-        DOHC_CLOUD_RELAY_URL: "https://Relay.Example.Test/",
-      }),
-    ).toEqual({
-      status: "ready",
-      serverUrl: "https://cloud.example.test",
-      relayUrl: "https://relay.example.test",
-    });
-  });
-
-  it("rejects malformed or secret-bearing managed endpoints", () => {
-    const invalidUrls = [
-      "cloud.example.test",
-      "https://",
-      "file:///cloud",
-      "https://user:pass@cloud.example.test",
-      "https://cloud.example.test/api",
-      "https://cloud.example.test?token=secret",
-    ];
-    for (const serverUrl of invalidUrls) {
-      expect(
-        resolveManagedCloudConfiguration({
-          DOHC_CLOUD_URL: serverUrl,
-          DOHC_CLOUD_RELAY_URL: "https://relay.example.test",
-        }),
-      ).toEqual({ status: "invalid" });
-    }
-    for (const relayUrl of invalidUrls) {
-      expect(
-        resolveManagedCloudConfiguration({
-          DOHC_CLOUD_URL: "https://cloud.example.test",
-          DOHC_CLOUD_RELAY_URL: relayUrl,
-        }),
-      ).toEqual({ status: "invalid" });
-    }
-  });
-});
-
-describe("cloud origin", () => {
-  it("keeps explicit loopback origins but never supplies one", () => {
-    expect(canonicalCloudOrigin("http://localhost:1786/")).toBe(
-      "http://localhost:1786",
-    );
-    expect(resolveManagedCloudConfiguration({})).toEqual({
-      status: "unconfigured",
-    });
+  it.each(["", "cloud.example.test", "https://", "file:///cloud", "https://user:pass@cloud.example.test", "https://cloud.example.test/api", "https://cloud.example.test?token=secret", "https://cloud.example.test#secret", "http://cloud.example.test", "http://192.168.1.10:1786"])("rejects unsupported or secret-bearing address %s", origin => {
+    expect(canonicalCloudOrigin(origin)).toBeNull();
   });
 });

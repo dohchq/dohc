@@ -47,8 +47,14 @@ import type {
   GetCollectionResult,
   ListCollectionsPayload,
   ListCollectionsResult,
+  ListOwnerLiveDocumentsPayload,
+  ListOwnerLiveRefusalsPayload,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  OwnerLiveDocumentActionPayload,
+  OwnerLiveDocumentsResult,
+  OwnerLiveRefusalsResult,
+  RetryOwnerLiveSharePayload,
   QueryCollectionRecordsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
@@ -373,6 +379,37 @@ function makeBaseBridge(
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
+    // Owner live documents and the live-delivery retry command. Typed to the
+    // contracts, not to these empty defaults: the live-document tests swap in
+    // real rows and real refusals.
+    listOwnerLiveDocuments: vi.fn(
+      async (
+        _payload: ListOwnerLiveDocumentsPayload,
+      ): Promise<OwnerLiveDocumentsResult> => ({
+        documents: [],
+        nextCursor: null,
+      }),
+    ),
+    listOwnerLiveRefusals: vi.fn(
+      async (
+        _payload: ListOwnerLiveRefusalsPayload,
+      ): Promise<OwnerLiveRefusalsResult> => ({
+        refusals: [],
+        nextCursor: null,
+      }),
+    ),
+    retryOwnerLiveShare: vi.fn(
+      async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
+    ),
+    stopOwnerLiveDocument: vi.fn(
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
+    ),
+    resumeOwnerLiveDocument: vi.fn(
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
+    ),
+    retryOwnerLiveDelivery: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -911,7 +948,7 @@ describe("workspace share handoff placement", () => {
 
     expect(
       await screen.findByText(
-        "dohc couldn't reach dohc Drive. Check your connection, then choose Try again.",
+        "dohc couldn't reach the server. Check your connection, then choose Try again.",
       ),
     ).toBeTruthy();
     await userEvent.setup().click(
@@ -15277,7 +15314,11 @@ describe("native workbench context menus", () => {
     bridge.showWorkbenchMenu.mockResolvedValue("open-history");
     renderShell(bridge);
 
-    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
+    // The title bar carries the workspace name the removed bottom bar showed,
+    // and the status context menu opens from that name.
+    const workspaceLabel = await screen.findByTestId("status-workspace");
+    expect(workspaceLabel.textContent).toBe("personal");
+    fireEvent.contextMenu(workspaceLabel);
 
     await waitFor(() => {
       expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
@@ -15359,6 +15400,287 @@ describe("settings entry points", () => {
 
     await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+});
+
+describe("owner live documents", () => {
+  const LIVE_ROW = {
+    path: "notes/today.md",
+    status: "ready" as const,
+    canResume: false,
+  };
+
+  async function openLiveDocumentsFromSettings(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    await user.click(await screen.findByTestId("activity-settings"));
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByTestId("settings-nav-cloud"));
+    await user.click(
+      await screen.findByRole("button", { name: "Open live documents" }),
+    );
+    // Settings hands the surface over rather than stacking on top of it.
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    return await screen.findByTestId("live-documents-dialog");
+  }
+
+  it("opens live documents from settings and drives the real bridge", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(
+      async (): Promise<OwnerLiveDocumentsResult> => ({
+        documents: [LIVE_ROW],
+        nextCursor: null,
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await waitFor(() =>
+      expect(bridge.listOwnerLiveDocuments).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
+    await screen.findByTestId(`live-document-row-${LIVE_ROW.path}`);
+
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: `Stop live editing for ${LIVE_ROW.path}`,
+      }),
+    );
+    await waitFor(() =>
+      expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        path: LIVE_ROW.path,
+      }),
+    );
+  });
+
+  // The dialog's failure outlives the dialog: the shell keeps the notice and
+  // its Try again, and reopens the list when there is nothing left to retry
+  // into.
+  it("keeps a refused read in the shell notice and reopens the dialog to retry", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => {
+      throw new Error("The engine did not answer.");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const dialog = await openLiveDocumentsFromSettings(user);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not load the live documents for this workspace.",
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("live-documents-dialog")).toBeNull();
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("live-documents-dialog")).toBeTruthy();
+  });
+
+  // DesktopRoot remounts the shell on a switch, so this rerenders the same
+  // instance: the stricter case, where the shell's own guard is what keeps
+  // workspace A's list from repainting or reading workspace B.
+  it("closes the live documents dialog when the window changes workspaces", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listOwnerLiveDocuments = vi.fn(
+      async (): Promise<OwnerLiveDocumentsResult> => ({
+        documents: [LIVE_ROW],
+        nextCursor: null,
+      }),
+    );
+    const user = userEvent.setup();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+
+    await openLiveDocumentsFromSettings(user);
+    bridge.listOwnerLiveDocuments.mockClear();
+
+    view.rerender(shell(OTHER_WORKSPACE));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("live-documents-dialog")).toBeNull(),
+    );
+    expect(bridge.listOwnerLiveDocuments).not.toHaveBeenCalled();
+  });
+
+  // The notice's Try again is main's own retry command, not a repaint.
+  it("runs the live delivery retry command from the notice", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const retryingStatus: SyncStatusResult = {
+      ...SYNC_STATUS,
+      ownerLiveDelivery: "retrying",
+    };
+    bridge.openWorkspace = vi.fn(async () => retryingStatus);
+    bridge.getSyncStatus = vi.fn(async () => retryingStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(
+      await screen.findByTestId("owner-live-delivery-toast-action"),
+    );
+    await waitFor(() =>
+      expect(bridge.retryOwnerLiveDelivery).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
+  });
+
+  it("opens live documents from a stable live delivery notice", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const pausedStatus: SyncStatusResult = {
+      ...SYNC_STATUS,
+      ownerLiveDelivery: "retrying",
+      ownerLiveDeliveryReason: "workspace-changed",
+    };
+    bridge.openWorkspace = vi.fn(async () => pausedStatus);
+    bridge.getSyncStatus = vi.fn(async () => pausedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(
+      within(await screen.findByTestId("notice-owner-live-delivery")).getByRole(
+        "button",
+        { name: "Live documents" },
+      ),
+    );
+
+    expect(await screen.findByTestId("live-documents-dialog")).toBeTruthy();
+    expect(bridge.retryOwnerLiveDelivery).not.toHaveBeenCalled();
+  });
+
+  async function openCloudSettings(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByTestId("activity-settings"));
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByTestId("settings-nav-cloud"));
+    return await screen.findByTestId("settings-section-cloud");
+  }
+
+  it("reports an unavailable server status and restores live documents after retry", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockRejectedValueOnce(new Error("private IPC detail"))
+      .mockResolvedValue({ connected: true, workspaceSynced: true });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not check this workspace's server connection.");
+    expect(toast.textContent).not.toContain("private IPC detail");
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    await openCloudSettings(user);
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+
+  // The list is a call to this workspace's own server, which main refuses for
+  // a workspace that has none. Local-only work gets no action that can only
+  // fail — the section still offers the way to turn sync on.
+  it("offers no live document list for a local-only workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: false,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await openCloudSettings(user);
+    await waitFor(() =>
+      expect(bridge.cloudStatus).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
+    expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Open sync and sharing" }),
+    ).toBeTruthy();
+  });
+
+  // Closing the connection dialog re-reads the status this gate is derived
+  // from, so the list arrives without a restart or a workspace switch.
+  it("offers the live document list once this workspace syncs", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    let workspaceSynced = false;
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await openCloudSettings(user);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+    expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Open sync and sharing" }));
+    await screen.findByTestId("cloud-sync-panel");
+    workspaceSynced = true;
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+
+    await openCloudSettings(user);
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+});
+
+describe("connection dialog retries", () => {
+  // The panel that failed is gone, and the user opened a fresh one by hand
+  // before choosing Try again. The notice's address must still reach it.
+  it("re-scopes a reopened connection dialog to the address that failed", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      // The device flow is the panel's own call; the shell's bridge carries it
+      // only for this test, and this server refuses to start one.
+      cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => {
+        throw new Error("dohc could not reach this server.");
+      }),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: false,
+      email: "",
+      serverUrl: "",
+      workspaceSynced: false,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-cloud"));
+    await user.type(
+      await screen.findByTestId("cloud-server-url"),
+      "https://dohc.example.test",
+    );
+    await user.click(screen.getByTestId("cloud-connect-start"));
+    await screen.findByTestId("workspace-shell-error");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    await user.click(screen.getByTestId("activity-cloud"));
+    expect(
+      ((await screen.findByTestId("cloud-server-url")) as HTMLInputElement).value,
+    ).toBe("");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("cloud-server-url") as HTMLInputElement).value,
+      ).toBe("https://dohc.example.test"),
+    );
   });
 });
 

@@ -190,7 +190,6 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
-import { resolveManagedCloudConfiguration } from "./workspaces/cloudConfiguration";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
 import {
@@ -618,7 +617,6 @@ const executeAppPreview = createAppPreviewExecution({
 // handlers register inside whenReady. The session token lives encrypted in
 // the credential store and never crosses IPC.
 let cachedCloudLogin: CloudLogin | null = null;
-const managedCloudConfiguration = resolveManagedCloudConfiguration(process.env);
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
     cachedCloudLogin = createCloudLogin({
@@ -631,12 +629,6 @@ function cloudLogin(): CloudLogin {
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
         },
       }),
-      ...(managedCloudConfiguration.status === "ready"
-        ? {
-            defaultServerUrl: managedCloudConfiguration.serverUrl,
-            defaultRelayUrl: managedCloudConfiguration.relayUrl,
-          }
-        : {}),
     });
   }
   return cachedCloudLogin;
@@ -811,7 +803,7 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
     cloudLogin().credentials(),
   );
   if (!loaded.current) {
-    throw new Error("Your dohc Drive session changed. Try again.");
+    throw new Error("Your server session changed. Try again.");
   }
   return loaded.credentials;
 }
@@ -852,7 +844,7 @@ function relayShareErrorCopy(
     case "secret_path":
       return "Secret files can't be shared.";
     case "recipient_not_found":
-      return "No dohc account matches that email. Ask them to sign in to dohc Drive once, then share again.";
+      return "No account on this server matches that email. Ask them to create an account here, then share again.";
     case "empty_selector":
       return "Pick a file, folder, or version to share.";
     case "invalid_path":
@@ -913,7 +905,7 @@ async function relayShareJsonWithCredentials<T>(
   | RelayShareRetainedNotFoundResult<T>
 > {
   if (!credentials.relayUrl) {
-    throw new Error("Reconnect dohc Drive with a sync relay URL, then try again.");
+    throw new Error("Reconnect your server to refresh its connection settings, then try again.");
   }
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -936,7 +928,7 @@ async function relayShareJsonWithCredentials<T>(
         cloudLogin().invalidateSessionIf(expected),
     });
     throw new RelaySessionError(
-      "Your dohc Drive session expired. Sign in again, then retry.",
+      "Your server session expired. Sign in again, then retry.",
       { sessionWasCurrent },
     );
   }
@@ -1816,6 +1808,7 @@ const activity = {
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+      hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   listOpenWorkspaceIds: () =>
     workspaceAuthorities.workspaceIds().filter((workspaceId) =>
@@ -2352,7 +2345,7 @@ async function revalidateChatWrite(
     store,
   );
   if (currentAuthorUserId !== authorUserId) {
-    throw new Error("Your dohc Drive session changed. Try again.");
+    throw new Error("Your server session changed. Try again.");
   }
 }
 
@@ -3189,6 +3182,7 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTra
 
 const desktopEngine = createDesktopEngine({
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
+    onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
     fetch: (input, init) => relayShareFetch(input, init)}),
   notifyOwnerDeliveryChanged: workspaceId => notifyRenderer({workspaceId}),
@@ -3324,7 +3318,7 @@ function createShareViewFilesForOperation(
       const credentials = cachedCredentials;
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
-          throw new Error("Sign in to dohc Drive first.");
+          throw new Error("Sign in to your server first.");
         }
         return null;
       }
@@ -4041,7 +4035,7 @@ function registerIpcHandlers(): void {
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
-    notifyRenderer, findWorkspace, managedCloudConfiguration,
+    notifyRenderer, findWorkspace,
     engineDaemonStartup: () => desktopEngine.startup,
     requireEngineSessions, currentEngineSessions: () => desktopEngine.sessions,
     withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,

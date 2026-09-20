@@ -72,6 +72,9 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 }
 
 const bridge = {
+  onWorkspaceActivity: vi.fn(() => () => {}),
+  listRelayShares: vi.fn(async () => ({ owned: [], received: [] })),
+  getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
@@ -808,6 +811,44 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("switch", { name: "Enable chat runner" }).getAttribute(
       "aria-checked",
     )).toBe("false");
+  });
+
+  // Live documents belong to the workspace that owns them. A shared view
+  // runs no owner live delivery, so it gets no list to manage.
+  it("opens live documents from sync and sharing for an owned workspace", async () => {
+    const onOpenLiveDocuments = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="cloud"
+        onOpenLiveDocuments={onOpenLiveDocuments}
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-live-documents");
+    expect(row.textContent).toContain("Live documents");
+    expect(row.textContent).toContain("Stopping one keeps the file and its history.");
+    await user.click(within(row).getByRole("button", { name: "Open live documents" }));
+    expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+  });
+
+  it("hides live documents in a shared view", async () => {
+    render(
+      <SettingsDialog
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="cloud"
+        sharedView
+        onOpenLiveDocuments={() => {}}
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByTestId("settings-section-cloud");
+    expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
   });
 
   it("copies the config snippet to the clipboard", async () => {

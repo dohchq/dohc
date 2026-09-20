@@ -127,6 +127,60 @@ describe("named browser invitations", () => {
 });
 
 describe("owner live document enrollment", () => {
+  const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
+
+  it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({ok: true, refusals: [refusal], nextCursor: "other-share"});
+    await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId, after: "prior/share"})).resolves.toEqual({refusals: [refusal], nextCursor: "other-share"});
+    expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-host?refusals=1&after=prior%2Fshare");
+    h.request.mockResolvedValue({ok: true, refusals: [], nextCursor: "next-share"});
+    await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId})).resolves.toEqual({refusals: [], nextCursor: "next-share"});
+  });
+
+  it("retries enrollment using only the share identity and owner session", async () => {
+    const h = harness(); h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "preparing"}]});
+    await expect(h.invoke(CHANNELS.retryOwnerLiveShare, {workspaceId, shareId: "share"})).resolves.toBeUndefined();
+    expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-host", {method: "POST", body: JSON.stringify({shareId: "share", retry: true})});
+    h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "unavailable"}]});
+    await expect(h.invoke(CHANNELS.retryOwnerLiveShare, {workspaceId, shareId: "share"})).rejects.toThrow("could not start");
+  });
+
+  it.each([CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare])("rejects untrusted or shared-view %s before loading credentials", async channel => {
+    const h = harness(), input = channel === CHANNELS.listOwnerLiveRefusals ? {workspaceId} : {workspaceId, shareId: "share"};
+    await expect(h.invoke(channel, input, -1)).rejects.toThrow("untrusted sender");
+    await expect(h.invoke(channel, {...input, credentials: h.credentials})).rejects.toThrow();
+    h.workspace.shareView = {};
+    await expect(h.invoke(channel, input)).rejects.toThrow("original workspace");
+    expect(h.remote).not.toHaveBeenCalled(); expect(h.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["retireRenderer", "retirePhysical", "rotateCredentials"] as const)("discards refusal and retry responses after %s", async invalidate => {
+    for (const channel of [CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare]) {
+      const h = harness(), response = deferred<unknown>(), started = deferred();
+      h.request.mockImplementation(() => {started.resolve(); return response.promise;});
+      const input = channel === CHANNELS.listOwnerLiveRefusals ? {workspaceId} : {workspaceId, shareId: "share"};
+      const pending = h.invoke(channel, input);
+      await started.promise; h[invalidate]();
+      const read = vi.fn(() => true);
+      response.resolve({get ok() {return read();}, refusals: [refusal], nextCursor: null, documents: []});
+      await expect(pending).rejects.toThrow(); expect(read).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects nonadvancing cursors and unsafe or oversized refusal responses", async () => {
+    const h = harness();
+    for (const result of [
+      {ok: true, refusals: [], nextCursor: "same"},
+      {ok: true, refusals: [{...refusal, paths: ["../secret"]}], nextCursor: null},
+      {ok: true, refusals: Array(65).fill(refusal), nextCursor: null},
+      {ok: true, refusals: [{...refusal, token: "server-secret"}], nextCursor: null},
+    ]) {
+      h.request.mockResolvedValue(result);
+      await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId, after: "same"})).rejects.toThrow();
+    }
+  });
+
   it("lists active and retired rows without exposing bindings", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
@@ -308,7 +362,8 @@ describe("registered relay share handlers", () => {
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.listOwnerLiveDocuments, CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument,
+      CHANNELS.listOwnerLiveDocuments, CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare,
+      CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument,
       CHANNELS.ownerRestore,
       CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
       CHANNELS.revokeRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,

@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  SyncStatusResult,
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
@@ -52,7 +53,8 @@ afterEach(() => {
 function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
   return (
     <NoticeCenter
-      workspaceId="ws-status-test"
+      workspaceId={props.workspaceId ?? "ws-status-test"}
+      {...(props.host ? { host: props.host } : {})}
       syncStatus={props.syncStatus ?? null}
       agentActive={props.agentActive ?? false}
       conflictSummaries={props.conflictSummaries ?? []}
@@ -69,12 +71,33 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
       {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
+      {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
+      {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
     />
   );
 }
 
 function renderNotices(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) {
   return render(noticeElement(props));
+}
+
+// A clean workspace whose only news is owner live delivery. A fresh object
+// every call, so a rerender models a new status read rather than the same
+// snapshot handed back.
+function liveDeliveryStatus(
+  ownerLiveDelivery: NonNullable<SyncStatusResult["ownerLiveDelivery"]>,
+  ownerLiveDeliveryReason?: SyncStatusResult["ownerLiveDeliveryReason"],
+): SyncStatusResult {
+  return {
+    state: "synced",
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+    ownerLiveDelivery,
+    ...(ownerLiveDeliveryReason ? { ownerLiveDeliveryReason } : {}),
+  };
 }
 
 function agentNotice(overrides: Partial<AgentNotification> = {}): AgentNotification {
@@ -572,7 +595,7 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  it("keeps the notice center open when dismissing the update toast", async () => {
+  it("stands the toast stack down while the notice center is open", async () => {
     renderNotices();
     pushUpdate?.({
       status: "ready",
@@ -583,14 +606,21 @@ describe("notice center", () => {
       canInstall: true,
       version: "1.2.3",
     });
+    await screen.findByTestId("update-toast");
 
+    // Every toast has a row in the panel, so the stack gets out of the way
+    // instead of sitting over the surface the user just opened.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
-
     expect(screen.queryByTestId("update-toast")).toBeNull();
     expect(screen.getByTestId("notice-center").textContent).toContain(
       "Update 1.2.3 is ready",
     );
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /dismiss update/i }),
+    );
+    expect(screen.queryByTestId("update-toast")).toBeNull();
   });
 
   it("calls installUpdate from the update notice action", async () => {
@@ -907,6 +937,330 @@ describe("notice center", () => {
       ),
     );
     expect(onDismissAgentNotification).toHaveBeenCalledWith("ws-a::run-1::finished");
+  });
+
+  // Owner live delivery is its own fact. Only "retrying" raises a notice, and
+  // what it offers depends on whether anything can be dialled again.
+  it("raises a toast and a notice with Copy while live delivery retries", async () => {
+    const onRetryLiveDelivery = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+
+    const toast = screen.getByTestId("owner-live-delivery-toast");
+    expect(toast.textContent).toContain("Live editing retrying");
+    expect(toast.textContent).toContain("Your edits are saved on this device.");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-owner-live-delivery");
+    expect(notice.textContent).toContain("Live editing retrying");
+    await user.click(
+      within(notice).getByRole("button", { name: "Copy error details" }),
+    );
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Live editing: Live editing retrying");
+    expect(copied).toContain("Workspace id: ws-status-test");
+
+    await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
+  });
+
+  it("runs the shell's retry from the live delivery toast", async () => {
+    const onRetryLiveDelivery = vi.fn();
+    renderNotices({ syncStatus: liveDeliveryStatus("retrying"), onRetryLiveDelivery });
+
+    await userEvent.click(screen.getByTestId("owner-live-delivery-toast-action"));
+    expect(onRetryLiveDelivery).toHaveBeenCalledOnce();
+  });
+
+  // A document that moved, or a workspace that changed, is not a connection
+  // to dial again: the way forward is the live-document list, and nothing
+  // here re-binds a document identity on the user's behalf.
+  it.each([
+    {
+      reason: "document-unavailable" as const,
+      body: "A document this workspace was editing live is no longer available.",
+    },
+    {
+      reason: "workspace-changed" as const,
+      body: "This workspace changed while live editing was running.",
+    },
+  ])("offers the live documents list for a $reason pause", async ({ reason, body }) => {
+    const onOpenLiveDocuments = vi.fn();
+    const onRetryLiveDelivery = vi.fn();
+    renderNotices({
+      syncStatus: liveDeliveryStatus("retrying", reason),
+      onOpenLiveDocuments,
+      onRetryLiveDelivery,
+    });
+
+    expect(screen.getByTestId("owner-live-delivery-toast").textContent).toContain(body);
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-owner-live-delivery");
+    expect(notice.textContent).toContain("Live editing paused");
+    expect(notice.textContent).toContain(body);
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await userEvent.click(
+      within(notice).getByRole("button", { name: "Live documents" }),
+    );
+    expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+    expect(onRetryLiveDelivery).not.toHaveBeenCalled();
+  });
+
+  // There is no command that restarts the app for the user, so the notice
+  // names the step instead of offering a control that cannot run.
+  it("names the restart without offering a retry", async () => {
+    const onRetryLiveDelivery = vi.fn();
+    const onOpenLiveDocuments = vi.fn();
+    renderNotices({
+      syncStatus: liveDeliveryStatus("retrying", "restart-required"),
+      onRetryLiveDelivery,
+      onOpenLiveDocuments,
+    });
+
+    expect(
+      screen.queryByTestId("owner-live-delivery-toast-action"),
+    ).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-owner-live-delivery");
+    expect(notice.textContent).toContain("Restart dohc to enable live editing.");
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(
+      within(notice).queryByRole("button", { name: "Live documents" }),
+    ).toBeNull();
+  });
+
+  it("clears the live delivery toast and notice when delivery recovers", async () => {
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+  });
+
+  // Status snapshots arrive on every workspace activity. A dismissed toast
+  // must not come back because an equal snapshot was read again.
+  it("does not raise the live delivery toast again for a repeated snapshot", async () => {
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss live editing notice" }),
+    );
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    // The row stays: the state is still true, only its announcement is over.
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-owner-live-delivery")).toBeTruthy();
+  });
+
+  // A dismissal answers one workspace. The same failure in the next workspace
+  // is news the user has not seen, so it must still be announced.
+  it("announces an identical live delivery failure in another workspace", async () => {
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss live editing notice" }),
+    );
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+
+    rerender(
+      noticeElement({
+        workspaceId: "ws-status-other",
+        syncStatus: liveDeliveryStatus("retrying"),
+      }),
+    );
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // Recovery forgets the dismissal, so the next failure is announced again.
+  it("announces a new live delivery failure after a recovery", async () => {
+    const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss live editing notice" }),
+    );
+
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("active") }));
+    rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
+    expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
+  });
+
+  // Enrollment refusals are one boolean on the status: however many shares it
+  // covers, the user gets one announcement and one row, and the list is the
+  // only surface that can name the files.
+  describe("owner live refusals", () => {
+    function refusalsStatus(hasOwnerLiveRefusals: boolean): SyncStatusResult {
+      return {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+        hasOwnerLiveRefusals,
+      };
+    }
+
+    it("raises one toast and one row that open the live documents list", async () => {
+      const onOpenLiveDocuments = vi.fn();
+      const user = userEvent.setup();
+      const { rerender } = renderNotices({
+        syncStatus: refusalsStatus(true),
+        onOpenLiveDocuments,
+      });
+
+      const toast = screen.getByTestId("owner-live-refusals-toast");
+      expect(toast.textContent).toContain("Some shares could not start live editing");
+      // A repeated status read is the same fact, not a second one.
+      rerender(
+        noticeElement({ syncStatus: refusalsStatus(true), onOpenLiveDocuments }),
+      );
+      expect(screen.getAllByTestId("owner-live-refusals-toast")).toHaveLength(1);
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const notice = screen.getByTestId("notice-owner-live-refusals");
+      expect(screen.getAllByTestId("notice-owner-live-refusals")).toHaveLength(1);
+      await user.click(within(notice).getByRole("button", { name: "Live documents" }));
+      expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+    });
+
+    // The toast and the row are the same fact, so they must paste the same
+    // generic report — no share id, no engine code, no engine message.
+    it("copies matching safe details from the toast and the row", async () => {
+      const user = userEvent.setup();
+      renderNotices({ syncStatus: refusalsStatus(true), onOpenLiveDocuments: vi.fn() });
+
+      await user.click(screen.getByTestId("owner-live-refusals-toast-copy"));
+      const fromToast = await navigator.clipboard.readText();
+      expect(fromToast).toContain(
+        "Live editing: Some shares could not start live editing",
+      );
+      expect(fromToast).toContain("Workspace id: ws-status-test");
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      await user.click(screen.getByTestId("notice-owner-live-refusals-copy"));
+      expect(await navigator.clipboard.readText()).toBe(fromToast);
+    });
+
+    it("keeps the row after the toast is closed, and stays closed for a repeat", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+
+      await user.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(true) }));
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-owner-live-refusals")).toBeTruthy();
+    });
+
+    it("clears the toast and the row once the workspace reports no refusals", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(false) }));
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-owner-live-refusals")).toBeNull();
+      expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+    });
+
+    // Recovery forgets the dismissal: the next refusal is news again.
+    it("announces a refusal again after a recovery", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+
+      rerender(noticeElement({ syncStatus: refusalsStatus(false) }));
+      rerender(noticeElement({ syncStatus: refusalsStatus(true) }));
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+    });
+
+    // A dismissal answers one workspace. The next workspace's refusals are a
+    // fact this user has not seen yet.
+    it("announces the same refusal in another workspace", async () => {
+      const { rerender } = renderNotices({ syncStatus: refusalsStatus(true) });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Dismiss live editing refusals notice" }),
+      );
+      expect(screen.queryByTestId("owner-live-refusals-toast")).toBeNull();
+
+      rerender(
+        noticeElement({
+          workspaceId: "ws-status-other",
+          syncStatus: refusalsStatus(true),
+        }),
+      );
+      expect(screen.getByTestId("owner-live-refusals-toast")).toBeTruthy();
+    });
+
+    // A share view has no live-document list to open, so the notice must not
+    // offer a way in that cannot exist.
+    it("states the refusal without an action when no list is available", async () => {
+      renderNotices({ syncStatus: refusalsStatus(true) });
+
+      expect(screen.queryByTestId("owner-live-refusals-toast-action")).toBeNull();
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notice = screen.getByTestId("notice-owner-live-refusals");
+      expect(
+        within(notice).queryByRole("button", { name: "Live documents" }),
+      ).toBeNull();
+    });
+  });
+
+  // Where the bell is decides where the rest of this center may sit. The rail
+  // hosts it on the left; a surface with no rail hosts it in the corner the
+  // toasts would otherwise take, so neither may cover the toggle.
+  describe("host placement", () => {
+    const shellError = {
+      id: "shell-error-1",
+      message: "dohc could not check this connection.",
+      details: "Error: dohc could not check this connection.",
+      atMs: 1_700_000_000_000,
+      canRetry: false,
+      seen: false,
+    };
+
+    it("keeps the toast corner and the rail-side panel by default", async () => {
+      renderNotices({ workspaceErrors: [shellError] });
+
+      const toasts = screen.getByTestId("notice-toasts");
+      expect(toasts.className).toContain("bottom-3");
+      expect(toasts.className).toContain("right-3");
+
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center").className).toContain("left-14");
+      // Every toast row is in the panel now, so the stack goes away.
+      expect(screen.queryByTestId("notice-toasts")).toBeNull();
+    });
+
+    it("clears a corner-hosted bell with the toasts and the panel", async () => {
+      renderNotices({ workspaceErrors: [shellError], host: "corner" });
+
+      // The toggle owns the bottom-right corner here, so the stack starts
+      // above it instead of landing on top of it.
+      const toasts = screen.getByTestId("notice-toasts");
+      expect(toasts.className).toContain("bottom-14");
+      expect(toasts.className).not.toContain("bottom-3");
+      expect(toasts.className).toContain("right-3");
+
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      // The panel opens next to the toggle that owns it, not across the window.
+      const panel = screen.getByTestId("notice-center");
+      expect(panel.className).toContain("bottom-14");
+      expect(panel.className).toContain("right-3");
+      expect(panel.className).not.toContain("left-14");
+      expect(screen.queryByTestId("notice-toasts")).toBeNull();
+    });
   });
 
   it("closes the notice popover on outside click while preserving inside clicks", async () => {

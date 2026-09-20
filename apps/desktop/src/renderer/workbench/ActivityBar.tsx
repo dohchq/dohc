@@ -176,7 +176,7 @@ export function ActivityBar(props: {
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         <RailButton
           testId="activity-cloud"
-          label="dohc Drive"
+          label="Sync and sharing"
           badge={props.hasConflict ? "danger" : undefined}
           onClick={props.onOpenCloud}
           icon={<RailGlyph Icon={Cloud} />}

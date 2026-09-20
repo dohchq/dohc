@@ -259,11 +259,11 @@ describe("grantDmRecipients", () => {
         },
         assertCurrent: () => {
           if (!current) {
-            throw new Error("Your dohc Drive session changed. Try again.");
+            throw new Error("Your server session changed. Try again.");
           }
         },
       }),
-    ).rejects.toThrow("Your dohc Drive session changed. Try again.");
+    ).rejects.toThrow("Your server session changed. Try again.");
     expect(revoked).toEqual(["share-a@x.com"]);
   });
 
@@ -280,14 +280,14 @@ describe("grantDmRecipients", () => {
         },
         assertCurrent: () => {
           if (!current) {
-            throw new Error("Your dohc Drive session changed. Try again.");
+            throw new Error("Your server session changed. Try again.");
           }
         },
         beforeCommit: async () => {
           current = false;
         },
       }),
-    ).rejects.toThrow("Your dohc Drive session changed. Try again.");
+    ).rejects.toThrow("Your server session changed. Try again.");
     expect(revoked).toEqual(["share-a@x.com"]);
   });
 

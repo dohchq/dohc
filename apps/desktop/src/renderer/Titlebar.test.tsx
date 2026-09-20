@@ -74,6 +74,49 @@ describe("Titlebar", () => {
     expect(onToggleChats).toHaveBeenCalledOnce();
   });
 
+  // The quick-open button is centered on the window, so a long workspace name
+  // used to run under it and hide the status beside it. Everything on the left
+  // now shares one clamped group and shortens inside it.
+  it("clamps the workspace name and its status into the space left of quick-open", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "win32" });
+
+    render(
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+        onQuickOpen={() => undefined}
+        workspaceStatus={<span data-testid="stub-status">Local · saved</span>}
+      />,
+    );
+
+    const group = screen.getByTestId("titlebar-left-group");
+    expect(group.contains(screen.getByTestId("status-workspace"))).toBe(true);
+    expect(group.contains(screen.getByTestId("stub-status"))).toBe(true);
+    // Absolutely positioned against the window, never inside the clamp.
+    expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
+  });
+
+  it("shortens the workspace name rather than the status beside it", () => {
+    render(
+      <Titlebar
+        workspace={{ ...workspace, rootPath: "/home/ice/launch-readiness-and-self-hosting" }}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+      />,
+    );
+
+    const name = screen.getByTestId("status-workspace");
+    // min-w-0 is what lets the name shrink inside the clamp; truncate is what
+    // ends it in an ellipsis instead of pushing the status out of the window.
+    expect(name.className).toContain("min-w-0");
+    expect(name.className).toContain("truncate");
+    // A shortened name stays readable on hover.
+    expect(screen.getByTestId("workspace-switcher").getAttribute("title")).toBe(
+      "launch-readiness-and-self-hosting",
+    );
+  });
+
   it("omits the chats layout control when the workspace has no chats sidebar", () => {
     render(
       <Titlebar

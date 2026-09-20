@@ -1210,7 +1210,7 @@ describe("share mount refresh failures", () => {
   it("abandons the refresh only when the session expired", () => {
     expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
       kind: "abort",
-      message: "Your dohc Drive session expired. Sign in again, then refresh shares.",
+      message: "Your server session expired. Sign in again, then refresh shares.",
     });
   });
 

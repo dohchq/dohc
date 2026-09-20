@@ -59,9 +59,9 @@ export const SETTINGS_SECTIONS = [
   },
   {
     id: "cloud",
-    label: "Cloud & Sync",
+    label: "Sync and sharing",
     scope: "Workspace",
-    keywords: ["cloud", "sync", "members", "share"],
+    keywords: ["sync", "share", "server", "connect", "cloud", "members"],
     Icon: Cloud,
   },
   {

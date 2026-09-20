@@ -67,6 +67,7 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import type { DesktopUserSettings } from "../settings/userSettings";
 import { useAutomationFailures } from "./shell/useAutomationFailures";
 import { useCloudPresence } from "./shell/useCloudPresence";
+import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
@@ -114,6 +115,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
+import { LiveDocumentsDialog } from "./LiveDocumentsDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -579,7 +581,17 @@ export function DesktopWorkspaceShell(props: {
   );
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
+  // The address a failed attempt used. Only set when a notice's Try again has
+  // to reopen the connection dialog, and cleared when that dialog closes.
+  const [cloudRetryServerUrl, setCloudRetryServerUrl] = useState("");
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
+  // The owner's live-document list, holding the workspace it was opened for
+  // rather than a bare flag. The render below only matches the current
+  // workspace, so a switch cannot leave the previous workspace's list — or
+  // mount a new workspace's — for even one paint.
+  const [liveDocumentsWorkspaceId, setLiveDocumentsWorkspaceId] = useState<
+    string | null
+  >(null);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
@@ -768,7 +780,82 @@ export function DesktopWorkspaceShell(props: {
     retryShellError,
   } = useShellError(workspaceId);
 
-  const { chatCollaboration, refreshCloudStatus } = useCloudPresence(workspaceId);
+  // A connection failure from any panel that embeds CloudLogin. The notice
+  // outlives the panel, so its Try again reopens the connection dialog with
+  // the address that failed when the panel it came from has closed.
+  const reportConnectionError = useCallback(
+    (error: ConnectionErrorReport) => {
+      reportShellError(error.message, new Error(error.message), () => {
+        if (error.retry?.()) return;
+        setCloudRetryServerUrl(error.serverUrl ?? "");
+        setCloudOpen(true);
+      });
+    },
+    [reportShellError],
+  );
+
+  // The live-document dialog's own reads and actions, straight through to
+  // main. The dialog passes the workspace it asked for, so a response can
+  // never be attributed to another one.
+  const loadLiveDocuments = useCallback(
+    (id: string, retiredAfter?: string) =>
+      bridge().listOwnerLiveDocuments({
+        workspaceId: id,
+        ...(retiredAfter === undefined ? {} : { retiredAfter }),
+      }),
+    [],
+  );
+  const stopLiveDocument = useCallback(
+    (id: string, path: string) =>
+      bridge().stopOwnerLiveDocument({ workspaceId: id, path }),
+    [],
+  );
+  const resumeLiveDocument = useCallback(
+    (id: string, path: string) =>
+      bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
+    [],
+  );
+  // The dialog maps refusal codes to app-owned copy and filters diagnostics.
+  const loadLiveRefusals = useCallback(async (id: string, after?: string) => {
+    const page = await bridge().listOwnerLiveRefusals({
+      workspaceId: id,
+      ...(after === undefined ? {} : { after }),
+    });
+    return {
+      refusals: page.refusals,
+      nextCursor: page.nextCursor,
+    };
+  }, []);
+  const retryLiveShare = useCallback(
+    (id: string, shareId: string) =>
+      bridge().retryOwnerLiveShare({ workspaceId: id, shareId }),
+    [],
+  );
+  // A refused read or action becomes the shell's own notice, which outlives
+  // the dialog. Its Try again runs the dialog's retry while the dialog is
+  // open, and reopens the dialog once it is not — but only for the workspace
+  // the failure belonged to.
+  const reportLiveDocumentsError = useCallback(
+    (message: string, error: unknown, retry: () => boolean) => {
+      const failedFor = workspaceIdRef.current;
+      reportShellError(message, error, () => {
+        if (workspaceIdRef.current !== failedFor) return;
+        if (retry()) return;
+        setLiveDocumentsWorkspaceId(failedFor);
+      });
+    },
+    [reportShellError],
+  );
+
+  const reportCloudStatusUnavailable = useCallback(
+    (retry: () => void) => {
+      const message = "dohc could not check this workspace's server connection.";
+      reportShellError(message, new Error(message), retry);
+    },
+    [reportShellError],
+  );
+  const { chatCollaboration, refreshCloudStatus, workspaceSynced } =
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
@@ -1300,6 +1387,8 @@ export function DesktopWorkspaceShell(props: {
   // surface and, below, the versions surface and collections, from the same
   // fact.
   const isShareView = Boolean(props.workspace.shareView);
+  // Owner live documents require this workspace's server connection.
+  const liveDocumentsAvailable = !isShareView && workspaceSynced;
   const { collectionFolders, refreshCollections } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
@@ -3573,7 +3662,7 @@ export function DesktopWorkspaceShell(props: {
       })),
       {
         id: "connect-cloud",
-        label: "Connect dohc Drive",
+        label: "Connect server",
         run: () => setCloudOpen(true),
       },
       {
@@ -4296,6 +4385,7 @@ export function DesktopWorkspaceShell(props: {
     setPaletteOpen(false);
     setShareTarget(null);
     setOpenShareOpen(false);
+    setLiveDocumentsWorkspaceId(null);
   }, [storeUpdateRequired]);
   const checkForStoreUpdate = useCallback(async () => {
     // Workspace-scoped guard (AGENTS.md): a slow answer for workspace A must
@@ -4315,6 +4405,28 @@ export function DesktopWorkspaceShell(props: {
       setStoreUpdateCheckPending(false);
     }
   }, [acceptStoreUpdateResult, workspaceId]);
+  // The live-delivery retry is main's own command, not a repaint: nothing
+  // here decides that delivery recovered. Main reports that by pushing a new
+  // status, so an accepted command needs no follow-up read. A refusal becomes
+  // a notice offering the same command again — for the workspace that asked.
+  const retryLiveDeliveryRef = useRef<() => void>(() => undefined);
+  const retryLiveDelivery = useCallback(() => {
+    const askedFor = workspaceIdRef.current;
+    void bridge()
+      .retryOwnerLiveDelivery({ workspaceId: askedFor })
+      .catch((error: unknown) => {
+        if (workspaceIdRef.current !== askedFor) return;
+        reportShellError(
+          "dohc could not retry live editing for this workspace.",
+          error,
+          () => {
+            if (workspaceIdRef.current !== askedFor) return;
+            retryLiveDeliveryRef.current();
+          },
+        );
+      });
+  }, [reportShellError]);
+  retryLiveDeliveryRef.current = retryLiveDelivery;
   return (
     <AgentSettingsContext.Provider value={props.userSettings?.settings ?? null}>
     <div
@@ -4592,6 +4704,12 @@ export function DesktopWorkspaceShell(props: {
               onRetryWorkspaceError={retryShellError}
               onHideWorkspaceError={hideShellError}
               onDismissWorkspaceError={dismissShellError}
+              onRetryLiveDelivery={retryLiveDelivery}
+              {...(isShareView
+                ? {}
+                : {
+                    onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
+                  })}
               agentNotifications={agentNotifs.notifications}
               onDismissAgentNotification={agentNotifs.dismiss}
               automationFailures={automationFailures}
@@ -5704,12 +5822,18 @@ export function DesktopWorkspaceShell(props: {
         <Overlay
           onClose={() => {
             setCloudOpen(false);
+            setCloudRetryServerUrl("");
             // A sign-in/out inside the dialog changes the relay session —
             // refresh so Chats presence lights up (or goes dormant) at once.
             refreshCloudStatus();
           }}
         >
-          <CloudLogin workspaceId={workspaceId} onConnected={refreshCloudStatus} />
+          <CloudLogin
+            workspaceId={workspaceId}
+            onConnected={refreshCloudStatus}
+            onConnectionError={reportConnectionError}
+            initialServerUrl={cloudRetryServerUrl}
+          />
         </Overlay>
       ) : null}
       {conflictReviewOpen ? (
@@ -5749,8 +5873,28 @@ export function DesktopWorkspaceShell(props: {
               closeSettings();
               setCloudOpen(true);
             }}
+            {...(liveDocumentsAvailable
+              ? {
+                  onOpenLiveDocuments: () => {
+                    closeSettings();
+                    setLiveDocumentsWorkspaceId(workspaceId);
+                  },
+                }
+              : {})}
           />
         </Overlay>
+      ) : null}
+      {liveDocumentsWorkspaceId === workspaceId && !isShareView ? (
+        <LiveDocumentsDialog
+          workspaceId={workspaceId}
+          load={loadLiveDocuments}
+          stop={stopLiveDocument}
+          resume={resumeLiveDocument}
+          loadRefusals={loadLiveRefusals}
+          retryRefusal={retryLiveShare}
+          onError={reportLiveDocumentsError}
+          onClose={() => setLiveDocumentsWorkspaceId(null)}
+        />
       ) : null}
       {shareTarget ? (
         <Overlay onClose={() => setShareTarget(null)}>
@@ -5776,6 +5920,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceReady={props.onSwitchWorkspace}
             onBack={() => props.onDismissShareHandoff?.()}
             onOpened={() => props.onShareHandoffOpened?.()}
+            onConnectionError={reportConnectionError}
             {...(shareView
               ? {}
               : {
@@ -5794,6 +5939,7 @@ export function DesktopWorkspaceShell(props: {
               props.onSwitchWorkspace(workspace);
             }}
             onBack={() => setOpenShareOpen(false)}
+            onConnectionError={reportConnectionError}
             {...(shareView
               ? {}
               : {

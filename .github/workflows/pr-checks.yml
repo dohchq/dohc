@@ -206,6 +206,19 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Self-host native editing
+        env:
+          POSTGRES_URL: postgres://dohc:dohc@127.0.0.1:54329/dohc
+          DOHC_SERVICE_HOST_PROOF_BINARY: ${{ github.workspace }}/target/debug/dohc-workspace-engine
+          DOHC_SERVICE_HOST_PROOF_OUTPUT: ${{ github.workspace }}/.agent-artifacts/self-host-native-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          DOHC_SERVICE_HOST_PROOF_SHA256="$(sha256sum "$DOHC_SERVICE_HOST_PROOF_BINARY" | cut -d ' ' -f 1)"
+          export DOHC_SERVICE_HOST_PROOF_SHA256
+          mkdir -p "$DOHC_SERVICE_HOST_PROOF_OUTPUT"
+          pnpm --filter @dohc/share-web exec vitest run --config vitest.self-host-native.config.ts --reporter=default --reporter=json --outputFile.json="$DOHC_SERVICE_HOST_PROOF_OUTPUT/vitest.json"
+          node --input-type=module -e "import {readSelfHostNativeProof} from './scripts/verification/verify.mjs'; readSelfHostNativeProof(process.env.DOHC_SERVICE_HOST_PROOF_OUTPUT, process.env.DOHC_SERVICE_HOST_PROOF_BINARY, process.env.DOHC_SERVICE_HOST_PROOF_SHA256);"
+
       - name: Desktop system dependencies
         run: pnpm exec playwright install-deps chromium
 

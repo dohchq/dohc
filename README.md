@@ -36,7 +36,11 @@ The desktop app currently includes:
 - Source-visible plugins and local web project previews.
 - Optional self-hosted sync, sharing, presence, and live co-editing.
 
-dohc Drive has not shipped yet.
+Local work does not require an account or server. Sync and sharing use a server you operate.
+
+**dohc Drive is coming soon.** It will be the managed service, with a planned free tier. dohc will handle hosting, setup, and maintenance. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
+
+Follow the [self-hosting guide](docs/how-to/self-host.md) to set up a server and connect the desktop app.
 
 ## Run it from source
 
@@ -55,12 +59,13 @@ Run the marketing site separately:
 pnpm dev:site
 ```
 
-## Run the collaboration services
+## Develop the collaboration services
 
-Multi-device sync, sharing, presence, and live co-editing use two optional services:
+Multi-device sync, sharing, presence, and live co-editing use optional services:
 
 - `services/workspace-api` provides authentication.
 - `services/sync-relay` carries engine operations, files, shares, and presence.
+- `services/share-web` serves browser share links.
 
 Postgres stores authentication data. The relay stores its own data in SQLite. Start Postgres and apply the migrations:
 
@@ -76,16 +81,14 @@ pnpm dev:workspace-api
 pnpm --filter @dohc/sync-relay dev
 ```
 
-For a self-hosted browser viewer, copy `.env.self-host.example` to
-`.env.self-host` and replace every `change-me` value. Follow the
-[`relay initialization procedure`](services/share-web/README.md#storage-and-recovery) once for a fresh deployment, then run
-`docker compose --env-file .env.self-host -f docker-compose.self-host.yml up`.
-The deployment runs one `share-web` instance and keeps relay state in the
-`dohc_self_host_sync_relay` volume. Read the
-[`share-web` operations contract](services/share-web/README.md) before making
-the viewer public. It defines the HTTPS proxy, exact Host and trusted-proxy
-settings, backup and restore procedure, log hygiene, retention, and v1 restart
-behavior.
+In a third terminal, [configure share-web](services/share-web/README.md), build its viewer assets, and start it:
+
+```bash
+pnpm --filter @dohc/share-web build
+pnpm --filter @dohc/share-web dev
+```
+
+These commands run development services. Use the [self-hosting guide](docs/how-to/self-host.md) for a production deployment.
 
 ## Repository map
 

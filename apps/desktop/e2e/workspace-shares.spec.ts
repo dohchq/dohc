@@ -33,7 +33,7 @@ import {
 //
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
-//   Settings → Cloud, and ends it — after which the recipient's relay
+//   Settings → Sync and sharing, and ends it — after which the recipient's relay
 //   access is a byte-identical 404.
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
@@ -242,7 +242,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.status).toBe(404);
     expect(strangerFetch.body).toBe(missingFetch.body);
 
-    // Settings → Cloud → "Shared by me": the grant is listed and endable.
+    // Settings → Sync and sharing → "Shared by me": the grant is listed and endable.
     await page.getByTestId("activity-settings").click();
     await page.getByTestId("settings-nav-cloud").click();
     const row = page.getByTestId("shared-by-me-row");

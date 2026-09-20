@@ -179,7 +179,7 @@ export function createDesktopSharedChannelSync<
         requestCredentialGeneration !== null &&
         currentCredentialGeneration() !== requestCredentialGeneration
       ) {
-        throw new Error("Your dohc Drive session changed. Try again.");
+        throw new Error("Your server session changed. Try again.");
       }
     };
     // Live rows this pass is responsible for. A pass that dies before finishing —

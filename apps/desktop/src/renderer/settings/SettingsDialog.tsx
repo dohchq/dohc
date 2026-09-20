@@ -111,6 +111,11 @@ export function SettingsDialog(props: {
     mutated: boolean;
   }) => void;
   onOpenCloud?: () => void;
+  /**
+   * Opens this workspace's live documents. Owned workspaces only: a shared
+   * view runs no owner live delivery, so it has no such list to manage.
+   */
+  onOpenLiveDocuments?: () => void;
   onWorkspaceFilesChanged?: (outcome?: {
     // The removal cleaned up the record but left its folder on disk. The
     // shell needs the id before its reload sees the record vanish.
@@ -576,21 +581,35 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-cloud">
             <SettingRow
-              title="dohc Drive"
-              description="Connect, sync, and manage cloud collaboration for this workspace."
+              title="Sync and sharing"
+              description="Connect a server, sync this workspace, and manage who you share it with."
             >
               <button
                 type="button"
-                // Pinned accessible name; the visible label follows the
-                // product name.
-                aria-label="Open Cloud"
+                aria-label="Open sync and sharing"
                 onClick={props.onOpenCloud}
                 className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
                 disabled={!props.onOpenCloud}
               >
-                Open Drive
+                Open
               </button>
             </SettingRow>
+            {!props.sharedView && props.onOpenLiveDocuments ? (
+              <SettingRow
+                title="Live documents"
+                description="Documents this workspace is editing live. Stopping one keeps the file and its history."
+                testId="settings-row-live-documents"
+              >
+                <button
+                  type="button"
+                  aria-label="Open live documents"
+                  onClick={props.onOpenLiveDocuments}
+                  className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90"
+                >
+                  Open
+                </button>
+              </SettingRow>
+            ) : null}
             <SettingRow
               title="Shared by me"
               description="Read-only views you've shared with other dohc accounts. Ending a share stops their access on their next refresh."

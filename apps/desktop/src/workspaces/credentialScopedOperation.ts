@@ -2,7 +2,7 @@ export function requireCredentials<Credentials>(
   credentials: Credentials | null,
   ErrorType: new (message: string) => Error = Error,
 ): Credentials {
-  if (credentials === null) throw new ErrorType("Sign in to dohc Drive first.");
+  if (credentials === null) throw new ErrorType("Sign in to your server first.");
   return credentials;
 }
 
@@ -14,7 +14,7 @@ export function credentialScopedOperation(input: {
   const assertCurrent = (): void => {
     input.assertCurrent();
     if (input.currentGeneration() !== input.capturedGeneration) {
-      throw new Error("Your dohc Drive session changed. Try again.");
+      throw new Error("Your server session changed. Try again.");
     }
   };
   return {

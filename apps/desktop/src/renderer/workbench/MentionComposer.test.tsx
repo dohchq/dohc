@@ -224,4 +224,17 @@ describe("MentionComposer autocomplete", () => {
     await userEvent.click(await screen.findByTestId("chats-file-mention-whole"));
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
   });
+
+  it("keeps the collapsed prompt on one line inside its pill", async () => {
+    render(<Harness surface="post" />);
+    const pill = screen.getByTestId("chats-open");
+    // A narrow channel column used to wrap this prompt past the pill's fixed
+    // height; it now shortens inside the border and the tooltip carries it.
+    expect(within(pill).getByText("Write a message…").className).toContain("truncate");
+    expect(pill.getAttribute("title")).toBe("Write a message…");
+    // Shortening the text costs the pill neither its name nor its job.
+    expect(pill.getAttribute("aria-label")).toBe("Write a post");
+    await userEvent.click(pill);
+    expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
+  });
 });

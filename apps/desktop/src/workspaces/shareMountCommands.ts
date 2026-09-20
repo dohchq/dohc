@@ -275,13 +275,13 @@ export function createShareMountCommands<WorkspaceSummary>(
         }
         const credentials = await dependencies.loadCredentials();
         assertCurrent();
-        if (!credentials) throw new Error("Sign in to dohc Drive first.");
+        if (!credentials) throw new Error("Sign in to your server first.");
         const relayUrl = credentials.relayUrl;
         if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
           // Never send this machine's session token to the pasted relay URL.
           throw new Error(
             "This share lives on a different server than the one you're signed in to. " +
-              `Reconnect dohc Drive with the sync relay URL ${parsed.relayUrl}, then try again.`,
+              "Connect to the server that hosts this share, then try again.",
           );
         }
         const existing = dependencies.readMounts(workspace.workspaceId);
@@ -302,7 +302,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           if (error instanceof RelayUnauthorizedError) {
             throw new Error(
-              "Your dohc Drive session expired. Sign in again, then retry.",
+              "Your server session expired. Sign in again, then retry.",
             );
           }
           throw error;

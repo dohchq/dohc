@@ -984,7 +984,7 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Ice" },
       body: "Existing message",
     });
-    const reason = "Sign in to dohc Drive to send a message in this shared channel.";
+    const reason = "Sign in to your server to send a message in this shared channel.";
     let messageGuardCalls = 0;
     const writesBefore = calls.writes;
     context.assertMessageWritable = async () => {
@@ -1048,7 +1048,7 @@ describe("CLI socket server", () => {
         reactionAuthorId: "install-local-user-id",
       };
     };
-    const reason = "dohc: Your dohc Drive session changed. Try again.";
+    const reason = "dohc: Your server session changed. Try again.";
 
     await expect(
       invoke("post", {
@@ -1143,7 +1143,7 @@ describe("CLI socket server", () => {
       title: "Blocked account change",
       body: "Must not land",
       attachments: ["tracked.md"],
-    })).rejects.toThrow("Your dohc Drive session changed. Try again.");
+    })).rejects.toThrow("Your server session changed. Try again.");
 
     expect(identityCalls).toBe(2);
     expect(calls.writes).toBe(writesBefore);
@@ -3362,7 +3362,7 @@ describe("CLI socket server", () => {
       actor: "agent",
       message: opened.messageId,
       emoji: "👍",
-    })).rejects.toThrow("Your dohc Drive session changed. Try again.");
+    })).rejects.toThrow("Your server session changed. Try again.");
 
     if (!store) throw new Error("Store is not available");
     const thread = (await store.listThreads({ workspaceId: WORKSPACE_ID }))
