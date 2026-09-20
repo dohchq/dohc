@@ -443,11 +443,18 @@ function mentionHandles(body: string): string[] {
   return handles;
 }
 
+const EMOJI_ATOM =
+  "(?:[#*0-9]\\uFE0F?\\u20E3|\\u{1F3F4}\\u{E0067}\\u{E0062}(?:\\u{E0065}\\u{E006E}\\u{E0067}|\\u{E0073}\\u{E0063}\\u{E0074}|\\u{E0077}\\u{E006C}\\u{E0073})\\u{E007F}|\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+const EMOJI_GRAPHEME_PATTERN = new RegExp(
+  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
+  "u",
+);
+
 function validateEmoji(value: string): string {
   const emoji = value.normalize("NFC").trim();
   if (emoji.length === 0 || emoji.length > 32) throw new Error("invalid-message-body");
   const segments = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(emoji)];
-  if (segments.length !== 1 || !new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v").test(emoji)) {
+  if (segments.length !== 1 || !EMOJI_GRAPHEME_PATTERN.test(emoji)) {
     throw new Error("invalid-message-body");
   }
   return emoji;

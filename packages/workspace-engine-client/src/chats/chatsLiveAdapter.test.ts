@@ -930,6 +930,31 @@ describe("ChatsLiveAdapter", () => {
     ).resolves.toBe("channel");
   });
 
+  it("matches native reaction validation for keycaps and ZWJ atoms", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const started = await adapter.startChannelThread({
+      workspaceId: "workspace", channelId: "channel",
+      author: { kind: "human", displayName: "Ice" }, body: "React here",
+    });
+    const reaction = {
+      workspaceId: "workspace", threadId: started.thread.id, messageId: started.message.id,
+      author: { authorId: "ice", kind: "human" as const, displayName: "Ice" },
+      replicationAuthorId: "ice", state: "added" as const,
+    };
+    for (const emoji of ["😀‍😀", "1\u20E3", "1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
+      await expect(adapter.setReaction({ ...reaction, emoji })).resolves.toBeDefined();
+    }
+    for (const emoji of ["😀😀", "1", "1\uFE0F", "😀‍x", "🏴\u{E0067}\u{E0062}"]) {
+      await expect(adapter.setReaction({ ...reaction, emoji })).rejects.toThrow("invalid-message-body");
+    }
+  });
+
   it("uses a fresh idempotency key for added, removed, then added reaction transitions", async () => {
     const loopback = new ChatsLoopbackEngine();
     const requests: Request[] = [];
