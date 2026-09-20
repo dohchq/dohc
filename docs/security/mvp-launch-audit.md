@@ -30,7 +30,7 @@ Evidence at the audited commit: matching pull requests received signing secrets 
 
 Attack: a pull request from a same-repo branch, for example from a compromised maintainer account or a malicious collaborator, can change a build script to print `process.env` and exfiltrate the macOS and Windows signing keys. Pull-request builds run as `dry_run`, so these credentials are never needed on that event.
 
-Follow-up: removed the PR trigger and restricted releases to main. Signing and publish jobs use the main-only `desktop-release` environment. Dry runs receive empty signing credentials. Environment restrictions must remain configured in GitHub; an editable workflow condition alone cannot protect repository secrets. See [release instructions](../how-to/desktop-releases.md).
+Follow-up: removed the PR trigger and restricted releases to main. Signing and publish jobs use the main-only `desktop-release` environment. Dry runs receive empty signing credentials. Environment restrictions must remain configured in GitHub; an editable workflow condition alone cannot protect repository secrets. See [release instructions](../how-to/desktop-release.md).
 
 ### 2. LOW — A user env var redirects the packaged update feed
 
@@ -40,7 +40,7 @@ Evidence: `updateFeedOverride` returns `env.DOHC_UPDATE_URL` whenever it is set 
 
 Attack: a process controlling the launch environment can redirect update metadata and downloads. Whether a hostile artifact installs depends on the platform and packaged signature configuration. The feed override alone does not prove native code execution.
 
-Follow-up: documented the override in [release instructions](../how-to/desktop-releases.md). On Windows, the locked electron-updater 6.8.9 verifier rejected unsigned, modified, and wrong-publisher fixtures and accepted a valid signed fixture. This does not prove a complete packaged dohc update or macOS/Linux behavior.
+Follow-up: documented the override in [release instructions](../how-to/desktop-release.md). On Windows, the locked electron-updater 6.8.9 verifier rejected unsigned, modified, and wrong-publisher fixtures and accepted a valid signed fixture. This does not prove a complete packaged dohc update or macOS/Linux behavior.
 
 ### 3. LOW — Default dev credentials in service entrypoints
 
