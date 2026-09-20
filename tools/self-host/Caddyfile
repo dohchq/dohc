@@ -1,0 +1,19 @@
+{
+  admin off
+}
+
+{$DOHC_PUBLIC_HOST} {
+  @home path /
+  redir @home /account 302
+  @account path /account /account/* /device /api/auth/* /.well-known/dohc-server
+  handle @account {
+    reverse_proxy workspace-api:1786
+  }
+  @relay path /sync/*
+  handle @relay {
+    reverse_proxy sync-relay:1788
+  }
+  handle {
+    reverse_proxy share-web:1790
+  }
+}

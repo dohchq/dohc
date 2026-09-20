@@ -9,3 +9,11 @@
 Dockerfile
 docker-compose*.yml
 README.md
+.env
+.env.*
+.agent-artifacts
+.agent-sources
+.dohc-dev
+**/target
+**/target-*
+**/*.log

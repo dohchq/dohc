@@ -132,6 +132,7 @@ async function harness() {
   let missingAdapter = false;
   const routed: unknown[] = [];
   const requireSessions = vi.fn(() => sessions);
+  const retryOwnerLiveDelivery = vi.fn();
   const registrations = createWorkspaceEngineIpc({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
@@ -141,6 +142,7 @@ async function harness() {
       return missingAdapter ? null : work(adapter);
     },
     requireEngineCapture, localAgentDisplayName: displayName, notifyRenderer: notify,
+    retryOwnerLiveDelivery,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
@@ -160,20 +162,30 @@ async function harness() {
     workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
-    events, handlers, invoke, routed, setMissingAdapter: () => { missingAdapter = true; },
+    events, handlers, invoke, routed, retryOwnerLiveDelivery, setMissingAdapter: () => { missingAdapter = true; },
   };
 }
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords,
   CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, CHANNELS.rebuildEngineStore,
+  CHANNELS.getSyncStatus, CHANNELS.retryOwnerLiveDelivery, CHANNELS.rebuildEngineStore,
   CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
   CHANNELS.engineYDocPrepareOwnerHandoff,
 ];
 
 describe("workspace engine IPC registrations", () => {
+  it("admits live delivery retries only through the current writable renderer workspace", async () => {
+    const h = await harness();
+    await h.invoke(CHANNELS.retryOwnerLiveDelivery);
+    expect(h.retryOwnerLiveDelivery).toHaveBeenCalledWith("workspace");
+    await expect(h.invoke(CHANNELS.retryOwnerLiveDelivery, {workspaceId: "foreign"})).rejects.toThrow();
+    expect(h.retryOwnerLiveDelivery).toHaveBeenCalledTimes(1);
+    h.writable.mockImplementation(() => {throw new Error("readonly");});
+    await expect(h.invoke(CHANNELS.retryOwnerLiveDelivery)).rejects.toThrow("readonly");
+    expect(h.retryOwnerLiveDelivery).toHaveBeenCalledTimes(1);
+  });
   it("registers the four groups in order and rejects untrusted callers before parsing", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual(channels);

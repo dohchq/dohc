@@ -1,4 +1,5 @@
 import type { StoredLiveDocumentAuthority } from "./types";
+import {serviceHostDocumentEnabled} from "./serviceHostEnrollment";
 import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
 import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
 import { allowsServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -331,6 +332,7 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
     if (!row) return { kind: "refused", reason: "stale-document" };
     const document = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId,
       lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id) };
+    if (!serviceHostDocumentEnabled(storage, document)) return {kind: "refused", reason: "host-unavailable"};
     if (scope.kind === "named") {
       const current = currentLiveDocumentBinding(storage, { document, actor: liveBrowserActor(scope) });
       return current.kind === "current" ? { kind: "current", binding: current.binding, host: current.host } : current;
@@ -625,6 +627,7 @@ export function currentLiveDocumentBinding(storage: StorageContext, { document, 
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
     stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
+    if (!serviceHostDocumentEnabled(storage, document)) return {kind: "refused", reason: "host-unavailable"};
     let share: SyncRelayShareRow;
     let selector: ShareSelector;
     let authority: ServerDerivedLiveUpdateAuthority;

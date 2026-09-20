@@ -63,6 +63,8 @@ const COMPARED_TABLES: &[&str] = &[
     "live_restore_fences",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
+    "owner_pending_settlements",
+    "owner_pending_settlement_blobs",
     "live_owner_adoptions",
     "live_device_bootstraps",
     "live_device_settlements",

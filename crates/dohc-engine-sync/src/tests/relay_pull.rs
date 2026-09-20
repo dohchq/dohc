@@ -2859,6 +2859,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         refusal_report_id: None,
+        settlement_report_id: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, 1_000),
@@ -3621,6 +3622,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
         refusal_report_id: report_id,
+        settlement_report_id: None,
     };
     commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000).expect("cursor commit");
     let replayed = read_replayed_refusal(&engine, &direct)
@@ -3642,6 +3644,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         replication_epoch: "epoch-1".to_owned(),
         stream_identity: "stream-1".to_owned(),
         refusal_report_id: None,
+        settlement_report_id: None,
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000),

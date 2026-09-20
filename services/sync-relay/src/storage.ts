@@ -1,5 +1,6 @@
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
+import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -333,6 +334,37 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
+
+  enrollServiceHostDocument(input: serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput) {
+    return serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+  }
+  enrollServiceHostDocuments(inputs: readonly serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput[]) {
+    return serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+  }
+  listServiceHostEnrollments(workspaceId?: string) {
+    return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
+  }
+  hasServiceHostEnrollment(workspaceId: string, path: string) {
+    return serviceHostEnrollmentStorage.hasServiceHostEnrollment(this, workspaceId, path);
+  }
+  readServiceHostEnrollment(workspaceId: string, path: string) {
+    return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
+  }
+  listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
+    return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
+  }
+  listCurrentServiceHostEnrollments(workspaceId: string) {
+    return serviceHostEnrollmentStorage.listCurrentServiceHostEnrollments(this, workspaceId);
+  }
+  scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
+    return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
+  }
+  checkServiceHostDocuments(input: Parameters<typeof serviceHostEnrollmentStorage.checkServiceHostDocuments>[1]) {
+    return serviceHostEnrollmentStorage.checkServiceHostDocuments(this, input);
+  }
+  setServiceHostEnrollmentEnabled(input: serviceHostEnrollmentStorage.SetServiceHostEnrollmentEnabledInput) {
+    return serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);
+  }
 
   readStopRestorePlan(input: Parameters<typeof liveRestoreOperationStorage.readStopRestorePlan>[1]) {
     return liveRestoreOperationStorage.readStopRestorePlan(this, input);

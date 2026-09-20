@@ -78,17 +78,30 @@ export async function runNativeOwnerDeliveryPass(options: {
     freshBearer: async () => {check(); return options.bearer;}});
   let drainer: OwnerYDocOutboxDrainer | undefined;
   try {
+    let synchronized = false;
     preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
     if (preparation.status === "capture" || preparation.draft.outboxId === null) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();
       if (authority.kind !== "authority") return authority.kind === "quarantine" ? "frozen" : "retry";
+      synchronized = true;
       // Re-read durable discovery after uncertain commits and concurrent draft writes.
       preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
     }
     if (preparation.status !== "observed") return "retry";
     if (preparation.draft.outboxId === null) return "empty";
     drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery);
-    return await drainer.drainOnce();
+    const result = await drainer.drainOnce();
+    if (result === "empty" && !synchronized) {
+      const authority = await delivery.freshOwnerAuthority(document.binding);
+      check();
+      if (authority.kind === "quarantine") {
+        await outbox.quarantine({outboxId: preparation.draft.outboxId, reason: authority.reason,
+          ...(authority.observedBinding === undefined ? {} : {observedBinding: authority.observedBinding})});
+        return "frozen";
+      }
+      if (authority.kind !== "authority") return "retry";
+    }
+    return result;
   } finally {drainer?.dispose(); delivery.dispose(); outbox.dispose(); await Promise.allSettled([...pending]);}
 }

@@ -46,6 +46,7 @@ export function createWorkspaceEngineIpc<
   }>;
   localAgentDisplayName(): string;
   notifyRenderer(target: { workspaceId: string }): void;
+  retryOwnerLiveDelivery?(workspaceId: string): void;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -206,6 +207,14 @@ export function createWorkspaceEngineIpc<
           activity.getStatus(input.workspaceId),
         ),
       );
+    });
+    registerHandler(CHANNELS.retryOwnerLiveDelivery, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = WorkspaceIdPayload.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+        assertWritableWorkspace(operation.workspace);
+        dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
+      });
     });
 
     registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {

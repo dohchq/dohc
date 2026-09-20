@@ -126,6 +126,72 @@ describe("named browser invitations", () => {
   });
 });
 
+describe("owner live document enrollment", () => {
+  it("lists active and retired rows without exposing bindings", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", status: "retired"}], nextCursor: "old.md"}
+      : {ok: true, documents: [{path: "live.md", status: "ready", document: {shareId: "secret"}}]});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
+      documents: [
+        {path: "old.md", status: "retired", canResume: true},
+        {path: "live.md", status: "ready", canResume: false},
+      ], nextCursor: "old.md",
+    });
+    expect(h.request.mock.calls.map((call) => call[1])).toEqual([
+      "/sync/workspace/live-host", "/sync/workspace/live-host?retired=1&after=older.md",
+    ]);
+  });
+
+  it("uses the server owner credential session for retire and resume", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path, init) => {
+      expect(path).toBe("/sync/workspace/live-host");
+      return init?.method === "DELETE"
+        ? {ok: true, path: "live.md", status: "retired"}
+        : {ok: true, path: "live.md", status: "ready", document: {shareId: "server-only"}};
+    });
+    await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
+    await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
+    expect(h.request.mock.calls.map((call) => [call[0], call[2]?.method, call[2]?.body])).toEqual([
+      [h.credentials, "DELETE", JSON.stringify({path: "live.md", retire: true})],
+      [h.credentials, "POST", JSON.stringify({path: "live.md"})],
+    ]);
+  });
+
+  it("rejects renderer identity, unsafe paths, and unavailable resumes", async () => {
+    const h = harness();
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, credentials: h.credentials})).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "../secret"})).rejects.toThrow();
+    h.request.mockResolvedValue({ok: true, path: "live.md", status: "unavailable"});
+    await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"})).rejects.toThrow("could not resume");
+    expect(h.request.mock.calls.at(-1)?.[0]).toBe(h.credentials);
+  });
+
+  it.each([CHANNELS.listOwnerLiveDocuments, CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument])(
+    "refuses a shared view before loading credentials for %s", async channel => {
+      const h = harness(); h.workspace.shareView = {};
+      const input = channel === CHANNELS.listOwnerLiveDocuments ? {workspaceId} : {workspaceId, path: "live.md"};
+      await expect(h.invoke(channel, input)).rejects.toThrow("original workspace");
+      expect(h.remote).not.toHaveBeenCalled(); expect(h.request).not.toHaveBeenCalled();
+    });
+
+  it("refuses mismatched action responses instead of claiming another file stopped", async () => {
+    const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", status: "retired"});
+    await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"})).rejects.toThrow();
+  });
+
+  it("refuses invalid retired paging cursors and malformed document paths", async () => {
+    const h = harness();
+    h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+      ? {ok: true, documents: [{path: "old.md", status: "retired"}], nextCursor: "old.md"}
+      : {ok: true, documents: []});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "old.md"})).rejects.toThrow("list changed");
+    h.request.mockResolvedValue({ok: true, documents: [{path: "../outside", status: "ready"}]});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId})).rejects.toThrow();
+  });
+});
+
 describe("registered owner restore handler", () => {
   const document = {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
   const intent = {deliveryKind: "owner", operationId: "restore", document, shareId: "share", grantId: "grant",
@@ -242,6 +308,7 @@ describe("registered relay share handlers", () => {
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
+      CHANNELS.listOwnerLiveDocuments, CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument,
       CHANNELS.ownerRestore,
       CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
       CHANNELS.revokeRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
@@ -279,6 +346,9 @@ describe("registered relay share handlers", () => {
   );
 
   it.each([
+    [CHANNELS.listOwnerLiveDocuments, {workspaceId}],
+    [CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"}],
+    [CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"}],
     [CHANNELS.createRelayShareLink, linkInput],
     [CHANNELS.promoteRelayShareGrant, {
       workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent",
@@ -298,7 +368,7 @@ describe("registered relay share handlers", () => {
       response.resolve({ get ok() { return readResult(); } });
       await expect(result).rejects.toThrow();
       expect(readResult).not.toHaveBeenCalled();
-      expect(h.request).toHaveBeenCalledOnce();
+      expect(h.request).toHaveBeenCalledTimes(channel === CHANNELS.listOwnerLiveDocuments ? 2 : 1);
     }
   });
 

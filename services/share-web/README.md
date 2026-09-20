@@ -101,15 +101,20 @@ in-memory session remains valid.
 
 ## Public Edit release
 
-Public Edit stays disabled unless both services receive `DOHC_PUBLIC_EDIT_RELEASE`
-as the exact JSON marker `{"version":1}`. Unknown versions and extra fields are rejected.
-Keep this variable unset until the deployment's calibration and required public proofs are admitted.
-The marker carries no budgets; existing explicit profiles still supply every limit.
+The self-host deployment sets `DOHC_SELF_HOST_LIVE=1` on both services.
+Use the [self-host setup guide](../../docs/how-to/self-host.md) for deployment steps.
+This selects shared limits for the native host, browser editor, sessions, and live transport.
+It also supplies the Public Edit marker `{"version":1}`.
+Operators still configure the public HTTPS origin, account service, secrets, and persistent native host storage.
+
+For manually configured deployments, Public Edit stays disabled until both services receive `DOHC_PUBLIC_EDIT_RELEASE` as `{"version":1}`.
+Unknown versions and extra fields are rejected. The marker carries no budgets; explicit profiles supply each limit.
 
 Share-web requires `DOHC_SHARE_WEB_LINK_LIVE_LIMITS`, the exact public HTTPS origin,
 and relay exchange configuration. The relay requires `DOHC_RELAY_LINK_LIVE=1`,
 complete named live/session/ticket profiles, and its configured document host.
-A service host must be configured and started. A device host also requires
+A service host must be configured and started. The self-host profile provisions that host and discovers shared live documents.
+A device host also requires
 configured device delivery and owner admission. An absent or incompatible marker
 on either service prevents a successful public Edit exchange.
 
@@ -126,14 +131,29 @@ The relay builds `/s/edit/<encoded-grantId>` from `DOHC_RELAY_SHARE_WEB_ORIGIN` 
 This URL identifies the invitation. The recipient must sign in with the invited account; knowing the URL grants no access.
 Issuing the invitation does not check whether the editor or document host is available.
 
-Browser editing requires configuration on both services:
+The self-host profile supplies the session, transport, and editor limits on both services.
+The relay enrolls current Markdown documents covered by Edit shares and retains their native state across restarts.
+The authenticated owner can inspect preparation or pause a document through `/sync/:workspaceId/live-host`.
+Pausing retains its state and stops live authorization immediately.
+
+The profile runs up to 64 documents across 16 workspaces, including paused documents.
+Stopping live editing retires an enrollment and frees its slot. The server keeps acknowledged history and native state.
+In desktop Settings, open **Sync and sharing**, then **Live documents**.
+Choose **Stop live editing** for a document, or **Resume live editing** for a stopped document.
+Retirement stops live editing for that document. It does not revoke its share grants or delete settled shared files.
+An owner can resume the same document at the same path while capacity is available.
+Active live documents must keep their original paths. Moving, deleting, or replacing one makes its live enrollment unavailable.
+Other enrolled documents continue working. Returning the same document to its original path allows the host to resume.
+Deleting enrollment storage or resetting its native state is not a recovery procedure.
+
+For a manual deployment, configure both services:
 
 - On the relay, set `DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_RELAY_SHARE_WEB_ORIGIN`, and `DOHC_RELAY_EXCHANGE_KEY`.
   Enable `DOHC_RELAY_NAMED_LIVE_CONFIG` and `DOHC_RELAY_NAMED_LIVE_HOSTS` with the existing link key and a configured native document host.
 - On share-web, set `DOHC_SHARE_WEB_AUTH_URL` and `DOHC_SHARE_WEB_PUBLIC_ORIGIN` with the matching public Host and relay exchange key.
   Set `DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS`, and `DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS`.
 
-The named session, live transport, and editor settings have no default budgets.
+Without the self-host profile, the named session, live transport, and editor settings require explicit budgets.
 Share-web refuses editor requests when its named editor is unconfigured.
 Live browser editing covers shared Markdown files. Other files retain their existing sharing permissions and change-submission flow.
 Desktop share codes remain available when browser invitations are unconfigured.

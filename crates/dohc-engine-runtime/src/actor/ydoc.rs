@@ -2519,14 +2519,6 @@ pub(super) fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        if kind == SettlementKind::CollectionAdoption || live_audit.is_some() {
-            journal_moment_outbound_in_tx(
-                tx,
-                &key.workspace_id,
-                &result.moment.moment_id,
-                result.deduped,
-            )?;
-        }
         // The settle marker commits atomically with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the
@@ -2579,6 +2571,16 @@ pub(super) fn ydoc_settle_on_store(
                 now_ms,
             )
             .map_err(StorageError::persist_public)?;
+        }
+        // Live settlement export owns its companion moment, including when
+        // enrollment defers the pair until earlier audit events are exported.
+        if kind == SettlementKind::CollectionAdoption && live_audit.is_none() {
+            journal_moment_outbound_in_tx(
+                tx,
+                &key.workspace_id,
+                &result.moment.moment_id,
+                result.deduped,
+            )?;
         }
         Ok((result, prior_marker))
     })?;

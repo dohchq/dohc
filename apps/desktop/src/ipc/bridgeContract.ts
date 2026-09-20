@@ -363,6 +363,25 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const OwnerLiveDocument = z.object({
+  path: SAFE_RELATIVE_PATH,
+  status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+  reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
+  canResume: z.boolean(),
+}).strict();
+export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
+export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
+  retiredAfter: SAFE_RELATIVE_PATH.optional(),
+}).strict();
+export type ListOwnerLiveDocumentsPayload = z.infer<typeof ListOwnerLiveDocumentsPayload>;
+export const OwnerLiveDocumentsResult = z.object({
+  documents: z.array(OwnerLiveDocument).max(128),
+  nextCursor: SAFE_RELATIVE_PATH.nullable(),
+}).strict();
+export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
+export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
+export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
+
 export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
   // Activity refreshes may reuse main's last complete listing. Every other
   // caller omits this and forces a disk/share walk, so direct mutations and
@@ -1182,6 +1201,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Active describes owner live delivery, not a fully synchronized workspace.
+  ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.
@@ -5990,6 +6012,9 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
+  listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
+  stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
+  resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;
@@ -6399,6 +6424,7 @@ export interface DohcDesktopBridge {
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
+  retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;

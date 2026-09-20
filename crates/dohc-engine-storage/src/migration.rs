@@ -2043,6 +2043,58 @@ const V2_AGENT_OWNER_DDL: &str = "\
 ALTER TABLE chat_messages ADD COLUMN author_owner_display_name TEXT;
 ";
 
+const V2_OWNER_SETTLEMENT_LOOKUP_DDL: &str = "\
+CREATE INDEX live_audit_settlement_moment ON live_audit_settlements(
+    workspace_id, json_extract(record_json,'$.momentId'), markdown_digest
+);
+CREATE INDEX replication_log_moment ON replication_log(
+    workspace_id, json_extract(payload_json,'$.momentId')
+) WHERE op_kind='moment.append';
+";
+
+const V2_OWNER_PENDING_SETTLEMENTS_DDL: &str = "\
+CREATE TABLE owner_pending_settlements (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    relay_namespace TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    terminal_cursor INTEGER NOT NULL CHECK (terminal_cursor >= 0),
+    checked_sequence INTEGER NOT NULL DEFAULT 0 CHECK (checked_sequence >= 0),
+    record_facts_json TEXT CHECK (record_facts_json IS NULL OR json_valid(record_facts_json)),
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+    report_id TEXT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX owner_pending_settlements_ready ON owner_pending_settlements(
+    workspace_id, checked_sequence, terminal_cursor
+);
+CREATE INDEX owner_pending_settlements_report ON owner_pending_settlements(workspace_id, report_id);
+CREATE TABLE owner_pending_settlement_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    role TEXT NOT NULL CHECK (role IN ('payload-before', 'payload-after', 'before')),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq, role),
+    CHECK ((text_sha256 IS NOT NULL) != (binary_sha256 IS NOT NULL)),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES owner_pending_settlements(workspace_id, origin_id, origin_seq)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX owner_pending_settlement_text_blobs
+    ON owner_pending_settlement_blobs(text_sha256) WHERE text_sha256 IS NOT NULL;
+CREATE INDEX owner_pending_settlement_binary_blobs
+    ON owner_pending_settlement_blobs(binary_sha256) WHERE binary_sha256 IS NOT NULL;
+";
+
 /// The frozen, ordered list of migrations this build knows.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -2061,6 +2113,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 2,
         id: "v2-agent-owner",
         sql: V2_AGENT_OWNER_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 3,
+        id: "v2-owner-settlement-lookup",
+        sql: V2_OWNER_SETTLEMENT_LOOKUP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 4,
+        id: "v2-owner-pending-settlements",
+        sql: V2_OWNER_PENDING_SETTLEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2291,6 +2355,14 @@ mod tests {
                 "v2-agent-owner",
                 "1b2a97da5260065640bdaaa9cfc2bad24cba32a08755db6fdf0e57a6aec52754",
             ),
+            (
+                "v2-owner-settlement-lookup",
+                "4a0f33de170847a66bce66949d7eae39aadd6280f52fe5a6685f12bb1ff98ca1",
+            ),
+            (
+                "v2-owner-pending-settlements",
+                "b512dfef371e1c09e92508e2633e122e18c4421df0505a9f5c851b65fe26e0c4",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -2339,7 +2411,7 @@ mod tests {
             .expect("shipped schema");
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied { newly_applied: 3 }
         );
         let nullable: bool = conn.query_row("SELECT [notnull] = 0 FROM pragma_table_info('chat_messages') WHERE name = 'author_owner_display_name'", [], |row| row.get(0)).expect("column");
         assert!(nullable);
@@ -2364,7 +2436,7 @@ mod tests {
 
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("groups and agent owner");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
         for (table, column) in [
             ("chat_channels", "type"),
             ("chat_channels", "purpose"),
@@ -2626,6 +2698,70 @@ mod tests {
             normalized(index_sql("idx_materialization_jobs_mutation_generation")),
             "CREATE INDEX idx_materialization_jobs_mutation_generation ON materialization_jobs(target_generation DESC) WHERE job_id NOT GLOB 'version-switch-mat_*' AND job_id NOT GLOB 'version-switch-secret-mat_*'"
         );
+    }
+
+    #[test]
+    fn pending_owner_settlements_retain_blobs_until_queue_removal() {
+        let dir = tempdir();
+        let path = dir.join("pending-owner-settlements.db");
+        let ctx = MigrationContext::current(2_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply migrations");
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,'x');
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',1,x'01');
+             INSERT INTO owner_pending_settlement_blobs VALUES
+                 ('ws','peer',0,'payload-before','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL),
+                 ('ws','peer',0,'payload-after',NULL,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+             INSERT INTO owner_pending_settlements (
+                 workspace_id,origin_id,origin_seq,main_version_id,object_id,
+                 lineage_claim_id,relay_namespace,binding_json,terminal_cursor
+             ) VALUES ('ws','peer',0,'main','object','lineage','relay','{}',3);
+             INSERT INTO replication_log (
+                 workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported
+             ) VALUES ('ws','peer',0,'moment.append','{}',1,1);
+             COMMIT;",
+        )
+        .expect("pins and queue can precede the imported envelope");
+        for sql in [
+            "UPDATE owner_pending_settlements SET checked_sequence=-1",
+            "UPDATE owner_pending_settlements SET record_facts_json='invalid'",
+        ] {
+            conn.execute(sql, [])
+                .expect_err("pending settlement rejects invalid drain state");
+        }
+        conn.execute(
+            "UPDATE owner_pending_settlements SET checked_sequence=1, record_facts_json='[]'",
+            [],
+        )
+        .expect("persist valid drain state");
+        for sql in [
+            "DELETE FROM blobs",
+            "DELETE FROM binary_blobs",
+            "DELETE FROM replication_log",
+        ] {
+            conn.execute(sql, [])
+                .expect_err("pending settlement retains its durable inputs");
+        }
+        conn.execute("DELETE FROM owner_pending_settlements", [])
+            .expect("remove pending settlement");
+        let pins: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM owner_pending_settlement_blobs",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count remaining pins");
+        assert_eq!(pins, 0);
+        conn.execute_batch(
+            "DELETE FROM blobs; DELETE FROM binary_blobs; DELETE FROM replication_log;",
+        )
+        .expect("removed queue releases its inputs");
     }
 
     #[test]

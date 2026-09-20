@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./self-host-live-profile": "./src/selfHostLiveProfile.ts",
     "./device-host": "./src/deviceHost.ts",
     "./owner-live-transport": "./src/ownerLiveTransport.ts",
     ".": "./src/server.ts",

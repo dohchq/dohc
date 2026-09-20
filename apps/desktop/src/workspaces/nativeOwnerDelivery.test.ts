@@ -83,3 +83,23 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
   expect(client.ownerYDocEnroll).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({captured,journalCursor:7,hostVector:Uint8Array.of(1),checkpoint:Uint8Array.of(2,3)}),expect.any(AbortSignal));
   expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(2);
 });
+
+it("pulls accepted state when an enrolled owner has no pending edits", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}}))};
+  mock.drain.mockResolvedValue("empty");
+  mock.authority.mockResolvedValue({kind: "authority", authority: {}});
+  expect(await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", assertCurrent() {}})).toBe("empty");
+  expect(mock.authority).toHaveBeenCalledWith(binding);
+});
+
+it("persists a fenced idle outbox instead of requesting it again indefinitely", async () => {
+  const sendRequest = vi.fn(async request => ({id: request.id, result: {}}));
+  const client = {sendRequest, ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}}))};
+  mock.drain.mockResolvedValue("empty");
+  mock.authority.mockResolvedValue({kind: "quarantine", reason: "binding changed", observedBinding: binding});
+  expect(await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config,
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", assertCurrent() {}})).toBe("frozen");
+  expect(sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "ydoc.ownerOutbox.quarantine", workspace: "handle",
+    params: {outboxId: "outbox", reason: "binding changed", observedBinding: binding}}), expect.any(AbortSignal));
+});

@@ -2,6 +2,7 @@ import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
 import { initializeServiceActivationSchema } from "./serviceActivationSchema";
+import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1178,6 +1179,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
     initializeServiceActivationSchema(db);
+    initializeServiceHostEnrollmentSchema(db);
     initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveCommittedDeliverySchema(db);

@@ -225,7 +225,7 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 #[derive(Default)]
 pub(crate) struct FakeRelay {
     pushes: Mutex<Vec<PushRequest>>,
-    pull: Mutex<Option<PullResponse>>,
+    pub(crate) pull: Mutex<Option<PullResponse>>,
 }
 
 impl RelayTransport for FakeRelay {

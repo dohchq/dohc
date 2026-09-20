@@ -19,6 +19,8 @@ pub struct RelayCursor {
     /// Local-only ownership token for refusal rows surfaced with this pending
     /// cursor. Persisted relay positions never carry one.
     pub refusal_report_id: Option<String>,
+    /// Local-only ownership token for applied owner settlements.
+    pub settlement_report_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub fn read_relay_cursor(
                     replication_epoch,
                     stream_identity,
                     refusal_report_id: None,
+                    settlement_report_id: None,
                 })
             })
             .transpose()
@@ -128,6 +131,14 @@ pub fn commit_relay_cursor(
                 tx.execute(
                     "DELETE FROM replication_pending_refusals \
                      WHERE workspace_id=?1 AND report_id=?2",
+                    params![workspace_id, report_id],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            if let Some(report_id) = &cursor.settlement_report_id {
+                tx.execute(
+                    "DELETE FROM owner_pending_settlements \
+                     WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
                     params![workspace_id, report_id],
                 )
                 .map_err(SyncError::persist)?;

@@ -234,6 +234,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
+import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
@@ -1811,9 +1812,11 @@ const activity = {
     notifyRenderer();
   },
   getStatus: (workspaceId: string) =>
-    withWorkspaceActivityState(workspaceId, (lease, workspace) =>
-      workspaceActivity.getStatus(workspace, lease.state.activity),
-    ),
+    withWorkspaceActivityState(workspaceId, (lease, workspace) => ({
+      ...workspaceActivity.getStatus(workspace, lease.state.activity),
+      ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
+      ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+    })),
   listOpenWorkspaceIds: () =>
     workspaceAuthorities.workspaceIds().filter((workspaceId) =>
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -1822,6 +1825,7 @@ const activity = {
     ),
   queueCloudSync: (workspaceId: string): void => {
     if (!findWorkspace(workspaceId)) return;
+    desktopEngine.retryOwnerDelivery(workspaceId);
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.queueCloudSync(lease.state.activity),
     );
@@ -3184,6 +3188,10 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTra
 });
 
 const desktopEngine = createDesktopEngine({
+  serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
+    credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
+    fetch: (input, init) => relayShareFetch(input, init)}),
+  notifyOwnerDeliveryChanged: workspaceId => notifyRenderer({workspaceId}),
   ownerDeliveryCredentials: () => cachedCredentials?.relayUrl ? {bearer: cachedCredentials.token,
     relayUrl: cachedCredentials.relayUrl, signal: ownerDeliveryCredentialLifetime.signal} : null,
   existingOwnerFor: binding => engineYDocSessionIpc.existingOwner(binding),
@@ -3971,6 +3979,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", notifyRenderer,
     requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
+    retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,

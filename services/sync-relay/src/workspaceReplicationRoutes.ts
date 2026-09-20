@@ -61,7 +61,9 @@ export function createWorkspaceReplicationRoutes(
     request: Request,
     route: WorkspaceReplicationRoute,
     actor: { userId: string },
+    guard: () => void = () => {},
   ): Promise<Response> {
+    guard();
     if (route.route === "bootstrap" && request.method === "GET") {
       const bootstrap = storage.getWorkspaceBootstrap(route.workspaceId);
       return jsonResponse({
@@ -123,6 +125,7 @@ export function createWorkspaceReplicationRoutes(
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
         guard: ({ enforceWorkspaceIdentity: enforceInAppend }) => {
+          guard();
           enforceWorkspaceIdentity(
             storage,
             route.workspaceId,

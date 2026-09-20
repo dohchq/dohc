@@ -20,6 +20,7 @@ mod settlement_record;
 pub use application_record::journal_live_event_in_tx;
 pub use enrollment::journal_live_event_or_defer_in_tx;
 pub use settlement_record::journal_live_settlement_in_tx;
+pub(crate) use settlement_record::owner_settlement_cursor_in;
 
 pub(crate) fn apply_audit_envelope(
     store: &mut EngineStore,
