@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
+import { parseArgs, parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { composeArgs, readSettings, validateSettings } from './config.mjs';
 
@@ -35,6 +35,20 @@ export function privateRouteInstructions(settings) {
   ];
 }
 
+export function updateImageSetting(original, image) {
+  const before = parseEnv(original);
+  const assignment = /^[ \t]*(?:export[ \t]+)?DOHC_IMAGE[ \t]*=.*$/gm;
+  if (!assignment.test(original)) throw new Error('Add a DOHC_IMAGE assignment before upgrading.');
+  if (/[\r\n]/.test(before.DOHC_IMAGE ?? '')) throw new Error('Use a single-line DOHC_IMAGE assignment before upgrading.');
+  const updated = original.replace(assignment, () => `DOHC_IMAGE='${image}'`);
+  const after = parseEnv(updated);
+  if (after.DOHC_IMAGE !== image || Object.keys(before).length !== Object.keys(after).length ||
+      Object.entries(before).some(([key, value]) => key !== 'DOHC_IMAGE' && after[key] !== value)) {
+    throw new Error('Use a single-line DOHC_IMAGE assignment outside quoted multiline values before upgrading.');
+  }
+  return updated;
+}
+
 function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     origin: { type: 'string' }, mode: { type: 'string' }, name: { type: 'string' }, image: { type: 'string' },
@@ -57,13 +71,14 @@ function main() {
       const errors = validateSettings({ ...settings, DOHC_IMAGE: values.image });
       if (errors.length) throw new Error(errors.join('\n'));
       const original = readFileSync(envFile, 'utf8');
+      const updated = updateImageSetting(original, values.image);
       const previous = `${envFile}.previous-${Date.now()}`;
       writeFileSync(previous, original, {flag: 'wx', mode: 0o600});
       console.log(`Previous configuration saved to ${previous}. Keep it private with your deployment secrets.`);
       console.log('Upgrade can apply database migrations. This configuration copy is not a data rollback.');
       const stopped = spawnSync('docker', composeArgs(envFile, settings, 'stop'), {stdio: 'inherit'});
       if (stopped.error || stopped.status !== 0) throw new Error('Could not stop the deployment. Its configuration was not changed.');
-      writeFileSync(envFile, original.replace(/^DOHC_IMAGE=.*$/m, () => `DOHC_IMAGE='${values.image}'`), {mode: 0o600});
+      writeFileSync(envFile, updated, {mode: 0o600});
     }
     const result = action === 'stop'
       ? spawnSync('docker', composeArgs(envFile, settings, 'stop'), {stdio: 'inherit'})

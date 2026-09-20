@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import test from 'node:test';
 import { load, YAML11_SCHEMA } from 'js-yaml';
-import { initialSettings, privateRouteInstructions } from '../tools/self-host/bootstrap.mjs';
+import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
 import { validateSettings, composeArgs, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
@@ -64,6 +64,19 @@ test('fresh configuration generates independent secrets and refuses invalid priv
   assert.throws(() => initialSettings({origin: 'http://machine.tail.ts.net', mode: 'private'}));
   assert.throws(() => initialSettings({origin: 'https://public.invalid', mode: 'private'}));
   assert.match(privateRouteInstructions(first).join('\n'), /Confirm HTTPS port 443 has no existing route/);
+});
+
+test('upgrade replaces spaced, exported, repeated and unchanged image assignments', () => {
+  for (const assignment of ["DOHC_IMAGE='old:v1'", " DOHC_IMAGE = 'old:v1'", "export DOHC_IMAGE = old:v1", "DOHC_IMAGE=old:v1\nDOHC_IMAGE = old:v2"]) {
+    const original = `# deployment\n${assignment}\nBETTER_AUTH_SECRET='preserve-this-value'\n`;
+    const updated = updateImageSetting(original, 'new:v2');
+    assert.equal(parseEnv(updated).DOHC_IMAGE, 'new:v2');
+    assert.equal(parseEnv(updated).BETTER_AUTH_SECRET, 'preserve-this-value');
+    assert.equal(updateImageSetting(updated, 'new:v2'), updated);
+  }
+  assert.throws(() => updateImageSetting('# DOHC_IMAGE=old:v1\n', 'new:v2'), /Add a DOHC_IMAGE assignment/);
+  assert.throws(() => updateImageSetting("DOHC_IMAGE='old:\nv1'\n", 'new:v2'), /single-line/);
+  assert.throws(() => updateImageSetting("NOTE='keep\nDOHC_IMAGE=quoted-content\n'\nDOHC_IMAGE=old:v1\n", 'new:v2'), /outside quoted multiline values/);
 });
 
 test('diagnostics reject placeholders and invalid origins without revealing secrets', () => {
