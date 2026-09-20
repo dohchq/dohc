@@ -847,8 +847,15 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError],
   );
 
+  const reportCloudStatusUnavailable = useCallback(
+    (retry: () => void) => {
+      const message = "dohc could not check this workspace's server connection.";
+      reportShellError(message, new Error(message), retry);
+    },
+    [reportShellError],
+  );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced } =
-    useCloudPresence(workspaceId);
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —

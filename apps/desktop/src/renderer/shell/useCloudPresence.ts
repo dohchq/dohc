@@ -3,7 +3,10 @@ import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { buildChatCollaboration } from "../collab/chatCollaboration";
 
-export function useCloudPresence(workspaceId: string) {
+export function useCloudPresence(
+  workspaceId: string,
+  onStatusUnavailable: (retry: () => void) => void,
+) {
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   // Scope the first render after a workspace switch, before effects run.
@@ -33,9 +36,13 @@ export function useCloudPresence(workspaceId: string) {
         }
       })
       .catch(() => {
-        if (token === cloudStatusToken.current) setScopedStatus(null);
+        if (token !== cloudStatusToken.current) return;
+        setScopedStatus(null);
+        onStatusUnavailable(() => {
+          if (token === cloudStatusToken.current) refreshCloudStatus();
+        });
       });
-  }, [workspaceId]);
+  }, [workspaceId, onStatusUnavailable]);
   useEffect(() => {
     setScopedStatus(null);
     refreshCloudStatus();

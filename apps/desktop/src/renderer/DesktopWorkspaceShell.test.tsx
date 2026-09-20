@@ -15567,6 +15567,23 @@ describe("owner live documents", () => {
     return await screen.findByTestId("settings-section-cloud");
   }
 
+  it("reports an unavailable server status and restores live documents after retry", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockRejectedValueOnce(new Error("private IPC detail"))
+      .mockResolvedValue({ connected: true, workspaceSynced: true });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not check this workspace's server connection.");
+    expect(toast.textContent).not.toContain("private IPC detail");
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    await openCloudSettings(user);
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+
   // The list is a call to this workspace's own server, which main refuses for
   // a workspace that has none. Local-only work gets no action that can only
   // fail — the section still offers the way to turn sync on.
