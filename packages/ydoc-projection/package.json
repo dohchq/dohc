@@ -20,12 +20,12 @@
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
-    "@tiptap/core": "^3.29.2",
-    "@tiptap/extension-list": "3.29.2",
-    "@tiptap/extension-table": "^3.29.2",
-    "@tiptap/markdown": "^3.29.2",
-    "@tiptap/pm": "^3.29.2",
-    "@tiptap/starter-kit": "^3.29.2",
+    "@tiptap/core": "^3.30.5",
+    "@tiptap/extension-list": "3.30.5",
+    "@tiptap/extension-table": "^3.30.5",
+    "@tiptap/markdown": "^3.30.5",
+    "@tiptap/pm": "^3.30.5",
+    "@tiptap/starter-kit": "^3.30.5",
     "js-yaml": "^5.2.3",
     "lib0": "0.2.117",
     "marked": "17.0.6",
@@ -35,6 +35,6 @@
   "devDependencies": {
     "@types/node": "^24.13.3",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

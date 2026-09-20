@@ -121,6 +121,16 @@ export async function startStaticDirectoryPreview(
   }
 
   const server = createServer(async (request, response) => {
+    const address = server.address();
+    if (
+      !address ||
+      typeof address === "string" ||
+      request.headers.host !== `127.0.0.1:${address.port}`
+    ) {
+      response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Forbidden");
+      return;
+    }
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const decoded = decodeURIComponent(url.pathname);
