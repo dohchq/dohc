@@ -49,6 +49,68 @@ fn text_sha(text: &str) -> String {
 }
 
 #[test]
+fn owner_binding_read_failure_does_not_acknowledge_moment() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["remote text"]);
+    let op = envelope(
+        "remote",
+        0,
+        "ws",
+        absent_text_payload("remote-moment", "object", "owner.md", "remote text"),
+    );
+    store
+        .read_with(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE ydoc_owner_bindings \
+                 RENAME COLUMN binding_json TO unavailable_binding_json",
+            )
+        })
+        .unwrap();
+
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &op, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "remote").unwrap(),
+        -1
+    );
+    for table in [
+        "replication_log",
+        "replication_pending_refusals",
+        "moments",
+        "snapshots",
+    ] {
+        assert_eq!(store.table_row_count(table).unwrap(), 0, "{table}");
+    }
+
+    store
+        .read_with(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE ydoc_owner_bindings \
+                 RENAME COLUMN unavailable_binding_json TO binding_json",
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        apply_moment_envelope(&mut store, &op, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "remote").unwrap(),
+        0
+    );
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(store.table_row_count("snapshots").unwrap(), 1);
+    assert_eq!(
+        store
+            .table_row_count("replication_pending_refusals")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pending_draft() {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     use dohc_engine_collab::owner_outbox::{
@@ -210,6 +272,37 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         ),
     );
     let before = snapshot(&store, "object");
+    let log_count = store.table_row_count("replication_log").unwrap();
+    let moment_count = store.table_row_count("moments").unwrap();
+    // Malformed local binding data must not permanently refuse a valid settlement.
+    store
+        .read_with(|conn| conn.execute("UPDATE ydoc_owner_bindings SET binding_json='{}'", []))
+        .unwrap();
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &old, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "host").unwrap(),
+        -1
+    );
+    assert_eq!(store.table_row_count("replication_log").unwrap(), log_count);
+    assert_eq!(store.table_row_count("moments").unwrap(), moment_count);
+    assert_eq!(
+        store
+            .table_row_count("replication_pending_refusals")
+            .unwrap(),
+        0
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                [serde_json::to_string(&observed.binding).unwrap()],
+            )
+        })
+        .unwrap();
     let old_result =
         crate::apply_moment_envelope_detailed(&mut store, &old, &NoFaults, &NoLiveLeases).unwrap();
     assert!(

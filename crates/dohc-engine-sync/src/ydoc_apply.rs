@@ -1545,7 +1545,15 @@ pub(crate) fn observed_owner_projection_in_tx(
     SyncError,
 > {
     let Some(owner) = dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(tx, key)
-        .map_err(|_| SyncError::LiveDocumentBindingActive)?
+        .map_err(|error| match error {
+            dohc_engine_collab::owner_outbox::OwnerOutboxError::Storage(storage) => {
+                SyncError::Storage(storage)
+            }
+            error @ dohc_engine_collab::owner_outbox::OwnerOutboxError::Corrupt => {
+                SyncError::corrupt(error)
+            }
+            _ => SyncError::LiveDocumentBindingActive,
+        })?
     else {
         return Ok(None);
     };
