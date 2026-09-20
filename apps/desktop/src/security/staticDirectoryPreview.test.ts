@@ -11,10 +11,14 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { startStaticDirectoryPreview } from "./staticDirectoryPreview";
 
 /** Sends `path` exactly as spelled, with no client-side URL normalization. */
-function rawRequestStatus(origin: string, path: string): Promise<number> {
+function rawRequestStatus(
+  origin: string,
+  path: string,
+  options: { headers?: Record<string, string>; setHost?: boolean } = {},
+): Promise<number> {
   const { hostname, port } = new URL(origin);
   return new Promise((resolve, reject) => {
-    const call = request({ hostname, port, path, method: "GET" }, (response) => {
+    const call = request({ hostname, port, path, method: "GET", ...options }, (response) => {
       response.resume();
       response.on("end", () => resolve(response.statusCode ?? 0));
     });
@@ -55,6 +59,14 @@ describe("startStaticDirectoryPreview", () => {
           (result) => result.status,
         ),
       ).resolves.toBe(403);
+      await expect(
+        rawRequestStatus(preview.url, "/index.html", {
+          headers: { host: "attacker.example" },
+        }),
+      ).resolves.toBe(403);
+      await expect(
+        rawRequestStatus(preview.url, "/index.html", { setHost: false }),
+      ).resolves.toBe(400);
     } finally {
       await preview.stop();
     }
@@ -77,6 +89,12 @@ describe("startStaticDirectoryPreview", () => {
       },
     });
     try {
+      for (const host of ["attacker.example", "localhost", "127.0.0.1:1", `${new URL(preview.url).host}.attacker.example`]) {
+        await expect(
+          rawRequestStatus(preview.url, "/index.html", { headers: { host } }),
+        ).resolves.toBe(403);
+      }
+      expect(read).not.toHaveBeenCalled();
       await expect(fetch(preview.url).then((response) => response.text())).resolves.toBe(
         "owner index",
       );

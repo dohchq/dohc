@@ -344,11 +344,17 @@ test("desktop releases use explicit release events and preserve unsigned package
     step.includes("electron-builder")
   );
 
-  assert.doesNotMatch(onSection, /pull_request/, "PR verification runs locally");
+  assert.doesNotMatch(onSection, /pull_request/);
+  assert.doesNotMatch(onSection, /tags:/);
   assert.match(onSection, /  push:/);
   assert.match(onSection, /  workflow_dispatch:/);
-  assert.match(workflow, /if: \$\{\{ needs\.preflight\.outputs\.dry_run != 'true' \}\}/);
   assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
+  const jobs = topLevelSection(workflow, "jobs");
+  assert.match(indentedSection(jobs, 2, "preflight"), /if: github\.ref == 'refs\/heads\/main'/);
+  for (const job of ["build", "publish"]) {
+    assert.match(indentedSection(jobs, 2, job), /^ {4}environment: desktop-release$/m);
+  }
+  assert.match(workflow, /if:\s*\$\{\{\s*needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/);
   assert.equal(packageSteps.length, 1, "all electron-builder package paths are explicitly covered");
   assert.equal(packageSteps[0], packageDesktop);
   for (const step of packageSteps) {
@@ -376,6 +382,18 @@ test("desktop releases use explicit release events and preserve unsigned package
   assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
   assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
   assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
+
+  const secretLines = workflow
+    .split(/\r?\n/)
+    .filter((line) => line.includes("secrets."));
+  assert.ok(secretLines.length > 0, "the workflow still declares release secrets");
+  for (const line of secretLines) {
+    assert.match(
+      line,
+      /needs\.preflight\.outputs\.dry_run != 'true'/,
+      `release secret must be empty for dry runs: ${line.trim()}`,
+    );
+  }
 });
 
 test("desktop release stages the Rust engine built for the packaged architecture", async () => {

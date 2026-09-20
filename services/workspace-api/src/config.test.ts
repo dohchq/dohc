@@ -4,7 +4,12 @@ import { ConfigError, readConfig } from "./config";
 const SECRET = "0123456789abcdef0123456789abcdef";
 
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-  return { NODE_ENV: "production", BETTER_AUTH_SECRET: SECRET, ...overrides } as NodeJS.ProcessEnv;
+  return {
+    NODE_ENV: "production",
+    BETTER_AUTH_SECRET: SECRET,
+    POSTGRES_URL: "postgres://dohc:dohc@example.test/dohc",
+    ...overrides,
+  } as NodeJS.ProcessEnv;
 }
 
 describe("readConfig", () => {

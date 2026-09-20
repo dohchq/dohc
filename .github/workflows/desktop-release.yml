@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       channel:
@@ -36,6 +34,7 @@ permissions:
 jobs:
   preflight:
     name: Preflight
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -87,9 +86,6 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
             channel="nightly"
             version_arg=()
-          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            channel="latest"
-            version_arg=(--version "${GITHUB_REF_NAME}")
           else
             channel="${DISPATCH_CHANNEL:-nightly}"
             version_arg=()
@@ -128,6 +124,7 @@ jobs:
   build:
     name: Package ${{ matrix.label }}
     needs: preflight
+    environment: desktop-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -204,8 +201,8 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           OS_NAME: ${{ matrix.os }}
           REQUIRE_SIGNING: ${{ matrix.require_signing }}
-          MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          MACOS_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
         run: |
           set -euo pipefail
           require=0
@@ -233,8 +230,8 @@ jobs:
       - name: Package smoke
         env:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
@@ -242,13 +239,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
-          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
+          WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
         run: |
           builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
           if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
@@ -287,6 +284,7 @@ jobs:
 
   publish:
     name: Publish
+    environment: desktop-release
     needs:
       - preflight
       - build

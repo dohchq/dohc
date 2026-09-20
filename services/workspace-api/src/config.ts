@@ -49,6 +49,10 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
   const nodeEnv = env.NODE_ENV;
   const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 
+  if (!isDevOrTest && !env.POSTGRES_URL?.trim()) {
+    throw new ConfigError("POSTGRES_URL must be set outside development/test.");
+  }
+
   // The /test/device/approve impersonation seam is fail-CLOSED: it requires an
   // explicit dev/test signal, never merely "not production". An operator who
   // copies a dev .env (DOHC_TEST_AUTH=1) into a real deployment must crash the
