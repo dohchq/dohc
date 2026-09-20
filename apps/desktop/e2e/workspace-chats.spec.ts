@@ -227,7 +227,9 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const columnBox = await column.boundingBox();
     expect(composerBox).not.toBeNull();
     expect(columnBox).not.toBeNull();
-    expect(composerBox!.y - (columnBox!.y + columnBox!.height)).toBeLessThan(60);
+    expect(composerBox!.y).toBeGreaterThanOrEqual(columnBox!.y);
+    expect(columnBox!.y + columnBox!.height - (composerBox!.y + composerBox!.height)).toBeGreaterThanOrEqual(0);
+    expect(columnBox!.y + columnBox!.height - (composerBox!.y + composerBox!.height)).toBeLessThan(60);
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
       await page.emulateMedia({ reducedMotion: "reduce" });

@@ -583,7 +583,6 @@ export function ChatsView(props: {
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
@@ -3581,7 +3580,7 @@ export function ChatsView(props: {
                             key={emoji}
                             data-testid="chats-feed-reaction-pill"
                             data-emoji={emoji}
-                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted"
+                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible"
                           >
                             <span aria-hidden>{emoji}</span>
                             <span className="tabular-nums">{count}</span>
@@ -3919,7 +3918,6 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               onNavCommand={props.onNavCommand}
               setMessageNode={setMessageNode}
-              messagesEndRef={messagesEndRef}
             />
           </div>
           <TypingIndicator

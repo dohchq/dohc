@@ -1,6 +1,6 @@
 import { AgentBadge } from "./AgentBadge";
 import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert } from "lucide-react";
-import { memo, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
+import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
   ChatAttachmentRecord,
@@ -405,7 +405,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
-  messagesEndRef: RefObject<HTMLDivElement | null>;
 }) {
   const {
     nav,
@@ -426,7 +425,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     beginResolve,
     scrollToMessage,
     setMessageNode,
-    messagesEndRef,
   } = props;
   if (messagesLoading) {
     return (
@@ -447,6 +445,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = openingMessage.authorKind === "agent";
+  const hasExplicitTitle = nav.thread.title.trim() !== openingMessage.body.split("\n", 1)[0]?.trim();
   const commentCount = messages.length - 1;
 
   // A comment: avatar column, then a bubble that holds the name and body,
@@ -715,7 +714,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </div>
         <h1
           data-testid="chats-thread-post-title"
-          className="sr-only"
+          className={hasExplicitTitle ? "mb-0 mt-2.5 text-[16px] font-semibold leading-snug text-ink" : "sr-only"}
         >
           {nav.thread.title}
         </h1>
@@ -809,7 +808,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       <ol data-testid="chats-comments" className="m-0 list-none space-y-4 p-0 pt-2">
         {commentTree.map((node) => renderThreadComment(node, 0, null))}
       </ol>
-      <div ref={messagesEndRef} />
     </>
   );
 });

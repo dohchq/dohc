@@ -371,6 +371,10 @@ export function MessageReactions(props: {
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(96);
   const [catalog, setCatalog] = useState<readonly { emoji: string; name: string }[]>([]);
+  const emojiNames = useMemo(() => new Map([
+    ...catalog.map(({ emoji, name }) => [emoji, name] as const),
+    ...EMOJI_DATA.map(({ emoji, shortcode }) => [emoji, shortcode] as const),
+  ]), [catalog]);
   useEffect(() => {
     if (props.controls.readOnly) setPickerOpen(false);
   }, [props.controls.readOnly]);
@@ -565,7 +569,7 @@ export function MessageReactions(props: {
                 data-testid={`${props.testIdPrefix}-reaction-choice`}
                 data-emoji={emoji}
                 aria-label={emoji}
-                title={EMOJI_DATA.find((entry) => entry.emoji === emoji)?.shortcode ?? catalog.find((entry) => entry.emoji === emoji)?.name ?? emoji}
+                title={emojiNames.get(emoji) ?? emoji}
                 onClick={() => {
                   toggle(emoji, mine);
                   setPickerOpen(false);
