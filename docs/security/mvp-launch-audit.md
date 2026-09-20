@@ -162,8 +162,10 @@ The follow-up checks the fixes rather than repeating the original audit in full.
 
 - GitHub reported the release workflow as `disabled_manually`. It remains disabled. Repository secrets contained no signing credentials. Organization-secret inventory returned HTTP 403, so historical exposure is unresolved. A past PR run completed packaging, but that does not prove credentials were present.
 - Created the `desktop-release` environment with a single allowed branch, `main`, and no secrets. GitHub rejected required reviewers under the current billing plan. Preserve the branch restriction and add signing credentials only to this environment.
-- JavaScript advisory evidence is in `.agent-artifacts/security/pnpm-audit.json` and `pnpm-audit-after.json`. The scan changed from 41 advisory records to zero after compatible dependency updates.
+- JavaScript advisory evidence is local-only in `.agent-artifacts/security/pnpm-audit.json` and `pnpm-audit-after.json`. The scan changed from 41 advisory records to zero after compatible dependency updates. Regenerate the current scan with `pnpm audit --json`.
 - Focused checks passed: 13 release tests, 11 static-preview tests, nine production-startup cases, 227 relay tests, and 75 share-web tests. The relay suites include workspace binding and grant revocation.
 - The Windows signature proof used electron-updater 6.8.9 from the lockfile. Upstream source: [electron-builder](https://github.com/electron-userland/electron-builder/tree/bed3a9c421a8a05c49f36a2af5d7ae3598cb1b95/packages/electron-updater), commit `bed3a9c421a8a05c49f36a2af5d7ae3598cb1b95`. Windows verification reads `publisherName` from packaged configuration and skips that check when it is absent.
 
 Before launch, verify signed packaged updates on Windows and macOS and establish the Linux feed trust model. Review organization-level signing-secret access with an account that can inspect it. A current empty repository-secret inventory cannot rule out past exposure.
+
+GitHub also returned HTTP 403 for main branch protection because the current plan does not support it for this private repository. The environment restriction limits signing to main, but it does not enforce review before code reaches main. Resolve that release-control decision before enabling signing.
