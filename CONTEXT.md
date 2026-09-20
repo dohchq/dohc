@@ -7,8 +7,16 @@ A local-first file sync and collaboration workspace for humans and agents. This 
 ### Offering
 
 **dohc Drive**:
-The optional managed sync and sharing offering for dohc workspaces. It extends the local workspace while users retain ownership of their work.
+The optional managed service for dohc sync and sharing. dohc operates the services while users retain ownership of their work.
 _Avoid_: dohc Cloud
+
+**Self-hosted server**:
+The dohc services operated by a person or organization on infrastructure they control. It provides sync and sharing for their workspaces.
+_Avoid_: self-hosted Drive
+
+**Server connection**:
+A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
+_Avoid_: Drive connection (for a self-hosted server)
 
 ### Collections
 

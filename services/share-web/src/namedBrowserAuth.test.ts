@@ -48,7 +48,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"));
     const options = {
       pool, baseURL: authOrigin, secret: "browser-auth-test-secret-at-least-32-characters",
-      trustedOrigins: [origin], sendEmail: async (to: string, _subject: string, body: string) => { verificationLinks.set(to, body); },
+      trustedOrigins: [origin], sendEmail: async (message: { to: string; text: string }) => { verificationLinks.set(message.to, message.text); },
     };
     auth = createWorkspaceAuth(options);
     relayAuth = createWorkspaceAuth(options);
@@ -157,13 +157,18 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
 
   it("keeps the production sign-in rate limit separate for verified clients despite forged forwarding headers", async () => {
     // Test mode disables BetterAuth's production default; retain the real factory options and enable it explicitly.
-    const limitedAuth = betterAuth({ ...auth.options, rateLimit: { enabled: true } });
+    const limitedAuth = betterAuth({ ...auth.options, rateLimit: { enabled: true, customRules: { "/sign-in/email": { window: 10, max: 3 } } } });
     expect((await limitedAuth.$context).rateLimit.enabled).toBe(true);
     await limitedAuth.api.signUpEmail({ body: { email: "limited@example.test", password, name: "Limited" } });
     const { handle: serve } = createShareWebApplication({
       relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test", publicHosts: new Set(["share.example.test"]),
       accountAuth: { upstreamUrl: "http://workspace-api:1786", publicOrigin: origin },
-      fetchAuth: (request) => limitedAuth.handler(request),
+      fetchAuth: (request) => {
+        // Model workspace-api's trusted share-web proxy boundary.
+        request.headers.set("x-dohc-auth-client-ip", request.headers.get("x-forwarded-for") ?? "127.0.0.1");
+        request.headers.delete("x-forwarded-for");
+        return limitedAuth.handler(request);
+      },
     });
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
     try {
@@ -282,12 +287,18 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
         }
         expect(storage.listSharesGrantedBy(owner.user.id)).toEqual(before);
       };
+      // dohc mails a link to its own verification page; the page then hands the
+      // token to Better Auth, which is what this checks.
       const verifyEmail = async (email: string) => {
-        const url = verificationLinks.get(email);
-        expect(url).toBeDefined();
-        const response = await auth.handler(new Request(url!));
+        const mail = verificationLinks.get(email);
+        expect(mail).toBeDefined();
+        const token = new URL(/https?:\/\/\S+/.exec(mail!)![0]).searchParams.get("token");
+        expect(token).toBeTruthy();
+        const response = await auth.handler(
+          new Request(`${authOrigin}/api/auth/verify-email?token=${token}&callbackURL=/verified`),
+        );
         expect(response.status).toBe(302);
-        expect(response.headers.get("location")).toBe(new URL(url!).searchParams.get("callbackURL"));
+        expect(response.headers.get("location")).toBe("/verified");
         await response.body?.cancel();
       };
       expect(owner.user.emailVerified).toBe(false);

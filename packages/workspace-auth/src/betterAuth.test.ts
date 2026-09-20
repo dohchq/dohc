@@ -2,6 +2,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
+import type { EmailMessage } from "./smtp";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
 // conformance tests): pnpm dev:postgres first. The 0001_better_auth migration
@@ -11,6 +12,21 @@ const POSTGRES_URL =
 
 let pool: Pool;
 let auth: WorkspaceAuth;
+// The transport under test is exercised in smtp.test.ts; here the sender only
+// has to record what the auth surface asked to deliver.
+const sent: EmailMessage[] = [];
+
+function lastEmailTo(email: string): EmailMessage {
+  const message = [...sent].reverse().find((entry) => entry.to === email);
+  if (!message) throw new Error(`no email was sent to ${email}`);
+  return message;
+}
+
+function linkIn(message: EmailMessage): URL {
+  const match = /https?:\/\/\S+/.exec(message.text);
+  if (!match) throw new Error(`no link in email: ${message.text}`);
+  return new URL(match[0]);
+}
 
 async function postgresReachable(): Promise<boolean> {
   const probe = new Client({
@@ -95,6 +111,9 @@ if (pgAvailable) {
       pool,
       baseURL: "http://localhost:1786",
       secret: "test-secret-0123456789abcdef0123456789abcdef",
+      sendEmail: async (message) => {
+        sent.push(message);
+      },
     });
   });
 
@@ -121,6 +140,50 @@ describeWithPostgres("email/password against Postgres", () => {
     await expect(
       auth.api.signInEmail({ body: { email, password: "wrong-password-1" } }),
     ).rejects.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describeWithPostgres("account email", () => {
+  it("sends a verification link to a dohc page, and the link verifies the address", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+
+    const message = lastEmailTo(email);
+    expect(message.subject).toBe("Verify your dohc email");
+    const link = linkIn(message);
+    expect(link.pathname).toBe("/account/verify-email");
+    const token = link.searchParams.get("token") ?? "";
+    expect(token.length).toBeGreaterThan(0);
+
+    await auth.api.verifyEmail({ query: { token } });
+    const signin = await auth.api.signInEmail({ body: { email, password: PASSWORD } });
+    expect(signin.user.emailVerified).toBe(true);
+  });
+
+  it("sends a reset link that sets a new password", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+
+    await auth.api.requestPasswordReset({ body: { email } });
+    const link = linkIn(lastEmailTo(email));
+    expect(link.pathname).toBe("/account/reset-password");
+
+    const newPassword = "another-real-password-456";
+    await auth.api.resetPassword({
+      body: { newPassword, token: link.searchParams.get("token") ?? "" },
+    });
+
+    const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
+    expect(signin.user.email).toBe(email);
+    await expect(
+      auth.api.signInEmail({ body: { email, password: PASSWORD } }),
+    ).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("answers a reset request for an unknown address without sending mail", async () => {
+    const email = `${unique()}@dohc.test`;
+    await auth.api.requestPasswordReset({ body: { email } });
+    expect(sent.some((message) => message.to === email)).toBe(false);
   });
 });
 

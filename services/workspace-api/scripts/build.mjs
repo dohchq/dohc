@@ -14,6 +14,6 @@ await build({
   platform: "node",
   format: "esm",
   target: "node22",
-  external: ["better-auth", "better-auth/*", "pg"],
+  external: ["better-auth", "better-auth/*", "pg", "nodemailer"],
   logLevel: "info",
 });

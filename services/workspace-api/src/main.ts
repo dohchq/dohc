@@ -1,66 +1,73 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import {
+  createSmtpSender,
+  refuseEmail,
+  type EmailMessage,
+  type SendEmail,
+} from "@dohc/workspace-auth/smtp";
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
+import { accountEmailDelivery } from "./emailDelivery";
+import { sanitizeAuthHeaders } from "./clientAddress";
+import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
+import { createReadinessProbe } from "./readiness";
+import { createRouter, type AuthGateway } from "./routes";
 
-// The auth host: one Postgres and Better Auth mounted on /api/auth/* (the
-// desktop's device sign-in flow). This file is the only place that reads env.
+// The auth host: one Postgres, Better Auth on /api/auth/*, and the browser
+// account pages that drive it. This file owns the process — env, database,
+// sockets, shutdown — and routes.ts owns request handling.
 
-const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
-const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
-const secret = process.env.BETTER_AUTH_SECRET ?? "";
-const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc";
-
-// The /test/device/approve impersonation seam is fail-CLOSED: it requires an
-// explicit dev/test signal, never merely "not production". An operator who
-// copies a dev .env (DOHC_TEST_AUTH=1) into a real deployment must crash the
-// server, not silently expose a full-impersonation endpoint with a
-// source-visible secret.
-const nodeEnv = process.env.NODE_ENV;
-const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
-const testAuthSeam = process.env.DOHC_TEST_AUTH === "1" && isDevOrTest;
-
-if (process.env.DOHC_TEST_AUTH === "1" && !isDevOrTest) {
-  console.error(
-    `FATAL: DOHC_TEST_AUTH=1 requires NODE_ENV=development or test, got NODE_ENV=${nodeEnv ?? "(unset)"}. ` +
-      "This is a dangerous impersonation seam — refusing to start.",
-  );
+let config: WorkspaceApiConfig;
+try {
+  config = readConfig(process.env);
+} catch (error) {
+  if (!(error instanceof ConfigError)) throw error;
+  console.error(`FATAL: ${error.message}`);
   process.exit(1);
 }
 
-if (!testAuthSeam && secret.length < 32) {
-  console.error(
-    "BETTER_AUTH_SECRET must be set (>=32 chars) — generate one with `openssl rand -base64 32`.",
-  );
-  process.exit(1);
-}
+// NODE_ENV=test may capture mail in memory so a test can read the link back.
+// Every other environment sends over SMTP or refuses: a server with no
+// transport must not pretend a verification email went out.
+const captured: EmailMessage[] = [];
+const deliverEmail: SendEmail = config.smtp
+  ? createSmtpSender(config.smtp)
+  : config.emailTransport === "capture"
+    ? async (message) => {
+        captured.push(message);
+      }
+    : refuseEmail;
 
-const webOrigin = process.env.DOHC_WEB_ORIGIN;
-const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
-});
+const email = accountEmailDelivery(deliverEmail);
+const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
+pool.on("error", () => console.error("[workspace-api] An idle database connection failed."));
 const auth = createWorkspaceAuth({
   pool,
-  baseURL,
-  secret: secret || "dev-test-only-secret-0123456789abcdef",
-  ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
+  baseURL: config.baseURL,
+  secret: config.secret,
+  sendEmail: email.sendEmail,
+  ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
 });
 
-// Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
-// test user so the desktop E2E can drive the real flow without a browser.
-// Double-gated: env flag and never in production NODE_ENV.
+const gateway: AuthGateway = {
+  handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
+  api: {
+    getSession: ({ headers }) => auth.api.getSession({ headers }),
+    deviceVerify: ({ query, headers }) => auth.api.deviceVerify({ query, headers }),
+  },
+};
+
+// Test-only seam: approves a device code as a seeded test user so the desktop
+// E2E can drive the real flow without a browser. Double-gated in readConfig by
+// DOHC_TEST_AUTH and NODE_ENV, and the process binds loopback while it is on.
 async function handleTestDeviceApprove(request: Request): Promise<Response> {
-  const { userCode, email } = (await request.json()) as {
-    userCode?: string;
-    email?: string;
-  };
+  const { userCode, email } = (await request.json()) as { userCode?: string; email?: string };
   if (!userCode) return Response.json({ ok: false, error: "userCode required" }, { status: 400 });
   const testEmail = email ?? "e2e-test-user@dohc.test";
   const password = "e2e-test-password-123";
   try {
-    await auth.api.signUpEmail({
-      body: { email: testEmail, password, name: "E2E Test User" },
-    });
+    await auth.api.signUpEmail({ body: { email: testEmail, password, name: "E2E Test User" } });
   } catch {
     // Already seeded — sign-in below is the real assertion.
   }
@@ -74,26 +81,37 @@ async function handleTestDeviceApprove(request: Request): Promise<Response> {
   return Response.json({ ok: true, email: testEmail });
 }
 
-async function fetchHandler(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  if (url.pathname.startsWith("/api/auth/")) return auth.handler(request);
-  if (url.pathname === "/health") {
-    return Response.json({ ok: true, service: "workspace-api" });
-  }
-  // testAuthSeam already encodes the dev/test gate (fail-closed above).
-  if (testAuthSeam && url.pathname === "/test/device/approve" && request.method === "POST") {
-    return handleTestDeviceApprove(request);
-  }
-  return Response.json({ ok: false, error: "route not found" }, { status: 404 });
-}
+const router = createRouter({
+  auth: gateway,
+  readiness: createReadinessProbe(pool, { emailConfigured: config.emailTransport !== "none" }),
+  descriptor: config.descriptor,
+  emailTransport: config.emailTransport,
+  allowedOrigins: config.allowedOrigins,
+  seams: {
+    ...(config.testAuthSeam ? { deviceApprove: handleTestDeviceApprove } : {}),
+    ...(config.emailTransport === "capture" ? { sentEmails: () => captured } : {}),
+  },
+});
 
-const server = createServer(toNodeHandler(fetchHandler));
-// When the impersonation seam is on, bind loopback only so the dev-cloud
-// test server is never reachable off-host.
-const host = testAuthSeam ? "127.0.0.1" : "0.0.0.0";
-server.listen(port, host, () => {
-  console.log(`[workspace-api] listening on ${host}:${port} (auth at /api/auth)`);
-  if (testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
+// The client address is derived from the socket and this server's own trusted
+// proxy list before Better Auth sees a single header, so no caller can choose
+// the address its rate limit is counted against.
+const handler = toNodeHandler(router);
+const server = createServer((request, response) => {
+  try {
+    sanitizeAuthHeaders(request.headers, request.socket.remoteAddress, config.trustedProxies);
+  } catch {
+    // A connection with no address of its own cannot be rate limited; it has
+    // usually already gone away by the time the request parses.
+    response.writeHead(400).end();
+    return;
+  }
+  return handler(request, response);
+});
+server.listen(config.port, config.bindHost, () => {
+  console.log(`[workspace-api] listening on ${config.bindHost}:${config.port} (auth at /api/auth)`);
+  console.log(`[workspace-api] email transport: ${config.emailTransport}`);
+  if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
