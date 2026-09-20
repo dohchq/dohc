@@ -3841,9 +3841,14 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   it("accepts real emoji graphemes, including multi-codepoint ones", () => {
     // Simple pictographic, variation-selector, skin-tone modifier, a flag (two
     // regional indicators), and a ZWJ sequence — all one grapheme cluster.
-    for (const emoji of ["👍", "❤️", "👍🏽", "🇺🇸", "👨‍👩‍👧", "🏳️‍🌈"]) {
+    for (const emoji of ["👍", "❤️", "👍🏽", "🇺🇸", "👨‍👩‍👧", "🏳️‍🌈", "1️⃣", "#️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
       expect(setPayload(emoji).success, emoji).toBe(true);
     }
+  });
+
+  it("accepts every emoji offered by the reaction catalog", async () => {
+    const { default: catalog } = await import("../renderer/workbench/reactionEmojiData.json");
+    for (const { emoji, name } of catalog) expect(setPayload(emoji).success, name).toBe(true);
   });
 
   it("rejects non-emoji strings the length bound alone would let through", () => {
@@ -3858,6 +3863,8 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
       "123",
       "👍 nice",
       " 👍",
+      "1",
+      "🏴\u{E0067}\u{E0062}",
       "x".repeat(40),
     ]) {
       expect(setPayload(bad).success, JSON.stringify(bad)).toBe(false);

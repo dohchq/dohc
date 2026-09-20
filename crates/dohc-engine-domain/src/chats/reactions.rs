@@ -57,6 +57,51 @@ fn consume_reaction_emoji_atom(chars: &[char], at: &mut usize) -> bool {
     let Some(&first) = chars.get(*at) else {
         return false;
     };
+    if matches!(first, '#' | '*' | '0'..='9') {
+        let mut end = *at + 1;
+        if chars.get(end) == Some(&'\u{fe0f}') {
+            end += 1;
+        }
+        if chars.get(end) != Some(&'\u{20e3}') {
+            return false;
+        }
+        *at = end + 1;
+        return true;
+    }
+    if first == '\u{1f3f4}' && chars.get(*at + 1) == Some(&'\u{e0067}') {
+        let suffix = chars.get(*at + 1..*at + 7);
+        if !matches!(
+            suffix,
+            Some(
+                [
+                    '\u{e0067}',
+                    '\u{e0062}',
+                    '\u{e0065}',
+                    '\u{e006e}',
+                    '\u{e0067}',
+                    '\u{e007f}'
+                ] | [
+                    '\u{e0067}',
+                    '\u{e0062}',
+                    '\u{e0073}',
+                    '\u{e0063}',
+                    '\u{e0074}',
+                    '\u{e007f}'
+                ] | [
+                    '\u{e0067}',
+                    '\u{e0062}',
+                    '\u{e0077}',
+                    '\u{e006c}',
+                    '\u{e0073}',
+                    '\u{e007f}'
+                ]
+            )
+        ) {
+            return false;
+        }
+        *at += 7;
+        return true;
+    }
     if is_regional_indicator(first) {
         let Some(&second) = chars.get(*at + 1) else {
             return false;

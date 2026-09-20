@@ -157,7 +157,7 @@ export function AgentsMcpSettings(props: {
   // have a trusted session signal proving that an external client copied the
   // configuration and connected, so only the in-app runner can make this
   // guide ready.
-  const setupReady = Boolean(preferredName && props.agentName) && runner.enabled;
+  const setupReady = Boolean(props.agentName) && runner.enabled;
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current();

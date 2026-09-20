@@ -574,6 +574,19 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("shows an enabled named agent as ready without a personal name", async () => {
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        profile: { agentName: "Nova" },
+        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
+      },
+      source: "default",
+    });
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("agent-setup-status").textContent).toBe("Ready"));
+  });
+
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
     const user = userEvent.setup();
     render(

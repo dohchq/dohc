@@ -447,7 +447,7 @@ function validateEmoji(value: string): string {
   const emoji = value.normalize("NFC").trim();
   if (emoji.length === 0 || emoji.length > 32) throw new Error("invalid-message-body");
   const segments = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(emoji)];
-  if (segments.length !== 1 || !/\p{Extended_Pictographic}/u.test(emoji)) {
+  if (segments.length !== 1 || !new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v").test(emoji)) {
     throw new Error("invalid-message-body");
   }
   return emoji;
