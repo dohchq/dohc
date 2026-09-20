@@ -9,7 +9,7 @@ import { RelayWriteOwner, type RelayContinuity } from "./storage/writeOwner";
 import { createLiveJournalHistoryAuthority, attachLiveJournalHistory } from "./storage/liveJournalHistory";
 import type { StorageContext } from "./storage/context";
 
-interface DeploymentConfig {
+export interface DeploymentConfig {
   version: 1;
   namespace: string;
   generation: number;
@@ -137,10 +137,10 @@ export function initializeRelayDeployment(input: { configPath: string; relayPath
   }
 }
 
-export function openRelayDeployment(configPath: string, options: OpenSyncRelayStorageOptions = {}) {
+function acquireDeployment(configPath: string) {
   const config = validate(absolute(configPath), JSON.parse(readFileSync(configPath, "utf8")));
   const lock = openExisting(join(config.continuityDirectory, "lock.sqlite"));
-  let side: DatabaseSync | undefined, transferred = false;
+  let side: DatabaseSync | undefined;
   try {
     if (lock.prepare("PRAGMA journal_mode").get()?.journal_mode !== "delete") throw unavailable();
     lock.exec("BEGIN EXCLUSIVE");
@@ -149,13 +149,48 @@ export function openRelayDeployment(configPath: string, options: OpenSyncRelaySt
     side = openExisting(join(config.continuityDirectory, "continuity.sqlite"));
     if (side.prepare("PRAGMA journal_mode").get()?.journal_mode !== "wal") throw unavailable();
     const current = row(side, "continuity"); matches(current, config);
+    if (!Number.isSafeInteger(current.expected_stamp) || (current.expected_stamp as number) < 0 ||
+        !Number.isSafeInteger(current.next_stamp) || (current.next_stamp as number) <= (current.expected_stamp as number)) throw unavailable();
+    return { config, lock, side, stamp: current.expected_stamp as number };
+  } catch (error) {
+    side?.close();
+    try { lock.exec("ROLLBACK"); } catch {}
+    lock.close();
+    throw error;
+  }
+}
+
+/** Maintenance owns the same writer lock as ordinary startup, without opening or creating relay storage. */
+export async function withRelayDeploymentMaintenance<T>(configPath: string,
+  operation: (deployment: { config: Readonly<DeploymentConfig>; stamp: number }) => Promise<T>): Promise<T> {
+  const deployment = acquireDeployment(configPath);
+  let operationFailed = false;
+  try { return await operation({ config: deployment.config, stamp: deployment.stamp }); }
+  catch (error) { operationFailed = true; throw error; }
+  finally {
+    const failures: unknown[] = [];
+    try { deployment.side.close(); } catch (error) { failures.push(error); }
+    try { deployment.lock.exec("ROLLBACK"); } catch (error) { failures.push(error); }
+    try { deployment.lock.close(); } catch (error) { failures.push(error); }
+    if (!operationFailed && failures.length) throw new AggregateError(failures, "Relay maintenance could not release deployment storage.");
+  }
+}
+
+export function validateRelayDeploymentMarker(db: SqliteDb | DatabaseSync, config: Readonly<DeploymentConfig>, stamp: number): void {
+  const marker = row(db, "sync_relay_continuity");
+  matches(marker, config);
+  if (marker.stamp !== stamp) throw unavailable();
+}
+
+export function openRelayDeployment(configPath: string, options: OpenSyncRelayStorageOptions = {}) {
+  const { config, lock, side, stamp } = acquireDeployment(configPath);
+  let transferred = false;
+  try {
     if (normalized(realpathSync(config.relayPath)) !== normalized(config.relayPath)) throw unavailable();
     const storage = openSyncRelayStorage(config.relayPath, options, db => {
-      const marker = row(db, "sync_relay_continuity"); matches(marker, config);
-      if (!Number.isSafeInteger(marker.stamp) || (marker.stamp as number) < 0 || marker.stamp !== current.expected_stamp ||
-          !Number.isSafeInteger(current.next_stamp) || (current.next_stamp as number) <= (marker.stamp as number)) throw unavailable();
-      const continuity = new DeploymentContinuity(lock, side!, config);
-      const owner = new RelayWriteOwner(db, continuity, marker.stamp as number);
+      validateRelayDeploymentMarker(db, config, stamp);
+      const continuity = new DeploymentContinuity(lock, side, config);
+      const owner = new RelayWriteOwner(db, continuity, stamp);
       transferred = true;
       return owner;
     });
@@ -165,7 +200,7 @@ export function openRelayDeployment(configPath: string, options: OpenSyncRelaySt
     return { storage, history };
   } catch (error) {
     if (!transferred) {
-      side?.close();
+      side.close();
       try { lock.exec("ROLLBACK"); } catch {}
       lock.close();
     }
