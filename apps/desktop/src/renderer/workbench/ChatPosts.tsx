@@ -21,6 +21,7 @@ import {
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
+import { SaveAsFileActions } from "./PostCard";
 import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 
@@ -362,22 +363,7 @@ export function BookmarkAction(props: {
           >
             <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />
           </button>
-          {!props.active ? (
-            <button
-              type="button"
-              data-testid={`${props.testId}-snapshot`}
-              aria-label="Bookmark chat as snapshot"
-              title="Bookmark as a static Markdown snapshot"
-              disabled={props.busy}
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onToggle?.("snapshot");
-              }}
-              className="rounded px-1.5 py-1 font-mono text-[9px] text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50"
-            >
-              snapshot
-            </button>
-          ) : null}
+
         </>
       ) : null}
     </span>
@@ -461,8 +447,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = openingMessage.authorKind === "agent";
-  const openingIsPlain =
-    openingMessage.body.trim() === nav.thread.title.trim();
   const commentCount = messages.length - 1;
 
   // A comment: avatar column, then a bubble that holds the name and body,
@@ -681,9 +665,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-testid="chats-message"
         data-message-id={openingMessage.id}
         data-author-kind={openingMessage.authorKind}
-        className={`group pt-4 transition-shadow ${
+        className={`group rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 transition-shadow ${
           flashMessageId === openingMessage.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
             : ""
         }`}
       >
@@ -731,11 +715,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         </div>
         <h1
           data-testid="chats-thread-post-title"
-          className={
-            openingIsPlain
-              ? "sr-only"
-              : "mb-0 mt-3 whitespace-pre-wrap break-words text-[17px] font-semibold leading-snug tracking-[-0.01em] text-ink"
-          }
+          className="sr-only"
         >
           {nav.thread.title}
         </h1>
@@ -743,9 +723,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             heading only. */}
         <p
           data-testid="chats-message-body"
-          className={`mb-0 select-text cursor-text whitespace-pre-wrap break-words text-ink ${
-            openingIsPlain ? "mt-3 text-[15px] leading-relaxed" : "mt-2 text-[14px] leading-relaxed"
-          }`}
+          className="mb-0 mt-2 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
         >
           <MentionText
             body={openingMessage.body}
@@ -769,7 +747,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ))}
           </div>
         ) : null}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line py-1.5">
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}
@@ -791,10 +769,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           {runRecords[openingMessage.id] ? (
             <RunChip run={runRecords[openingMessage.id]} />
           ) : null}
-          <BookmarkAction
-            active={Boolean(openingBookmark)}
+          <SaveAsFileActions
+            testIdPrefix="chats-message-bookmark"
+            bookmark={openingBookmark}
             busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-            destinationPath={openingBookmark?.destinationPath}
             onToggle={
               threadLocked
                 ? undefined
@@ -813,7 +791,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 ? () => props.onOpenPath?.(openingBookmark.destinationPath)
                 : undefined
             }
-            testId="chats-message-bookmark"
           />
         </div>
       </article>

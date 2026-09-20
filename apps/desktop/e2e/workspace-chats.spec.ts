@@ -171,7 +171,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
 
 // The panel is a navigator, like the Explorer: a click opens the conversation
 // in the Chats editor tab and the panel keeps its list.
-test("a panel click opens the conversation in the Chats tab and the panel keeps its list", async () => {
+test("a panel click opens the conversation in the Chats tab and the panel keeps its list", async ({}, testInfo) => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -221,6 +221,20 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       pageThreadView.getByTestId("chats-thread-post-title"),
     ).toHaveText("Expand me into a tab.");
     await expect(panel.getByTestId("chats-thread-view")).toHaveCount(0);
+    const back = pageThreadView.getByRole("button", { name: "Back", exact: true });
+    const column = pageThreadView.getByTestId("chats-thread-column");
+    const composerBox = await pageThreadView.getByTestId("chats-composer").boundingBox();
+    const columnBox = await column.boundingBox();
+    expect(composerBox).not.toBeNull();
+    expect(columnBox).not.toBeNull();
+    expect(composerBox!.y - (columnBox!.y + columnBox!.height)).toBeLessThan(60);
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await back.focus();
+      await expect(back).toBeFocused();
+      await page.screenshot({ path: testInfo.outputPath(`post-navigation-${theme}.png`) });
+    }
     await expect(page.getByTestId("chats-composer")).toHaveCount(1);
     await page.getByTestId("chats-composer").fill("draft in flight");
 

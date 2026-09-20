@@ -2,6 +2,7 @@ import "../../testing/legendListMock";
 import { formatChatDay, formatChatTime } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef, useState, type Dispatch, type SetStateAction } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
@@ -461,6 +462,7 @@ describe("message reactions (WS-MU-C2)", () => {
     reactions: ChatReactionRecord[],
     viewerAuthorId: string,
     onToggle = vi.fn(),
+    readOnly = false,
   ) {
     render(
       <ChatMessageList
@@ -469,10 +471,25 @@ describe("message reactions (WS-MU-C2)", () => {
         loading={false}
         emptyLabel="No messages"
         listRef={createRef<ChatMessageListHandle>()}
-        reactionControls={{ reactions, viewerAuthorId, onToggle }}
+        reactionControls={{ reactions, viewerAuthorId, onToggle, readOnly }}
       />,
     );
     return { onToggle };
+  }
+
+  // jsdom measures every box as empty and the picker dismisses itself when
+  // its trigger sits outside the viewport, so the trigger gets a size.
+  function openPicker() {
+    const trigger = screen.getByTestId("test-chat-add-reaction");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    fireEvent.click(trigger);
+    return screen.getByTestId("test-chat-reaction-picker");
+  }
+
+  function choiceEmojis(picker: HTMLElement) {
+    return within(picker)
+      .getAllByTestId("test-chat-reaction-choice")
+      .map((button) => button.dataset.emoji);
   }
 
   it("groups reactions into a pill with a count and reactor tooltip", () => {
@@ -555,6 +572,50 @@ describe("message reactions (WS-MU-C2)", () => {
     fireEvent.keyDown(choice, { key: "Escape" });
     expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
     expect(document.activeElement).toBe(trigger);
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it("finds an emoji by search and accepts a pasted emoji outside the catalog", async () => {
+    const { onToggle } = renderList([], "you@x");
+    const picker = openPicker();
+    const search = within(picker).getByLabelText("Search emoji or paste any emoji");
+    // Opening focuses the search box so typing starts at once.
+    expect(document.activeElement).toBe(search);
+    await userEvent.paste("rocket");
+    expect(choiceEmojis(picker)).toEqual(["🚀"]);
+    fireEvent.click(within(picker).getByTestId("test-chat-reaction-choice"));
+    expect(onToggle).toHaveBeenCalledWith({
+      messageId: "message-1",
+      emoji: "🚀",
+      nextState: "added",
+    });
+    expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
+
+    // A multi-codepoint emoji the catalog does not list still reacts as
+    // itself when pasted. Reopening starts from an empty search.
+    const family = "👨‍👩‍👧‍👦";
+    const reopened = openPicker();
+    expect(choiceEmojis(reopened)).toContain("👍");
+    await userEvent.paste(family);
+    expect(choiceEmojis(reopened)).toEqual([family]);
+    fireEvent.click(within(reopened).getByTestId("test-chat-reaction-choice"));
+    expect(onToggle).toHaveBeenLastCalledWith({
+      messageId: "message-1",
+      emoji: family,
+      nextState: "added",
+    });
+  });
+
+  it("keeps the add-reaction trigger visible but disabled when read-only", () => {
+    const { onToggle } = renderList([reaction()], "you@x", vi.fn(), true);
+    const trigger = screen.getByTestId("test-chat-add-reaction") as HTMLButtonElement;
+    expect(trigger.getAttribute("aria-label")).toBe("Add reaction");
+    expect(trigger.disabled).toBe(true);
+    fireEvent.click(trigger);
+    expect(screen.queryByTestId("test-chat-reaction-picker")).toBeNull();
+    const pill = screen.getByTestId("test-chat-reaction-pill") as HTMLButtonElement;
+    expect(pill.disabled).toBe(true);
+    fireEvent.click(pill);
     expect(onToggle).not.toHaveBeenCalled();
   });
 

@@ -1,9 +1,10 @@
+import { MessageReactions } from "./chatMessages";
 import { chatEditorPath } from "../shell/chatsNav";
 import { parseChatTabPath } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
-import { ActionButton, LIKE_EMOJI, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -46,7 +47,6 @@ import {
   MessageSquare,
   MessagesSquare,
   Plus,
-  SmilePlus,
   Square,
   Users,
   X,
@@ -584,6 +584,7 @@ export function ChatsView(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const threadComposerRef = useRef<HTMLDivElement | null>(null);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
@@ -1981,7 +1982,7 @@ export function ChatsView(props: {
         }
       }
       clearMatchingComposer();
-      messagesEndRef.current?.scrollIntoView({ block: "end" });
+      threadComposerRef.current?.scrollIntoView({ block: "end" });
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
       if (sentMessage && resolvingMessageId) {
@@ -2058,10 +2059,10 @@ export function ChatsView(props: {
   // the first reaction listing), so the write goes first and the listing that
   // answers it repaints the item and names the viewer.
   const toggleHomeReaction = useCallback(
-    (threadId: string, messageId: string, liked: boolean) => {
+    (threadId: string, messageId: string, emoji: string, nextState: "added" | "removed") => {
       if (nav.level !== "feed") return;
       const token = liveToken.current;
-      const cellKey = `${messageId}\u0000${LIKE_EMOJI}`;
+      const cellKey = `${messageId}\u0000${emoji}`;
       const seq = (reactionSeq.current.get(cellKey) ?? 0) + 1;
       reactionSeq.current.set(cellKey, seq);
       const isCurrent = () =>
@@ -2071,8 +2072,8 @@ export function ChatsView(props: {
           workspaceId,
           threadId,
           messageId,
-          emoji: LIKE_EMOJI,
-          state: liked ? "removed" : "added",
+          emoji,
+          state: nextState,
         })
         .then(() => bridge().listChatReactions({ workspaceId, threadId }))
         .then((result) => {
@@ -3235,6 +3236,11 @@ export function ChatsView(props: {
     });
   }, []);
 
+  useEffect(() => {
+    if (!replyTarget) return;
+    threadComposerRef.current?.querySelector("textarea")?.focus();
+  }, [replyTarget]);
+
   const beginResolve = useCallback((message: ChatMessageRecord, option?: string) => {
     setResolveTargetMessageId(message.id);
     setResolveChosenOption(option ?? null);
@@ -3465,12 +3471,6 @@ export function ChatsView(props: {
                   byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
                 }
                 const itemViewer = item.viewerAuthorId ?? "";
-                const liked =
-                  itemViewer !== "" &&
-                  itemReactions.some(
-                    (reaction) =>
-                      reaction.emoji === LIKE_EMOJI && reaction.authorId === itemViewer,
-                  );
                 const where = item.channel
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
@@ -3572,7 +3572,12 @@ export function ChatsView(props: {
                         className="mt-2.5 flex items-center gap-1.5 py-1.5 text-[12px] text-subtle"
                       >
                         {[...byEmoji.entries()].map(([emoji, count]) => (
-                          <span
+                          <button
+                            type="button"
+                            disabled={locked}
+                            aria-label={`${emoji} ${count}`}
+                            aria-pressed={itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer)}
+                            onClick={() => toggleHomeReaction(item.thread.id, item.message.id, emoji, itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer) ? "removed" : "added")}
                             key={emoji}
                             data-testid="chats-feed-reaction-pill"
                             data-emoji={emoji}
@@ -3580,21 +3585,17 @@ export function ChatsView(props: {
                           >
                             <span aria-hidden>{emoji}</span>
                             <span className="tabular-nums">{count}</span>
-                          </span>
+                          </button>
                         ))}
                       </div>
                     ) : (
                       <span className="block h-2.5" />
                     )}
-                    <div className="flex items-stretch border-t border-line">
-                      <ActionButton
-                        testId="chats-feed-like"
-                        label="Like"
-                        disabled={locked}
-                        icon={<SmilePlus size={15} strokeWidth={1.9} aria-hidden />}
-                        active={liked}
-                        onClick={() => toggleHomeReaction(item.thread.id, item.message.id, liked)}
-                      />
+                    <div className="flex items-center gap-2 border-t border-line py-1.5">
+                      <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly flush
+                        messageId={item.message.id} records={itemReactions}
+                        controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked,
+                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item.thread.id, item.message.id, emoji, nextState) }} />
                       <ActionButton
                         label={isComment ? "Reply" : "Comment"}
                         icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
@@ -3895,7 +3896,7 @@ export function ChatsView(props: {
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div
             data-testid="chats-thread-column"
-            className="mx-auto w-full max-w-[640px] px-3 pb-16 sm:px-4"
+            className="mx-auto w-full max-w-[640px] px-3 pb-3 pt-3 sm:px-4"
           >
             <ThreadMessages
               nav={nav}
@@ -3921,96 +3922,96 @@ export function ChatsView(props: {
               messagesEndRef={messagesEndRef}
             />
           </div>
-        </div>
-        <TypingIndicator
-          names={presence.typingNames}
-          className="mx-auto w-full max-w-[640px] px-3 sm:px-4"
-        />
-        {threadLocked ? (
-          <ComposerNotice testId="chats-readonly-note">
-            {threadJoined?.ended
-              ? "This channel is no longer shared with you. You can still read it."
-              : "This channel is read-only for you."}
-          </ComposerNotice>
-        ) : (
-          <div className="mx-auto w-full max-w-[640px] px-3 sm:px-4">
-            {resolveTargetMessageId ? (
-              <div
-                data-testid="chats-resolving-mode"
-                className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {resolveChosenOption
-                    ? `Answering the poll · ${resolveChosenOption}`
-                    : "Answering the poll"}
-                </span>
-                <button
-                  type="button"
-                  data-testid="chats-resolving-cancel"
-                  aria-label="Cancel resolving decision"
-                  onClick={() => {
-                    if (replyTarget?.messageId === resolveTargetMessageId) {
-                      setReplyTarget(null);
-                    }
-                    setResolveTargetMessageId(null);
-                    setResolveChosenOption(null);
-                  }}
-                  className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+          <TypingIndicator
+            names={presence.typingNames}
+            className="mx-auto w-full max-w-[640px] px-3 sm:px-4"
+          />
+          {threadLocked ? (
+            <ComposerNotice testId="chats-readonly-note">
+              {threadJoined?.ended
+                ? "This channel is no longer shared with you. You can still read it."
+                : "This channel is read-only for you."}
+            </ComposerNotice>
+          ) : (
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
+              {resolveTargetMessageId ? (
+                <div
+                  data-testid="chats-resolving-mode"
+                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
                 >
-                  ×
-                </button>
-              </div>
-            ) : null}
-            {replyTarget ? (
-              <div
-                data-testid="chats-replying-mode"
-                className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-              >
-                <span className="min-w-0 flex-1">
-                  Replying to {replyTarget.authorLabel} ·
-                </span>
-                <button
-                  type="button"
-                  data-testid="chats-replying-cancel"
-                  aria-label="Cancel reply"
-                  onClick={() => {
-                    if (resolveTargetMessageId === replyTarget.messageId) {
+                  <span className="min-w-0 flex-1 truncate">
+                    {resolveChosenOption
+                      ? `Answering the poll · ${resolveChosenOption}`
+                      : "Answering the poll"}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="chats-resolving-cancel"
+                    aria-label="Cancel resolving decision"
+                    onClick={() => {
+                      if (replyTarget?.messageId === resolveTargetMessageId) {
+                        setReplyTarget(null);
+                      }
                       setResolveTargetMessageId(null);
-                    }
-                    setReplyTarget(null);
-                  }}
-                  className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+                      setResolveChosenOption(null);
+                    }}
+                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
+              {replyTarget ? (
+                <div
+                  data-testid="chats-replying-mode"
+                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
                 >
-                  ×
-                </button>
-              </div>
-            ) : null}
-            <MentionComposer
-              testIdPrefix="chats"
-              composerId="chats-composer"
-              value={composer}
-              sending={sending}
-              allowEmptySend={resolveTargetMessageId !== null}
-              placeholder="Write a comment…  @ to mention"
-              sendLabel="Send message"
-              candidates={mentionCandidates}
-              fileCandidates={fileMentionCandidates}
-              loadFileHeadings={loadFileHeadings}
-              onChange={(value) => {
-                setComposer(value);
-                presence.setTyping(value.trim().length > 0);
-              }}
-              onEscape={() => {
-                setReplyTarget(null);
-                setResolveTargetMessageId(null);
-              }}
-              onSend={() => {
-                presence.setTyping(false);
-                void sendMessage();
-              }}
-            />
-          </div>
-        )}
+                  <span className="min-w-0 flex-1">
+                    Replying to {replyTarget.authorLabel} ·
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="chats-replying-cancel"
+                    aria-label="Cancel reply"
+                    onClick={() => {
+                      if (resolveTargetMessageId === replyTarget.messageId) {
+                        setResolveTargetMessageId(null);
+                      }
+                      setReplyTarget(null);
+                    }}
+                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
+              <MentionComposer
+                testIdPrefix="chats"
+                composerId="chats-composer"
+                value={composer}
+                sending={sending}
+                allowEmptySend={resolveTargetMessageId !== null}
+                placeholder="Write a comment…  @ to mention"
+                sendLabel="Send message"
+                candidates={mentionCandidates}
+                fileCandidates={fileMentionCandidates}
+                loadFileHeadings={loadFileHeadings}
+                onChange={(value) => {
+                  setComposer(value);
+                  presence.setTyping(value.trim().length > 0);
+                }}
+                onEscape={() => {
+                  setReplyTarget(null);
+                  setResolveTargetMessageId(null);
+                }}
+                onSend={() => {
+                  presence.setTyping(false);
+                  void sendMessage();
+                }}
+              />
+            </div>
+          )}
+        </div>
       </div>
     );
   }

@@ -140,13 +140,31 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     expect(composer.getAttribute("role")).toBe("combobox");
     await userEvent.type(composer, "@");
-    const menu = await screen.findByRole("listbox");
+    const menu = await screen.findByRole("listbox", { hidden: true });
     expect(menu.getAttribute("aria-label")).toBe("Mention a person, agent, or file");
     expect(composer.getAttribute("aria-expanded")).toBe("true");
-    const options = within(menu).getAllByRole("option");
+    const options = within(menu).getAllByRole("option", { hidden: true });
     expect(composer.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
     await userEvent.keyboard("{ArrowDown}");
     expect(composer.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+  });
+
+  // jsdom's viewport is 1024 by 768. The menu is a fixed popover anchored to
+  // the composer: below it when there is room, otherwise above.
+  it.each([
+    { name: "below a composer near the top", top: 500, menuTop: 566 },
+    { name: "above a composer at the bottom", top: 700, menuTop: 692 },
+  ])("floats the roster $name", async ({ top, menuTop }) => {
+    render(<Harness />);
+    const composer = screen.getByTestId("chats-composer");
+    vi.spyOn(composer, "getBoundingClientRect").mockReturnValue(new DOMRect(40, top, 300, 60));
+    await userEvent.type(composer, "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    expect(menu.getAttribute("popover")).toBe("manual");
+    expect(menu.className).toContain("fixed");
+    expect(menu.style.left).toBe("40px");
+    expect(menu.style.top).toBe(`${menuTop}px`);
+    expect(menu.style.maxHeight).toBe("192px");
   });
 
   it("tracks the active file and heading option for assistive tech", async () => {

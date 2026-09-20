@@ -38,7 +38,7 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await expect(like).toBeFocused();
     // The next card must follow data order even while Legend's pooled DOM
     // containers still reflect a recently scrolled viewport.
-    await first.getByTestId("chats-post-bookmark-snapshot").focus();
+    await first.getByTestId("chats-post-bookmark").focus();
     await page.keyboard.press("Tab");
     await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[1]}"]`)).toBeFocused();
     await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });

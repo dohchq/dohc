@@ -28,7 +28,6 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await openMyAgent(page);
     await page.getByTestId("chats-panel").getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await page.getByTestId("chats-add-agent-name").fill("Profile test");
     for (const name of ["Claude Code", "Codex"]) {
       await page.getByRole("button", { name, exact: true }).click();
       await page.getByTestId("chats-add-agent-check").click();

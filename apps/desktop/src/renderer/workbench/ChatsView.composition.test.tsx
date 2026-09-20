@@ -206,7 +206,7 @@ describe("ChatsView My agent", () => {
     await user.click(await screen.findByTestId("chats-add-agent-open"));
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Your agent");
     await user.type(screen.getByTestId("chats-add-agent-agent-name"), "Nova");
-    await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
+    expect(screen.queryByLabelText("Your name")).toBeNull();
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Nova");
     await user.click(screen.getByText("Advanced", { selector: "summary" }));
     await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
@@ -222,7 +222,7 @@ describe("ChatsView My agent", () => {
     expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
     expect(onSaveUserSettings).toHaveBeenLastCalledWith({
       ...DEFAULT_USER_SETTINGS,
-      profile: { preferredName: "Ice", agentName: "Nova" },
+      profile: { ...DEFAULT_USER_SETTINGS.profile, agentName: "Nova" },
       runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
     });
   });

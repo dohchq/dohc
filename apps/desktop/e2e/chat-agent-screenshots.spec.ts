@@ -87,7 +87,6 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await page.getByTestId("chats-add-agent-open").click();
     await expect(page.getByTestId("chats-add-agent")).toBeVisible();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await page.getByTestId("chats-add-agent-name").fill("Ice");
     await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
     await shoot(page, "agent-tool-cards");
     for (const tool of ["Claude Code", "Codex"]) {
