@@ -23,7 +23,8 @@ Store signing and notarization secrets in the GitHub `desktop-release` environme
 Do not store them as repository or organization secrets available to arbitrary branches.
 Restrict that environment to the `main` branch, with no tag rules.
 
-The release workflow accepts pushes and manual dispatches on `main` only.
+The release workflow runs for pushes to `main`.
+Manual dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
 Pull requests use local verification. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
 
