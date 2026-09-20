@@ -4,9 +4,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseOptions, createEvidenceDirectory, benchmarkEnvironment } from './packaged-benchmark-options.mjs';
+import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
@@ -193,6 +193,14 @@ test('startup observer propagates the editing refusal', async t => {
 });
 
 const required = ['--binary', 'dohc.exe', '--package-commit', 'a'.repeat(40), '--output', 'new-output', '--label', 'baseline'];
+test('packaged rehearsals opt out of OS registration with their own profile', () => {
+  const profile = resolve('rehearsal/profile');
+  const args = packagedLaunchArgs(profile);
+  assert.ok(args.includes(`--user-data-dir=${profile}`));
+  assert.ok(args.includes('--dohc-isolated-test'));
+  assert.throws(() => packagedLaunchArgs('relative/profile'), /absolute profile/);
+  assert.throws(() => packagedLaunchArgs(''), /absolute profile/);
+});
 test('release environment excludes inherited dohc integration and Node controls', () => {
   const inherited = {
     PATH: 'runtime-path', SystemRoot: 'windows-root', HOME: 'user-home',

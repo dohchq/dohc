@@ -12,6 +12,39 @@ import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
 
+test("Windows setup uses pnpm.cmd and stops after failed or missing installation", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-setup-windows-"));
+  const put = (path, contents) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  };
+  try {
+    put("apps/desktop/package.json", "{}");
+    for (const name of ["setup.mjs", "process.mjs", "windows-command.mjs", "windows-job.ps1"]) {
+      mkdirSync(join(root, "scripts/verification"), { recursive: true });
+      copyFileSync(new URL(`./${name}`, import.meta.url), join(root, "scripts/verification", name));
+    }
+    put("apps/desktop/scripts/ensure-electron-installed.mjs", "import {writeFileSync} from 'node:fs';writeFileSync('electron-ran', 'yes');");
+    put("scripts/verification/doctor.mjs", "import {writeFileSync} from 'node:fs';writeFileSync('doctor-ran', 'yes');");
+    put("bin/pnpm.ps1", "throw 'Setup must use the command shim, not the PowerShell shim.'");
+    const pwsh = execFileSync("where.exe", ["pwsh.exe"], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
+    env.PATH = [join(root, "bin"), dirname(pwsh), join(process.env.SystemRoot, "System32"), join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0")].join(";");
+    for (const exitCode of [0, 23, null]) {
+      for (const path of ["electron-ran", "doctor-ran", "install-args", "bin/pnpm.cmd"]) rmSync(join(root, path), { force: true });
+      if (exitCode !== null) put("bin/pnpm.cmd", `@echo off\r\necho %* > install-args\r\nexit /b ${exitCode}\r\n`);
+      const result = spawnSync(process.execPath, ["scripts/verification/setup.mjs"], { cwd: root, env, encoding: "utf8", timeout: 30_000 });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
+      assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
+      assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
+      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile");
+      if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("doctor requires a disk measurement only when a build budget is configured", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-doctor-disk-"));
   const put = (path, contents) => {

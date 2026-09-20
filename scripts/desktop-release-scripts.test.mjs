@@ -1,16 +1,29 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import {
   mkdir,
-  mkdtemp,
+  mkdtemp as createTemporaryDirectory,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
+
+const temporaryDirectories = [];
+async function mkdtemp(prefix) {
+  const directory = await createTemporaryDirectory(prefix);
+  temporaryDirectories.push(directory);
+  return directory;
+}
+after(async () => {
+  for (const directory of temporaryDirectories) await rm(directory, { recursive: true, force: true });
+});
 
 import {
   nextNightlyBaseVersion,
@@ -223,27 +236,29 @@ sha512: x64
   );
 });
 
-test("mock update server serves files and blocks traversal/symlink escapes", async () => {
+test("mock update server serves files and blocks traversal/directory-link escapes", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-update-server-"));
   const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
   await writeFile(join(root, "latest.yml"), "version: 0.1.0\n");
   await writeFile(join(outside, "secret.txt"), "nope");
-  await symlink(join(outside, "secret.txt"), join(root, "secret-link.txt"));
+  await symlink(outside, join(root, "outside-link"), process.platform === "win32" ? "junction" : "dir");
 
   assert.ok(await resolveServablePath(root, "/latest.yml"));
   assert.equal(await resolveServablePath(root, "/../secret.txt"), null);
   assert.equal(await resolveServablePath(root, "/latest%00.yml"), null);
-  assert.equal(await resolveServablePath(root, "/secret-link.txt"), null);
+  assert.equal(await resolveServablePath(root, "/outside-link/secret.txt"), null);
 
   const server = await createMockUpdateServer({ root });
   try {
     const ok = await fetch(`${server.url}/latest.yml`);
     const escaped = await fetch(`${server.url}/../secret.txt`);
+    const linked = await fetch(`${server.url}/outside-link/secret.txt`);
     const nul = await fetch(`${server.url}/latest%00.yml`);
     assert.equal(ok.status, 200);
     assert.match(ok.headers.get("content-type") ?? "", /^text\/yaml/);
     assert.equal(await ok.text(), "version: 0.1.0\n");
     assert.equal(escaped.status, 404);
+    assert.equal(linked.status, 404);
     assert.equal(nul.status, 404);
   } finally {
     await server.close();
@@ -275,7 +290,7 @@ function indentedSection(source, indent, name) {
 }
 
 function stepBlocks(source) {
-  return source.match(/^ {6}- name: .*(?:\n(?! {6}- name: ).*)*/gm) ?? [];
+  return source.replaceAll("\r\n", "\n").match(/^ {6}- name: .*(?:\n(?! {6}- name: ).*)*/gm) ?? [];
 }
 
 function stepBlock(source, name) {
@@ -317,40 +332,23 @@ test("workflow section helpers support CRLF line endings", () => {
   );
 });
 
-test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
+test("desktop releases use explicit release events and preserve unsigned package smoke", async () => {
   const workflow = await readFile(
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
   );
   const onSection = topLevelSection(workflow, "on");
-  const pullRequestSection = indentedSection(onSection, 2, "pull_request");
   const packageDesktop = stepBlock(workflow, "Package desktop");
   const fuseSmoke = stepBlock(workflow, "Fuse smoke");
   const packageSteps = stepBlocks(workflow).filter((step) =>
     step.includes("electron-builder")
   );
 
-  assert.match(pullRequestSection, /^ {4}branches:\n {6}- main$/m);
-  assert.match(
-    pullRequestSection,
-    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "apps\/desktop\/\*\*"/m,
-    "desktop release simulation must run on PRs that touch desktop code",
-  );
-  assert.match(
-    pullRequestSection,
-    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "scripts\/verification\/\*\*"/m,
-    "release engine builds import the shared verification runner",
-  );
-  assert.match(
-    workflow,
-    /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "pull_request" \]\]; then\s+echo "dry_run=true"/,
-    "pull requests must be forced into dry-run mode",
-  );
-  assert.match(
-    workflow,
-    /if:\s*\$\{\{\s*github\.event_name != 'pull_request' && needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/,
-    "publish job must be disabled for pull requests",
-  );
+  assert.doesNotMatch(onSection, /pull_request/, "PR verification runs locally");
+  assert.match(onSection, /  push:/);
+  assert.match(onSection, /  workflow_dispatch:/);
+  assert.match(workflow, /if: \$\{\{ needs\.preflight\.outputs\.dry_run != 'true' \}\}/);
+  assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
   assert.equal(packageSteps.length, 1, "all electron-builder package paths are explicitly covered");
   assert.equal(packageSteps[0], packageDesktop);
   for (const step of packageSteps) {
@@ -536,4 +534,67 @@ test("desktop release workflow uploads only distributable release assets", async
     /if ! is_release_upload_file "\$file"; then\s+continue\s+fi/,
     "release upload step must skip non-release files before the basename conflict guard",
   );
+});
+
+async function artifactFixture(platform = "win", arch = "x64") {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-test-"));
+  const version = "0.1.0";
+  const extension = platform === "win" ? "exe" : platform === "mac" ? "zip" : "AppImage";
+  const artifactArch = platform === "linux" && arch === "x64" ? "x86_64" : arch;
+  const name = `dohc-${version}-${platform}-${artifactArch}.${extension}`;
+  const bytes = Buffer.from("packaged artifact fixture");
+  const sha512 = createHash("sha512").update(bytes).digest("base64");
+  await writeFile(join(directory, name), bytes);
+  if (platform === "mac") await writeFile(join(directory, `dohc-${version}-mac-${arch}.dmg`), "dmg fixture");
+  const manifest = { version, files: [{ url: name, sha512, size: bytes.length }], path: name, sha512 };
+  const manifestPath = join(directory, `latest${platform === "win" ? "" : `-${platform}`}.yml`);
+  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  return { options: { directory, platform, arch, version, channel: "latest" }, name, manifest, manifestPath };
+}
+
+test("release verification hashes distributable files for each configured platform", async () => {
+  for (const [platform, arch] of [["win", "x64"], ["linux", "x64"], ["mac", "x64"], ["mac", "arm64"]]) {
+    const { options } = await artifactFixture(platform, arch);
+    const result = await verifyDesktopReleaseArtifacts(options);
+    assert.equal(result.status, "passed");
+    assert.equal(result.artifacts.length, platform === "mac" ? 2 : 1);
+    assert.ok(result.excludes.includes("installation"));
+  }
+});
+
+test("release verification rejects changed bytes, version, and legacy updater metadata", async () => {
+  const { options, name, manifest, manifestPath } = await artifactFixture();
+  await assert.rejects(verifyDesktopReleaseArtifacts({ ...options, version: "0.2.0" }), /Manifest version/);
+  await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, sha512: "incorrect" }));
+  await assert.rejects(verifyDesktopReleaseArtifacts(options), /Manifest path and SHA-512/);
+  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await writeFile(join(options.directory, name), "different package bytes!");
+  await assert.rejects(verifyDesktopReleaseArtifacts(options), /size or SHA-512/);
+});
+
+test("release verification rejects missing installers and wrong update architecture", async () => {
+  const fixture = await artifactFixture("mac", "arm64");
+  await rm(join(fixture.options.directory, "dohc-0.1.0-mac-arm64.dmg"));
+  await assert.rejects(verifyDesktopReleaseArtifacts(fixture.options), /ENOENT/);
+  const win = await artifactFixture();
+  const alternate = "other.exe";
+  await writeFile(join(win.options.directory, alternate), await readFile(join(win.options.directory, win.name)));
+  const manifest = { ...win.manifest, files: [{ ...win.manifest.files[0], url: alternate }], path: alternate };
+  await writeFile(win.manifestPath, serializeUpdateManifest(manifest));
+  await assert.rejects(verifyDesktopReleaseArtifacts(win.options), /does not list the x64 update artifact/);
+});
+
+test("release verification rejects artifact paths outside the release directory", async () => {
+  const { options, name, manifest, manifestPath } = await artifactFixture();
+  for (const url of ["../outside.exe", "https://example.com/installer.exe", "..%2Foutside.exe"]) {
+    await writeFile(manifestPath, serializeUpdateManifest({ ...manifest, files: [{ ...manifest.files[0], url }] }));
+    await assert.rejects(verifyDesktopReleaseArtifacts(options), /local filename/);
+  }
+  const outside = await mkdtemp(join(tmpdir(), "dohc-artifact-outside-"));
+  await writeFile(join(outside, name), "outside");
+  await rm(join(options.directory, name));
+  // Containment must fail before the file-type check; Windows junctions need no symlink privilege.
+  await symlink(outside, join(options.directory, name), process.platform === "win32" ? "junction" : "dir");
+  await writeFile(manifestPath, serializeUpdateManifest(manifest));
+  await assert.rejects(verifyDesktopReleaseArtifacts(options), /escapes its directory/);
 });

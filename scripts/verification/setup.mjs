@@ -2,7 +2,7 @@ import { run, repoRoot } from "./process.mjs";
 
 // The checkout cannot resolve its own pnpm package until installation completes.
 const installer = process.platform === "win32"
-  ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "pnpm install --frozen-lockfile; exit $LASTEXITCODE"]]
+  ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; pnpm.cmd install --frozen-lockfile; exit $LASTEXITCODE"]]
   : ["pnpm", ["install", "--frozen-lockfile"]];
 try {
   await run(...installer);

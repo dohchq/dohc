@@ -13,6 +13,7 @@ describe("electronLaunchArgs", () => {
     expect(args).toContain(
       "--user-data-dir=C:/temp/dohc-desktop-e2e-ab12/electron-user-data",
     );
+    expect(args).toContain("--dohc-isolated-test");
   });
 
   // Two concurrent runs must not share a user data dir: that directory is what

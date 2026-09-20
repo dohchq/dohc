@@ -4,7 +4,7 @@ import { EventEmitter, once } from "node:events";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -71,7 +71,9 @@ if (process.argv[2] === "fixture") {
     app.emit("close");
   };
   globalThis.debugFixtureElectron = { launch: async (options) => {
+    assert.ok(options.args.includes("--dohc-isolated-test"), "debug must preserve the installed protocol handler");
     const profile = options.args.find((arg) => arg.startsWith("--user-data-dir=")).slice("--user-data-dir=".length);
+    assert.ok(isAbsolute(profile), "debug needs an absolute isolated profile");
     writeFileSync(join(profile, "DevToolsActivePort"), "1235\n");
     return app;
   } };

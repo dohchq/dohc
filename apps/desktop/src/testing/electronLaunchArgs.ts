@@ -25,6 +25,7 @@ export function electronLaunchArgs(input: {
   const platform = input.platform ?? process.platform;
   return [
     `--user-data-dir=${input.userDataDir}`,
+    "--dohc-isolated-test",
     // Chromium's sandbox needs privileges the CI containers do not grant.
     ...(platform === "linux" ? ["--no-sandbox"] : []),
     // Electron takes the first non-switch argument as the app to run, so the
