@@ -20,6 +20,21 @@ import {
 import { runnerProgram } from "./ChatsView";
 
 describe("ChatsView My agent", () => {
+  it.each([
+    { title: "CLI title", body: "A separate body", visible: true },
+    { title: "Derived title", body: "Derived title\nMore details", visible: false },
+  ])("preserves the title without repeating the first body line: $title", async ({ title, body, visible }) => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ title })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message({ body })] });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-thread"));
+    const heading = await screen.findByTestId("chats-thread-post-title");
+    expect(heading.textContent).toBe(title);
+    expect(heading.classList.contains("sr-only")).toBe(!visible);
+    expect(screen.getByTestId("chats-message-body").textContent).toBe(body);
+  });
+
   it("attributes a runner failure to dohc without an agent badge", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({
@@ -206,7 +221,7 @@ describe("ChatsView My agent", () => {
     await user.click(await screen.findByTestId("chats-add-agent-open"));
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Your agent");
     await user.type(screen.getByTestId("chats-add-agent-agent-name"), "Nova");
-    await user.type(screen.getByTestId("chats-add-agent-name"), "Ice");
+    expect(screen.queryByLabelText("Your name")).toBeNull();
     expect(screen.getByTestId("chats-add-agent-preview").textContent).toContain("Nova");
     await user.click(screen.getByText("Advanced", { selector: "summary" }));
     await user.type(screen.getByTestId("chats-add-agent-command"), "node agent.mjs");
@@ -222,7 +237,7 @@ describe("ChatsView My agent", () => {
     expect(onSaveUserSettings).toHaveBeenCalledTimes(2);
     expect(onSaveUserSettings).toHaveBeenLastCalledWith({
       ...DEFAULT_USER_SETTINGS,
-      profile: { preferredName: "Ice", agentName: "Nova" },
+      profile: { ...DEFAULT_USER_SETTINGS.profile, agentName: "Nova" },
       runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
     });
   });

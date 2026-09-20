@@ -109,6 +109,14 @@ body {
   }
 }
 
+/* Text fields use their border and a thin underline, including borderless
+ * editors. Unlayered so field utilities cannot hide keyboard focus. */
+:is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):focus {
+  outline: none;
+  border-color: var(--dohc-muted);
+  box-shadow: inset 0 -1px 0 var(--dohc-muted);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,
@@ -3495,8 +3503,9 @@ input.dohc-math__source {
 
 @utility dohc-focus-input {
   &:focus {
-    outline: 2px solid var(--dohc-accent);
-    outline-offset: -1px;
+    outline: none;
+    border-color: var(--dohc-muted);
+    box-shadow: inset 0 -1px 0 var(--dohc-muted);
   }
 }
 

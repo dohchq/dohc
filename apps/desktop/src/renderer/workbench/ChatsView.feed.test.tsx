@@ -17,6 +17,25 @@ import {
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
 
+// Like opens the emoji picker; the reaction is written when a choice is
+// picked. jsdom measures every box as empty and the picker dismisses itself
+// when its trigger sits outside the viewport, so the trigger gets a size.
+async function openPicker(like: HTMLElement) {
+  vi.spyOn(like, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 32, 32));
+  await userEvent.click(like);
+  return screen.findByTestId("chats-feed-reaction-picker");
+}
+
+function choiceFor(picker: HTMLElement, emoji: string) {
+  return within(picker)
+    .getAllByTestId("chats-feed-reaction-choice")
+    .find((button) => button.dataset.emoji === emoji)!;
+}
+
+async function pickReaction(like: HTMLElement, emoji: string) {
+  await userEvent.click(choiceFor(await openPicker(like), emoji));
+}
+
 describe("ChatsView hybrid feed", () => {
   it("keeps Home in the editor while Open Groups reveals the sidebar", async () => {
     const onOpenNavigator = vi.fn();
@@ -66,8 +85,15 @@ describe("ChatsView hybrid feed", () => {
     renderView();
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const like = await screen.findByTestId("chats-feed-like");
+    // The trigger stays visible either way; a locked group only disables it.
+    expect(like.getAttribute("aria-label")).toBe("Add reaction");
     expect((like as HTMLButtonElement).disabled).toBe(locked);
-    await userEvent.click(like);
+    if (locked) {
+      await userEvent.click(like);
+      expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
+    } else {
+      await pickReaction(like, "👍");
+    }
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(locked ? 0 : 1);
   });
 
@@ -86,9 +112,11 @@ describe("ChatsView hybrid feed", () => {
     renderView(vi.fn(), onError);
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const like = await screen.findByTestId("chats-feed-like");
-    await userEvent.click(like);
-    await userEvent.click(like);
-    await waitFor(() => expect(like.getAttribute("aria-pressed")).toBe("true"));
+    await pickReaction(like, "👍");
+    await pickReaction(like, "👍");
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍"),
+    );
     await act(async () => {
       older.reject(new Error("Older request failed"));
       await older.promise.catch(() => undefined);
@@ -306,7 +334,7 @@ describe("ChatsView hybrid feed", () => {
     );
   });
 
-  it("offers a keyboard and touch accessible snapshot bookmark action", async () => {
+  it("offers one icon bookmark action without a separate snapshot action", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({
       threads: [thread({ openingMessage: openingPreview() })],
@@ -315,15 +343,16 @@ describe("ChatsView hybrid feed", () => {
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
-    const snapshot = await screen.findByRole("button", {
-      name: "Bookmark chat as snapshot",
+    const bookmark = await screen.findByRole("button", {
+      name: "Save as file",
     });
-    await user.click(snapshot);
+    expect(screen.queryByRole("button", { name: "Bookmark chat as snapshot" })).toBeNull();
+    await user.click(bookmark);
 
     expect(bridgeMock.saveChatBookmark).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
       target: { kind: "thread", threadId: "thread-1" },
-      mode: "snapshot",
+      mode: "live",
     });
   });
 
@@ -452,8 +481,12 @@ describe("ChatsView hybrid feed", () => {
 
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const like = await screen.findByTestId("chats-feed-like");
-    expect(like.getAttribute("aria-pressed")).toBe("false");
-    await userEvent.click(like);
+    expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull();
+    const picker = await openPicker(like);
+    const thumbs = choiceFor(picker, "👍");
+    expect(thumbs.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(thumbs);
+    expect(screen.queryByTestId("chats-feed-reaction-picker")).toBeNull();
 
     expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -462,12 +495,11 @@ describe("ChatsView hybrid feed", () => {
       emoji: "👍",
       state: "added",
     });
-    await waitFor(() =>
-      expect(screen.getByTestId("chats-feed-like").getAttribute("aria-pressed")).toBe("true"),
-    );
-    const pill = screen.getByTestId("chats-feed-reaction-pill");
+    const pill = await screen.findByTestId("chats-feed-reaction-pill");
     expect(pill.dataset.emoji).toBe("👍");
     expect(pill.textContent).toContain("1");
+    // The listing named the viewer, so the picker now shows the choice as yours.
+    expect(choiceFor(await openPicker(like), "👍").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("opens Home with an already-liked post pressed, and unlikes it", async () => {
@@ -493,15 +525,15 @@ describe("ChatsView hybrid feed", () => {
 
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const like = await screen.findByTestId("chats-feed-like");
-    await waitFor(() => expect(like.getAttribute("aria-pressed")).toBe("true"));
+    expect(screen.getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍");
+    const thumbs = choiceFor(await openPicker(like), "👍");
+    expect(thumbs.getAttribute("aria-pressed")).toBe("true");
     bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "author-you" });
-    await userEvent.click(like);
+    await userEvent.click(thumbs);
     expect(bridgeMock.setChatReaction).toHaveBeenCalledWith(
-      expect.objectContaining({ messageId: "message-liked", state: "removed" }),
+      expect.objectContaining({ messageId: "message-liked", emoji: "👍", state: "removed" }),
     );
-    await waitFor(() =>
-      expect(screen.getByTestId("chats-feed-like").getAttribute("aria-pressed")).toBe("false"),
-    );
+    await waitFor(() => expect(screen.queryByTestId("chats-feed-reaction-pill")).toBeNull());
   });
 
   it("keeps two Home items from one thread on their own answers", async () => {
@@ -541,19 +573,19 @@ describe("ChatsView hybrid feed", () => {
         reactions: [reactionFor("message-a"), reactionFor("message-b")],
         viewerAuthorId: "author-you",
       });
-    await userEvent.click(likes[0]!);
-    await userEvent.click(likes[1]!);
+    await pickReaction(likes[0]!, "👍");
+    await pickReaction(likes[1]!, "👍");
+    const items = screen.getAllByTestId("chats-feed-item");
     await waitFor(() =>
-      expect(screen.getAllByTestId("chats-feed-like")[1]!.getAttribute("aria-pressed")).toBe("true"),
+      expect(within(items[1]!).getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍"),
     );
     // A's stale listing (only A liked) lands last. B stays liked.
     await act(async () => {
       answerA({ reactions: [reactionFor("message-a")], viewerAuthorId: "author-you" });
       await lateA;
     });
-    const after = screen.getAllByTestId("chats-feed-like");
-    expect(after[0]!.getAttribute("aria-pressed")).toBe("true");
-    expect(after[1]!.getAttribute("aria-pressed")).toBe("true");
+    expect(within(items[0]!).getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍");
+    expect(within(items[1]!).getByTestId("chats-feed-reaction-pill").dataset.emoji).toBe("👍");
   });
 
   it("keeps Saved beside Open file once a post is saved", async () => {

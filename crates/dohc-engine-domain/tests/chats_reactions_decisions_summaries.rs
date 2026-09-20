@@ -275,6 +275,46 @@ fn reaction_set_rejects_non_emoji_graphemes() {
 }
 
 #[test]
+fn reaction_set_accepts_keycaps_and_subdivision_flags() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    for (index, emoji) in [
+        "1️⃣",
+        "#️⃣",
+        "*️⃣",
+        "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+        "🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+        "🏴\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        set_reaction(
+            &mut store,
+            &format!("emoji-{index}"),
+            "thread",
+            "message",
+            emoji,
+            "Ada",
+            ChatReactionState::Added,
+            30,
+        )
+        .expect("reaction");
+    }
+    for invalid in [
+        "1",
+        "1\u{fe0f}",
+        "🏴\u{e0067}\u{e0062}",
+        "🏴\u{e0067}\u{e0062}\u{e0078}\u{e0078}\u{e0078}\u{e007f}",
+    ] {
+        assert!(!dohc_engine_domain::chats::is_reaction_emoji_verbatim(
+            invalid
+        ));
+    }
+}
+
+#[test]
 fn reaction_row_and_journal_share_origin_coordinate() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

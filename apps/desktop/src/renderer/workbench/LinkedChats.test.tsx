@@ -720,10 +720,10 @@ describe("LinkedChatsPanel share level", () => {
       screen.getAllByTestId("linked-chat-reaction-pill").length,
       "dropping reactionControls hides other people's reactions too",
     ).toBeGreaterThan(0);
-    expect(
-      screen.queryByTestId("linked-chat-add-reaction"),
-      "a share that refuses writes must not offer the picker",
-    ).toBeNull();
+    const trigger = screen.getByTestId("linked-chat-add-reaction") as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+    await userEvent.click(trigger);
+    expect(screen.queryByTestId("linked-chat-reaction-picker")).toBeNull();
   });
 
   it("keeps the composer on a workspace this machine owns", async () => {

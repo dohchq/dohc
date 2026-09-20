@@ -90,6 +90,32 @@ export function MentionComposer(props: {
   const menuLength = fileStage ? fileStage.headings.length + 1 : matches.length + fileMatches.length;
   const showMenu = fileStage !== null || (active !== null && menuLength > 0);
 
+  const menuRef = useRef<HTMLUListElement | null>(null);
+  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0, maxHeight: 192 });
+  useLayoutEffect(() => {
+    if (!showMenu) return;
+    const menu = menuRef.current;
+    menu?.showPopover?.();
+    const position = () => {
+      const anchor = textareaRef.current?.getBoundingClientRect();
+      if (!anchor || !menu) return;
+      const below = window.innerHeight - anchor.bottom - 12;
+      const above = anchor.top - 12;
+      const height = Math.min(192, menu.scrollHeight + 2);
+      const down = below >= height || below >= above;
+      const maxHeight = Math.max(0, Math.min(192, down ? below : above));
+      setMenuPosition({
+        left: Math.max(8, Math.min(anchor.left, window.innerWidth - Math.min(256, window.innerWidth - 16) - 8)),
+        top: down ? anchor.bottom + 6 : Math.max(8, anchor.top - Math.min(height, maxHeight) - 6),
+        maxHeight,
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    document.addEventListener("scroll", position, true);
+    return () => { window.removeEventListener("resize", position); document.removeEventListener("scroll", position, true); };
+  }, [showMenu, menuLength, fileStage, props.value]);
+
   useLayoutEffect(() => {
     if (!highlightFileOnOpen.current || pendingCaret.current !== null || !active) return;
     highlightFileOnOpen.current = false;
@@ -305,11 +331,14 @@ export function MentionComposer(props: {
       ) : null}
       {showMenu ? (
         <ul
+          ref={menuRef}
+          popover="manual"
+          style={{ margin: 0, inset: "auto", ...menuPosition }}
           id={listboxId}
           data-testid={`${props.testIdPrefix}-mention-menu`}
           role="listbox"
           aria-label={fileStage ? `Mention ${fileStage.label}` : "Mention a person, agent, or file"}
-          className="dohc-popover dohc-pop-in absolute bottom-full left-2 z-20 mb-1 max-h-48 w-64 overflow-y-auto rounded-lg border border-line bg-panel py-1 text-xs"
+          className="dohc-popover dohc-pop-in fixed z-50 w-64 max-w-[calc(100vw-16px)] overflow-y-auto rounded-lg border border-line bg-panel py-1 text-xs"
         >
           {fileStage ? (
             <>

@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
+import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
@@ -8,13 +11,14 @@ test("a named agent replies to a group mention with its owner on hover and focus
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
+    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await page.getByTestId("titlebar-chats-sidebar").click();
     await page.getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
-    await page.getByTestId("chats-add-agent-name").fill("Ada");
+    await expect(page.getByLabel("Your name", { exact: true })).toHaveCount(0);
     const command = `node "${resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs")}" report`;
     await page.getByText("Advanced", { exact: true }).click();
     await page.getByTestId("chats-add-agent-command").fill(command);

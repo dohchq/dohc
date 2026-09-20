@@ -1,3 +1,4 @@
+import { EMOJI_DATA } from "../editor/emojiData";
 import { AgentBadge } from "./AgentBadge";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
@@ -323,10 +324,9 @@ export function MentionText(props: {
   return <>{content}</>;
 }
 
-// Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
-// keyboard. Reacting to an agent's message is a first-class move, so this set
-// leans toward acknowledging work.
+// Common reactions lead the searchable Unicode catalog.
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+const SINGLE_EMOJI = new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v");
 
 export interface ChatReactionControls {
   // Every active reaction in the open thread (all messages).
@@ -349,7 +349,7 @@ function reactionerNames(records: readonly ChatReactionRecord[]): string {
 
 // One message's reaction row: existing pills (grouped by emoji) plus an
 // add-reaction affordance. Kept obvious — pills show emoji + count, yours are
-// highlighted, and the picker is a short quick-pick.
+// highlighted, and the picker searches the Unicode emoji catalog.
 export function MessageReactions(props: {
   testIdPrefix: string;
   messageId: string;
@@ -359,6 +359,8 @@ export function MessageReactions(props: {
   // In the chat lane an empty row floats over the message's corner, so a
   // run of short lines keeps its rhythm until someone reacts.
   overlayWhenEmpty?: boolean;
+  actionTestId?: string;
+  pickerOnly?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -366,7 +368,32 @@ export function MessageReactions(props: {
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const [pickerPosition, setPickerPosition] = useState({ left: 0, top: 0 });
   const pickerId = useId();
-  const choices = props.controls.emojiChoices ?? DEFAULT_REACTION_EMOJIS;
+  const [query, setQuery] = useState("");
+  const [visibleCount, setVisibleCount] = useState(96);
+  const [catalog, setCatalog] = useState<readonly { emoji: string; name: string }[]>([]);
+  const emojiNames = useMemo(() => new Map([
+    ...catalog.map(({ emoji, name }) => [emoji, name] as const),
+    ...EMOJI_DATA.map(({ emoji, shortcode }) => [emoji, shortcode] as const),
+  ]), [catalog]);
+  useEffect(() => {
+    if (props.controls.readOnly) setPickerOpen(false);
+  }, [props.controls.readOnly]);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    let current = true;
+    // Unicode Emoji 16.0, fully-qualified sequences from unicode.org's emoji-test.txt.
+    void import("./reactionEmojiData.json").then((data) => { if (current) setCatalog(data.default); });
+    return () => { current = false; };
+  }, [pickerOpen]);
+  const searched = query.trim().toLowerCase().replaceAll(":", "");
+  const customEmoji = query.trim();
+  const isEmoji = SINGLE_EMOJI.test(customEmoji);
+  const choices = pickerOpen ? [...new Set([
+    ...(isEmoji ? [customEmoji] : []),
+    ...(!searched ? (props.controls.emojiChoices ?? DEFAULT_REACTION_EMOJIS) : []),
+    ...EMOJI_DATA.filter((entry) => !searched || entry.shortcode.includes(searched) || entry.keywords.some((word) => word.includes(searched)) || entry.emoji === customEmoji).map((entry) => entry.emoji),
+    ...catalog.filter((entry) => !searched || entry.name.toLowerCase().includes(searched) || entry.emoji === customEmoji).map((entry) => entry.emoji),
+  ])] : [];
 
   // Dismiss the picker on an outside pointer press (calm, no modal scrim).
   useEffect(() => {
@@ -414,14 +441,14 @@ export function MessageReactions(props: {
         return false;
       }
       setPickerPosition({
-        left: Math.max(4, Math.min(trigger.right - picker.width, window.innerWidth - picker.width - 4)),
+        left: Math.max(4, Math.min(trigger.left, window.innerWidth - picker.width - 4)),
         top: Math.max(4, Math.min(trigger.top >= picker.height + 4 ? trigger.top - picker.height - 4 : trigger.bottom + 4, window.innerHeight - picker.height - 4)),
       });
       return true;
     };
     pickerRef.current?.showPopover?.();
     if (!position()) return;
-    pickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    pickerRef.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
     window.addEventListener("resize", position);
     document.addEventListener("scroll", position, true);
     return () => {
@@ -468,7 +495,7 @@ export function MessageReactions(props: {
           : `relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`
       }
     >
-      {byEmoji.map((group) => (
+      {!props.pickerOnly && byEmoji.map((group) => (
         <button
           key={group.emoji}
           type="button"
@@ -493,22 +520,23 @@ export function MessageReactions(props: {
           <span className="tabular-nums">{group.records.length}</span>
         </button>
       ))}
-      {!props.controls.readOnly ? (
+      {(
         <button
           ref={triggerRef}
           type="button"
-          data-testid={`${props.testIdPrefix}-add-reaction`}
+          data-testid={props.actionTestId ?? `${props.testIdPrefix}-add-reaction`}
           aria-label="Add reaction"
+          disabled={props.controls.readOnly}
           aria-haspopup="true"
           aria-expanded={pickerOpen}
           aria-controls={pickerOpen ? pickerId : undefined}
           title="Add reaction"
-          onClick={() => setPickerOpen((open) => !open)}
-          className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+          onClick={() => { setQuery(""); setVisibleCount(96); setPickerOpen((open) => !open); }}
+          className={`grid ${props.overlayWhenEmpty ? "size-6" : "size-8"} place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-panel-2 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default`}
         >
-          <SmilePlus size={13} aria-hidden />
+          <SmilePlus size={16} aria-hidden />
         </button>
-      ) : null}
+      )}
       {pickerOpen && !props.controls.readOnly ? (
         // A lightweight quick-pick, not an APG menu: role="group" with plain
         // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
@@ -524,9 +552,14 @@ export function MessageReactions(props: {
           role="group"
           data-testid={`${props.testIdPrefix}-reaction-picker`}
           aria-label="Choose a reaction"
-          className="dohc-popover dohc-pop-in fixed z-50 flex max-w-[calc(100vw-8px)] flex-wrap gap-0.5 rounded-lg border border-line bg-panel p-1"
+          className="dohc-popover dohc-pop-in fixed z-50 max-h-[calc(100vh-16px)] w-72 max-w-[calc(100vw-8px)] overflow-y-auto rounded-lg border border-line bg-panel p-2"
         >
-          {choices.map((emoji) => {
+          <input aria-label="Search emoji or paste any emoji" placeholder="Search or paste an emoji" value={query}
+            onChange={(event) => { setQuery(event.currentTarget.value); setVisibleCount(96); }}
+            className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
+            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
+          <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
+          {choices.slice(0, visibleCount).map((emoji) => {
             const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
             return (
               <button
@@ -535,7 +568,8 @@ export function MessageReactions(props: {
                 aria-pressed={mine}
                 data-testid={`${props.testIdPrefix}-reaction-choice`}
                 data-emoji={emoji}
-                title={emoji}
+                aria-label={emoji}
+                title={emojiNames.get(emoji) ?? emoji}
                 onClick={() => {
                   toggle(emoji, mine);
                   setPickerOpen(false);
@@ -549,6 +583,9 @@ export function MessageReactions(props: {
               </button>
             );
           })}
+          {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-panel-2" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
+          </div>
+          {choices.length === 0 ? <p className="m-0 p-2 text-[12px] text-muted">No matching emoji. Paste an emoji to use it.</p> : null}
         </div>
       ) : null}
     </div>

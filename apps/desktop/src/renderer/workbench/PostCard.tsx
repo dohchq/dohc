@@ -1,9 +1,9 @@
 import { AgentBadge } from "./AgentBadge";
-import { CircleHelp, FileText, MessageSquare, Save, SmilePlus } from "lucide-react";
+import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
-import { chatAuthorLabel, type ChatReactionControls } from "./chatMessages";
+import { chatAuthorLabel, MessageReactions, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
 
 // A post in a group's feed. Drawn like a social card: who, where, when; the
@@ -37,7 +37,7 @@ export function postExcerpt(title: string, body: string): string {
   return newline === -1 ? "" : body.slice(newline + 1).trim();
 }
 
-export const LIKE_EMOJI = "👍";
+
 
 export function ActionButton(props: {
   testId?: string;
@@ -59,12 +59,13 @@ export function ActionButton(props: {
         props.onClick();
       }}
       title={props.label}
-      className={`flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
+      aria-label={props.label}
+      className={`flex size-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
         props.active ? "text-accent" : "text-muted hover:bg-panel-2 hover:text-ink"
       }`}
     >
       {props.icon}
-      <span className="truncate @[360px]:inline hidden">{props.label}</span>
+      <span className="sr-only">{props.label}</span>
       {props.count ? (
         <span className="font-mono text-[11px] font-normal text-subtle">{props.count}</span>
       ) : null}
@@ -72,8 +73,7 @@ export function ActionButton(props: {
   );
 }
 
-// Save as file, with the snapshot alternative on hover, or Open file once
-// saved. Shared by the post card and Home so the two read the same.
+// Shared by the post card and Home.
 export function SaveAsFileActions(props: {
   testIdPrefix: string;
   bookmark?: ChatBookmarkRecord;
@@ -88,7 +88,7 @@ export function SaveAsFileActions(props: {
         <ActionButton
           testId={props.testIdPrefix}
           label={props.bookmark ? "Saved" : "Save as file"}
-          icon={<Save size={15} strokeWidth={1.9} aria-hidden />}
+          icon={<Bookmark size={16} strokeWidth={1.9} fill={props.bookmark ? "currentColor" : "none"} aria-hidden />}
           active={Boolean(props.bookmark)}
           disabled={props.busy}
           onClick={() => props.onToggle?.("live")}
@@ -102,22 +102,7 @@ export function SaveAsFileActions(props: {
           onClick={props.onOpen}
         />
       ) : null}
-      {!props.bookmark ? (
-        <button
-          type="button"
-          data-testid={`${props.testIdPrefix}-snapshot`}
-          aria-label="Bookmark chat as snapshot"
-          title="Save a snapshot instead of a live file"
-          disabled={props.busy}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onToggle?.("snapshot");
-          }}
-          className="grid h-8 w-7 shrink-0 place-items-center rounded-md font-mono text-[10px] text-subtle opacity-0 transition-opacity hover:bg-panel-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 dohc-focus-visible disabled:opacity-50"
-        >
-          snap
-        </button>
-      ) : null}
+
     </>
   );
 }
@@ -151,10 +136,6 @@ export function PostCard(props: {
     if (list) list.push(reaction);
     else byEmoji.set(reaction.emoji, [reaction]);
   }
-  const liked = reactions.some(
-    (reaction) =>
-      reaction.emoji === LIKE_EMOJI && reaction.authorId === props.data.viewerAuthorId,
-  );
   const readOnly = props.reactionControls.readOnly === true || message === null;
 
   return (
@@ -286,22 +267,9 @@ export function PostCard(props: {
         <span data-testid="chats-post-footer" className="block h-2.5" />
       )}
 
-      <div className="flex items-stretch border-t border-line">
-        <ActionButton
-          testId="chats-post-like"
-          label="Like"
-          icon={<SmilePlus size={15} strokeWidth={1.9} aria-hidden />}
-          active={liked}
-          disabled={readOnly}
-          onClick={() => {
-            if (!message) return;
-            props.reactionControls.onToggle({
-              messageId: message.id,
-              emoji: LIKE_EMOJI,
-              nextState: liked ? "removed" : "added",
-            });
-          }}
-        />
+      <div className="flex items-center gap-2 border-t border-line py-1.5">
+        {message ? <MessageReactions testIdPrefix="chats-post" actionTestId="chats-post-like" pickerOnly
+          messageId={message.id} records={reactions} controls={{ ...props.reactionControls, readOnly }} flush /> : null}
         <ActionButton
           testId="chats-post-comment"
           label="Comment"

@@ -36,7 +36,6 @@ export function AddAgentForm(props: {
 }) {
   const { settings, onSave } = props;
   const [agentName, setAgentName] = useState(settings.profile.agentName ?? "");
-  const [name, setName] = useState(settings.profile.preferredName ?? "");
   const [profile, setProfile] = useState(settings.runner.profile);
   const [advanced, setAdvanced] = useState(!settings.runner.profile && settings.runner.command.length > 0);
   const requests = useRequestSequence([props.workspaceId]);
@@ -46,23 +45,19 @@ export function AddAgentForm(props: {
   const [check, setCheck] = useState<CheckState>({ status: "idle" });
 
   useEffect(() => {
-    setName(settings.profile.preferredName ?? "");
     setAgentName(settings.profile.agentName ?? "");
     setCommand(settings.runner.command);
     setProfile(settings.runner.profile);
-  }, [settings.profile.preferredName, settings.profile.agentName, settings.runner.command, settings.runner.profile?.tool, settings.runner.profile?.executable]);
+  }, [settings.profile.agentName, settings.runner.command, settings.runner.profile?.tool, settings.runner.profile?.executable]);
 
-  const trimmedName = name.trim();
   const trimmedCommand = configuredRunnerCommand({ command, profile });
   const preview = agentName.trim() || "Your agent";
 
   // Writes the name and the command, dispatch on. Returns false when the
   // input is not a name or the write failed; the message is on screen.
   const save = useCallback(async (): Promise<boolean> => {
-    let preferredName: string | undefined;
     let validAgentName: string | undefined;
     try {
-      preferredName = preferredNameFromInput(name);
       validAgentName = preferredNameFromInput(agentName);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Enter a valid name.");
@@ -70,10 +65,6 @@ export function AddAgentForm(props: {
     }
     if (!validAgentName) {
       setError("Enter an agent name.");
-      return false;
-    }
-    if (!preferredName) {
-      setError("Enter your name. Agent work is attributed to you.");
       return false;
     }
     if (trimmedCommand.length === 0) {
@@ -86,7 +77,7 @@ export function AddAgentForm(props: {
     try {
       await onSave({
         ...settings,
-        profile: { ...settings.profile, preferredName, agentName: validAgentName },
+        profile: { ...settings.profile, agentName: validAgentName },
         runner: { ...settings.runner, command: command.trim(), profile, enabled: true },
       });
       return requests.isCurrent(token);
@@ -96,7 +87,7 @@ export function AddAgentForm(props: {
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
     }
-  }, [agentName, name, onSave, settings, trimmedCommand, command, profile, requests, props.onError]);
+  }, [agentName, onSave, settings, trimmedCommand, command, profile, requests, props.onError]);
 
   const runCheck = useCallback(async () => {
     const token = requests.current();
@@ -157,21 +148,6 @@ export function AddAgentForm(props: {
             onChange={(event) => setAgentName(event.currentTarget.value)}
             className={INPUT_CLASS}
           />
-        </div>
-        <div className="flex flex-col gap-1">
-          <label htmlFor="chats-add-agent-name" className={LABEL_CLASS}>
-            Your name
-          </label>
-          <input
-            id="chats-add-agent-name"
-            data-testid="chats-add-agent-name"
-            value={name}
-            maxLength={MAX_PREFERRED_NAME_LENGTH}
-            disabled={busy}
-            autoComplete="name"
-            onChange={(event) => setName(event.currentTarget.value)}
-            className={INPUT_CLASS}
-          />
           <p data-testid="chats-add-agent-preview" className={HINT_CLASS}>
             Posts as <span className="font-medium text-muted">{preview}</span>
           </p>
@@ -226,7 +202,7 @@ export function AddAgentForm(props: {
           <SecondaryButton
             size="compact"
             data-testid="chats-add-agent-check"
-            disabled={busy || !agentName.trim() || trimmedCommand.length === 0 || trimmedName.length === 0}
+            disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
             onClick={() => void runCheck()}
             className="flex items-center gap-1"
           >
@@ -247,7 +223,7 @@ export function AddAgentForm(props: {
             size="compact"
             type="submit"
             data-testid="chats-add-agent-submit"
-            disabled={busy || !agentName.trim() || trimmedCommand.length === 0 || trimmedName.length === 0}
+            disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
           >
             {saving ? "Saving…" : "Add agent"}
           </PrimaryButton>

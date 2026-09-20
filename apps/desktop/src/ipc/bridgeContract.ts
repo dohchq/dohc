@@ -1817,7 +1817,7 @@ export type ChatRunRecordsForThreadResult = z.infer<
 // every Node/Electron runtime this repo targets (tsconfig `target`/`lib` are
 // ES2022), so `\p{Extended_Pictographic}` is safe here.
 const EMOJI_ATOM =
-  "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
+  "(?:[#*0-9]\\uFE0F?\\u20E3|\\u{1F3F4}\\u{E0067}\\u{E0062}(?:\\u{E0065}\\u{E006E}\\u{E0067}|\\u{E0073}\\u{E0063}\\u{E0074}|\\u{E0077}\\u{E006C}\\u{E0073})\\u{E007F}|\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
 const EMOJI_GRAPHEME_PATTERN = new RegExp(
   `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
   "u",

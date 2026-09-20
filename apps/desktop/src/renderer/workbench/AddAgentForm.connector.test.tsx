@@ -143,3 +143,20 @@ it("keeps a cleared Advanced command open and preserves drafts across equivalent
   expect((input as HTMLInputElement).value).toBe("node draft.mjs");
   expect(input.closest("details")?.open).toBe(true);
 });
+
+
+it.each([undefined, "Ice"])("adds and checks an agent without editing the existing profile name (%s)", async (preferredName) => {
+  const f = fixture();
+  const profile = preferredName === undefined ? {} : { preferredName };
+  render(<AddAgentForm {...f.props} settings={{ ...f.props.settings, profile }} />);
+  expect(screen.queryByLabelText("Your name")).toBeNull();
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  await userEvent.click(screen.getByTestId("chats-add-agent-check"));
+  await waitFor(() => expect(f.selfTest).toHaveBeenCalledWith({ workspaceId: "workspace-a" }));
+  await screen.findByTestId("chats-add-agent-check-result");
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onDone).toHaveBeenCalledOnce());
+  expect(f.props.onSave).toHaveBeenCalledTimes(2);
+  for (const [saved] of f.props.onSave.mock.calls) expect(saved.profile).toEqual({ ...profile, agentName: "Nova" });
+});
