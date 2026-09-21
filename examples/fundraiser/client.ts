@@ -7,8 +7,8 @@ export type BackendStatus = 400 | 404 | 409 | 413 | 429 | 503;
 const STATUSES: readonly number[] = [400, 404, 409, 413, 429, 503];
 
 export class BackendError extends Error {
-  constructor(readonly status: BackendStatus) {
-    super(`Backend request refused (${status}).`);
+  constructor(readonly status: BackendStatus, readonly refusal?: {code: string; message: string}) {
+    super(refusal?.message ?? `Backend request refused (${status}).`);
     this.name = "BackendError";
   }
   /** The host may still have applied the request. Retry with the same key; never mint a new one. */
@@ -71,7 +71,15 @@ export function connectBackend(): BackendPort {
       if (!item) return;
       sent.delete(data.id); inFlight--; clearTimeout(item.timer);
       if (data.ok === true && item.check(data.value)) item.resolve(data.value);
-      else item.reject(new BackendError(data.ok !== true && STATUSES.includes(data.status as number) ? data.status as BackendStatus : 503));
+      else {
+        const status = data.ok !== true && STATUSES.includes(data.status as number) ? data.status as BackendStatus : 503;
+        const error = data.error;
+        const refusal = status === 409 && record(error) && Object.keys(error).sort().join() === "code,message" &&
+          typeof error.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) &&
+          typeof error.message === "string" && error.message.length > 0 && error.message.length <= 512 && !/[\u0000-\u001f\u007f]/.test(error.message)
+          ? {code: error.code, message: error.message} : undefined;
+        item.reject(new BackendError(status, refusal));
+      }
       pump();
     };
     port.start();

@@ -37,6 +37,7 @@ $cert.Dispose();$rsa.Dispose()`;
   const browser=await chromium.launch({headless:true,args:[`--ignore-certificate-errors-spki-list=${spki}`,`--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`,"--no-proxy-server"]});
   try {
     const guestContext=await browser.newContext({viewport:{width:1280,height:1000}}),guest=await guestContext.newPage();
+    guest.setDefaultTimeout(15_000);
     guest.on("pageerror",error=>failures.push(String(error)));
     await guest.goto(`${viewerOrigin}/fixture-open`);await guest.getByRole("button",{name:"Open fundraiser"}).click();
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
@@ -70,6 +71,7 @@ $cert.Dispose();$rsa.Dispose()`;
     expect(f.calls.some(call=>call.operation==="totals"&&!call.named&&call.status===404)).toBe(true);
 
     const organizerContext=await browser.newContext({viewport:{width:1280,height:1000},reducedMotion:"reduce"}),organizer=await organizerContext.newPage();
+    organizer.setDefaultTimeout(15_000);
     organizer.on("pageerror",error=>failures.push(String(error)));
     await organizer.goto(`${viewerOrigin}/s/apps/w/${f.publicationId}`);
     await organizer.getByLabel("Email",{exact:true}).fill("organizer@example.test");
@@ -96,20 +98,24 @@ $cert.Dispose();$rsa.Dispose()`;
     await dialog.getByRole("button",{name:"Close",exact:true}).click();
     await organizer.screenshot({path:info.outputPath("fundraiser-organizer-desktop.png")});
     await admin.getByRole("tab",{name:"Add entry",exact:true}).click();
-    await admin.getByLabel("First and last name",{exact:true}).fill("Venue Friend");
+    await admin.getByLabel("Full name",{exact:true}).fill("Venue Friend");
     await admin.getByRole("radio",{name:"Spectator",exact:true}).check();
-    await admin.getByLabel("Session",{exact:true}).selectOption("both");
+    await admin.getByRole("tabpanel",{name:"Add entry",exact:true}).getByLabel("Session",{exact:true}).selectOption("both");
     await admin.getByRole("button",{name:"Save entry",exact:true}).click();
     await expect(admin.getByText(/Added Venue Friend as pay at venue/)).toBeVisible();
     const rows=await f.ownerRead("listRegistrations");
     expect(rows.result.records).toHaveLength(2);
     expect(rows.result.records.find((row:{fullName:string})=>row.fullName==="Venue Friend")).toMatchObject({source:"reclub",status:"pay_at_venue",total:300});
     await admin.getByRole("tab",{name:"Attendees",exact:true}).click();
-    await expect(admin.getByRole("cell",{name:"Venue Friend",exact:true}).first()).toBeVisible();
+    try { await expect(admin.getByRole("cell",{name:"Venue Friend",exact:true}).first()).toBeVisible(); }
+    catch(error) { console.log("Organizer state",await admin.locator("body").innerText(),JSON.stringify(f.calls));throw error; }
     await organizer.setViewportSize({width:390,height:844});await organizer.emulateMedia({colorScheme:"dark"});
     await organizer.screenshot({path:info.outputPath("fundraiser-organizer-mobile-dark.png")});
     expect(await admin.locator("body").evaluate(body=>body.scrollWidth<=innerWidth)).toBe(true);
     expect((await f.ownerRead("attendees")).result.records).toHaveLength(4);
+    const table=await f.ownerRead("tableRegistrations",{offset:0,limit:50,search:"Venue"});
+    expect(table.result.rows).toHaveLength(1);
+    expect(table.result.rows[0]).toMatchObject({fullName:"Venue Friend",status:"pay_at_venue",total:300});
     expect(f.compiler.recipe).toBe("dohc-closed-app-v2");expect(failures).toEqual([]);
     await info.attach("real-backend-operations",{body:JSON.stringify(f.calls,null,2),contentType:"application/json"});
   }finally{await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));f.close();}

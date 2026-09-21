@@ -67,6 +67,7 @@ export function receiptProblem(file: File): string | null {
   return null;
 }
 function describe(error: unknown, overrides: Partial<Record<BackendStatus, string>> = {}): string {
+  if (error instanceof BackendError && error.status === 409 && error.refusal) return error.refusal.message;
   const status = backendStatus(error);
   return status === null ? "The app hit an unexpected error. Reload the page, then try again." : overrides[status] ?? GENERIC_MESSAGE[status];
 }
@@ -712,7 +713,7 @@ function createOrganizerView(client: FundraiserClient): View {
           pendingChange = null;
           const status = backendStatus(error);
           detailNotice = status === 409
-            ? { kind: "error", text: "The backend refused this change. The registration changed first, or a session has no free player slots. Reload it, then try again.", reload: true }
+            ? { kind: "error", text: describe(error, {409: "The registration changed or a session has no free player slots. Reload it, then try again."}), reload: true }
             : { kind: "error", text: describe(error, { ...ORGANIZER_MESSAGES, 400: "The backend refused this change. Choose the payment method used, then try again." }) };
         }
       } finally { detailBusy = false; if (active?.id === row.id) renderDetail(); }

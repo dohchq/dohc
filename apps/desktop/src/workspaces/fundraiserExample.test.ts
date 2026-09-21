@@ -153,6 +153,14 @@ it("unfreezes after a definite refusal and sends the corrected draft under a new
   expect(client.uploadReceipt).toHaveBeenCalledTimes(2);
 });
 
+it("shows the backend's safe capacity refusal beside the registration", async () => {
+  const client = fakeClient({register: vi.fn<FundraiserClient["register"]>().mockRejectedValue(new BackendError(409,
+    {code: "capacity_unavailable", message: "A session no longer has enough player slots."}))});
+  mount(client); await fillRegistration(); send();
+  await screen.findByText("A session no longer has enough player slots.");
+  expect(fieldsetDisabled("Mobile number")).toBe(false);
+});
+
 it("resumes a retained attempt from the app context and reports when it settles", async () => {
   const client = fakeClient();
   const pendingAttempt = await createRegistrationAttempt({ fullName: "Ice de Vera", mobile: "+639171234567", sessions: [{ sessionId: "s2", players: ["Ana Cruz"], spectators: [] }], paymentMethod: "bdo" },
