@@ -54,7 +54,7 @@ describe("owner app backend", () => {
     expect(screen.getAllByRole("columnheader").map(header => header.textContent)).toEqual(["id", "donor", "amount", "status", "verified", "note", "version", "Actions"]);
     expect(screen.getByText("pending_verification")).toBeTruthy();
     expect(screen.getByText("null")).toBeTruthy();
-    expect(screen.getByText("Backend online")).toBeTruthy();
+    expect(screen.getByText("Data active")).toBeTruthy();
     expect(screen.getByText("Rows 1–2 of 2")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
     await userEvent.setup().type(screen.getByLabelText("Search app data"), "Ana{Enter}");
@@ -180,6 +180,19 @@ describe("owner app backend", () => {
     view.unmount();
     await act(async () => { pending.reject(new Error("late")); });
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it.each([{ local: true, hint: "If you moved its data to a share link, open that publication." }, { local: false, hint: "Initialize or restore its data first." }])("labels inactive data honestly instead of reading it (local: $local)", async ({ local, hint }) => {
+    api.appBackend.mockImplementation(request => request.action === "describe" ? Promise.resolve({ capability, revision: 0, online: false }) : answer(request));
+    render(<OwnerAppBackend workspaceId="ws-trip" publicationId={publicationId} capability={capability} local={local} onError={onError} />);
+    fireEvent.click(screen.getByRole("button", { name: "Load table" }));
+    await screen.findByText("No active data");
+    expect(screen.getByRole("status").textContent).toBe(`This app has no active data here. dohc cannot load rows or save edits. ${hint}`);
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(api.appBackend.mock.calls.every(([input]) => input.action === "describe")).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "Export data" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(local ? /Stored on this device in/ : /^Stored in/)).toBeTruthy();
   });
 
   it("offers no edit for a table without a write operation", async () => {

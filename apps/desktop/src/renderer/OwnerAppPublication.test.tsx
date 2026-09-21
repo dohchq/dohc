@@ -35,8 +35,11 @@ const row: ListRelayShareLinksResult["links"][number] = {
   revokedAtMs: null, lastUsedAtMs: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
 };
 const page: ListRelayShareLinksResult = { supportedLinkAccess: ["view", "comment"], links: [row], independentGrants: [] };
+const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), backendCapability: backend, active: true };
 async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult> {
   if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
+  if (request.action === "listLocal") return { kind: "localListed", publications: [] };
+  if (request.action === "prepareLocal") return { ...prepared, local: true };
   if (request.action === "prepare" || request.action === "reviewReactivation") return prepared;
   if (request.action === "approve") return published;
   if (request.action === "withdraw") return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
@@ -251,7 +254,7 @@ describe("owner app publication", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Share app folder" }));
     expect(onShareSource).toHaveBeenCalledOnce();
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list")).toBe(true);
+    expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list" || input.action === "listLocal")).toBe(true);
   });
 
   it("can unpublish a damaged manifest without inventing its source or app", async () => {
@@ -299,7 +302,7 @@ describe("owner app publication", () => {
     await userEvent.setup().click(screen.getByTestId("app-publication-withdraw-cancel"));
     expect(screen.queryByTestId("app-publication-withdraw-confirm")).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Publish app" }));
-    expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list")).toBe(true);
+    expect(api.publishOwnerApp.mock.calls.every(([input]) => input.action === "list" || input.action === "listLocal")).toBe(true);
   });
 
   it("shows the fixed collection capability before approving the unchanged digest", async () => {
@@ -436,6 +439,81 @@ describe("owner app publication", () => {
     expect(await screen.findByText("Backend data details unavailable.")).toBeTruthy();
     expect(screen.getByText("No collection access")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "App data" })).toBeNull();
+  });
+
+  it("prepares, reviews, and approves an app for this device when links and shared publications are unavailable", async () => {
+    let approved = false;
+    api.listRelayShareLinks.mockRejectedValue(new Error("Sign in to load links."));
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "list") throw new Error("Sign in to load publications.");
+      if (request.action === "listLocal") return { kind: "localListed", publications: approved ? [localRow] : [] };
+      if (request.action === "prepareLocal") return { ...prepared, capabilities: [backend], local: true };
+      if (request.action === "approve") { approved = true; return { ...published, local: true }; }
+      return answer(request);
+    });
+    const appBackend = vi.fn(async (request: { action: string }) => request.action === "describe" ? { capability: backend, revision: 1, online: true } : { result: { rows: [{ id: 1, status: "verified" }], total: 1 }, revision: 1, replayed: false });
+    vi.stubGlobal("dohcDesktop", { ...api, appBackend });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(screen.getByText("No app approved on this device yet. Prepare it to review its source and data access.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Prepare app" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await screen.findByRole("heading", { name: "Review app for this device" });
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "prepareLocal", workspaceId: "ws-trip", appRoot: "trip" });
+    expect(screen.getByText("This device only")).toBeTruthy();
+    expect(screen.getByText(/Approve this captured app for this device\. It is not published on any link\./)).toBeTruthy();
+    const scope = screen.getByTestId("app-publication-capability");
+    expect(scope.textContent).toContain("Stores its data on this device in trip/data/app.sqlite");
+    expect(scope.textContent).toContain("No link exists for this approval. Only you can use the data until you publish the app on a link.");
+    expect(scope.textContent).toContain("Once published on a link, anyone with the link can run: donate (changes data)");
+    expect(screen.queryByText(/Unpublishing stops new access/)).toBeNull();
+    expect(screen.getByTestId("app-publication-digest").textContent).toBe(prepared.candidateDigest);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Approve for this device" }));
+    await screen.findByText("App approved on this device. It is not published on any link.");
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
+    expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "listLocal")).toHaveLength(2);
+    await screen.findByText(/Approved on this device/);
+    const region = screen.getByRole("region", { name: "App data" });
+    expect(region.textContent).toContain("Stored on this device in trip/data/app.sqlite. Not published on any link.");
+    fireEvent.click(screen.getByRole("button", { name: "Load table" }));
+    await screen.findByRole("table");
+    expect(appBackend).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-trip", publicationId: localRow.publicationId, action: "invoke", operation: "listDonations" }));
+    expect(screen.getAllByRole("alert").map(alert => alert.textContent)).toEqual(["Sign in to load publications.", "Sign in to load links."]);
+    expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "prepare")).toBe(false);
+  });
+
+  it("cancels a local candidate on Escape and refuses a local answer to a link preparation", async () => {
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await screen.findByRole("heading", { name: "Review app for this device" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, local: true } : answer(request));
+    await open();
+    await userEvent.setup().selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByText("dohc could not prepare this app. Try again.");
+    expect(api.publishOwnerApp).toHaveBeenLastCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
+    expect(screen.queryByRole("button", { name: "Publish this revision" })).toBeNull();
+  });
+
+  it("labels inactive local approvals, mounts no panel for them, and retries a failed local list alone", async () => {
+    let attempts = 0;
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action !== "listLocal") return answer(request);
+      if (++attempts === 1) throw new Error("Local apps are unavailable. Restart dohc and try again.");
+      return { kind: "localListed", publications: [{ ...localRow, active: false }] };
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect((await screen.findByRole("alert")).textContent).toBe("Local apps are unavailable. Restart dohc and try again.");
+    expect(screen.getByText("No publications.")).toBeTruthy();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Reload local apps" }));
+    await screen.findByText(/Inactive on this device/);
+    expect(screen.getByText("Its data is not active here. If you moved it to a share link, open that publication.")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "App data" })).toBeNull();
+    expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "list")).toHaveLength(1);
   });
 
   it("does not mount a response panel for an unknown damaged app", async () => {

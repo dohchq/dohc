@@ -27,13 +27,13 @@ function parsePage(value: AppBackendJson): Pick<Page, "rows" | "total"> {
   return { rows: value.rows, total: typeof total === "number" && Number.isSafeInteger(total) && total >= 0 ? total : null };
 }
 
-type Props = { workspaceId: string; publicationId: string; capability: AppBackendCapability; disabled?: boolean; onError: ReportError };
+type Props = { workspaceId: string; publicationId: string; capability: AppBackendCapability; local?: boolean; disabled?: boolean; onError: ReportError };
 
 export function OwnerAppBackend(props: Props) {
   return <BackendPanel key={`${props.workspaceId}\0${props.publicationId}`} {...props} />;
 }
 
-function BackendPanel({ workspaceId, publicationId, capability, disabled, onError }: Props) {
+function BackendPanel({ workspaceId, publicationId, capability, local, disabled, onError }: Props) {
   const api = useRef(bridge()).current;
   const alive = useRef(true);
   const request = useRef(0);
@@ -53,10 +53,12 @@ function BackendPanel({ workspaceId, publicationId, capability, disabled, onErro
   const stale = (mine: number) => !alive.current || request.current !== mine;
   const target = { workspaceId, publicationId };
 
+  // Inactive data has no rows to show: the host refuses reads and edits until the app is initialized or restored.
   async function fetchPage(read: AppBackendTable, offset: number, query: string, mine: number): Promise<Page | null> {
     const info = OwnerAppBackendDescribe.parse(await api.appBackend({ ...target, action: "describe" }));
     if (stale(mine)) return null;
     setOnline(info.online);
+    if (!info.online) { setPage(null); return null; }
     const result = OwnerAppBackendInvoke.parse(await api.appBackend({ ...target, action: "invoke", operation: read.readOperation, idempotencyKey: crypto.randomUUID(),
       input: { offset, limit: APP_BACKEND_PAGE_SIZE, search: query } }));
     if (stale(mine)) return null;
@@ -102,7 +104,7 @@ function BackendPanel({ workspaceId, publicationId, capability, disabled, onErro
   }
 
   async function exportData() {
-    if (busy || disabled) return;
+    if (busy || disabled || online === false) return;
     const mine = ++request.current;
     setBusy("export"); setStatus(null);
     try {
@@ -139,11 +141,12 @@ function BackendPanel({ workspaceId, publicationId, capability, disabled, onErro
     <div className="flex items-center justify-between gap-2">
       <h3 ref={heading} tabIndex={-1} className="m-0 text-[13px] font-medium text-ink">App data</h3>
       <div className="flex items-center gap-2">
-        {online !== null ? <Pill className={online ? "text-success" : "text-warning"}>{online ? "Backend online" : "Backend offline"}</Pill> : null}
-        <SecondaryButton disabled={locked} onClick={() => void exportData()}>{busy === "export" ? "Exporting…" : "Export data"}</SecondaryButton>
+        {online !== null ? <Pill className={online ? "text-success" : "text-warning"}>{online ? "Data active" : "No active data"}</Pill> : null}
+        <SecondaryButton disabled={locked || online === false} onClick={() => void exportData()}>{busy === "export" ? "Exporting…" : "Export data"}</SecondaryButton>
       </div>
     </div>
-    <p className="mt-2 text-[12px] text-muted">Stored in <span className="break-all font-mono">{capability.dataPath}</span>. Every edit runs one of the app's own operations.</p>
+    <p className="mt-2 text-[12px] text-muted">{local ? "Stored on this device in " : "Stored in "}<span className="break-all font-mono">{capability.dataPath}</span>. {local ? "Not published on any link. " : ""}Every edit runs one of the app's own operations.</p>
+    {online === false ? <p role="status" className="text-[12px] text-warning">This app has no active data here. dohc cannot load rows or save edits.{local ? " If you moved its data to a share link, open that publication." : " Initialize or restore its data first."}</p> : null}
     {capability.tables.length === 0 ? <p className="text-[12px] text-muted">This app declares no tables. Export its data to inspect it.</p> :
       <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void load(0, search); }}>
         <label className="text-[12px] text-muted">Table
