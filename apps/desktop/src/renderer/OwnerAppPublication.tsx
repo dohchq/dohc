@@ -56,6 +56,13 @@ function BackendApproval({ capability, local }: { capability: AppBackendCapabili
   </div>;
 }
 
+/** The local launcher answers with a loopback address only. Anything else never reaches the browser. */
+function localLaunchUrl(raw: string): string | null {
+  let url: URL;
+  try { url = new URL(raw); } catch { return null; }
+  return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.port !== "" && url.username === "" && url.password === "" ? url.toString() : null;
+}
+
 function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   const checked = OwnerAppPublicationResult.safeParse(result);
   if (!checked.success || checked.data.kind !== "prepared") throw new Error("dohc could not verify this app's data access. Prepare the app again.");
@@ -98,7 +105,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [reactivating, setReactivating] = useState(false);
   const [preparedLink, setPreparedLink] = useState("");
-  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "approve" | "withdraw" | "revokeCollection" | "launch" | null>(null);
   const [busyPublicationId, setBusyPublicationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -306,6 +313,25 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
     finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
 
+  // The launcher serves the approved source through its own broker; this dialog only hands the address to the browser.
+  const launch = async (publication: LocalPublication) => {
+    if (busy || responsesBusy) return;
+    const mine = ++request.current;
+    setBusy("launch"); setBusyPublicationId(publication.publicationId); setError(null); setNotice(null);
+    try {
+      const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId: props.workspaceId, publicationId: publication.publicationId });
+      if (!alive.current || mine !== request.current) return;
+      if (result.kind !== "localLaunched" || result.publicationId !== publication.publicationId) throw new Error("dohc could not confirm which app started. Try again.");
+      const url = localLaunchUrl(result.url);
+      if (!url) throw new Error("The app address is not on this device. dohc did not open it.");
+      await api.openExternalUrl({ url });
+      if (!alive.current || mine !== request.current) return;
+      setNotice("App opened in your browser.");
+    } catch (cause) {
+      if (alive.current && mine === request.current) reportError("dohc could not open this app in your browser.", cause, () => void launch(publication));
+    } finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
+  };
+
   const back = () => {
     cancel(candidate.current); candidate.current = null; setPrepared(null); setError(null);
   };
@@ -367,10 +393,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
           {localLoading ? <p role="status" className="mb-0 text-[12px] text-muted">Loading local apps…</p> : localError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{localError}</p> : localPublications.length === 0 ?
               <p className="mb-0 mt-2 text-[12px] text-muted">No app approved on this device yet. Prepare it to review its source and data access.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
-                {localPublications.map(publication => <li key={publication.publicationId} className="min-w-0 text-[12px] text-muted">
-                  <p className="m-0">{publication.active ? "Approved on this device" : "Inactive on this device"} · <span className="font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</span></p>
-                  {publication.active ? null : <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>}
-                  <BackendSummary capability={publication.backendCapability} />
+                {localPublications.map(publication => <li key={publication.publicationId} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 text-[12px] text-muted">
+                    <p className="m-0">{publication.active ? "Approved on this device" : "Inactive on this device"} · <span className="font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</span></p>
+                    {publication.active ? null : <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>}
+                    <BackendSummary capability={publication.backendCapability} />
+                  </div>
+                  {publication.active ? <SecondaryButton className="shrink-0" disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton> : null}
                 </li>)}
               </ul>}
         </div>

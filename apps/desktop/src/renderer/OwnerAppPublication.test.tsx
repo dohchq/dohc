@@ -48,7 +48,10 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
 const api = {
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
   publishOwnerApp: vi.fn(answer),
+  openExternalUrl: vi.fn(async () => undefined),
 };
+const localList = (request: OwnerAppPublicationRequest) => request.action === "listLocal" ? Promise.resolve<OwnerAppPublicationResult>({ kind: "localListed", publications: [localRow] }) : answer(request);
+const openButton = () => screen.findByRole("button", { name: `Open in browser ${localRow.publicationId}` });
 
 async function open() {
   await userEvent.setup().click(screen.getByRole("button", { name: "Publish app" }));
@@ -514,6 +517,58 @@ describe("owner app publication", () => {
     expect(screen.getByText("Its data is not active here. If you moved it to a share link, open that publication.")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "App data" })).toBeNull();
     expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "list")).toHaveLength(1);
+  });
+
+  it("opens an active local approval in the browser once per click through the loopback address", async () => {
+    const pending = deferred<OwnerAppPublicationResult>();
+    api.publishOwnerApp.mockImplementation(request => request.action === "launchLocal" ? pending.promise : localList(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(screen.queryByRole("button", { name: /^Open in browser/ })).toBeTruthy();
+    fireEvent.click(await openButton());
+    expect(screen.getByRole("button", { name: `Open in browser ${localRow.publicationId}` }).textContent).toBe("Opening…");
+    fireEvent.click(screen.getByRole("button", { name: `Open in browser ${localRow.publicationId}` }));
+    expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "launchLocal")).toEqual([[{ action: "launchLocal", workspaceId: "ws-trip", publicationId: localRow.publicationId }]]);
+    expect((screen.getByRole("button", { name: "Prepare for this device" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Close publication" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(api.openExternalUrl).not.toHaveBeenCalled();
+    await act(async () => { pending.resolve({ kind: "localLaunched", publicationId: localRow.publicationId, url: "http://127.0.0.1:43123/" }); });
+    expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
+    expect(screen.getByText("App opened in your browser.")).toBeTruthy();
+    expect((await openButton()).textContent).toBe("Open in browser");
+  });
+
+  it.each([
+    { name: "another app's id", result: { kind: "localLaunched" as const, publicationId: "e".repeat(64), url: "http://127.0.0.1:43123/" } },
+    { name: "an https address", result: { kind: "localLaunched" as const, publicationId: localRow.publicationId, url: "https://127.0.0.1:43123/" } },
+    { name: "a hostname", result: { kind: "localLaunched" as const, publicationId: localRow.publicationId, url: "http://localhost:43123/" } },
+    { name: "credentials", result: { kind: "localLaunched" as const, publicationId: localRow.publicationId, url: "http://owner:secret@127.0.0.1:43123/" } },
+    { name: "no port", result: { kind: "localLaunched" as const, publicationId: localRow.publicationId, url: "http://127.0.0.1/" } },
+    { name: "the wrong result kind", result: { kind: "cancelled" as const } },
+  ])("refuses to open $name and offers a retry through the error hook", async ({ result }) => {
+    api.publishOwnerApp.mockImplementation(request => request.action === "launchLocal" ? Promise.resolve(result) : localList(request));
+    const reportError = vi.fn();
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    fireEvent.click(await openButton());
+    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not open this app in your browser.", expect.any(Error), expect.any(Function)));
+    expect(api.openExternalUrl).not.toHaveBeenCalled();
+    expect(screen.queryByText("App opened in your browser.")).toBeNull();
+    await act(async () => { (reportError.mock.calls[0]![2] as () => void)(); });
+    await waitFor(() => expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "launchLocal")).toHaveLength(2));
+    expect(api.openExternalUrl).not.toHaveBeenCalled();
+  });
+
+  it("never opens a launch that resolves after the workspace changed", async () => {
+    const pending = deferred<OwnerAppPublicationResult>();
+    api.publishOwnerApp.mockImplementation(request => request.action === "launchLocal" ? pending.promise : localList(request));
+    const view = render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    fireEvent.click(await openButton());
+    view.rerender(<OwnerAppPublication workspaceId="ws-other" appRoot="other" />);
+    await act(async () => { pending.resolve({ kind: "localLaunched", publicationId: localRow.publicationId, url: "http://127.0.0.1:43123/" }); });
+    expect(api.openExternalUrl).not.toHaveBeenCalled();
+    expect(screen.queryByText("App opened in your browser.")).toBeNull();
   });
 
   it("does not mount a response panel for an unknown damaged app", async () => {
