@@ -94,6 +94,10 @@ describe("local app backend",()=>{
     expect(next.publicationId).not.toBe(publication.publicationId);
     expect((await invoke(host,next,"list","read")).result.rows).toHaveLength(1);
     await expect(invoke(host,publication,"order","stale",{quantity:1})).rejects.toThrow(/unavailable/);
+    await expect(invoke(host,next,"order","first",{quantity:1})).rejects.toThrow(/retry key/);
+    const exact=await host.activate(await prepared(source.replace("No stock remains.","All stock is reserved.")));
+    const accepted=await invoke(host,exact,"order","second",{quantity:1});
+    expect(await invoke(host,await host.activate(await prepared(source.replace("No stock remains.","All stock is reserved."))),"order","second",{quantity:1})).toEqual({...accepted,replayed:true});
   });
   it("fences an in-flight local operation when the owner chooses shared authority",async()=>{
     let evaluated!:()=>void, release!:()=>void;
@@ -178,6 +182,8 @@ describe("local app backend",()=>{
   it("serves only approved frontend bytes and operation-authorized attachments to the local browser",async()=>{
     const {host}=await open(),publication=await host.activate(await prepared());
     const browser=host.browserPublication(publication.publicationId);
+    expect(()=>host.assertBrowserPublication(publication.publicationId,publication.authorityRevision)).not.toThrow();
+    expect(()=>host.assertBrowserPublication(publication.publicationId,publication.authorityRevision+1)).toThrow(/approval changed/);
     expect(browser.files.map(file=>file.path)).toEqual(["bundle.js"]);
     expect(hash(browser.files[0]!.bytes)).toBe(browser.files[0]!.sha256);
     const upload=await host.request(publication.publicationId,"upload",{authorityRevision:publication.authorityRevision,
@@ -190,5 +196,31 @@ describe("local app backend",()=>{
     await expect(host.readBrowserFile(publication.publicationId,{...request,operation:"list"})).rejects.toThrow(/did not allow/);
     host.transfer("data/orders.sqlite","shared-pub");
     expect(()=>host.browserPublication(publication.publicationId)).toThrow(/shared host/);
+    expect(()=>host.assertBrowserPublication(publication.publicationId,publication.authorityRevision)).toThrow(/approval changed/);
+  });
+  it("suppresses a private runtime refusal after shared authority replaces the local approval",async()=>{
+    let evaluated!:()=>void,release!:()=>void;
+    const waiting=new Promise<void>(resolve=>evaluated=resolve),resume=new Promise<void>(resolve=>release=resolve);
+    const delayed={...runtime,async evaluateAppOperation(input:Parameters<typeof runtime.evaluateAppOperation>[0]){
+      try{return await runtime.evaluateAppOperation(input);}catch(error){evaluated();await resume;throw error;}
+    }};
+    const {host}=await open(undefined,delayed),publication=await host.activate(await prepared(source.replace("No stock remains.","Private refusal from the previous approval.")));
+    const pending=invoke(host,publication,"order","over-capacity",{quantity:4});
+    await waiting;host.setSharedAuthority("data/orders.sqlite","shared-pub");release();
+    await expect(pending).rejects.toThrow(/shared host/);
+  });
+  it("reevaluates a runtime refusal when its data snapshot has changed",async()=>{
+    let evaluated!:()=>void,release!:()=>void,attempts=0;
+    const waiting=new Promise<void>(resolve=>evaluated=resolve),resume=new Promise<void>(resolve=>release=resolve);
+    const delayed={...runtime,async evaluateAppOperation(input:Parameters<typeof runtime.evaluateAppOperation>[0]){
+      attempts++;
+      if(attempts===1){evaluated();await resume;throw new runtime.AppBackendRuntimeError({code:"stale",message:"Private stale refusal."});}
+      return runtime.evaluateAppOperation(input);
+    }};
+    const {host,workspaceRoot}=await open(undefined,delayed),publication=await host.activate(await prepared());
+    const other=(await open(workspaceRoot)).host;
+    const pending=invoke(host,publication,"list","read");
+    await waiting;await invoke(other,publication,"order","first",{quantity:1});release();
+    expect((await pending).result.rows).toHaveLength(1);expect(attempts).toBe(2);
   });
 });

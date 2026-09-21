@@ -208,10 +208,10 @@ export async function createLocalAppBackendHost(options: {
   async function invoke(publicationId: string, raw: unknown, signal?: AbortSignal) {
     const request = parseAppBackendInvokeRequest(raw);
     const nowMs = Date.now(), requestId = randomUUID(), secret = randomBytes(32).toString("base64url");
-    const payloadHash = hash(JSON.stringify([request.operation, request.input]));
     for (let attempt = 0; attempt < 3; attempt++) {
       checkSignal(signal);
       const row = state(publicationId,request.authorityRevision,true), capability = parseAppBackendCapability(JSON.parse(row.capability));
+      const payloadHash = hash(JSON.stringify(["dohc-app-operation-v1",capability.dataPath,capability.backendSha256,capability.schemaSha256,request.operation,request.input]));
       if (!row.database) throw new Error("Restore the app data before running operations.");
       const operation = capability.operations.find(operation=>operation.name===request.operation);
       if (!operation) throw new Error("This operation was not approved for this app.");
@@ -221,10 +221,20 @@ export async function createLocalAppBackendHost(options: {
         if (receipt.payload_hash !== payloadHash) throw new Error("This retry key was already used for another operation.");
         return {result:JSON.parse(String(receipt.result)),revision:receipt.revision,replayed:true};
       }
-      const evaluated = await options.runtime.evaluateAppOperation({source:row.source,operation:operation.name,
-        caller:{kind:"owner",userId:`local:${options.workspaceId}`},input:request.input,nowMs,requestId,secret,
-        database:row.database,tables:capability.tables.map(table=>table.name),readOnly:operation.readOnly,
-        files:readFiles(row,request.input),signal:combinedSignal(signal)});
+      let evaluated:AppOperationResult;
+      try {
+        evaluated = await options.runtime.evaluateAppOperation({source:row.source,operation:operation.name,
+          caller:{kind:"owner",userId:`local:${options.workspaceId}`},input:request.input,nowMs,requestId,secret,
+          database:row.database,tables:capability.tables.map(table=>table.name),readOnly:operation.readOnly,
+          files:readFiles(row,request.input),signal:combinedSignal(signal)});
+      } catch(error) {
+        const unchanged=transaction(()=>{
+          checkSignal(signal);
+          return state(publicationId,request.authorityRevision,operation.readOnly).revision===row.revision;
+        });
+        if(!unchanged)continue;
+        throw error;
+      }
       checkSignal(signal);
       const result = transaction(() => {
         checkSignal(signal);
