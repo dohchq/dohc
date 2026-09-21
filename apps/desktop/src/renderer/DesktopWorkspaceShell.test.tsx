@@ -12,8 +12,21 @@ import {
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import "./CollectionPage";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+// Collection dependencies read these observers during module evaluation.
+// Preload them before tests so an unfinished import cannot clean up a later test's globals.
+const { ObserverStub } = vi.hoisted(() => {
+  class ObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): never[] { return []; }
+  }
+  Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
+  return { ObserverStub };
+});
 import {
   ENGINE_STORE_BACKUP_DIR,
   SetWorkspaceUiStatePayload,
@@ -2147,27 +2160,6 @@ describe("global letter shortcut ownership", () => {
 });
 
 describe("collection folders", () => {
-  class ObserverStub {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-    takeRecords(): never[] {
-      return [];
-    }
-  }
-
-  beforeAll(async () => {
-    // These tests assert the real lazy surface after opening the folder.
-    // Load its dependencies separately from that 15-second behavior budget.
-    vi.stubGlobal("ResizeObserver", ObserverStub);
-    vi.stubGlobal("IntersectionObserver", ObserverStub);
-    try {
-      await import("./CollectionPage");
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  }, 30_000);
-
   // The table virtualizer reads offsetWidth/offsetHeight, which jsdom reports
   // as 0 — no row would render (CollectionPage.test.tsx precedent).
   const offsetDescriptors = {
@@ -2176,10 +2168,7 @@ describe("collection folders", () => {
   };
 
   beforeEach(() => {
-    // The file's module-level ResizeObserver stub is removed by the global
-    // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
-    // collection surface's lazy chunk evaluates @dnd-kit, which reads both
-    // observers while its module loads, so they must exist before the click.
+    // Give each collection test the same observer and viewport fixtures.
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
