@@ -1608,6 +1608,7 @@ async function dispatch(
     }
     case "appBackend": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appBackend) throw new CliCommandError("App data requires the owning workspace.");
+      if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("App export requires an explicit savePath.");
       return context.appBackend(request.args.request);
     }
     case "ownerAppResponses": {

@@ -514,6 +514,7 @@ describe("CLI socket server", () => {
     context.appBackend = async request => { requests.push(request); return { result: [], revision: 1, replayed: false }; };
     const request = { action: "invoke" as const, workspaceId: WORKSPACE_ID, publicationId: "a".repeat(64), operation: "list", idempotencyKey: "read-1", input: {} };
     expect(await invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).toEqual({ result: [], revision: 1, replayed: false });
+    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, publicationId: "a".repeat(64) } })).rejects.toThrow("savePath");
     await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
     context.readOnly = true;
     await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
