@@ -228,7 +228,7 @@ describe("ChatLane", () => {
       return { thread: thread(), message: message({ id: "ours", body: "Our first message" }), viewerAuthorId: "you" };
     });
     render(lane());
-    await screen.findByText("No messages yet");
+    await screen.findByText("No messages in #general yet.");
     send("Our first message");
     await screen.findByText("Their first message");
     expect(screen.getByText("Our first message")).toBeTruthy();

@@ -137,12 +137,14 @@ export function ChatHeader(props: {
   testId: string;
   onBack?: () => void;
   icon?: React.ReactNode;
+  // One muted line after the title: a group's purpose, or what a view lists.
+  description?: React.ReactNode;
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
+    <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
       {props.onBack ? (
         <button
           type="button"
@@ -156,11 +158,18 @@ export function ChatHeader(props: {
         </button>
       ) : null}
       {props.icon}
-      <span
-        data-testid={`${props.testId}-title`}
-        className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
-      >
-        {props.label}
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span
+          data-testid={`${props.testId}-title`}
+          className="min-w-0 truncate text-[13px] font-medium text-ink"
+        >
+          {props.label}
+        </span>
+        {props.description ? (
+          <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
+            {props.description}
+          </span>
+        ) : null}
       </span>
       {props.action}
       {props.trailing}

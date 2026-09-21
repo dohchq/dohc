@@ -3432,6 +3432,7 @@ export function ChatsView(props: {
           testId="chats-feed"
           onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
+          description="Posts and comments from your groups, newest first"
         />
         <PostFeedList
           key={`${workspaceId}:home`}
@@ -3441,7 +3442,7 @@ export function ChatsView(props: {
           header={<>
             {personalFeed.length === 0 && !personalFeedLoading ? (
               <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
-                <p className="m-0">Nothing new yet</p>
+                <p className="m-0">No posts in your groups yet.</p>
                 <button
                   type="button"
                   data-testid="chats-feed-empty-groups"
@@ -4103,6 +4104,11 @@ export function ChatsView(props: {
               <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
             )
           }
+          description={
+            nav.channel.purpose?.trim() ? (
+              <span data-testid="chats-channel-purpose">{nav.channel.purpose}</span>
+            ) : undefined
+          }
           trailing={
             <>
               {nav.channel.kind === "agent" ? (
@@ -4111,46 +4117,71 @@ export function ChatsView(props: {
                   testId="chats-channel-agent-presence"
                 />
               ) : null}
-              <PresenceFaces
-                others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
-              />
+              {groupType === "both" ? (
+                <div role="tablist" aria-label="Group lanes" className="flex shrink-0 gap-1">
+                  {(
+                    [
+                      ["posts", "Posts"],
+                      ["chat", "Chat"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="tab"
+                      aria-selected={groupLane === value}
+                      data-testid={`chats-group-lane-${value}`}
+                      onClick={() => setGroupLane(value)}
+                      className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
+                        groupLane === value
+                          ? "bg-panel-2 text-ink"
+                          : "text-muted hover:bg-panel-2 hover:text-ink"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {canShare ? (
+                // One control: who is here now, how many have access, and the
+                // member list behind it. The faces stay live presence; the
+                // grant avatars stand in until someone else arrives.
+                <button
+                  type="button"
+                  data-testid="chats-share-channel"
+                  title={channelGrants.length > 0 ? "Members" : "Add members"}
+                  aria-expanded={sharePanelOpen}
+                  onClick={() => setSharePanelOpen((open) => !open)}
+                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  {presence.others.length > 0 ? (
+                    <PresenceFaces others={presence.others} />
+                  ) : channelGrants.length > 0 ? (
+                    <span className="flex items-center -space-x-1.5">
+                      {channelGrants.slice(0, 3).map((grant) => (
+                        <ChatAvatar
+                          key={grant.shareId}
+                          name={grant.recipientEmail ?? "?"}
+                          kind="human"
+                          size="strip"
+                          className="ring-2 ring-panel"
+                        />
+                      ))}
+                    </span>
+                  ) : (
+                    <Users size={13} aria-hidden />
+                  )}
+                  {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
+                </button>
+              ) : (
+                <PresenceFaces
+                  others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
+                />
+              )}
             </>
           }
-          action={
-            canShare ? (
-              <button
-                type="button"
-                data-testid="chats-share-channel"
-                title={channelGrants.length > 0 ? "Members" : "Add members"}
-                aria-expanded={sharePanelOpen}
-                onClick={() => setSharePanelOpen((open) => !open)}
-                className="flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
-              >
-                {channelGrants.length > 0 ? (
-                  <span className="flex items-center -space-x-1.5">
-                    {channelGrants.slice(0, 3).map((grant) => (
-                      <ChatAvatar
-                        key={grant.shareId}
-                        name={grant.recipientEmail ?? "?"}
-                        kind="human"
-                        size="strip"
-                        className="ring-2 ring-panel"
-                      />
-                    ))}
-                  </span>
-                ) : (
-                  <Users size={13} aria-hidden />
-                )}
-                {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
-              </button>
-            ) : undefined
-          }
         />
-        {nav.channel.purpose?.trim() ? (
-          <p data-testid="chats-channel-purpose" className="m-0 truncate px-3 pb-2 text-[12px] text-muted">
-            {nav.channel.purpose}
-          </p>
-        ) : null}
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
@@ -4299,36 +4330,6 @@ export function ChatsView(props: {
             </form>
           </div>
         ) : null}
-        {groupType === "both" ? (
-          <div
-            role="tablist"
-            aria-label="Group lanes"
-            className="flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
-          >
-            {(
-              [
-                ["posts", "Posts"],
-                ["chat", "Chat"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={groupLane === value}
-                data-testid={`chats-group-lane-${value}`}
-                onClick={() => setGroupLane(value)}
-                className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                  groupLane === value
-                    ? "bg-panel-2 text-ink"
-                    : "text-muted hover:bg-panel-2 hover:text-ink"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        ) : null}
         {showLane ? (
           <ChatLane
             workspaceId={workspaceId}
@@ -4384,7 +4385,12 @@ export function ChatsView(props: {
                 className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-[13px] text-subtle">No posts yet</span>
+                <span className="text-[13px] text-subtle">
+                  {nav.channel.kind === "agent"
+                    ? "No posts yet."
+                    : `No posts in #${nav.channel.name} yet.`}
+                  {channelLocked ? "" : " Start one above."}
+                </span>
               </div>
             )}
           renderItem={(thread) => {
