@@ -141,6 +141,15 @@ it("runs the published fundraiser through participant and organizer HTTP operati
     {paymentMethod: "gcash", verified: 4000, pending: 0, rejected: 0, dueAtVenue: 0, total: 4000},
   ]);
   expect((await f.ok(f.invoke("helper", "attendees", "attendees"))).result.records).toHaveLength(6);
+  const capability = prepared.candidate.capabilities.find(item => item.kind === "app-backend")!;
+  for (const table of capability.tables) {
+    const page = await f.ok(f.invoke("owner", `table-${table.name}`, table.readOperation, {offset: 0, limit: 1, search: ""}));
+    expect(page.result.rows).toHaveLength(1);
+    expect(page.result.rows[0][table.primaryKey]).toBeTypeOf("string");
+    const absent = await f.ok(f.invoke("owner", `table-empty-${table.name}`, table.readOperation, {offset: 0, limit: 1, search: "no-such-synthetic-person"}));
+    expect(absent.result.rows).toEqual([]);
+    expect((await f.invoke("participant", `private-table-${table.name}`, table.readOperation, {})).status).toBe(404);
+  }
   f.restart();
   expect(await f.ok(f.invoke("participant", "register", "register", input))).toEqual(accepted);
   expect((await f.ok(f.invoke("participant", "status-restart", "lookupStatus", {token: accepted.result.statusToken}))).result.status).toBe("verified");

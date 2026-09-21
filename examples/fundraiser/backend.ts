@@ -201,8 +201,9 @@
     const {limit, offset} = pageInput(ctx, input, 200);
     const selected = input.sessionId === undefined ? "" : session(ctx, input.sessionId);
     const filter = input.status === undefined ? "" : status(ctx, input.status);
-    const rows = ctx.db.query("SELECT a.id,a.registration_id,a.session_id,a.role,a.name,r.full_name,r.mobile,r.status FROM attendees a JOIN registrations r ON r.id=a.registration_id WHERE (?='' OR a.session_id=?) AND (?='' OR r.status=?) AND r.status<>'rejected' ORDER BY a.session_id,a.role,a.name,a.id LIMIT ? OFFSET ?",
-      [selected, selected, filter, filter, limit + 1, offset]);
+    const search = tableSearch(ctx, input);
+    const rows = ctx.db.query("SELECT a.id,a.registration_id,a.session_id,a.role,a.name,r.full_name,r.mobile,r.status FROM attendees a JOIN registrations r ON r.id=a.registration_id WHERE (?='' OR a.session_id=?) AND (?='' OR r.status=?) AND r.status<>'rejected' AND (?='' OR instr(lower(a.name),lower(?))>0 OR instr(lower(r.full_name),lower(?))>0 OR instr(r.mobile,?)>0) ORDER BY a.session_id,a.role,a.name,a.id LIMIT ? OFFSET ?",
+      [selected, selected, filter, filter, search, search, search, search, limit + 1, offset]);
     return {records: rows.slice(0, limit).map(row => ({
       id: row.id, registrationId: row.registration_id, sessionId: row.session_id, role: row.role,
       name: row.name, contactName: row.full_name, mobile: row.mobile, status: row.status,
@@ -221,8 +222,25 @@
   function listRegistrationSessions(ctx, input) {
     organizer(ctx); object(ctx, input);
     const {limit, offset} = pageInput(ctx, input, 100);
-    const records = ctx.db.query("SELECT id,registration_id AS registrationId,session_id AS sessionId,player_count AS players,spectator_count AS spectators FROM registration_sessions ORDER BY id LIMIT ? OFFSET ?", [limit + 1, offset]);
+    const search = tableSearch(ctx, input);
+    const records = ctx.db.query("SELECT id,registration_id AS registrationId,session_id AS sessionId,player_count AS players,spectator_count AS spectators FROM registration_sessions WHERE (?='' OR instr(id,?)>0 OR instr(registration_id,?)>0 OR instr(session_id,?)>0) ORDER BY id LIMIT ? OFFSET ?", [search, search, search, search, limit + 1, offset]);
     return {records: records.slice(0, limit), nextOffset: records.length > limit ? offset + limit : null};
   }
-  globalThis.operations = {listPublicSessions, register, lookupStatus, listRegistrations, attendees, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions};
+  function tableSearch(ctx, input) {
+    const search = input.search === undefined ? "" : input.search;
+    if (typeof search !== "string" || search.length > 150) invalid(ctx, "Keep the search under 150 characters.");
+    return search;
+  }
+  function tableSessions(ctx, input) {
+    organizer(ctx); object(ctx, input);
+    const {limit, offset} = pageInput(ctx, input, 100);
+    const search = tableSearch(ctx, input).toLowerCase();
+    const rows = listPublicSessions(ctx).filter(row => row.name.toLowerCase().includes(search));
+    return {rows: rows.slice(offset, offset + limit), total: rows.length};
+  }
+  function tableRegistrations(ctx, input) { return {rows: listRegistrations(ctx, input).records}; }
+  function tableRegistrationSessions(ctx, input) { return {rows: listRegistrationSessions(ctx, input).records}; }
+  function tableAttendees(ctx, input) { return {rows: attendees(ctx, input).records}; }
+  globalThis.operations = {listPublicSessions, register, lookupStatus, listRegistrations, attendees, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions,
+    tableSessions, tableRegistrations, tableRegistrationSessions, tableAttendees};
 }());

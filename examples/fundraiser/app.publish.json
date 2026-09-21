@@ -18,13 +18,17 @@
       {"name": "receiptAccess", "access": "helper", "readOnly": true},
       {"name": "setStatus", "access": "helper", "readOnly": false},
       {"name": "updateRegistration", "access": "helper", "readOnly": false},
-      {"name": "manualEntry", "access": "helper", "readOnly": false}
+      {"name": "manualEntry", "access": "helper", "readOnly": false},
+      {"name": "tableSessions", "access": "owner", "readOnly": true},
+      {"name": "tableRegistrations", "access": "owner", "readOnly": true},
+      {"name": "tableRegistrationSessions", "access": "owner", "readOnly": true},
+      {"name": "tableAttendees", "access": "owner", "readOnly": true}
     ],
     "tables": [
-      {"name": "sessions", "primaryKey": "id", "readOperation": "listPublicSessions", "writeOperation": null},
-      {"name": "registrations", "primaryKey": "id", "readOperation": "listRegistrations", "writeOperation": "updateRegistration"},
-      {"name": "registration_sessions", "primaryKey": "id", "readOperation": "listRegistrationSessions", "writeOperation": null},
-      {"name": "attendees", "primaryKey": "id", "readOperation": "attendees", "writeOperation": null}
+      {"name": "sessions", "primaryKey": "id", "readOperation": "tableSessions", "writeOperation": null},
+      {"name": "registrations", "primaryKey": "id", "readOperation": "tableRegistrations", "writeOperation": "updateRegistration"},
+      {"name": "registration_sessions", "primaryKey": "id", "readOperation": "tableRegistrationSessions", "writeOperation": null},
+      {"name": "attendees", "primaryKey": "id", "readOperation": "tableAttendees", "writeOperation": null}
     ]
   }
 }
