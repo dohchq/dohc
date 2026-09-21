@@ -18,12 +18,17 @@ export type ShareReadFailure =
       limit: number;
     };
 
+// The rail names the concrete action when it can: "Running codex" beats
+// "working", and an idle agent owes no word at all, only the dot.
 export function AgentPresenceHint(props: {
   activity: AgentPresenceActivity | null;
   testId: string;
+  // The program the runner starts, when the view knows it.
+  program?: string | null;
 }) {
   if (props.activity === null) return null;
   const working = props.activity === "working";
+  const text = working ? (props.program ? `Running ${props.program}` : "working") : null;
   return (
     <span
       data-testid={props.testId}
@@ -37,18 +42,22 @@ export function AgentPresenceHint(props: {
           working ? "bg-agent" : "border border-agent/60 bg-transparent"
         }`}
       />
-      {props.activity}
+      {text}
     </span>
   );
 }
 
-export function UnreadPill(props: { count: number; testId: string }) {
+// Ink means the user was addressed: a DM or their agent. Quiet marks unread
+// activity in a group the user only follows.
+export function UnreadPill(props: { count: number; testId: string; tone?: "ink" | "quiet" }) {
   if (props.count <= 0) return null;
   return (
     <span
       data-testid={props.testId}
       aria-label={`${props.count} unread`}
-      className="min-w-4 shrink-0 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
+      className={`min-w-4 shrink-0 rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums ${
+        props.tone === "quiet" ? "bg-line/70 text-ink" : "bg-ink text-bg"
+      }`}
     >
       {props.count > 99 ? "99+" : props.count}
     </span>
