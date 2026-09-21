@@ -76,3 +76,12 @@ Focused tests cover candidate isolation, changesets, SQL access, read-only calls
 The initial implementation passed on Windows Node 24.16.0.
 A Linux Node 24.20.0 container also initialized a database, executed an operation, and returned the expected changeset.
 These checks do not establish shared commit, publication, or packaged desktop behavior.
+
+## Packaging
+
+Run the package's `build` script before consuming it. Tests build it automatically.
+Both the client and child exports resolve to compiled `.mjs` files under `dist`.
+Keep this package and its QuickJS dependencies external when bundling a Node host.
+Deployment must include `dist` and the QuickJS Wasm dependency files.
+The child export resolves through the package name, so bundling the host does not change its location.
+Desktop hosts must supply a compatible child launcher instead of treating Electron's executable as Node.

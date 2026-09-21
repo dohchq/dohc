@@ -2,8 +2,12 @@
   "name": "@dohc/app-backend-runtime",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./dist/index.mjs" },
+    "./child": "./dist/child.mjs"
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },
   "dependencies": { "quickjs-emscripten": "0.32.0" },
-  "devDependencies": { "@types/node": "^24.13.3", "typescript": "^7.0.2", "vitest": "^4.1.11" }
+  "devDependencies": { "@types/node": "^24.13.3", "esbuild": "0.28.1", "typescript": "^7.0.2", "vitest": "^4.1.11" }
 }

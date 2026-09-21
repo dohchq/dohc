@@ -19,7 +19,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
   let directory: string | undefined;
   try {
     directory = await mkdtemp(join(tmpdir(), "dohc-app-operation-"));
-    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--max-old-space-size=96", fileURLToPath(new URL("./child.ts", import.meta.url))], {
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--max-old-space-size=96", fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/child"))], {
       env: {},
       cwd: directory,
       stdio: ["ignore", "ignore", "ignore", "ipc"],
