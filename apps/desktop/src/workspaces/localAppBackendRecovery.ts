@@ -63,8 +63,8 @@ export function parseLocalBackendRecovery(raw:unknown):LocalBackendRecovery {
     else if(row.grant_id!=="" || row.principal_id!=="" || bytes.byteLength!==0)throw new Error("Invalid recovery approval history.");
   });
   const last=bundle.history.at(-1);
-  if(bundle.history.length!==snapshot.revision || last?.database_sha256!==recoveryHash(database) || last.publication_id!==snapshot.publicationId ||
-    last.publication_revision!==snapshot.publicationRevision || last.source_sha256!==snapshot.sourceSha256 || last.recorded_at_ms!==snapshot.updatedAtMs)throw new Error("The recovery database differs from its history.");
+  if(bundle.history.length!==snapshot.revision || last?.database_sha256!==recoveryHash(database) ||
+    last.source_sha256!==snapshot.sourceSha256 || last.recorded_at_ms!==snapshot.updatedAtMs)throw new Error("The recovery database differs from its history.");
   const receiptKeys=new Set<string>(),receiptRevisions=new Set<number>();
   bundle.receipts.forEach(row=>{
     scoped(row);text(row.grant_id);text(row.principal_id);text(row.idempotency_key,128);digest(row.payload_sha256);

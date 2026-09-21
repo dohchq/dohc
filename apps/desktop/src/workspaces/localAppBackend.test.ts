@@ -9,6 +9,10 @@ import { compileClosedApp } from "./closedAppCompiler";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost, type LocalAppBackendRuntime } from "./localAppBackend";
 import { parseLocalBackendRecovery, signLocalBackendRecovery } from "./localAppBackendRecovery";
+import { openSyncRelayStorage } from "../../../../services/sync-relay/src/storage";
+import { initializeAppBackendSchema } from "../../../../services/sync-relay/src/storage/appBackendSchema";
+import { exportAppBackend, restoreAppBackend } from "../../../../services/sync-relay/src/storage/appBackendData";
+import type { StorageContext } from "../../../../services/sync-relay/src/storage/context";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const schema = "CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL, quantity INTEGER NOT NULL);";
@@ -150,5 +154,24 @@ describe("local app backend",()=>{
     const retried=await host.request(publication.publicationId,"upload",{...input,idempotencyKey:"staged"}) as any;
     expect(retried.file.fileId).not.toBe(staged.file.fileId);
     expect((await host.request(publication.publicationId,"file",{authorityRevision:publication.authorityRevision,fileId:attached.file.fileId}) as any).file).toEqual(attached.file);
+  });
+  it("moves the same data through relay recovery and back to a fresh local host",async()=>{
+    const {host,workspaceRoot}=await open(),approved=await prepared(),publication=await host.activate(approved);
+    const first=await invoke(host,publication,"order","first",{quantity:2});
+    const bundle=host.transfer("data/orders.sqlite","shared-publication");
+    const storage=openSyncRelayStorage(join(workspaceRoot,"relay.sqlite"));
+    try{
+      const context=storage as StorageContext;initializeAppBackendSchema(context.db);
+      storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
+      const snapshot=bundle.snapshot;
+      await restoreAppBackend(context,{...snapshot,database:Buffer.from(snapshot.databaseBase64,"base64"),publicationId:"shared-publication",publicationRevision:4,
+        expectedRevision:null,nowMs:Date.now(),bundle,authorize(){},
+        validateDatabase:database=>runtime.validateAppDatabase({database,schemaSql:schema,tables:["orders"]})});
+      const shared=exportAppBackend(context,{workspaceId:"w",dataPath:"data/orders.sqlite",authorize(){}});
+      const restored=(await open()).host,pending=await restored.activate(approved,undefined,{initialize:false});
+      await restored.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle:shared});
+      expect((await invoke(restored,pending,"list","read")).result.rows).toHaveLength(1);
+      expect(await invoke(restored,pending,"order","first",{quantity:2})).toEqual({...first,replayed:true});
+    }finally{storage.close();}
   });
 });
