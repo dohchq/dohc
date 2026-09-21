@@ -974,12 +974,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
-    const [identity] = await Promise.all([
+    const [identity, runner] = await Promise.all([
       options.identityFor(workspace),
-      options.chatStoreFor(workspace).ensureAgentChannel({
-        workspaceId: workspace.workspaceId,
-      }),
+      options.readRunnerSettings(),
     ]);
+    // The agent channel is part of opting into local dispatch. A background
+    // scan must not create an agent conversation in every new workspace.
+    if (runner.enabled && configuredRunnerCommand(runner)) {
+      await options.chatStoreFor(workspace).ensureAgentChannel({
+        workspaceId: workspace.workspaceId,
+      });
+    }
     const recordedCount = await options
       .dispatchStoreFor(workspace)
       .recordEligibleTriggers({

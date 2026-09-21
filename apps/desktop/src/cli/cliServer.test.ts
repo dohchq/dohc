@@ -2096,8 +2096,18 @@ describe("CLI socket server", () => {
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
   });
 
+  it("does not provision an agent when listing channels", async () => {
+    if (!store) throw new Error("Store is not available");
+    const result = await invoke("channels", { cwd: workspaceRoot, actor: "agent" });
+    expect(result.channels.map((channel) => channel.kind)).not.toContain("agent");
+    expect((await store.listChannels({ workspaceId: WORKSPACE_ID })).map(
+      (channel) => channel.kind,
+    )).not.toContain("agent");
+  });
+
   it("rejects post for DM streams while allowing agent-channel task posts", async () => {
     if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const dm = await store.createChannel({
       workspaceId: WORKSPACE_ID,
       name: "Alice",
@@ -3178,6 +3188,8 @@ describe("CLI socket server", () => {
   });
 
   it("returns unread agent DMs, agent mentions, and human unread threads", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const agentDm = await post({
       actor: "human",
       channel: "my-agent",

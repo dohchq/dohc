@@ -6380,6 +6380,34 @@ describe("ui-state merge-on-load", () => {
     chatsVisible: false,
   };
 
+  it.each([false, true])("offers the local agent mention only after opting in (runner enabled: %s)", async (enabled) => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(chatsPageBridge(CHATS_PAGE_STATE), {
+      listChatChannelShares: vi.fn(async () => ({
+        joined: [], sessionKey: null,
+        relay: { state: "answered" as const, granted: [], received: [] },
+      })),
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<DesktopWorkspaceShell
+      workspace={WORKSPACE}
+      workspaces={[WORKSPACE]}
+      {...shellBootstrapProps(bridge)}
+      userSettings={{ source: "stored", settings: {
+        ...DEFAULT_USER_SETTINGS,
+        profile: enabled ? { agentName: "Nova" } : {},
+        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled, command: enabled ? "node agent.mjs" : "" },
+      } }}
+      onSwitchWorkspace={() => {}}
+    />);
+    await screen.findByTestId("chats-personal-feed");
+    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.type(await screen.findByTestId("chats-new-thread-composer"), "@");
+    const options = await screen.findAllByTestId("chats-new-thread-mention-option");
+    expect(options.some((option) => option.dataset.candidateId === "agent:default")).toBe(enabled);
+  });
+
   it("keeps Home open when a DM link cannot resolve and offers a retry", async () => {
     const user = userEvent.setup();
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);

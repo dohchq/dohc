@@ -25,6 +25,7 @@ export function createSettingsIpc<
   refreshDispatchTray(): Promise<unknown>;
   openDispatchWorkspaces(): readonly { workspaceId: string }[];
   chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
+  notifyRenderer(scope: { workspaceId: string }): void;
   // Tells every window the settings changed. The writer already has the
   // result; the other surfaces learn it here.
   broadcastUserSettings(result: DesktopUserSettingsResult): void;
@@ -37,7 +38,7 @@ export function createSettingsIpc<
     registerHandler, assertTrustedSender, stateDir, enqueueUserSettingsWrite,
     setCachedPreferredName, applyZoomLevelToWindows, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
-    broadcastUserSettings,
+    broadcastUserSettings, notifyRenderer,
   } = dependencies;
 
   function registerSettingsIpcHandlers(): void {
@@ -66,7 +67,9 @@ export function createSettingsIpc<
       await refreshDispatchTray();
       if (input.settings.runner.enabled && configuredRunnerCommand(input.settings.runner)) {
         for (const workspace of openDispatchWorkspaces()) {
-          void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+          void chatDispatchService.scanWorkspace(workspace.workspaceId).then(() => {
+            notifyRenderer({ workspaceId: workspace.workspaceId });
+          }).catch((error) => {
             console.error("[desktop] runner-settings dispatch scan:", error);
           });
         }

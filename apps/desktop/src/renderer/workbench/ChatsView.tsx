@@ -310,8 +310,8 @@ function NavRow(props: {
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
       {...props.data}
-      className={`mx-2 flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 hover:bg-panel-2 dohc-focus-visible ${
-        props.active ? "bg-panel-2" : ""
+      className={`mx-2 flex h-8 w-[calc(100%-1rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-visible ${
+        props.active ? "bg-line" : "hover:bg-line/50"
       } ${props.className ?? ""}`}
     >
       {props.icon}
@@ -937,6 +937,20 @@ export function ChatsView(props: {
     },
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
+
+  const awaitingAgentChannel = Boolean(
+    props.userSettings?.runner.enabled &&
+    overview.status === "ready" &&
+    !overview.channels.some((channel) => channel.kind === "agent"),
+  );
+  useEffect(() => {
+    if (!awaitingAgentChannel) return;
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === workspaceId) void refreshOverview({ background: true });
+    });
+    void refreshOverview({ background: true });
+    return unsubscribe;
+  }, [awaitingAgentChannel, refreshOverview, workspaceId]);
 
   // Badge-only refresh for activity nobody asked for. It reads only the
   // channel listing and the joined grants (local questions), takes commit
@@ -4716,7 +4730,7 @@ export function ChatsView(props: {
                   onClick={() =>
                     agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
                   }
-                  className="mx-2 flex h-7 w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                  className="mx-2 flex h-7 w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-line/50 hover:text-ink dohc-focus-visible"
                 >
                   {agentReady ? (
                     <>
