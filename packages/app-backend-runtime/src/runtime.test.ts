@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { AppBackendRuntimeError, evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "./index.ts";
+import { AppBackendRuntimeError, createAppBackendRuntime, evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "./index.ts";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { EvaluateAppOperationInput } from "./index.ts";
 
 const tables = ["stock", "orders"];
@@ -22,6 +24,14 @@ async function request(overrides: Partial<EvaluateAppOperationInput> = {}): Prom
 }
 
 describe("app operation runtime", () => {
+  it("passes a captured absolute child path to the host launcher", async () => {
+    const entryPath=join(tmpdir(),"packaged-runtime","child.mjs");
+    const options={entryPath,launch({entryPath:actual}:{entryPath:string}):never { expect(actual).toBe(entryPath);throw new Error("launcher reached"); }};
+    const runtime=createAppBackendRuntime(options);
+    options.entryPath=join(tmpdir(),"changed.mjs");
+    await expect(runtime.initializeAppDatabase({tables,schemaSql})).rejects.toThrow("launcher reached");
+    expect(()=>createAppBackendRuntime({entryPath:"relative/child.mjs"})).toThrow("absolute");
+  });
   it("validates recovery snapshots against the exact approved schema in isolation", async () => {
     const input=await request();
     const candidate=await evaluateAppOperation(input);

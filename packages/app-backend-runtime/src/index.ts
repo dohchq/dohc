@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.js";
 import type { AppOperationResult, AppRuntimeChild, AppRuntimeLauncher, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
@@ -23,9 +23,16 @@ const nodeLauncher: AppRuntimeLauncher = options => {
   return { postMessage(message) { child.send(message as object, error => { if(error) options.onError(error); }); }, kill() { child.kill("SIGKILL"); } };
 };
 
-export interface AppBackendRuntimeOptions { launch?: AppRuntimeLauncher }
+export interface AppBackendRuntimeOptions { launch?: AppRuntimeLauncher; entryPath?: string }
 
-async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSignal, launch: AppRuntimeLauncher = nodeLauncher): Promise<AppOperationResult> {
+function validateEntryPath(entryPath: string | undefined): void {
+  if (entryPath !== undefined && (typeof entryPath !== "string" || !isAbsolute(entryPath) || entryPath.includes("\0"))) {
+    throw new Error("The app runtime child path must be absolute.");
+  }
+}
+
+async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSignal, launch: AppRuntimeLauncher = nodeLauncher, entryPath?: string): Promise<AppOperationResult> {
+  validateEntryPath(entryPath);
   if (signal?.aborted) throw new Error("App operation was cancelled.");
   if (active >= MAX_ACTIVE) throw new Error("App runtime is busy. Try again.");
   active += 1;
@@ -53,7 +60,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
         else resolveReply(received);
       };
       try {
-        child = launch({entryPath:fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/child")),cwd,env:{},
+        child = launch({entryPath:entryPath ?? fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/child")),cwd,env:{},
           onMessage:message=>{ received=message as ChildReply; },onError,onExit});
         if (failure) child.kill();
         else child.postMessage({...request,directory});
@@ -104,23 +111,25 @@ export async function evaluateAppOperation(input: EvaluateAppOperationInput, opt
     inputJson: boundedText(JSON.stringify(input.input), limits.inputBytes, "Operation input"),
     nowMs: input.nowMs, requestId: input.requestId, database: input.database, readOnly: input.readOnly === true,
     files: files.map(({fileId,name,contentType,byteLength,sha256})=>({fileId,name,contentType,byteLength,sha256})), secret,
-  } as Omit<ChildRequest, "directory">,input.signal,options.launch);
+  } as Omit<ChildRequest, "directory">,input.signal,options.launch,options.entryPath);
 }
 
 export async function initializeAppDatabase(input: InitializeAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<Uint8Array> {
   const limits = runtimeLimits(input.limits);
   return (await run({ kind: "initialize", tables: approvedTables(input.tables), limits,
-    schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal,options.launch)).database;
+    schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal,options.launch,options.entryPath)).database;
 }
 
 export async function validateAppDatabase(input: ValidateAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<void> {
   const limits=runtimeLimits(input.limits);
   if (!(input.database instanceof Uint8Array) || input.database.byteLength < 100 || input.database.byteLength > limits.databaseBytes) throw new Error("Invalid app database snapshot.");
   await run({kind:"validate",tables:approvedTables(input.tables),limits,database:input.database,
-    schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal,options.launch);
+    schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal,options.launch,options.entryPath);
 }
 
 export function createAppBackendRuntime(options: AppBackendRuntimeOptions = {}) {
+  validateEntryPath(options.entryPath);
+  options = {...options};
   return {
     evaluateAppOperation: (input: EvaluateAppOperationInput) => evaluateAppOperation(input,options),
     initializeAppDatabase: (input: InitializeAppDatabaseInput) => initializeAppDatabase(input,options),
