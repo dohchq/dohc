@@ -23,10 +23,24 @@ request: (action: "activate" | "restore" | "describe", body: unknown) => Promise
     if (existing?.active && !existing.sharedPublicationId) throw new Error("This app has local data. Publish it with initialization to transfer that data.");
     return;
   }
-  if (existing && (!existing.sharedPublicationId || existing.sharedPublicationId === input.publicationId)) {
-    const bundle = local.transfer(capability.dataPath, input.publicationId);
+  let sharedInitialized = false;
+  if (existing?.sharedPublicationId) {
+    const raw = await request("describe", {});
+    signal.throwIfAborted();
+    const description = raw as { publicationId?: unknown; authorityRevision?: unknown; initialized?: unknown } | null;
+    if (!description || description.publicationId !== input.publicationId || description.authorityRevision !== input.authorityRevision || typeof description.initialized !== "boolean") {
+      throw new Error("The app activation changed. Refresh its publications.");
+    }
+    sharedInitialized = description.initialized;
+    if (!sharedInitialized && existing.sharedTransferConfirmed) throw new Error("The shared app data is missing. Restore a current shared recovery export before continuing.");
+  }
+  if (existing && !sharedInitialized) {
+    if (existing.capability.backendSha256 !== capability.backendSha256) throw new Error("The shared app does not match its local data. Restore the matching backend source before retrying the transfer.");
+    const bundle = local.transfer(capability.dataPath, input.publicationId, existing.sharedPublicationId ?? undefined);
     signal.throwIfAborted();
     confirm(await request("restore", { authorityRevision: input.authorityRevision, bundle }));
+    signal.throwIfAborted();
+    local.advanceSharedAuthority(capability.dataPath, input.publicationId, input.publicationId);
   } else {
     confirm(await request("activate", { authorityRevision: input.authorityRevision }));
     signal.throwIfAborted();

@@ -151,6 +151,21 @@ describe("local app backend",()=>{
     payload.history=[{...payload.history[0],database_sha256:hash(wrong)}];
     await expect(other.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle:signLocalBackendRecovery(payload)})).rejects.toThrow(/schema/i);
   });
+  it("persists transfer confirmation and retargets only an unfinished frozen snapshot",async()=>{
+    const {host,workspaceRoot}=await open(),publication=await host.activate(await prepared());
+    await invoke(host,publication,"order","first",{quantity:2});
+    const bundle=host.transfer("data/orders.sqlite","first-shared");
+    host.close();
+    const reopened=(await open(workspaceRoot)).host;
+    expect(reopened.findByDataPath("data/orders.sqlite")?.sharedTransferConfirmed).toBe(false);
+    expect(()=>reopened.transfer("data/orders.sqlite","next-shared","wrong-previous")).toThrow(/shared host/);
+    expect(reopened.transfer("data/orders.sqlite","next-shared","first-shared")).toEqual(bundle);
+    reopened.advanceSharedAuthority("data/orders.sqlite","next-shared","next-shared");
+    reopened.close();
+    const confirmed=(await open(workspaceRoot)).host;
+    expect(confirmed.findByDataPath("data/orders.sqlite")?.sharedTransferConfirmed).toBe(true);
+    expect(()=>confirmed.transfer("data/orders.sqlite","third-shared","next-shared")).toThrow(/shared host/);
+  });
   it("expires staged uploads after a day but preserves attached receipts",async()=>{
     const {host}=await open(),publication=await host.activate(await prepared());
     const input={authorityRevision:publication.authorityRevision,name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-synthetic").toString("base64")};

@@ -58,7 +58,9 @@ export async function createLocalAppBackendHost(options: {
       key TEXT NOT NULL, metadata TEXT NOT NULL, content BLOB NOT NULL, attached_revision INTEGER, recovery TEXT NOT NULL,
       PRIMARY KEY(data_path,file_id), UNIQUE(data_path,key)) STRICT;
     CREATE TABLE IF NOT EXISTS artifacts(data_path TEXT NOT NULL REFERENCES apps(data_path), path TEXT NOT NULL,
-      metadata TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(data_path,path)) STRICT;`);
+      metadata TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(data_path,path)) STRICT;
+    CREATE TABLE IF NOT EXISTS shared_transfers(data_path TEXT PRIMARY KEY REFERENCES apps(data_path),
+      confirmed_publication TEXT NOT NULL) STRICT;`);
   db.prepare("INSERT OR IGNORE INTO identity(singleton,workspace_id) VALUES(1,?)").run(options.workspaceId);
   if (db.prepare("SELECT workspace_id FROM identity WHERE singleton=1").get()!.workspace_id !== options.workspaceId) {
     db.close(); throw new Error("This local app store belongs to another workspace.");
@@ -341,7 +343,8 @@ export async function createLocalAppBackendHost(options: {
     has(publicationId: string) { assertCurrent(); return !!db.prepare("SELECT 1 FROM apps WHERE publication_id=?").get(publicationId); },
     findByDataPath(dataPath:string) {
       assertCurrent();const row=byPath(dataPath);
-      return row ? {...description(row),appRoot:row.app_root,sourceRevision:JSON.parse(row.candidate).sourceRevision,sharedPublicationId:row.shared_publication} : null;
+      return row ? {...description(row),appRoot:row.app_root,sourceRevision:JSON.parse(row.candidate).sourceRevision,sharedPublicationId:row.shared_publication,
+        sharedTransferConfirmed:!!db.prepare("SELECT 1 FROM shared_transfers WHERE data_path=?").get(dataPath)} : null;
     },
     sharedPublicationFor(publicationId:string) {
       assertCurrent();return (db.prepare("SELECT shared_publication FROM apps WHERE publication_id=?").get(publicationId)?.shared_publication as string | null | undefined) ?? null;
@@ -352,6 +355,7 @@ export async function createLocalAppBackendHost(options: {
         const row=byPath(dataPath);
         if(!row || row.shared_publication!==expectedPublicationId)throw new Error("The shared app authority changed. Reload the app.");
         db.prepare("UPDATE apps SET shared_publication=? WHERE data_path=?").run(publicationId,dataPath);
+        db.prepare("INSERT INTO shared_transfers VALUES(?,?) ON CONFLICT(data_path) DO UPDATE SET confirmed_publication=excluded.confirmed_publication").run(dataPath,publicationId);
       });
     },
     list(appRoot: string) { assertCurrent(); return db.prepare("SELECT * FROM apps WHERE app_root=? ORDER BY publication_id").all(appRoot).map(record=>{
@@ -369,13 +373,15 @@ export async function createLocalAppBackendHost(options: {
         db.prepare("UPDATE apps SET shared_publication=?,authority_revision=authority_revision+1 WHERE data_path=?").run(publicationId,dataPath);
       });
     },
-    transfer(dataPath:string,publicationId:string) {
+    transfer(dataPath:string,publicationId:string,expectedSharedPublicationId?:string) {
       if(!publicationId || publicationId.length>128)throw new Error("Invalid shared app publication.");
       return transaction(()=>{
         const row=byPath(dataPath);if(!row)throw new Error("This local app data is unavailable.");
-        if(row.shared_publication && row.shared_publication!==publicationId)throw new Error("This app already has a shared host.");
+        if(row.shared_publication && row.shared_publication!==publicationId &&
+          (row.shared_publication!==expectedSharedPublicationId || db.prepare("SELECT 1 FROM shared_transfers WHERE data_path=?").get(dataPath)))throw new Error("This app already has a shared host.");
         const bundle=exportData(row);
         if(!row.shared_publication)db.prepare("UPDATE apps SET shared_publication=?,authority_revision=authority_revision+1 WHERE data_path=?").run(publicationId,dataPath);
+        else if(row.shared_publication!==publicationId)db.prepare("UPDATE apps SET shared_publication=? WHERE data_path=?").run(publicationId,dataPath);
         return bundle;
       });
     },

@@ -202,6 +202,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       requireBackendOwner(value);
       const snapshot = readAppBackendMetadata(storage, scope(value));
       return {publicationId, authorityRevision: value.authorityRevision, capability: value.capability,
+        initialized: snapshot !== null,
         active: snapshot?.publicationId === publicationId && snapshot.publicationRevision === value.authorityRevision,
         revision: snapshot?.revision ?? 0};
     });

@@ -3,6 +3,14 @@ import { evaluateAppOperation, initializeAppDatabase, type EvaluateAppOperationI
 import { createAppBackendHost, type AppBackendAuth } from "./appBackendHost";
 import { fixture, owner, input, limits } from "./appBackendTestFixture";
 
+it("distinguishes absent data from initialized data under another publication", async () => {
+  const f = fixture();
+  expect(f.host.describe(owner, f.publicationId)).toMatchObject({ initialized: false, active: false, revision: 0 });
+  await f.host.activate(owner, f.publicationId, 1);
+  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_app_backends SET publication_id='previous'").run());
+  expect(f.host.describe(owner, f.publicationId)).toMatchObject({ initialized: true, active: false, revision: 1 });
+});
+
 it("serializes concurrent last-slot reservations, preserving an invocation identity across retries", async () => {
   let release!: () => void;
   const ready = new Promise<void>(resolve => {release = resolve;});
