@@ -71,6 +71,10 @@ export interface InitializeAppDatabaseInput {
   signal?: AbortSignal;
 }
 
+export interface ValidateAppDatabaseInput extends InitializeAppDatabaseInput {
+  database: Uint8Array;
+}
+
 export interface AppOperationResult {
   result: JsonValue;
   database: Uint8Array;
@@ -83,7 +87,7 @@ export type ChildRequest = {
   directory: string;
   limits: RuntimeLimits;
   tables: string[];
-} & ({ kind: "initialize"; schemaSql: string } | {
+} & ({ kind: "initialize"; schemaSql: string } | {kind:"validate"; schemaSql:string; database:Uint8Array} | {
   kind: "evaluate";
   source: string;
   operation: string;

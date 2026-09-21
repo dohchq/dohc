@@ -4,10 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.ts";
-import type { AppOperationResult, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput } from "./protocol.ts";
-export type { AppOperationResult, AppOperationFile, AppOperationRefusal, EvaluateAppOperationInput, InitializeAppDatabaseInput, JsonValue, RuntimeLimits } from "./protocol.ts";
-export { AppBackendRuntimeError } from "./protocol.ts";
+import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.js";
+import type { AppOperationResult, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
+export type { AppOperationResult, AppOperationFile, AppOperationRefusal, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput, JsonValue, RuntimeLimits } from "./protocol.js";
+export { AppBackendRuntimeError } from "./protocol.js";
 
 let active = 0;
 const MAX_ACTIVE = 8;
@@ -71,7 +71,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
 export async function evaluateAppOperation(input: EvaluateAppOperationInput): Promise<AppOperationResult> {
   const limits = runtimeLimits(input.limits);
   if (!(input.database instanceof Uint8Array) || input.database.byteLength > limits.databaseBytes || input.database.byteLength < 100) throw new Error("Invalid app database snapshot.");
-  if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(input.operation)) throw new Error("Invalid app operation name.");
+  if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(input.operation)) throw new Error("Invalid app operation name.");
   if (!Number.isSafeInteger(input.nowMs) || input.nowMs < 0 || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.requestId)) throw new Error("Invalid app operation context.");
   const secret = input.secret ?? randomBytes(32).toString("base64url");
   if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("Invalid app operation secret.");
@@ -95,4 +95,11 @@ export async function initializeAppDatabase(input: InitializeAppDatabaseInput): 
   const limits = runtimeLimits(input.limits);
   return (await run({ kind: "initialize", tables: approvedTables(input.tables), limits,
     schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal)).database;
+}
+
+export async function validateAppDatabase(input: ValidateAppDatabaseInput): Promise<void> {
+  const limits=runtimeLimits(input.limits);
+  if (!(input.database instanceof Uint8Array) || input.database.byteLength < 100 || input.database.byteLength > limits.databaseBytes) throw new Error("Invalid app database snapshot.");
+  await run({kind:"validate",tables:approvedTables(input.tables),limits,database:input.database,
+    schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal);
 }

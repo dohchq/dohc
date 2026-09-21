@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AppBackendRuntimeError, evaluateAppOperation, initializeAppDatabase } from "./index.ts";
+import { AppBackendRuntimeError, evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "./index.ts";
 import type { EvaluateAppOperationInput } from "./index.ts";
 
 const tables = ["stock", "orders"];
@@ -22,6 +22,14 @@ async function request(overrides: Partial<EvaluateAppOperationInput> = {}): Prom
 }
 
 describe("app operation runtime", () => {
+  it("validates recovery snapshots against the exact approved schema in isolation", async () => {
+    const input=await request();
+    const candidate=await evaluateAppOperation(input);
+    await expect(validateAppDatabase({database:candidate.database,tables,schemaSql})).resolves.toBeUndefined();
+    await expect(validateAppDatabase({database:candidate.database,tables,schemaSql:schemaSql.replace("CHECK(remaining>=0)","CHECK(remaining>=-1)")})).rejects.toThrow("approved schema");
+    const corrupt=Uint8Array.from(candidate.database);corrupt.fill(0,0,100);
+    await expect(validateAppDatabase({database:corrupt,tables,schemaSql})).rejects.toThrow();
+  });
   it("returns an isolated candidate and changeset, without modifying its baseline", async () => {
     const input = await request();
     const baseline = Buffer.from(input.database);

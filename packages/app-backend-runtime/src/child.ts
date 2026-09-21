@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, constants } from "node:sqlite";
 import { getQuickJS } from "quickjs-emscripten";
-import { AppBackendRuntimeError, boundedText } from "./protocol.ts";
-import type { AppOperationRefusal, ChildReply, ChildRequest } from "./protocol.ts";
+import { AppBackendRuntimeError, boundedText } from "./protocol.js";
+import type { AppOperationRefusal, ChildReply, ChildRequest } from "./protocol.js";
 
 const unsafeFunctions = new Set(["load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"]);
 
@@ -164,7 +164,7 @@ async function evaluate(db: DatabaseSync, request: Extract<ChildRequest, {kind: 
 
 async function handle(request: ChildRequest): Promise<ChildReply> {
   const path = join(request.directory, "app.sqlite");
-  if (request.kind === "evaluate") writeFileSync(path, request.database, { flag: "wx", mode: 0o600 });
+  if (request.kind !== "initialize") writeFileSync(path, request.database, { flag: "wx", mode: 0o600 });
   const db = new DatabaseSync(path, { allowExtension: false, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false });
   let transaction = false;
   try {
@@ -178,6 +178,20 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
       db.exec(request.schemaSql);
       db.setAuthorizer(null);
       verifySchema(db, request);
+    } else if (request.kind === "validate") {
+      verifySchema(db,request);
+      const expected = new DatabaseSync(join(request.directory,"expected.sqlite"),{allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false});
+      try {
+        expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA max_page_count=${Math.floor(request.limits.databaseBytes / 4096)}`);
+        authorize(expected,request,true);
+        expected.exec(request.schemaSql);
+        expected.setAuthorizer(null);
+        verifySchema(expected,request);
+        const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+        if (JSON.stringify(db.prepare(schema).all()) !== JSON.stringify(expected.prepare(schema).all())) throw new Error("App database does not match its approved schema.");
+        const integrity=db.prepare("PRAGMA integrity_check(1)").get();
+        if (integrity?.integrity_check !== "ok" || db.prepare("PRAGMA foreign_key_check").iterate().next().done !== true) throw new Error("App database integrity check failed.");
+      } finally { expected.close(); }
     } else {
       verifySchema(db, request);
       const session = db.createSession();

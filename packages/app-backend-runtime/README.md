@@ -63,6 +63,8 @@ Read-only operations also refuse file attachments.
 Schema initialization is separate. It admits declared tables, indexes, constraints, and triggers.
 Every table needs a non-null primary key or a single INTEGER primary key that aliases rowid.
 SQLite sessions capture changes for host history and replication. Replicas must apply changesets without rerunning authored logic.
+Recovery uses `validateAppDatabase` before committing an imported snapshot.
+The isolated child compares its schema to a fresh database from the approved schema source, then checks integrity and foreign keys.
 
 ## Dependency evidence
 
