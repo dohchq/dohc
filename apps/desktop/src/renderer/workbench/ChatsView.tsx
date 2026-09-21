@@ -3525,9 +3525,6 @@ export function ChatsView(props: {
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
                     : item.thread.title;
-                // A group's label opens the group; DMs, agents and files open the item.
-                const groupChannel =
-                  item.channel && item.channel.kind === "channel" ? item.channel : null;
                 const open = () => {
                   if (!item.channel) {
                     props.onOpenFileChat(fileThread!, item.message.id);
@@ -3597,30 +3594,7 @@ export function ChatsView(props: {
                             {chatAuthorLabel(item.message)}
                           </span>
                           <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-                            {groupChannel ? (
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openConversation({
-                                    level: "channel",
-                                    channel: {
-                                      ...groupChannel,
-                                      wireId: groupChannel.wireId,
-                                      createdAtMs: 0,
-                                      updatedAtMs: 0,
-                                      threadCount: 0,
-                                      unreadCount: 0,
-                                    },
-                                  });
-                                }}
-                                className="truncate rounded font-mono text-[11px] transition-colors duration-75 hover:text-ink dohc-focus-visible"
-                              >
-                                {where}
-                              </button>
-                            ) : (
-                              <span className="truncate font-mono text-[11px]">{where}</span>
-                            )}
+                            <span className="truncate font-mono text-[11px]">{where}</span>
                             <span aria-hidden>·</span>
                             <time dateTime={time.iso} title={time.iso} className="shrink-0">
                               {time.label}
@@ -4112,6 +4086,44 @@ export function ChatsView(props: {
       channelShares !== null &&
       channelJoined === null &&
       !!nav.channel.wireId;
+    // The wide page carries the lane switch in the header. The panel can be
+    // 240px, where the header's fixed controls already fill the row, so the
+    // switch keeps its own row there.
+    const laneTabs =
+      groupType === "both" ? (
+        <div
+          role="tablist"
+          aria-label="Group lanes"
+          className={
+            variant === "page"
+              ? "flex shrink-0 gap-1"
+              : "flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
+          }
+        >
+          {(
+            [
+              ["posts", "Posts"],
+              ["chat", "Chat"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={groupLane === value}
+              data-testid={`chats-group-lane-${value}`}
+              onClick={() => setGroupLane(value)}
+              className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
+                groupLane === value
+                  ? "bg-panel-2 text-ink"
+                  : "text-muted hover:bg-panel-2 hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null;
     return (
       <div
         data-testid="chats-channel-view"
@@ -4146,32 +4158,7 @@ export function ChatsView(props: {
                   testId="chats-channel-agent-presence"
                 />
               ) : null}
-              {groupType === "both" ? (
-                <div role="tablist" aria-label="Group lanes" className="flex shrink-0 gap-1">
-                  {(
-                    [
-                      ["posts", "Posts"],
-                      ["chat", "Chat"],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      role="tab"
-                      aria-selected={groupLane === value}
-                      data-testid={`chats-group-lane-${value}`}
-                      onClick={() => setGroupLane(value)}
-                      className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                        groupLane === value
-                          ? "bg-panel-2 text-ink"
-                          : "text-muted hover:bg-panel-2 hover:text-ink"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
+              {variant === "page" ? laneTabs : null}
               {/* Presence is a live status region, so it stays beside the
                   members control rather than inside the button. */}
               <PresenceFaces
@@ -4207,6 +4194,7 @@ export function ChatsView(props: {
             </>
           }
         />
+        {variant === "panel" ? laneTabs : null}
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
