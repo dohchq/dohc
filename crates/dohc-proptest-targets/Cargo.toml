@@ -1,0 +1,23 @@
+[package]
+license.workspace = true
+name = "dohc-proptest-targets"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "Bounded property-test / input-validation regression suite over the engine's remote/cross-process input surfaces (IPC framing, Y.Doc update ingestion, replication envelopes). Runs under plain `cargo test --workspace` (proptest-based) so it works identically on native Windows MSVC and Linux/WSL -- cargo-fuzz/libFuzzer is not required and is NOT part of the required gate."
+
+[dependencies]
+dohc-engine-protocol = { path = "../dohc-engine-protocol" }
+dohc-engine-collab = { path = "../dohc-engine-collab" }
+dohc-engine-sync = { path = "../dohc-engine-sync" }
+dohc-engine-storage = { path = "../dohc-engine-storage" }
+dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+dohc-engine-runtime = { path = "../dohc-engine-runtime" }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

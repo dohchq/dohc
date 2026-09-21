@@ -36,7 +36,6 @@ jobs:
         id: filter
         with:
           filters: |
-            # fuzz/ is a cargo workspace member the gate clippy/builds;
             # .cargo/ holds audit.toml, where advisory ignores would hide;
             # .gitignore decides what the gate's own tree-provenance readings
             # can see, so it is an input to the gate and not just to git --
@@ -45,8 +44,6 @@ jobs:
             rust:
               - 'crates/**'
               - 'vendor/**'
-              - 'fuzz/**'
-              - 'fixtures/**'
               - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -97,8 +94,6 @@ jobs:
               - 'services/**'
               - 'crates/**'
               - 'vendor/**'
-              - 'fuzz/**'
-              - 'fixtures/**'
               - 'scripts/**'
               - 'tools/**'
               - 'tsconfig.base.json'

@@ -68,7 +68,7 @@ serde_json = "1"
 rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
-# The differential harness parses the shared workspace-kernel golden fixtures
+# The differential harness parses the workspace-kernel golden fixtures under tests/fixtures
 # (independently-computed hashes) and the crate's extended goldens.
 # Drives the async FilesActor traces (cancellation + deadline through the tokio
 # loop). Also recomputes expected hashes via a second code path (non-tautology).

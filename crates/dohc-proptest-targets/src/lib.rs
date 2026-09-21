@@ -1,8 +1,5 @@
-//! R14 robustness closure: input-validation regression coverage over the
-//! engine's remote/cross-process input surfaces.
-//!
-//! Per the program plan's "Fuzzing -- prioritized by input trust" section,
-//! this covers the cutover-blocking families (remote/cross-process input):
+//! Input-validation regression coverage over the engine's remote and
+//! cross-process input surfaces, in order of input trust:
 //! IPC framing/protocol validation (`tests/protocol_framing.rs`), Y.Doc
 //! update ingestion (`tests/ydoc_update.rs`), and replication envelopes --
 //! both the generic apply boundary and the encrypted-secret apply boundary

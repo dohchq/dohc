@@ -1,7 +1,7 @@
 //! Differential harness (CAL-3 calibration signal).
 //!
 //! The goldens are the retired reference accelerator's own committed fixtures
-//! (`fixtures/workspace-kernel/*.json`). Note the honest scope of what each
+//! (`tests/fixtures/workspace-kernel/*.json`). Note the honest scope of what each
 //! field proves:
 //!
 //! - `size` and `sha256` are **engine-independent** ground truth — any correct
@@ -118,7 +118,7 @@ struct FxReconcileExpected {
 // ---- helpers ----------------------------------------------------------------
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/workspace-kernel")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace-kernel")
 }
 
 fn read_fixture<T: for<'de> Deserialize<'de>>(name: &str) -> T {

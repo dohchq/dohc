@@ -3308,7 +3308,7 @@ fn truncated_update_is_rejected_and_never_journaled() {
 /// YRS-ABORT-SAFETY regression: the deterministic 41-byte witness for yrs
 /// 0.27.3's uncatchable `char`-decode UB hard-abort
 /// (`known_crash_witness_yrs_char_decode_ub`,
-/// `fuzz/dohc-fuzz-targets/tests/ydoc_update.rs`) is rejected fail-closed
+/// `crates/dohc-proptest-targets/tests/ydoc_update.rs`) is rejected fail-closed
 /// through both real ingestion choke points this crate exposes to untrusted
 /// input: the local edit path (`record_local_update`) and the remote
 /// replication path (`apply_remote_update`). Before the fix, either call
