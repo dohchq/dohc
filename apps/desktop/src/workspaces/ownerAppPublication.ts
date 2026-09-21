@@ -53,7 +53,6 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
   adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
 }): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"]; generation: number }> {
-  const { adapter, signal, assertCurrent } = dependencies;
   const selector = grant.selector;
   if (grant.shareId !== input.shareId || grant.grantId !== input.grantId || grant.status !== "active" || grant.revokedAtMs !== null ||
       !Number.isSafeInteger(grant.generation) || grant.generation < 1 || !selector || !isShareablePathList(selector.paths) ||
@@ -61,6 +60,24 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
   const versionId = selector.versionId ?? "main";
   const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path) &&
     (selector.paths.length === 0 || selector.paths.some(root => path === root || path.startsWith(root + "/")));
+  return { ...await prepareAppSources(input, versionId, allowed, dependencies), generation: grant.generation };
+}
+
+/** Local approval captures the same immutable source without creating a share grant. */
+export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: {
+  adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
+  compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
+}): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+  const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
+  return prepareAppSources(input, "main", allowed, dependencies);
+}
+
+async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
+  versionId: string, allowed: (path: string) => boolean, dependencies: {
+    adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
+    compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
+  }): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+  const { adapter, signal, assertCurrent } = dependencies;
   if (!allowed(input.appRoot)) throw new Error("The app is outside this link's shared files.");
   const manifestPath = `${input.appRoot}/app.publish.json`;
   if (!allowed(manifestPath)) throw new Error("The app declaration is outside this link's shared files.");
@@ -125,5 +142,5 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
     inputs: selected.metadata.files.map(({ path, sha256, byteLength }) => ({ path, sha256, byteLength })),
     dependencies: built.dependencyLock.map(file => file.path), files: built.files.map(({ bytes: _, ...file }) => file), capabilities,
   }, APP_PUBLICATION_LIMITS);
-  return { candidate, files: built.files.map(file => ({ ...file, bytes: Uint8Array.from(file.bytes) })), generation: grant.generation };
+  return { candidate, files: built.files.map(file => ({ ...file, bytes: Uint8Array.from(file.bytes) })) };
 }
