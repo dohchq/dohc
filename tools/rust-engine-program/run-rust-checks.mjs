@@ -168,7 +168,7 @@ function toolAvailable(probe) {
 const required = [
   {
     name: "fixture drift",
-    cmd: "node tools/rust-engine-program/check-fixture-drift.mjs",
+    cmd: "node packages/app-backend-runtime/scripts/build.mjs && node tools/rust-engine-program/check-fixture-drift.mjs",
     skipCode: 2,
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },

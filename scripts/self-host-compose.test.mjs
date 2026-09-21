@@ -86,6 +86,16 @@ test('diagnostics reject placeholders and invalid origins without revealing secr
   assert.ok(validateSettings(parseEnv(readFileSync('.env.self-host.example', 'utf8'))).length > 0);
 });
 
+test('app backends remain opt-in and require app publications', () => {
+  assert.equal(settings().DOHC_RELAY_APP_BACKENDS, '0');
+  assert.equal(compose.services['sync-relay'].environment.DOHC_RELAY_APP_BACKENDS, '${DOHC_RELAY_APP_BACKENDS:-0}');
+  assert.deepEqual(validateSettings({...settings(), DOHC_RELAY_APP_BACKENDS: '1', DOHC_RELAY_APP_PUBLICATIONS: '1'}), []);
+  for (const publications of [undefined, '0']) {
+    assert.ok(validateSettings({...settings(), DOHC_RELAY_APP_BACKENDS: '1', DOHC_RELAY_APP_PUBLICATIONS: publications}).some(error => error.includes('require DOHC_RELAY_APP_PUBLICATIONS=1')));
+  }
+  assert.ok(validateSettings({...settings(), DOHC_RELAY_APP_BACKENDS: 'true'}).some(error => error.includes('DOHC_RELAY_APP_BACKENDS to 0 or 1')));
+});
+
 test('private mode selects the private-only gateway overlay and the real env file', () => {
   const args = composeArgs('.env.self-host', {...settings(), DOHC_SERVER_NETWORK_ACCESS: 'private'}, 'up');
   assert.ok(args.includes('tools/self-host/compose.private.yml'));

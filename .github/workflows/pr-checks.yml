@@ -64,6 +64,9 @@ jobs:
               - 'packages/service-http/**'
               # Native paired-backup proof invokes the production relay fixture.
               - 'services/sync-relay/**'
+              - 'packages/app-backend-runtime/**'
+              - 'examples/fundraiser/**'
+              - 'examples/stock-orders/**'
               - 'packages/live-session-contract/**'
               - '**/package.json'
               - '**/tsconfig*.json'
@@ -87,6 +90,8 @@ jobs:
               - '.github/workflows/desktop-release.yml'
               # Source-backed example apps are compiled and staged by the desktop scripts.
               - 'examples/trip-poll/**'
+              - 'examples/fundraiser/**'
+              - 'examples/stock-orders/**'
               # The desktop daemon prebuild reads Cargo configuration.
               - '.cargo/**'
               - '.npmrc'
@@ -168,6 +173,9 @@ jobs:
 
       - name: Install
         run: pnpm install --frozen-lockfile
+
+      - name: Build app backend runtime
+        run: pnpm --filter @dohc/app-backend-runtime build
 
       - name: Rust toolchain
         run: |

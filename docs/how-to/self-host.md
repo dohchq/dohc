@@ -23,6 +23,8 @@ Local work remains available when the server is offline.
 App publishing is disabled in the default self-host bundle.
 It needs a separate HTTPS app domain and additional relay limits.
 Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
+For apps with private data, also set `DOHC_RELAY_APP_BACKENDS=1` after enabling `DOHC_RELAY_APP_PUBLICATIONS=1`.
+The release includes the isolated app runtime. The release build checks its compiled child and Wasm dependencies before creating the image.
 
 ## Prepare the host
 
