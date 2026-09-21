@@ -16,7 +16,7 @@ import {
 } from "./FieldForm";
 import { serializeCollectionSchema } from "./schemaAuthoring";
 
-// The New collection flow (docs/plans/collections.md Phase 2, settled
+// The New collection flow (settled
 // 2026-08-31): a folder becomes a collection only through this dialog's name
 // plus first fields, or an agent writing the schema file directly. The
 // dialog speaks in collections, fields, and types; the file underneath stays

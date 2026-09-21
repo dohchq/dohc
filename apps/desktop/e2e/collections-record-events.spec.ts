@@ -21,7 +21,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The Phase 3 record-events gate (docs/plans/collections.md): a plugin
+// The Phase 3 record-events gate: a plugin
 // subscribed through collections.watch on device B receives the field-change
 // event for an edit made on device A, through sync. Device B is the real
 // Electron app running the fixture plugin in its watch-collection mode.

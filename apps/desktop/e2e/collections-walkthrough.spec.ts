@@ -9,7 +9,7 @@ import {
   seedWorkspaceManifest,
 } from "./helpers/workspace";
 
-// The Phase 2 collections gate walkthrough (docs/plans/collections.md),
+// The Phase 2 collections gate walkthrough,
 // driven through the real app: create two collections from the File menu's
 // New Collection command, add a field of every v1 type through the Fields
 // dialog, create records with New record, edit every field type inline in

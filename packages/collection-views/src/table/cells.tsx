@@ -78,7 +78,7 @@ export function fieldDisplayText(
   }
 }
 
-// Settled 2026-08-31 (docs/plans/collections.md): a flagged value renders
+// Settled 2026-08-31: a flagged value renders
 // its raw text with the warning treatment, the validation reason on hover,
 // and stays editable.
 /**
