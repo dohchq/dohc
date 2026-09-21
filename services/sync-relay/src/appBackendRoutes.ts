@@ -2,6 +2,7 @@ import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendInvokeRequest,
   parseAppBackendJson, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppBackendAuth, AppBackendHost } from "./appBackendHost";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { badRequest, notFound, relayError } from "./errors";
 
 export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "describe" | "descriptor" | "blob" | "export" | "helper";
@@ -82,6 +83,11 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
       }
       signal.throwIfAborted();
       return new Response(JSON.stringify(encodeBinary(result)), {headers:{...headers,"content-type":"application/json"}});
+    } catch (error) {
+      if (error instanceof AppBackendRuntimeError) {
+        return Response.json({ok:false,code:error.refusal.code,error:error.refusal.message}, {status:409,headers});
+      }
+      throw error;
     } finally { pending--; }
   };
 }
