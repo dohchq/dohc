@@ -295,6 +295,11 @@ export async function createLocalAppBackendHost(options: {
   }
   return {
     activate, request, assertCurrent,
+    assertBrowserPublication(publicationId:string,authorityRevision:number) {
+      assertCurrent();
+      const row=db.prepare("SELECT authority_revision,shared_publication,database IS NOT NULL AS initialized FROM apps WHERE publication_id=?").get(publicationId);
+      if(!row || row.authority_revision!==authorityRevision || row.shared_publication!==null || row.initialized!==1)throw new Error("This local app approval changed. Open the app again.");
+    },
     browserPublication(publicationId:string) {
       return transaction(()=>{
         const row=state(publicationId);if(!row.database)throw new Error("Restore the app data before opening it.");
