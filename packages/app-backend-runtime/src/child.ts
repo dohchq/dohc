@@ -10,6 +10,7 @@ const unsafeFunctions = new Set(["load_extension", "readfile", "writefile", "edi
 function authorize(db: DatabaseSync, request: ChildRequest, initializing: boolean, sessionIntrospection = false): void {
   const tables = new Set(request.tables.map(name => name.toLowerCase()));
   const schemaTables = new Set(["sqlite_master", "sqlite_schema"]);
+  const admittedIndexes = new Set<string>();
   const writable = initializing || (request.kind === "evaluate" && !request.readOnly);
   db.setAuthorizer((action, first, second, database) => {
     if (database !== null && database !== "main") return constants.SQLITE_DENY;
@@ -24,7 +25,12 @@ function authorize(db: DatabaseSync, request: ChildRequest, initializing: boolea
     }
     if (initializing) {
       if (action === constants.SQLITE_CREATE_TABLE) return tables.has(table) ? constants.SQLITE_OK : constants.SQLITE_DENY;
-      if (action === constants.SQLITE_CREATE_INDEX || action === constants.SQLITE_CREATE_TRIGGER) return tables.has((second ?? "").toLowerCase()) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+      if (action === constants.SQLITE_CREATE_INDEX && tables.has((second ?? "").toLowerCase())) {
+        admittedIndexes.add(table);
+        return constants.SQLITE_OK;
+      }
+      if (action === constants.SQLITE_REINDEX) return admittedIndexes.has(table) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+      if (action === constants.SQLITE_CREATE_TRIGGER) return tables.has((second ?? "").toLowerCase()) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     }
     return constants.SQLITE_DENY;
   });

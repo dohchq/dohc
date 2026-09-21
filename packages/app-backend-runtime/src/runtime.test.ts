@@ -142,7 +142,7 @@ describe("app operation runtime", () => {
     await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY)"})).rejects.toThrow("non-null");
     await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE items(a INTEGER,b INTEGER,PRIMARY KEY(a,b))"})).rejects.toThrow("non-null");
     await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE other(id INTEGER PRIMARY KEY)"})).rejects.toThrow();
-    const database=await initializeAppDatabase({tables:["items"],schemaSql:`CREATE TABLE items(id INTEGER PRIMARY KEY, amount INTEGER CHECK(amount>=0)); CREATE TRIGGER bounded BEFORE INSERT ON items WHEN new.amount>5 BEGIN SELECT RAISE(ABORT,'limit'); END;`});
+    const database=await initializeAppDatabase({tables:["items"],schemaSql:`CREATE TABLE items(id INTEGER PRIMARY KEY, amount INTEGER CHECK(amount>=0)); CREATE INDEX items_amount ON items(amount); CREATE TRIGGER bounded BEFORE INSERT ON items WHEN new.amount>5 BEGIN SELECT RAISE(ABORT,'limit'); END;`});
     const input=await request({tables:["items"],database,source:`globalThis.operations={reserve(ctx){ctx.db.execute('INSERT INTO items VALUES(1,6)');return true}}`});
     await expect(evaluateAppOperation(input)).rejects.toThrow();
   });
