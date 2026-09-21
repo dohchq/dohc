@@ -6,6 +6,7 @@
     "dohc": "./bin/dohc.js"
   },
   "exports": {
+    "./app-backend": "./src/appBackend.ts",
     "./app-responses": "./src/appResponses.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",

@@ -17,6 +17,9 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
+import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
+import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
+import type { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
@@ -3039,12 +3042,17 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
+let ownerAppBackendForCli: ((input: OwnerAppBackendRequest) => Promise<OwnerAppBackendResult>) | undefined;
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
+  },
+  appBackend: input => {
+    if (!ownerAppBackendForCli) throw new Error("App data is not ready. Try again.");
+    return ownerAppBackendForCli(input);
   },
   ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
@@ -4114,6 +4122,31 @@ function registerIpcHandlers(): void {
     ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
+  const ownerBackendDependencies = {
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler), assertTrustedSender, withRendererWorkspaceOperation,
+    transportForWorkspace: async (workspace, _publicationId, signal) => {
+      const remote = await remoteForWorkspace(workspace);
+      signal.throwIfAborted();
+      return createRemoteAppBackendTransport({ workspaceId: workspace.workspaceId, ...remote,
+        currentCredentialGeneration: () => credentialCacheGeneration, relayJson: relayShareJsonWithCredentials });
+    },
+    saveExport: async (_workspace, publicationId, bundle, signal, destination) => {
+      if (!destination) {
+        const chosen = await dialog.showSaveDialog({ title: "Export app recovery data",
+          defaultPath: `app-recovery-${publicationId.slice(0, 12)}.json`, filters: [{ name: "Recovery JSON", extensions: ["json"] }] });
+        signal.throwIfAborted();
+        if (chosen.canceled || !chosen.filePath) throw new Error("App export was cancelled.");
+        destination = { path: chosen.filePath, overwrite: true };
+      }
+      return writeAppBackendExport({ ...destination, bundle, signal });
+    },
+  } satisfies Parameters<typeof registerOwnerAppBackendIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
+  registerOwnerAppBackendIpc(ownerBackendDependencies);
+  const cliOwnerBackend = createOwnerAppBackendHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
+    ...ownerBackendDependencies, readRecovery: readAppBackendRecovery, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+  });
+  ownerAppBackendForCli = input => cliOwnerBackend(input.workspaceId, input);
+
 
   const {
     assertShareNotHeldElsewhere,

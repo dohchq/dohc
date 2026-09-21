@@ -40,6 +40,7 @@ import {
 } from "../workspaces/chatRelayIdentity";
 
 interface DesktopCliServerDependencies<State> {
+  appBackend?(request: import("@dohc/cli/app-backend").OwnerAppBackendRequest): Promise<import("@dohc/cli/app-backend").OwnerAppBackendResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -148,13 +149,18 @@ export function createDesktopCliServer<State>(
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(await collectionEditContextFor(operation)),
       );
-    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.ownerAppResponses)
+    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.ownerAppResponses || dependencies.appBackend)
       ? await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;
       }) : undefined;
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.appBackend ? { appBackend: (request: import("@dohc/cli/app-backend").OwnerAppBackendRequest) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment?.aborted) throw new Error("The app workspace attachment changed.");
+          return dependencies.appBackend!(request);
+        }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
           if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment?.aborted)throw new Error("The response workspace attachment changed.");

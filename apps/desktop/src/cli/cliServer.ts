@@ -174,6 +174,7 @@ export interface CliCollectionsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  appBackend?(request: import("@dohc/cli/app-backend").OwnerAppBackendRequest): Promise<import("@dohc/cli/app-backend").OwnerAppBackendResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
@@ -1604,6 +1605,10 @@ async function dispatch(
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
       return context.appPublication(request.args.request);
+    }
+    case "appBackend": {
+      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appBackend) throw new CliCommandError("App data requires the owning workspace.");
+      return context.appBackend(request.args.request);
     }
     case "ownerAppResponses": {
       if(request.args.request.workspaceId!==context.workspaceId || context.readOnly || !context.ownerAppResponses)throw new CliCommandError("App responses require the owning workspace.");

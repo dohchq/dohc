@@ -115,6 +115,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           const capability = candidate.capabilities[0];
           if (!capability) return published;
           if (capability.kind === "app-backend") {
+            if (input.initialize === false) return published;
             await session.run(() => dependencies.relayJson(remote.credentials,
               `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/activate`,
               { method: "POST", signal: operation.signal, body: JSON.stringify({ authorityRevision: published.authorityRevision }) }));

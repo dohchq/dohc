@@ -13,7 +13,7 @@ describe("owner publication review contract", () => {
     const list = (publication: unknown) => ({kind:"listed",publications:[publication],nextCursor:null});
     expect(OwnerAppPublicationResult.safeParse(list(row)).success).toBe(false);
     for (const collectionCapability of [null, capability, "unavailable"]) {
-      const value = list({...row,collectionCapability});
+      const value = list({...row,collectionCapability,backendCapability:null});
       expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
     }
   });
