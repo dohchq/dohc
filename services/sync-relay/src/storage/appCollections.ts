@@ -55,6 +55,9 @@ function narrows(requested: AppCollectionCapability, approved: AppCollectionCapa
     approved.allowedFields.every(name => requested.allowedFields.includes(name)) && requested.requiredFields.every(name => approved.requiredFields.includes(name)) &&
     approved.readFields.every(name => requested.readFields.includes(name));
 }
+function exposesSubmittedFields(capability: AppCollectionCapability): boolean {
+  return capability.allowedFields.every(name => capability.readFields.includes(name));
+}
 /** Owner approval and revocation both invalidate existing launch revisions. */
 export function approveAppCollection(storage: StorageContext, input: ApproveAppCollectionInput) {
   const capability = input.capability === null ? null : parseAppCollectionCapability(input.capability);
@@ -64,6 +67,7 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
     const revision = Number(row.authority_revision);
     if (revision !== input.expectedAuthorityRevision || revision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority changed.");
     if (capability) {
+      if (!exposesSubmittedFields(capability)) throw badRequest("Collection responses are shared files. Approve reading every submitted field, or use an app backend for private responses.");
       const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
       if (row.active !== 1 || !share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId || !grant || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
       const manifest = boundedBlob(storage,input.workspaceId,String(row.manifest_sha256),input.limits.maxMetadataBytes);
@@ -89,6 +93,7 @@ function approved(storage: StorageContext, input: LinkAppPublicationInput) {
   const row = storage.db.prepare("SELECT capability_json FROM sync_relay_app_collection_approvals WHERE publication_id=? AND active=1").get(input.publicationId);
   if (!row) throw notFound();
   const capability = parseAppCollectionCapability(JSON.parse(String(row.capability_json)));
+  if (!exposesSubmittedFields(capability)) throw notFound();
   const requested = authority.candidate.capabilities[0];
   if (!requested || requested.kind !== "collection-create" || !narrows(requested,capability)) throw notFound();
   containment(storage,authority.result.shareId,authority.result.grantId,authority.candidate.versionId,capability);
@@ -132,7 +137,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     const publicId = mapping ? String(mapping.public_principal_id) : `public_${randomUUID()}`;
     const acceptanceId = `accepted_${randomUUID()}`, objectId = randomUUID(), momentId = randomUUID(), path = `${capability.collectionPath}/${acceptanceId}.md`;
     const receipt: AppCollectionReceipt = {kind:"accepted",acceptanceId,objectId,path,momentId,acceptedAtMs:input.nowMs};
-    const document = Buffer.from(`---\n${JSON.stringify({...response,created_at:input.nowMs,created_by:publicId,grant_id:authority.result.grantId,idempotency_key:input.idempotencyKey,acceptance_id:acceptanceId})}\n---\n`);
+    const document = Buffer.from(`---\n${JSON.stringify({...response,created_at:input.nowMs,created_by:publicId,grant_id:authority.result.grantId,acceptance_id:acceptanceId})}\n---\n`);
     if (document.byteLength > MAX_RECORD_BYTES) throw badRequest("Collection response is too large.");
     const blobHash = sha(document);
     const receiptJson = JSON.stringify(receipt), receiptBytes = bytes([workspaceId,authority.result.grantId,privateId,input.idempotencyKey,payloadHash,receiptJson])+256;

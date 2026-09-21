@@ -66,7 +66,8 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(row.originId).toBe("relay:collection-create:g");
   const payload=JSON.parse(row.payloadJson),blob=f.storage.getBlob("w",payload.payloadAfterBlobSha256)!;
   const record=parseCollectionRecordFields(Buffer.from(blob).toString("utf8"))!;
-  expect(record).toMatchObject({destination:"Tokyo",name:"Ice",created_at:20,grant_id:"g",idempotency_key:"vote-1",acceptance_id:receipt.acceptanceId});
+  expect(record).toMatchObject({destination:"Tokyo",name:"Ice",created_at:20,grant_id:"g",acceptance_id:receipt.acceptanceId});
+  expect(record).not.toHaveProperty("idempotency_key");
   expect(record).not.toHaveProperty("id");expect(record.created_by).toMatch(/^public_/);
   expect(payload).toMatchObject({metadata:{origin:"sync"},author:{kind:"public",principalId:record.created_by,grantId:"g"}});
   const privatePrincipal=f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").get()!.principal_id;
@@ -321,13 +322,25 @@ it("uses the same authenticated HTTP read and create contract for an agent and b
   expect((await f.request("POST",{...f.body,fields:{destination:"Manila"}})).status).toBe(409);
 });
 
-it.each([{ readFields: ["destination"] }, { readFields: [] }])("documents current raw-link exposure despite collection readFields $readFields", async ({ readFields }) => {
+it.each([{ readFields: ["destination"] }, { readFields: [] }])("refuses collection approvals that imply private submitted fields with readFields $readFields", async ({ readFields }) => {
   const f = httpFixture();
-  const approved = f.storage.approveAppCollection({
+  expect(() => f.storage.approveAppCollection({
     ...f.owner, expectedAuthorityRevision: 2, capability: { ...capability, readFields },
-  });
-  const fields = { destination: "Tokyo", name: "Synthetic private participant" };
-  const submitted = await f.request("POST", { ...f.body, authorityRevision: approved.authorityRevision, fields });
+  })).toThrow(/Collection responses are shared files/);
+  expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
+
+  // A previously stored approval must also fail closed without writing a response.
+  f.raw.prepare("UPDATE sync_relay_app_collection_approvals SET capability_json=? WHERE publication_id=?")
+    .run(JSON.stringify({ ...capability, readFields }), f.input.publicationId);
+  expect((await f.request("POST", f.body)).status).toBe(404);
+  expect((await f.request()).status).toBe(404);
+  expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(-1);
+});
+
+it("keeps intentionally shared response files readable without private retry metadata", async () => {
+  const f = httpFixture();
+  const fields = { destination: "Tokyo", name: "Synthetic shared participant" };
+  const submitted = await f.request("POST", { ...f.body, fields });
   expect(submitted.status).toBe(200);
   const receipt = await submitted.json();
 
@@ -338,16 +351,11 @@ it.each([{ readFields: ["destination"] }, { readFields: [] }])("documents curren
   } });
   const headers = { authorization: `LinkCapability ${readerToken}`, "x-dohc-link-profile-secret": "Q".repeat(43) };
   const read = (path: string) => f.handler(new Request(`https://relay${path}`, { headers }));
-  const page = await read(`${f.path}?authorityRevision=${approved.authorityRevision}`);
-  if (readFields.length) {
-    expect(page.status).toBe(200);
-    expect(await page.json()).toEqual({ records: [{ path: receipt.path, recordId: null, fields: { destination: "Tokyo" } }], nextPath: null });
-  } else {
-    expect(page.status).toBe(404);
-    await page.body?.cancel();
-  }
+  const page = await read(`${f.path}?authorityRevision=2`);
+  expect(page.status).toBe(200);
+  expect(await page.json()).toEqual({ records: [{ path: receipt.path, recordId: null, fields }], nextPath: null });
 
-  // Exposure baseline: collection field approval does not restrict the link's ordinary file selector.
+  // The collection API does not replace the link's ordinary shared-file selector.
   const current = await read("/sync/link/current");
   expect(current.status).toBe(200);
   const snapshot = await current.json();
@@ -355,9 +363,9 @@ it.each([{ readFields: ["destination"] }, { readFields: [] }])("documents curren
   expect(responseFile).toBeDefined();
   const raw = await read(`/sync/link/blobs/${responseFile.blobSha256}`);
   expect(raw.status).toBe(200);
-  expect(parseCollectionRecordFields(await raw.text())).toMatchObject({
-    ...fields, acceptance_id: receipt.acceptanceId, idempotency_key: f.body.idempotencyKey,
-  });
+  const document = parseCollectionRecordFields(await raw.text());
+  expect(document).toMatchObject({ ...fields, acceptance_id: receipt.acceptanceId });
+  expect(document).not.toHaveProperty("idempotency_key");
 
   f.storage.revokeShareGrant({ shareId: "s", grantId: "g", revokedAtMs: 21 });
   for (const path of ["/sync/link/current", `/sync/link/blobs/${responseFile.blobSha256}`]) {
