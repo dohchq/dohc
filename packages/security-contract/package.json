@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./app-backend": "./src/appBackend.ts",
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",
