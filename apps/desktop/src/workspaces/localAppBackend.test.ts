@@ -164,7 +164,7 @@ describe("local app backend",()=>{
       const context=storage as StorageContext;initializeAppBackendSchema(context.db);
       storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
       const snapshot=bundle.snapshot;
-      await restoreAppBackend(context,{...snapshot,database:Buffer.from(snapshot.databaseBase64,"base64"),publicationId:"shared-publication",publicationRevision:4,
+      await restoreAppBackend(context,{...snapshot,publicationId:"shared-publication",publicationRevision:4,
         expectedRevision:null,nowMs:Date.now(),bundle,authorize(){},
         validateDatabase:database=>runtime.validateAppDatabase({database,schemaSql:schema,tables:["orders"]})});
       const shared=exportAppBackend(context,{workspaceId:"w",dataPath:"data/orders.sqlite",authorize(){}});
