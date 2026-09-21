@@ -286,6 +286,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (stopped) return;
       void scanWorkspace(workspaceId, workspace.attachmentId).then(
         () => {
+          notifyRunUpdated(workspace);
           if (!recoveryTimers.has(workspaceId)) {
             recoveryAttempts.delete(workspaceId);
           }
