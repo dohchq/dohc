@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import * as runtime from "@dohc/app-backend-runtime";
 import { compileClosedApp } from "./closedAppCompiler";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost, type LocalAppBackendRuntime } from "./localAppBackend";
+import { parseLocalBackendRecovery, signLocalBackendRecovery } from "./localAppBackendRecovery";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const schema = "CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL, quantity INTEGER NOT NULL);";
@@ -55,7 +56,7 @@ async function open(root?:string, adapter:LocalAppBackendRuntime=runtime) {
   const host=await createLocalAppBackendHost({workspaceId:"w",workspaceRoot,runtime:adapter});
   hosts.push(host);return {host,workspaceRoot};
 }
-afterEach(async()=>{for(const host of hosts.splice(0))host.close();for(const directory of directories.splice(0))await rm(directory,{recursive:true,force:true});});
+afterEach(async()=>{vi.useRealTimers();for(const host of hosts.splice(0))host.close();for(const directory of directories.splice(0))await rm(directory,{recursive:true,force:true});});
 const invoke=(host:LocalAppBackendHost,pub:{publicationId:string;authorityRevision:number},operation:string,idempotencyKey:string,input:unknown={})=>
   host.request(pub.publicationId,"invoke",{authorityRevision:pub.authorityRevision,operation,idempotencyKey,input}) as Promise<{result:any;revision:number;replayed:boolean}>;
 
@@ -71,8 +72,9 @@ describe("local app backend",()=>{
     expect(listed.result.rows).toHaveLength(1);expect(listed.revision).toBe(first.revision);
     await expect(invoke(restarted,publication,"order","order-1",{quantity:1})).rejects.toThrow(/retry key/);
     const exported=await restarted.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision}) as any;
-    expect(Buffer.from(exported.databaseBase64,"base64").subarray(0,16).toString()).toBe("SQLite format 3\0");
-    expect(exported.receipts).toHaveLength(1);expect(exported.artifacts.map((file:any)=>file.path)).toContain("backend.js");
+    expect(Buffer.from(exported.snapshot.databaseBase64,"base64").subarray(0,16).toString()).toBe("SQLite format 3\0");
+    expect(exported.receipts).toHaveLength(1);expect(exported.snapshot.source).toContain("operations");
+    expect(parseLocalBackendRecovery(exported)).toEqual(exported);
   });
   it("serializes concurrent reservations across separate host instances",async()=>{
     const {host,workspaceRoot}=await open(),publication=await host.activate(await prepared()),other=(await open(workspaceRoot)).host;
@@ -110,5 +112,43 @@ describe("local app backend",()=>{
     await invoke(host,publication,"order","first",{quantity:1,fileId:first.file.fileId});
     const exported=await host.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision}) as any;
     expect(exported.files[0].attached_revision).toBe(2);
+  });
+  it("restores the portable bundle into an absent store and keeps retry receipts",async()=>{
+    const {host}=await open(),approved=await prepared(),publication=await host.activate(approved);
+    const first=await invoke(host,publication,"order","first",{quantity:2});
+    const bundle=await host.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision});
+    const other=(await open()).host,pending=await other.activate(approved,undefined,{initialize:false});
+    expect(pending.active).toBe(false);
+    await expect(invoke(other,pending,"list","read")).rejects.toThrow(/Restore/);
+    await other.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle});
+    expect((await invoke(other,pending,"list","read")).result.rows).toHaveLength(1);
+    expect(await invoke(other,pending,"order","first",{quantity:2})).toEqual({...first,replayed:true});
+    await expect(other.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle})).rejects.toThrow(/cannot replace/);
+    const transfer=host.transfer("data/orders.sqlite","remote-publication");
+    expect(parseLocalBackendRecovery(transfer)).toEqual(bundle);
+    expect(host.transfer("data/orders.sqlite","remote-publication")).toEqual(transfer);
+    await expect(invoke(host,{...publication,authorityRevision:publication.authorityRevision+1},"order","second",{quantity:1})).rejects.toThrow(/shared host/);
+  });
+  it("refuses corrupt recovery and structurally valid SQLite with a different schema",async()=>{
+    const {host}=await open(),approved=await prepared(),publication=await host.activate(approved);
+    const bundle=await host.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision}) as any;
+    const other=(await open()).host,pending=await other.activate(approved,undefined,{initialize:false});
+    await expect(other.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle:{...bundle,integritySha256:"0".repeat(64)}})).rejects.toThrow(/integrity/);
+    const wrong=await runtime.initializeAppDatabase({schemaSql:"CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL, secret TEXT);",tables:["orders"]});
+    const {integritySha256:_,...payload}=bundle;
+    payload.snapshot={...payload.snapshot,databaseBase64:Buffer.from(wrong).toString("base64")};
+    payload.history=[{...payload.history[0],database_sha256:hash(wrong)}];
+    await expect(other.request(pending.publicationId,"restore",{authorityRevision:pending.authorityRevision,bundle:signLocalBackendRecovery(payload)})).rejects.toThrow(/schema/i);
+  });
+  it("expires staged uploads after a day but preserves attached receipts",async()=>{
+    const {host}=await open(),publication=await host.activate(await prepared());
+    const input={authorityRevision:publication.authorityRevision,name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-synthetic").toString("base64")};
+    const attached=await host.request(publication.publicationId,"upload",{...input,idempotencyKey:"attached"}) as any;
+    await invoke(host,publication,"order","first",{quantity:1,fileId:attached.file.fileId});
+    const staged=await host.request(publication.publicationId,"upload",{...input,idempotencyKey:"staged"}) as any;
+    vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(Date.now()+86400001);
+    const retried=await host.request(publication.publicationId,"upload",{...input,idempotencyKey:"staged"}) as any;
+    expect(retried.file.fileId).not.toBe(staged.file.fileId);
+    expect((await host.request(publication.publicationId,"file",{authorityRevision:publication.authorityRevision,fileId:attached.file.fileId}) as any).file).toEqual(attached.file);
   });
 });

@@ -6,17 +6,19 @@ import type { DatabaseSync } from "node:sqlite";
 import { parseAppBackendCapability, parseAppBackendInvokeRequest, parseAppBackendUploadRequest,
   type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import type { AppOperationResult, EvaluateAppOperationInput, InitializeAppDatabaseInput } from "@dohc/app-backend-runtime";
+import type { AppOperationResult, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "@dohc/app-backend-runtime";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
+import { parseLocalBackendRecovery, recoveryBytes, signLocalBackendRecovery } from "./localAppBackendRecovery";
 
 export interface LocalAppBackendRuntime {
   initializeAppDatabase(input: InitializeAppDatabaseInput): Promise<Uint8Array>;
   evaluateAppOperation(input: EvaluateAppOperationInput): Promise<AppOperationResult>;
+  validateAppDatabase(input: ValidateAppDatabaseInput): Promise<void>;
 }
 type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
 type State = { data_path: string; app_root: string; publication_id: string; authority_revision: number;
-  revision: number; source: string; capability: string; candidate: string; database: Uint8Array; shared_publication: string | null };
+  revision: number; source: string; capability: string; candidate: string; database: Uint8Array | null; shared_publication: string | null };
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const snapshotBound = 16 * 1024 * 1024;
 const storeBound = 128 * 1024 * 1024;
@@ -43,14 +45,14 @@ export async function createLocalAppBackendHost(options: {
     CREATE TABLE IF NOT EXISTS identity(workspace_id TEXT PRIMARY KEY) STRICT;
     CREATE TABLE IF NOT EXISTS apps(data_path TEXT PRIMARY KEY, app_root TEXT NOT NULL, publication_id TEXT UNIQUE NOT NULL,
       authority_revision INTEGER NOT NULL, revision INTEGER NOT NULL, source TEXT NOT NULL, capability TEXT NOT NULL,
-      candidate TEXT NOT NULL, database BLOB NOT NULL CHECK(length(database)<=16777216), shared_publication TEXT) STRICT;
+      candidate TEXT NOT NULL, database BLOB CHECK(length(database)<=16777216), shared_publication TEXT) STRICT;
     CREATE TABLE IF NOT EXISTS receipts(data_path TEXT NOT NULL REFERENCES apps(data_path), key TEXT NOT NULL,
-      payload_hash TEXT NOT NULL, result TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(data_path,key)) STRICT;
+      payload_hash TEXT NOT NULL, result TEXT NOT NULL, revision INTEGER NOT NULL, recovery TEXT NOT NULL, PRIMARY KEY(data_path,key)) STRICT;
     CREATE TABLE IF NOT EXISTS history(data_path TEXT NOT NULL REFERENCES apps(data_path), revision INTEGER NOT NULL,
-      publication_id TEXT NOT NULL, recorded_at INTEGER NOT NULL, changeset BLOB NOT NULL, database_hash TEXT NOT NULL,
+      publication_id TEXT NOT NULL, recorded_at INTEGER NOT NULL, changeset BLOB NOT NULL, database_hash TEXT NOT NULL, recovery TEXT NOT NULL,
       PRIMARY KEY(data_path,revision)) STRICT;
     CREATE TABLE IF NOT EXISTS files(data_path TEXT NOT NULL REFERENCES apps(data_path), file_id TEXT NOT NULL,
-      key TEXT NOT NULL, metadata TEXT NOT NULL, content BLOB NOT NULL, attached_revision INTEGER,
+      key TEXT NOT NULL, metadata TEXT NOT NULL, content BLOB NOT NULL, attached_revision INTEGER, recovery TEXT NOT NULL,
       PRIMARY KEY(data_path,file_id), UNIQUE(data_path,key)) STRICT;
     CREATE TABLE IF NOT EXISTS artifacts(data_path TEXT NOT NULL REFERENCES apps(data_path), path TEXT NOT NULL,
       metadata TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(data_path,path)) STRICT;`);
@@ -59,6 +61,8 @@ export async function createLocalAppBackendHost(options: {
   db.prepare("INSERT OR IGNORE INTO identity(workspace_id) VALUES(?)").run(options.workspaceId);
   let closed = false;
   const lifetime = new AbortController();
+  const actor = {grant_id:"local-owner",principal_id:`local:${options.workspaceId}`};
+  const receiptKey = (key: string) => JSON.stringify([actor.grant_id,actor.principal_id,key]);
   function assertCurrent() { if (closed) throw new Error("This local app session ended."); }
   function transaction<T>(work: () => T): T {
     assertCurrent(); db.exec("BEGIN IMMEDIATE");
@@ -103,9 +107,64 @@ export async function createLocalAppBackendHost(options: {
     return files;
   }
   function description(row: State) { return { publicationId: row.publication_id, authorityRevision: row.authority_revision,
-    capability: parseAppBackendCapability(JSON.parse(row.capability)), active: !row.shared_publication, revision: row.revision }; }
+    capability: parseAppBackendCapability(JSON.parse(row.capability)), active: !!row.database && !row.shared_publication, revision: row.revision }; }
 
-  async function activate(prepared: Prepared, signal?: AbortSignal) {
+  function recordHistory(row: State, kind: "activate" | "operation" | "restore", nowMs: number, changeset: Uint8Array) {
+    const capability = parseAppBackendCapability(JSON.parse(row.capability));
+    const recovery = {workspace_id:options.workspaceId,data_path:row.data_path,revision:row.revision,publication_id:row.publication_id,
+      publication_revision:row.authority_revision,source_sha256:capability.backendSha256,kind,
+      grant_id:kind === "operation" ? actor.grant_id : "",principal_id:kind === "operation" ? actor.principal_id : "",
+      changeset_base64:Buffer.from(changeset).toString("base64"),database_sha256:hash(row.database!),recorded_at_ms:nowMs};
+    db.prepare("INSERT INTO history VALUES(?,?,?,?,?,?,?)").run(row.data_path,row.revision,row.publication_id,nowMs,changeset,hash(row.database!),JSON.stringify(recovery));
+  }
+  function exportData(row: State) {
+    if (!row.database) throw new Error("This app has no data to export.");
+    const capability = parseAppBackendCapability(JSON.parse(row.capability));
+    const history=db.prepare("SELECT recovery FROM history WHERE data_path=? ORDER BY revision").all(row.data_path).map(record=>JSON.parse(String(record.recovery)));
+    return signLocalBackendRecovery({formatVersion:1,snapshot:{workspaceId:options.workspaceId,dataPath:row.data_path,appRoot:row.app_root,
+      publicationId:row.publication_id,publicationRevision:Number(history.at(-1).publication_revision),schemaSha256:capability.schemaSha256,
+      schemaVersion:capability.schemaVersion,sourceSha256:capability.backendSha256,source:row.source,capabilityJson:row.capability,
+      revision:row.revision,databaseBase64:Buffer.from(row.database).toString("base64"),updatedAtMs:Number(history.at(-1).recorded_at_ms)},history,
+      receipts:db.prepare("SELECT recovery FROM receipts WHERE data_path=? ORDER BY revision,key").all(row.data_path).map(record=>JSON.parse(String(record.recovery))),
+      files:db.prepare("SELECT * FROM files WHERE data_path=? AND attached_revision IS NOT NULL ORDER BY file_id").all(row.data_path).map(record=>({
+        ...JSON.parse(String(record.recovery)),attached_revision:record.attached_revision,content_base64:Buffer.from(record.content as Uint8Array).toString("base64")})),
+    });
+  }
+  async function restore(publicationId:string,raw:unknown,signal?:AbortSignal) {
+    const input=raw as {authorityRevision:number;bundle:unknown};
+    if(!Number.isSafeInteger(input?.authorityRevision)||input.authorityRevision<1)throw new Error("Invalid app authority revision.");
+    const row=state(publicationId,input.authorityRevision);
+    if(row.database)throw new Error("Recovery cannot replace existing app data.");
+    const bundle=parseLocalBackendRecovery(input.bundle),snapshot=bundle.snapshot,capability=parseAppBackendCapability(JSON.parse(row.capability));
+    if(snapshot.workspaceId!==options.workspaceId || snapshot.dataPath!==row.data_path || snapshot.appRoot!==row.app_root ||
+      snapshot.schemaSha256!==capability.schemaSha256 || snapshot.schemaVersion!==capability.schemaVersion)throw new Error("Recovery scope or schema differs from the approved app.");
+    const schema=db.prepare("SELECT content FROM artifacts WHERE data_path=? AND path=?").get(row.data_path,capability.schemaPath)?.content as Uint8Array;
+    const database=recoveryBytes(snapshot.databaseBase64);
+    await options.runtime.validateAppDatabase({database,schemaSql:new TextDecoder("utf-8",{fatal:true}).decode(schema),
+      tables:capability.tables.map(table=>table.name),signal:combinedSignal(signal)});
+    checkSignal(signal);
+    return transaction(()=>{
+      checkSignal(signal);const current=state(publicationId,input.authorityRevision);
+      if(current.database)throw new Error("App data was initialized during recovery.");
+      for(const history of bundle.history) db.prepare("INSERT INTO history VALUES(?,?,?,?,?,?,?)").run(row.data_path,Number(history.revision),String(history.publication_id),
+        Number(history.recorded_at_ms),recoveryBytes(history.changeset_base64),String(history.database_sha256),JSON.stringify(history));
+      for(const receipt of bundle.receipts) db.prepare("INSERT INTO receipts VALUES(?,?,?,?,?,?)").run(row.data_path,
+        JSON.stringify([receipt.grant_id,receipt.principal_id,receipt.idempotency_key]),String(receipt.payload_sha256),String(receipt.result_json),Number(receipt.revision),JSON.stringify(receipt));
+      for(const file of bundle.files) {
+        const bytes=recoveryBytes(file.content_base64,5*1024*1024),metadata={fileId:file.file_id,name:file.name,contentType:file.content_type,byteLength:bytes.byteLength,sha256:file.sha256};
+        const {content_base64:_,attached_revision:__,...recovery}=file;
+        db.prepare("INSERT INTO files VALUES(?,?,?,?,?,?,?)").run(row.data_path,String(file.file_id),JSON.stringify([file.grant_id,file.principal_id,file.idempotency_key]),
+          JSON.stringify(metadata),bytes,Number(file.attached_revision),JSON.stringify(recovery));
+      }
+      const revision=snapshot.revision+1;
+      if(!Number.isSafeInteger(revision))throw new Error("App history exceeded its revision limit.");
+      db.prepare("UPDATE apps SET database=?,revision=? WHERE data_path=?").run(database,revision,row.data_path);
+      recordHistory({...row,database,revision},"restore",Date.now(),new Uint8Array());quota();
+      return {publicationId,authorityRevision:row.authority_revision,revision};
+    });
+  }
+
+  async function activate(prepared: Prepared, signal?: AbortSignal, activation: {initialize?:boolean} = {}) {
     checkSignal(signal);
     const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
     const rawCapability = candidate.capabilities[0];
@@ -122,22 +181,22 @@ export async function createLocalAppBackendHost(options: {
     if (existing?.shared_publication) throw new Error("This app already uses a shared host. Change its source there.");
     if (existing && existing.app_root !== candidate.appRoot) throw new Error("This app data belongs to another app.");
     if (existing && JSON.parse(existing.capability).schemaSha256 !== capability.schemaSha256) throw new Error("The app schema changed. An explicit data migration is required.");
-    const database = existing?.database ?? await options.runtime.initializeAppDatabase({schemaSql, tables:capability.tables.map(table=>table.name), signal:combinedSignal(signal)});
-    if (database.byteLength > snapshotBound) throw new Error("The app database is too large.");
+    const database = existing?.database ?? (activation.initialize === false ? null : await options.runtime.initializeAppDatabase({schemaSql, tables:capability.tables.map(table=>table.name), signal:combinedSignal(signal)}));
+    if (database && database.byteLength > snapshotBound) throw new Error("The app database is too large.");
     checkSignal(signal);
     return transaction(() => {
       checkSignal(signal);
       const current = byPath(capability.dataPath);
       if (current?.shared_publication || current?.revision !== existing?.revision) throw new Error("The app changed while it was prepared. Try again.");
-      if (current?.publication_id === publicationId) return description(current);
-      const revision = (current?.revision ?? 0) + 1, authorityRevision = (current?.authority_revision ?? 0) + 1;
+      if (current?.publication_id === publicationId && (!!current.database || !database)) return description(current);
+      const revision = database ? (current?.revision ?? 0) + 1 : 0, authorityRevision = (current?.authority_revision ?? 0) + 1;
       db.prepare(`INSERT INTO apps(data_path,app_root,publication_id,authority_revision,revision,source,capability,candidate,database)
         VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(data_path) DO UPDATE SET publication_id=excluded.publication_id,
         authority_revision=excluded.authority_revision,revision=excluded.revision,source=excluded.source,
-        capability=excluded.capability,candidate=excluded.candidate`).run(capability.dataPath,candidate.appRoot,publicationId,authorityRevision,revision,source,JSON.stringify(capability),JSON.stringify(candidate),database);
+        capability=excluded.capability,candidate=excluded.candidate,database=excluded.database`).run(capability.dataPath,candidate.appRoot,publicationId,authorityRevision,revision,source,JSON.stringify(capability),JSON.stringify(candidate),database);
       db.prepare("DELETE FROM artifacts WHERE data_path=?").run(capability.dataPath);
       for (const metadata of candidate.files) db.prepare("INSERT INTO artifacts VALUES(?,?,?,?)").run(capability.dataPath,metadata.path,JSON.stringify(metadata),prepared.files.find(file=>file.path===metadata.path)!.bytes);
-      db.prepare("INSERT INTO history VALUES(?,?,?,?,?,?)").run(capability.dataPath,revision,publicationId,Date.now(),new Uint8Array(),hash(database));
+      if (database) recordHistory(state(publicationId),"activate",Date.now(),new Uint8Array());
       quota(); return description(state(publicationId));
     });
   }
@@ -149,10 +208,11 @@ export async function createLocalAppBackendHost(options: {
     for (let attempt = 0; attempt < 3; attempt++) {
       checkSignal(signal);
       const row = state(publicationId,request.authorityRevision,true), capability = parseAppBackendCapability(JSON.parse(row.capability));
+      if (!row.database) throw new Error("Restore the app data before running operations.");
       const operation = capability.operations.find(operation=>operation.name===request.operation);
       if (!operation) throw new Error("This operation was not approved for this app.");
       if (row.shared_publication && !operation.readOnly) throw new Error("This app uses its shared host. Connect to that host to change its current data.");
-      const receipt = !operation.readOnly && db.prepare("SELECT * FROM receipts WHERE data_path=? AND key=?").get(row.data_path,request.idempotencyKey);
+      const receipt = !operation.readOnly && db.prepare("SELECT * FROM receipts WHERE data_path=? AND key=?").get(row.data_path,receiptKey(request.idempotencyKey));
       if (receipt) {
         if (receipt.payload_hash !== payloadHash) throw new Error("This retry key was already used for another operation.");
         return {result:JSON.parse(String(receipt.result)),revision:receipt.revision,replayed:true};
@@ -173,8 +233,10 @@ export async function createLocalAppBackendHost(options: {
           if (updated.changes !== 1) throw new Error("The attached file is unavailable.");
         }
         db.prepare("UPDATE apps SET database=?,revision=? WHERE data_path=?").run(evaluated.database,revision,row.data_path);
-        db.prepare("INSERT INTO receipts VALUES(?,?,?,?,?)").run(row.data_path,request.idempotencyKey,payloadHash,JSON.stringify(evaluated.result),revision);
-        db.prepare("INSERT INTO history VALUES(?,?,?,?,?,?)").run(row.data_path,revision,publicationId,nowMs,evaluated.changeset,hash(evaluated.database));
+        const recoveryReceipt={workspace_id:options.workspaceId,data_path:row.data_path,...actor,idempotency_key:request.idempotencyKey,
+          payload_sha256:payloadHash,revision,result_json:JSON.stringify(evaluated.result),recorded_at_ms:nowMs};
+        db.prepare("INSERT INTO receipts VALUES(?,?,?,?,?,?)").run(row.data_path,receiptKey(request.idempotencyKey),payloadHash,JSON.stringify(evaluated.result),revision,JSON.stringify(recoveryReceipt));
+        recordHistory({...row,database:evaluated.database,revision},"operation",nowMs,evaluated.changeset);
         quota(); return {result:evaluated.result,revision,replayed:false};
       });
       if (result) return result;
@@ -186,6 +248,7 @@ export async function createLocalAppBackendHost(options: {
     checkSignal(signal);
     if (action === "describe") return description(state(publicationId,undefined,true));
     if (action === "invoke") return invoke(publicationId,body,signal);
+    if (action === "restore") return restore(publicationId,body,signal);
     const authorityRevision = (body as {authorityRevision?:unknown})?.authorityRevision;
     if (!Number.isSafeInteger(authorityRevision) || (authorityRevision as number) < 1) throw new Error("Invalid app authority revision.");
     return transaction(() => {
@@ -195,14 +258,21 @@ export async function createLocalAppBackendHost(options: {
       if (action === "upload") {
         if (row.shared_publication) throw new Error("This app uses its shared host. Connect to that host to upload files.");
         const input = parseAppBackendUploadRequest(body), bytes = Buffer.from(input.bytesBase64,"base64"), sha256 = hash(bytes);
-        const existing = db.prepare("SELECT * FROM files WHERE data_path=? AND key=?").get(row.data_path,input.idempotencyKey);
+        if (!row.database) throw new Error("Restore the app data before uploading files.");
+        const staged=db.prepare("SELECT file_id,recovery FROM files WHERE data_path=? AND attached_revision IS NULL").all(row.data_path);
+        for(const file of staged) if(JSON.parse(String(file.recovery)).expires_at_ms<=Date.now()) db.prepare("DELETE FROM files WHERE data_path=? AND file_id=? AND attached_revision IS NULL").run(row.data_path,String(file.file_id));
+        const existing = db.prepare("SELECT * FROM files WHERE data_path=? AND key=?").get(row.data_path,receiptKey(input.idempotencyKey));
         if (existing) {
           const file = fileMetadata(existing as {metadata:string});
           if (file.sha256 !== sha256 || file.name !== input.name || file.contentType !== input.contentType) throw new Error("This retry key was already used for another upload.");
           return {file,replayed:true};
         }
+        if(Number(db.prepare("SELECT count(*) AS n FROM files WHERE data_path=? AND attached_revision IS NULL").get(row.data_path)!.n)>=32) throw new Error("Attach or wait for existing uploads before uploading more files.");
         const file: AppBackendFile = {fileId:randomBytes(24).toString("base64url"),name:input.name,contentType:input.contentType,byteLength:bytes.byteLength,sha256};
-        db.prepare("INSERT INTO files VALUES(?,?,?,?,?,NULL)").run(row.data_path,file.fileId,input.idempotencyKey,JSON.stringify(file),bytes);
+        const nowMs=Date.now();
+        const recovery={workspace_id:options.workspaceId,data_path:row.data_path,...actor,file_id:file.fileId,idempotency_key:input.idempotencyKey,
+          name:file.name,content_type:file.contentType,sha256:file.sha256,created_at_ms:nowMs,expires_at_ms:nowMs+86400000};
+        db.prepare("INSERT INTO files VALUES(?,?,?,?,?,NULL,?)").run(row.data_path,file.fileId,receiptKey(input.idempotencyKey),JSON.stringify(file),bytes,JSON.stringify(recovery));
         quota(); return {file,replayed:false};
       }
       if (action === "file") {
@@ -212,18 +282,20 @@ export async function createLocalAppBackendHost(options: {
         if (!file) throw new Error("This app file is unavailable.");
         return {file:fileMetadata(file as {metadata:string}),bytesBase64:Buffer.from(file.content as Uint8Array).toString("base64")};
       }
-      if (action === "export") return {format:"dohc-local-app-backend-v1",workspaceId:options.workspaceId,dataPath:row.data_path,
-        candidate:JSON.parse(row.candidate),revision:row.revision,databaseBase64:Buffer.from(row.database).toString("base64"),
-        receipts:db.prepare("SELECT key,payload_hash,result,revision FROM receipts WHERE data_path=? ORDER BY revision,key").all(row.data_path),
-        history:db.prepare("SELECT * FROM history WHERE data_path=? ORDER BY revision").all(row.data_path).map(record=>({...record,changeset:Buffer.from(record.changeset as Uint8Array).toString("base64")})),
-        files:db.prepare("SELECT * FROM files WHERE data_path=? ORDER BY file_id").all(row.data_path).map(record=>({...record,content:Buffer.from(record.content as Uint8Array).toString("base64")})),
-        artifacts:db.prepare("SELECT * FROM artifacts WHERE data_path=? ORDER BY path").all(row.data_path).map(record=>({...record,content:Buffer.from(record.content as Uint8Array).toString("base64")}))};
+      if (action === "export") return exportData(row);
       throw new Error("Unsupported local app backend action.");
     });
   }
   return {
     activate, request, assertCurrent,
     has(publicationId: string) { assertCurrent(); return !!db.prepare("SELECT 1 FROM apps WHERE publication_id=?").get(publicationId); },
+    findByDataPath(dataPath:string) {
+      assertCurrent();const row=byPath(dataPath);
+      return row ? {...description(row),appRoot:row.app_root,sourceRevision:JSON.parse(row.candidate).sourceRevision,sharedPublicationId:row.shared_publication} : null;
+    },
+    sharedPublicationFor(publicationId:string) {
+      assertCurrent();return (db.prepare("SELECT shared_publication FROM apps WHERE publication_id=?").get(publicationId)?.shared_publication as string | null | undefined) ?? null;
+    },
     list(appRoot: string) { assertCurrent(); return db.prepare("SELECT * FROM apps WHERE app_root=? ORDER BY publication_id").all(appRoot).map(record=>{
       const row = record as unknown as State;
       return {...description(row),appRoot:row.app_root,sourceRevision:JSON.parse(row.candidate).sourceRevision,
@@ -236,6 +308,16 @@ export async function createLocalAppBackendHost(options: {
         if (!row) return;
         if (row.shared_publication && row.shared_publication !== publicationId) throw new Error("This app already has a shared host.");
         db.prepare("UPDATE apps SET shared_publication=?,authority_revision=authority_revision+1 WHERE data_path=?").run(publicationId,dataPath);
+      });
+    },
+    transfer(dataPath:string,publicationId:string) {
+      if(!publicationId || publicationId.length>128)throw new Error("Invalid shared app publication.");
+      return transaction(()=>{
+        const row=byPath(dataPath);if(!row)throw new Error("This local app data is unavailable.");
+        if(row.shared_publication && row.shared_publication!==publicationId)throw new Error("This app already has a shared host.");
+        const bundle=exportData(row);
+        if(!row.shared_publication)db.prepare("UPDATE apps SET shared_publication=?,authority_revision=authority_revision+1 WHERE data_path=?").run(publicationId,dataPath);
+        return bundle;
       });
     },
     close() { if (!closed) { closed=true; lifetime.abort(); db.close(); } },
