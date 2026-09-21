@@ -58,6 +58,7 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       current();
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const candidate = prepared.candidate;
+      if (candidate.capabilities[0]?.kind !== "app-backend") throw new Error("This app has no backend declaration. Add one before preparing local app data.");
       const approvalId = randomUUID(), digest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
       const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
