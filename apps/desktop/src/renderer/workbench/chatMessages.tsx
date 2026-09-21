@@ -707,12 +707,18 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
   // The day of the topmost visible message, pinned over the list while the
-  // first message is out of view. Legend reports viewability once per scroll
+  // reader is somewhere in history: neither the first nor the last message
+  // is in view. Legend reports viewability once per scroll
   // frame at most, and an unchanged label is a no-op update.
   const [topDay, setTopDay] = useState<string | null>(null);
+  const messageCount = useRef(props.messages.length);
+  messageCount.current = props.messages.length;
   const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
     const first = info.viewableItems[0];
-    setTopDay(first && first.index > 0 ? formatChatDay(first.item.createdAtMs) : null);
+    const last = info.viewableItems[info.viewableItems.length - 1];
+    // Reading the latest messages needs no label; scrolled into history it does.
+    const inHistory = first !== undefined && first.index > 0 && last !== undefined && last.index < messageCount.current - 1;
+    setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
   }, []);
 
   const messageKey = useCallback((node: Node | null) => {

@@ -335,7 +335,8 @@ function NavRow(props: {
   );
 }
 
-// The action a section label offers on the right, shown on hover or focus.
+// The action a section label offers on the right, always visible like the
+// explorer's section actions so a new user can find it.
 function SectionActionButton(props: {
   testId?: string;
   label: string;
@@ -349,7 +350,7 @@ function SectionActionButton(props: {
       aria-label={props.label}
       title={props.label}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/50 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-line/50 hover:text-ink dohc-focus-visible"
     >
       {props.children}
     </button>
