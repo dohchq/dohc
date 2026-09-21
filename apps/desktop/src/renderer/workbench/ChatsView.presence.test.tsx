@@ -396,9 +396,13 @@ describe("ChatsView presence (MU-C1)", () => {
         },
       ]);
     });
+    // Idle keeps the dot and the label, and says nothing.
     await waitFor(() =>
-      expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("idle"),
+      expect(screen.getByTestId("chats-my-agent-presence").getAttribute("aria-label")).toBe(
+        "Agent is idle",
+      ),
     );
+    expect(screen.getByTestId("chats-my-agent-presence").textContent).toBe("");
 
     await user.click(screen.getByTestId("chats-my-agent"));
     await user.click(await screen.findByTestId("chats-thread"));

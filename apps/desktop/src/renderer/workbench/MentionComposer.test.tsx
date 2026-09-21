@@ -243,6 +243,24 @@ describe("MentionComposer autocomplete", () => {
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
   });
 
+  it("offers the same File button on the chat surface", async () => {
+    render(<Harness />);
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.click(screen.getByRole("button", { name: "Attach a file" }));
+    const fileOption = await screen.findByTestId("chats-file-mention-option");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(fileOption.id);
+    expect(fileOption.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("gives the File trigger its own word after ordinary text", async () => {
+    render(<Harness />);
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.type(composer, "See this");
+    await userEvent.click(screen.getByRole("button", { name: "Attach a file" }));
+    expect((composer as HTMLTextAreaElement).value).toBe("See this @");
+    await screen.findByTestId("chats-file-mention-option");
+  });
+
   it("keeps the collapsed prompt on one line inside its pill", async () => {
     render(<Harness surface="post" />);
     const pill = screen.getByTestId("chats-open");

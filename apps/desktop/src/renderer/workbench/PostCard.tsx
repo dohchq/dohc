@@ -5,9 +5,10 @@ import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { chatAuthorLabel, MessageReactions, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
+import { useId } from "react";
 
 // A post in a group's feed. Drawn like a social card: who, where, when; the
-// title or the text; a social line; then Like, Comment, Save as file. The
+// title or the text; then one row of reactions, Comment, Save as file. The
 // whole card opens the post. Controls inside stop the click so a reaction
 // never also opens it.
 //
@@ -43,16 +44,19 @@ export function ActionButton(props: {
   testId?: string;
   label: string;
   icon: React.ReactNode;
-  count?: number;
+  count?: React.ReactNode;
   active?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
+  // The pinned label stays the name; the count describes it.
+  const countId = useId();
   return (
     <button
       type="button"
       data-testid={props.testId}
       aria-pressed={props.active}
+      aria-describedby={props.count ? countId : undefined}
       disabled={props.disabled}
       onClick={(event) => {
         event.stopPropagation();
@@ -60,14 +64,14 @@ export function ActionButton(props: {
       }}
       title={props.label}
       aria-label={props.label}
-      className={`flex size-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
+      className={`flex h-8 min-w-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[13px] font-medium transition-colors duration-75 dohc-focus-visible disabled:cursor-default disabled:opacity-50 ${
         props.active ? "text-accent" : "text-muted hover:bg-panel-2 hover:text-ink"
       }`}
     >
       {props.icon}
       <span className="sr-only">{props.label}</span>
       {props.count ? (
-        <span className="font-mono text-[11px] font-normal text-subtle">{props.count}</span>
+        <span id={countId} className="font-mono text-[11px] font-normal tabular-nums text-subtle">{props.count}</span>
       ) : null}
     </button>
   );
@@ -153,8 +157,12 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className="group @container cursor-pointer rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 text-left transition-colors duration-75 hover:border-muted/50 dohc-focus-visible"
+      className="group @container relative cursor-pointer rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5 text-left transition-colors duration-75 hover:border-muted/50 dohc-focus-visible"
     >
+      {/* Unread: a bar down the left edge, inset past the corner radius. */}
+      {props.thread.unreadCount > 0 ? (
+        <span aria-hidden className="absolute inset-y-3 left-0 w-0.5 rounded-full bg-ink" />
+      ) : null}
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The card itself is the semantic button. */}
       <div data-testid="chats-thread" data-thread-id={props.thread.id}>
@@ -225,55 +233,53 @@ export function PostCard(props: {
         ) : null}
       </div>
 
-      {/* Social line: who reacted, how many comments. Empty when nothing has
-          happened yet, so a fresh post is just its words. */}
-      {byEmoji.size > 0 || commentCount > 0 ? (
-        <div
-          data-testid="chats-post-footer"
-          className="mt-2.5 flex items-center gap-2 py-1.5 text-[12px] text-subtle"
-        >
-          {[...byEmoji.entries()].map(([emoji, records]) => (
-            <button
-              key={emoji}
-              type="button"
-              data-testid="chats-post-reaction-pill"
-              data-emoji={emoji}
-              data-mine={records.some((r) => r.authorId === props.data.viewerAuthorId)}
-              aria-label={`${emoji} ${records.length}`}
-              title={records.map((record) => chatAuthorLabel(record)).join(", ")}
-              disabled={readOnly}
-              onClick={(event) => {
-                event.stopPropagation();
-                if (!message) return;
-                const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
-                props.reactionControls.onToggle({
-                  messageId: message.id,
-                  emoji,
-                  nextState: mine ? "removed" : "added",
-                });
-              }}
-              className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default"
-            >
-              <span aria-hidden>{emoji}</span>
-              <span className="tabular-nums">{records.length}</span>
-            </button>
-          ))}
-          <span className="flex-1" />
-          <span data-testid="chats-post-comment-count" className="font-mono text-[11px]">
-            {commentCount} {commentCount === 1 ? "comment" : "comments"}
-          </span>
-        </div>
-      ) : (
-        <span data-testid="chats-post-footer" className="block h-2.5" />
-      )}
-
-      <div className="flex items-center gap-2 border-t border-line py-1.5">
+      {/* One row: who reacted and the picker on the left; Comment, with its
+          count, and Save as file on the right. In a narrow panel the actions
+          wrap under the pills instead of crushing them. */}
+      <div
+        data-testid="chats-post-footer"
+        className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line py-1.5"
+      >
+        {[...byEmoji.entries()].map(([emoji, records]) => (
+          <button
+            key={emoji}
+            type="button"
+            data-testid="chats-post-reaction-pill"
+            data-emoji={emoji}
+            data-mine={records.some((r) => r.authorId === props.data.viewerAuthorId)}
+            aria-label={`${emoji} ${records.length}`}
+            title={records.map((record) => chatAuthorLabel(record)).join(", ")}
+            disabled={readOnly}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!message) return;
+              const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
+              props.reactionControls.onToggle({
+                messageId: message.id,
+                emoji,
+                nextState: mine ? "removed" : "added",
+              });
+            }}
+            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default"
+          >
+            <span aria-hidden>{emoji}</span>
+            <span className="tabular-nums">{records.length}</span>
+          </button>
+        ))}
         {message ? <MessageReactions testIdPrefix="chats-post" actionTestId="chats-post-like" pickerOnly
           messageId={message.id} records={reactions} controls={{ ...props.reactionControls, readOnly }} flush /> : null}
+        <span className="flex-1" />
         <ActionButton
           testId="chats-post-comment"
           label="Comment"
           icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
+          count={
+            commentCount > 0 ? (
+              <span data-testid="chats-post-comment-count">
+                {commentCount} {commentCount === 1 ? "comment" : "comments"}
+              </span>
+            ) : undefined
+          }
           onClick={props.onOpen}
         />
         <SaveAsFileActions
