@@ -37,6 +37,6 @@ Agent-written contributions follow the same rules. Name the model or agent used.
 
 Each contributor must accept the [CLA](CLA.md) before merging. You keep ownership and allow the project owner to relicense your contributions, including commercially. Existing license grants remain valid under their terms.
 
-CLA Assistant setup is deferred until the repository is public. Until then, the maintainer links the agreement at a specific commit in your pull request. Reply from your GitHub account to explicitly accept that version. The maintainer records your account, agreement commit, and acceptance comment before merging. You only need to accept each version once.
+CLA Assistant setup is deferred until the repository is public. Until then, the maintainer links the agreement at a specific commit in your pull request. Reply from your GitHub account to explicitly accept that version. If accepting for a legal entity, name it and confirm your authority in that comment. The maintainer records your account, agreement commit, and acceptance comment before merging. You only need to accept each version once.
 
 If your employer has rights to your contribution, check section 4 of the agreement before submitting it.
