@@ -270,7 +270,7 @@ export function ChatLane(props: {
         testIdPrefix="chats-lane"
         messages={messages}
         loading={loading}
-        emptyLabel="No messages yet"
+        emptyLabel={`No messages in #${props.channel.name} yet.`}
         key={`${workspaceId}:${channelId}`}
         listRef={listRef}
         mentionCandidates={props.mentionCandidates}
