@@ -5,7 +5,7 @@ import { evaluateAppOperation, initializeAppDatabase } from "./index.ts";
 import type { EvaluateAppOperationInput, JsonValue } from "./index.ts";
 
 const participant = {kind: "link", principalId: "participant", grantId: "public"};
-const helper = {kind: "named", userId: "organizer", grantId: "private", access: "view", helper: true};
+const helper = {kind: "named", userId: "organizer", grantId: "private", access: "edit", helper: true};
 const owner = {kind: "owner", userId: "owner"};
 const file = {fileId: "receipt", name: "receipt.png", contentType: "image/png", byteLength: 128, sha256: "a".repeat(64)};
 const read = (app: string, name: string) => readFileSync(new URL(`../../../examples/${app}/${name}`, import.meta.url), "utf8");
@@ -100,7 +100,7 @@ describe("fundraiser app operations", () => {
 
   it("refuses hidden organizer operations for public callers and named nonhelpers", async () => {
     const f = await fixture();
-    for (const caller of [participant, {...helper, helper: false}]) {
+    for (const caller of [participant, {...helper, helper: false}, {...helper, access: "view"}]) {
       for (const operation of ["listRegistrations", "setStatus", "updateRegistration", "manualEntry", "attendees", "totals", "receiptAccess", "listRegistrationSessions"]) {
         await expect(f.call(operation, {}, {caller})).rejects.toMatchObject({refusal: {code: "forbidden"}});
       }
@@ -129,6 +129,16 @@ describe("fundraiser app operations", () => {
     const second = row((await f.call("attendees", {limit: 200, offset: 200}, {caller: helper, readOnly: true})).result);
     expect(second.records).toHaveLength(72);
     expect(second.nextOffset).toBeNull();
+  }, 30000);
+
+  it("accepts the original form's local and international mobile formats", async () => {
+    const f = await fixture();
+    for (const mobile of ["09171234567", "09991234567", "08171234567", "+639171234567", "639171234567", "9171234567", "0917 123 4567", "+63 (917) 123-4567", "00639171234567"]) {
+      expect((await f.call("register", {...registration(), mobile})).result).toMatchObject({status: "pending_verification"});
+    }
+    for (const mobile of ["", "0917123456", "091712345678", "+63281234567", "09001234567", "+12025550123", "08001234567", "0917abc4567", "call 09171234567", "09171234567 ext 2"]) {
+      await expect(f.call("register", {...registration(), mobile})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
+    }
   }, 30000);
 });
 

@@ -2,7 +2,7 @@
 (function () {
   function invalid(ctx, message) { ctx.refuse("invalid_input", message); }
   function organizer(ctx) {
-    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper)) ctx.refuse("forbidden", "Organizer access is required.");
+    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper && ctx.caller.access === "edit")) ctx.refuse("forbidden", "Organizer access is required.");
   }
   function object(ctx, input) {
     if (!input || typeof input !== "object" || Array.isArray(input)) invalid(ctx, "Enter the order details.");

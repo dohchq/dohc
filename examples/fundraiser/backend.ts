@@ -8,7 +8,7 @@
 
   function invalid(ctx, message) { return ctx.refuse("invalid_input", message); }
   function organizer(ctx) {
-    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper)) {
+    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper && ctx.caller.access === "edit")) {
       ctx.refuse("forbidden", "Organizer access is required.");
     }
   }
@@ -29,10 +29,10 @@
     if (typeof input !== "string" || input.length > 24 || !/^[\d+()\s-]+$/.test(input)) invalid(ctx, "Enter a Philippine mobile number.");
     let digits = input.replace(/[()\s-]/g, "");
     if (digits.startsWith("00")) digits = "+" + digits.slice(2);
-    if (/^09\d{9}$/.test(digits)) digits = "+63" + digits.slice(1);
-    if (/^639\d{9}$/.test(digits)) digits = "+" + digits;
-    if (/^9\d{9}$/.test(digits)) digits = "+63" + digits;
-    if (!/^\+639\d{9}$/.test(digits)) invalid(ctx, "Enter a Philippine mobile number, such as 0917 123 4567.");
+    if (/^0(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+63" + digits.slice(1);
+    if (/^63(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+" + digits;
+    if (/^(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+63" + digits;
+    if (!/^\+63(?:817|90[5-9]|9[1-9]\d)\d{7}$/.test(digits)) invalid(ctx, "Enter a Philippine mobile number, such as 0917 123 4567.");
     return digits;
   }
   function payment(ctx, input, allowCash) {
