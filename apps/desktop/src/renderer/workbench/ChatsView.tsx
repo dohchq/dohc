@@ -297,6 +297,9 @@ function NavRow(props: {
   onClick: () => void;
   active?: boolean;
   muted?: boolean;
+  // Unread activity the user was not addressed in: the name carries the
+  // weight, not a pill.
+  unread?: boolean;
   labelTestId?: string;
   trailing?: React.ReactNode;
   data?: Record<`data-${string}`, string>;
@@ -318,12 +321,37 @@ function NavRow(props: {
       <span
         data-testid={props.labelTestId}
         className={`min-w-0 flex-1 truncate text-[13px] ${
-          props.active ? "font-medium text-ink" : props.muted ? "text-muted" : "text-ink"
+          props.active || props.unread
+            ? "font-medium text-ink"
+            : props.muted
+              ? "text-muted"
+              : "text-ink"
         }`}
       >
         {props.label}
       </span>
       {props.trailing}
+    </button>
+  );
+}
+
+// The action a section label offers on the right, shown on hover or focus.
+function SectionActionButton(props: {
+  testId?: string;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      aria-label={props.label}
+      title={props.label}
+      onClick={props.onClick}
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/50 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+    >
+      {props.children}
     </button>
   );
 }
@@ -4434,6 +4462,21 @@ export function ChatsView(props: {
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
   const agentLabel = props.agentSetup?.agentName ?? "Your agent";
+  const beginNewDm = () => {
+    // Always start compose from a clean slate — never inherit a
+    // recipient/draft left over from a previous compose.
+    setDmRecipients("");
+    setDmDraft("");
+    if (variant === "panel" && props.onOpenInTab) {
+      props.onOpenInTab({ level: "dm-new" });
+      return;
+    }
+    // A command like any conversation click (see openConversation): report
+    // it synchronously, or a DM answer queued in this tick remounts over the
+    // compose.
+    props.onNavCommand?.({ level: "dm-new" });
+    setNav({ level: "dm-new" });
+  };
 
   return (
     <div
@@ -4453,9 +4496,18 @@ export function ChatsView(props: {
             label="Home"
             className="mt-2"
           />
-          <SectionLabel as="p" data-testid="chats-channels-heading" className="mb-1 mt-4 px-4">
-            Groups
-          </SectionLabel>
+          <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+            <SectionLabel as="p" data-testid="chats-channels-heading" className="min-w-0 flex-1">
+              Groups
+            </SectionLabel>
+            <SectionActionButton
+              testId="chats-new-channel"
+              label="New group"
+              onClick={() => setCreatingChannel("")}
+            >
+              <Plus size={12} aria-hidden />
+            </SectionActionButton>
+          </div>
           <ul className="m-0 list-none p-0">
             {overview.channels
               .filter((channel) => channel.kind === "channel")
@@ -4477,6 +4529,7 @@ export function ChatsView(props: {
                         "data-thread-count": String(channel.threadCount),
                       }}
                       active={selectedChannelId === channel.id}
+                      unread={channel.unreadCount > 0}
                       onClick={() => openConversation({ level: "channel", channel })}
                       icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
                       label={channel.name}
@@ -4493,7 +4546,7 @@ export function ChatsView(props: {
                               <span className="sr-only">{sharedLabel}</span>
                             </span>
                           ) : null}
-                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
+                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" tone="quiet" />
                         </>
                       }
                     />
@@ -4544,9 +4597,16 @@ export function ChatsView(props: {
           ) : null}
           {dmAvailable || dms.length > 0 ? (
             <div data-testid="chats-dms-section">
-              <SectionLabel as="p" className="mb-1 mt-4 px-4">
-                People
-              </SectionLabel>
+              <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+                <SectionLabel as="p" className="min-w-0 flex-1">
+                  People
+                </SectionLabel>
+                {dmAvailable ? (
+                  <SectionActionButton label="New message" onClick={beginNewDm}>
+                    <Plus size={12} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
+              </div>
               <ul className="m-0 list-none p-0">
                 {dms.map((dm) => (
                   <li key={dm.channelId}>
@@ -4574,21 +4634,7 @@ export function ChatsView(props: {
               {dmAvailable ? (
                 <NavRow
                   testId="chats-new-dm"
-                  onClick={() => {
-                    // Always start compose from a clean slate — never inherit a
-                    // recipient/draft left over from a previous compose.
-                    setDmRecipients("");
-                    setDmDraft("");
-                    if (variant === "panel" && props.onOpenInTab) {
-                      props.onOpenInTab({ level: "dm-new" });
-                      return;
-                    }
-                    // A command like any conversation click (see
-                    // openConversation): report it synchronously, or a DM
-                    // answer queued in this tick remounts over the compose.
-                    props.onNavCommand?.({ level: "dm-new" });
-                    setNav({ level: "dm-new" });
-                  }}
+                  onClick={beginNewDm}
                   icon={<Plus size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
                   label="New message"
                   muted
@@ -4682,6 +4728,11 @@ export function ChatsView(props: {
                       )}
                       <AgentPresenceHint
                         activity={agentSummaryActivity}
+                        program={
+                          agentReady && props.userSettings
+                            ? runnerProgram(configuredRunnerCommand(props.userSettings.runner))
+                            : null
+                        }
                         testId="chats-my-agent-presence"
                       />
                       <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
@@ -4749,18 +4800,8 @@ export function ChatsView(props: {
           ) : null}
         </nav>
       </div>
-      <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
-        {creatingChannel === null ? (
-          <button
-            type="button"
-            data-testid="chats-new-channel"
-            onClick={() => setCreatingChannel("")}
-            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-          >
-            <Plus size={12} aria-hidden />
-            New group
-          </button>
-        ) : (
+      {creatingChannel !== null ? (
+        <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -4842,8 +4883,8 @@ export function ChatsView(props: {
               Create group
             </button>
           </form>
-        )}
-      </div>
+        </div>
+      ) : null}
       {acceptingDmRequest ? (
         <AcceptDmDialog
           key={acceptingDmRequest.shareId}
