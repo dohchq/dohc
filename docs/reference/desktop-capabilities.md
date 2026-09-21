@@ -12,6 +12,9 @@ installer has passed the [release rehearsal](../how-to/desktop-release.md).
 | Browser access through a share link | Reachable share-web and relay services, with the owner's selected access. |
 | Shared live document editing | A configured session host and the relay's required admission settings. |
 | Publish an app from the packaged desktop | Windows x64 and a server configured to accept app publishing. |
+| Create and run a local app backend | Windows x64 compiler and bundled backend runtime. No account or server; the approved app opens in a local browser session. |
+| Share an app with private data | App publishing plus backend-enabled relay services. The shared host must be reachable to confirm operations. |
+| Manage app data through tables or an agent | An approved backend with declared operations; table edits use the same rules as the app. |
 | Run the bundled MCP launcher | Node.js 22.13+, 23.4+, or 24+ on `PATH`. The desktop runtime does not supply Node to MCP. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 
@@ -24,6 +27,10 @@ The release workflow builds Windows x64, macOS x64, macOS arm64, and Linux x64.
 App publishing has a narrower platform boundary because its installed compiler
 currently ships a Windows x64 runtime. Reading a shared app in a browser does
 not require that compiler.
+
+The [app backend guide](../how-to/app-backend.md) covers local launch, sharing,
+owner management, and recovery. Shared app data has one authoritative host;
+the desktop does not independently accept its writes while that host is offline.
 
 A private server requires recipients to have network access. Public HTTPS
 hosting can support browser links without a private network. Hosting does not

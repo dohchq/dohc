@@ -62,6 +62,16 @@ For app collection responses, also set `DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PE
 on the relay to a positive integer. This limits accepted creates over each grant's lifetime.
 Leave it unset or set it to `0` to disable collection access. Owners must approve each app's collection capability.
 Disabling collection access still lets owners revoke an existing approval.
+
+For private transactional app data, also set `DOHC_RELAY_APP_BACKENDS=1` on the relay.
+It requires `DOHC_RELAY_APP_PUBLICATIONS=1`; unset or `0` disables backend routes,
+and invalid values stop startup. `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT`
+limits enrolled link principals per grant and defaults to `1000`. Set a positive
+safe integer; `0` is invalid. This counts browser identities, not submitted rows.
+Backend operations do not require the collection-create setting or public Edit.
+See the [app backend guide](../../docs/how-to/app-backend.md) for publication,
+runtime packaging, private uploads, and recovery.
+
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
 `DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
 registrable domain. App launch stays off when the app domain is unset. Setting

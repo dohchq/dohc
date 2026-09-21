@@ -55,6 +55,14 @@ dohc app listLocal '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser"}'
 
 Review the source and requested capability returned by preparation. Use its exact `approvalId` and `candidateDigest` for approval. Approval initializes the database and returns a `publicationId`. Local management uses the same operation commands as shared management. This local backend does not by itself create a URL that friends can visit.
 
+Open the approved app from dohc's local app controls, or request its local launch URL:
+
+```sh
+dohc app launchLocal '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID"}'
+```
+
+Open the returned `url` in a browser on this computer within 30 seconds. It starts a single-use local session with owner authority and requires dohc to stay open. It is not a share link. Launch again when the session ends.
+
 ```sh
 dohc app describe '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID"}'
 dohc app invoke '{"workspaceId":"WORKSPACE_ID","publicationId":"PUBLICATION_ID","operation":"listPublicSessions","idempotencyKey":"sessions-1","input":{}}'
