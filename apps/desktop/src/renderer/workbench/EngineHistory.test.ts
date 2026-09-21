@@ -72,9 +72,9 @@ describe("engineMomentSourceLabel", () => {
 
   it("matches the agent label in the chat rail exactly", () => {
     expect(
-      engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "Ice de Vera" })),
+      engineMomentSourceLabel(moment({ id: "m1", agentAuthorName: "Sam Rivera" })),
     ).toBe(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice de Vera" }),
+      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam Rivera" }),
     );
   });
 
@@ -195,7 +195,7 @@ describe("chatAuthorLabel", () => {
 
   it("shows agent-authored messages as \"the agent name\"", () => {
     expect(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice de Vera" }),
-    ).toBe("Ice de Vera");
+      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam Rivera" }),
+    ).toBe("Sam Rivera");
   });
 });

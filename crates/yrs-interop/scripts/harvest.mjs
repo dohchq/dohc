@@ -5,7 +5,7 @@
 // junctions, 8.3 short names) to a live workspace layout
 // (.dohc/engine/engine.db) and opens read-only regardless. Harvested
 // fixtures can contain personal content: they land in
-// crates/yrs-spike/fixtures/harvested/, which is gitignored — they stay
+// crates/yrs-interop/fixtures/harvested/, which is gitignored — they stay
 // LOCAL and are never committed.
 //
 // Usage: node harvest.mjs <path-to-copied-engine.db>

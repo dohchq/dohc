@@ -180,15 +180,15 @@ describe("registered settings IPC", () => {
   it("reads defaults, refreshes cached reads after save, and resets the persisted user settings", async () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "default" });
-    const settings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ice" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 } };
+    const settings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 } };
     await expect(h.invoke(CHANNELS.setUserSettings, { settings })).resolves.toEqual({ settings, source: "stored" });
-    expect(h.preferredName()).toBe("Ice");
+    expect(h.preferredName()).toBe("Sam");
     await expect(h.invoke(CHANNELS.getUserSettings)).resolves.toEqual({ settings, source: "stored" });
     await expect(h.invoke(CHANNELS.resetUserSettings)).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     expect(h.broadcastUserSettings).toHaveBeenLastCalledWith({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     expect(h.preferredName()).toBeUndefined();
     expect(h.effects.map(({ kind, value }) => ({ kind, value }))).toEqual([
-      { kind: "name", value: "Ice" }, { kind: "zoom", value: 2 },
+      { kind: "name", value: "Sam" }, { kind: "zoom", value: 2 },
       { kind: "name", value: undefined }, { kind: "zoom", value: 0 },
     ]);
     for (const effect of h.effects) {

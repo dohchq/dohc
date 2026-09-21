@@ -11,11 +11,11 @@ describe("chat identity", () => {
   const decodePreferredName = Schema.decodeUnknownResult(PreferredName);
 
   it("normalizes a configured owner name", () => {
-    expect(preferredNameFromInput("  Ice de Vera  ")).toBe("Ice de Vera");
+    expect(preferredNameFromInput("  Sam Rivera  ")).toBe("Sam Rivera");
     expect(preferredNameFromInput("   ")).toBeUndefined();
 
-    const decoded = decodePreferredName("  Ice de Vera  ");
-    expect(Result.isSuccess(decoded) && decoded.success).toBe("Ice de Vera");
+    const decoded = decodePreferredName("  Sam Rivera  ");
+    expect(Result.isSuccess(decoded) && decoded.success).toBe("Sam Rivera");
   });
 
   it("bounds and validates names", () => {
@@ -37,15 +37,15 @@ describe("chat identity", () => {
       );
     }
     expect(Result.isSuccess(decodePreferredName("می\u200cثم"))).toBe(true);
-    expect(Result.isSuccess(decodePreferredName("Ice 👩\u200d💻"))).toBe(true);
+    expect(Result.isSuccess(decodePreferredName("Sam 👩\u200d💻"))).toBe(true);
     for (const name of [
-      "Ice\u0000Admin",
-      "Ice\u202eAdmin",
-      "Ice\u2066Admin\u2069",
-      "Ice\u200eAdmin",
-      "Ice\u200bAdmin",
-      "Ice\u2028Admin",
-      "Ice\u2029Admin",
+      "Sam\u0000Admin",
+      "Sam\u202eAdmin",
+      "Sam\u2066Admin\u2069",
+      "Sam\u200eAdmin",
+      "Sam\u200bAdmin",
+      "Sam\u2028Admin",
+      "Sam\u2029Admin",
     ]) {
       const result = decodePreferredName(name);
       expect(Result.isFailure(result)).toBe(true);
@@ -58,7 +58,7 @@ describe("chat identity", () => {
     expect(() => preferredNameFromInput("x".repeat(MAX_PREFERRED_NAME_LENGTH + 1))).toThrow(
       `Names must contain ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`,
     );
-    expect(() => preferredNameFromInput("Ice\u202eAdmin")).toThrow(
+    expect(() => preferredNameFromInput("Sam\u202eAdmin")).toThrow(
       "Names cannot contain control characters.",
     );
   });

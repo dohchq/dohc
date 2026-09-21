@@ -54,7 +54,7 @@ vi.mock("./CloudLogin", () => ({
 
 const SHARED_VIEW = {
   workspaceId: "ws-shared-view",
-  rootPath: "/home/ice/dohc/shared",
+  rootPath: "/home/sam/dohc/shared",
   kind: "personal" as const,
   mode: "local-first" as const,
   shareView: { shareId: "share-exact", granterEmail: "granter@dohc.test" },
@@ -85,7 +85,7 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));
-  await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalledWith({shareCode: "edit-code", rootPath: "/home/ice/dohc/shared"}));
+  await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalledWith({shareCode: "edit-code", rootPath: "/home/sam/dohc/shared"}));
   expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   expect(onWorkspaceReady).toHaveBeenCalled();
 });
@@ -114,9 +114,9 @@ beforeEach(() => {
   bridgeMock.acceptShareHandoff.mockResolvedValue(undefined);
   bridgeMock.retryShareHandoff.mockResolvedValue(undefined);
   bridgeMock.dismissShareHandoff.mockResolvedValue(undefined);
-  bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/shared");
+  bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/shared");
   bridgeMock.getDefaultShareRoot.mockImplementation(
-    async ({ shareId }: { shareId: string }) => `/home/ice/dohc/shared/${shareId}`,
+    async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
   );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
   bridgeMock.mountShare.mockResolvedValue({
@@ -417,14 +417,14 @@ describe("ShareHandoffSurface", () => {
       shareId: "share-exact",
     });
 
-    await screen.findByText("/home/ice/dohc/shared/share-exact");
+    await screen.findByText("/home/sam/dohc/shared/share-exact");
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("open-share-start"));
 
     await waitFor(() =>
       expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
         shareCode: "ordinary-exact-share-code",
-        rootPath: "/home/ice/dohc/shared/share-exact",
+        rootPath: "/home/sam/dohc/shared/share-exact",
       }),
     );
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();

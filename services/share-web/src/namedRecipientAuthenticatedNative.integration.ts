@@ -29,6 +29,7 @@ import { createLiveGateway } from "./liveGateway.js";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute.js";
 import {prepareHostileRestoreProof} from "./hostileRestoreProof.integration-helper.js";
 import {createNamedBrowserQuarantineProof} from "./namedBrowserQuarantineProof.integration-helper.js";
+import { ensureLocalhostTls } from "./testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Explicit proof inputs, not product limits or release defaults.
@@ -58,8 +59,8 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   const admin = new Client({ connectionString, connectionTimeoutMillis: 5000 });
   const pool = new Pool({ connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000 });
   let schemaCreated = false;
-  const publicHttps = createHttpsServer({key: readFileSync(new URL("./testing/device-control/localhost-key.pem", import.meta.url)),
-    cert: readFileSync(new URL("./testing/device-control/localhost-cert.pem", import.meta.url))});
+  const tls = await ensureLocalhostTls();
+  const publicHttps = createHttpsServer({key: readFileSync(tls.key), cert: readFileSync(tls.certificate)});
   publicHttps.listen(0, "127.0.0.1"); await once(publicHttps, "listening");
   const audience = `https://127.0.0.1:${(publicHttps.address() as {port: number}).port}`;
   try {

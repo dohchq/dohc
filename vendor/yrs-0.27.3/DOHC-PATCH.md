@@ -15,7 +15,7 @@ consumer's first error. The engine uses it to check actual run, attribute,
 and byte budgets before copying text. Existing Delta and snapshot APIs keep
 their upstream implementation.
 
-Visitor regression tests live in `crates/yrs-spike/tests/text_diff_visitor.rs`;
+Visitor regression tests live in `crates/yrs-interop/tests/text_diff_visitor.rs`;
 projection budget tests live in `crates/dohc-engine-collab/src/ydoc.rs`.
 Both run in the canonical workspace Rust gate. This dependency is excluded
 from workspace membership and selected through the root Cargo patch.

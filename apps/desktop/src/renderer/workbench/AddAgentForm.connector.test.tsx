@@ -21,7 +21,7 @@ function fixture(probe = vi.fn(async () => detected)) {
   const selfTest = vi.fn(async () => ({ ok: true, detail: "The runner answered." }));
   vi.stubGlobal("dohcDesktop", { detectAgentTools: probe, runnerSelfTest: selfTest });
   const props = {
-    workspaceId: "workspace-a", settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ice", agentName: "Nova" } },
+    workspaceId: "workspace-a", settings: { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Sam", agentName: "Nova" } },
     onSave: vi.fn(async (_settings: DesktopUserSettings): Promise<void> => undefined), onError: vi.fn(), onDone: vi.fn(), onCancel: vi.fn(),
   };
   return { props, selfTest, probe };
@@ -30,13 +30,13 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("requires an agent name and saves it alongside the selected tool and owner", async () => {
   const f = fixture();
-  render(<AddAgentForm {...f.props} settings={{ ...f.props.settings, profile: { preferredName: "Ice" } }} />);
+  render(<AddAgentForm {...f.props} settings={{ ...f.props.settings, profile: { preferredName: "Sam" } }} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
-  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ profile: { preferredName: "Ice", agentName: "Nova" }, runner: expect.objectContaining({ profile: { tool: "codex", executable: "C:\\Tools\\codex.cmd" }, enabled: true }) })));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ profile: { preferredName: "Sam", agentName: "Nova" }, runner: expect.objectContaining({ profile: { tool: "codex", executable: "C:\\Tools\\codex.cmd" }, enabled: true }) })));
 });
 
 it("preserves the saved command when selecting a profile and can restore it", async () => {
@@ -145,7 +145,7 @@ it("keeps a cleared Advanced command open and preserves drafts across equivalent
 });
 
 
-it.each([undefined, "Ice"])("adds and checks an agent without editing the existing profile name (%s)", async (preferredName) => {
+it.each([undefined, "Sam"])("adds and checks an agent without editing the existing profile name (%s)", async (preferredName) => {
   const f = fixture();
   const profile = preferredName === undefined ? {} : { preferredName };
   render(<AddAgentForm {...f.props} settings={{ ...f.props.settings, profile }} />);

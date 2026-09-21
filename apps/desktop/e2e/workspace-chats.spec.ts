@@ -106,7 +106,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
           workspaceId,
           channelId: general.id,
           author: { kind: "agent", displayName: "Nova" },
-          authorOwnerDisplayName: "Ice",
+          authorOwnerDisplayName: "Sam",
           body: "The zeppelin-cadence report is ready.",
         });
       },

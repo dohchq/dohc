@@ -421,7 +421,7 @@ describe("registry emptied under an open workspace", () => {
   it("drops to first run instead of keeping a shell with nothing to open", async () => {
     const workspace = {
       workspaceId: "ws-1",
-      rootPath: "/home/ice/dohc/personal",
+      rootPath: "/home/sam/dohc/personal",
       kind: "personal" as const,
       mode: "local-first" as const,
     };

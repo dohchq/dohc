@@ -3,8 +3,8 @@ packages:
   - "packages/*"
   - "services/*"
   # The Node driver for the yrs/Yjs interop harness needs the repo's pinned
-  # yjs and @dohc/ydoc-projection (see crates/yrs-spike).
-  - "crates/yrs-spike/scripts"
+  # yjs and @dohc/ydoc-projection (see crates/yrs-interop).
+  - "crates/yrs-interop/scripts"
 
 # pnpm blocks dependency build scripts unless this map allows them. Electron's
 # binary download runs in its postinstall, so these packages must stay allowed.

@@ -38,6 +38,7 @@ import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports
 import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js";
 import { createShareWebApplication } from "./server.js";
 import { createLiveGateway } from "./liveGateway.js";
+import { ensureLocalhostTls } from "./testing/device-control/localhostTls.js";
 
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -91,8 +92,8 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   const admin = new Client({ connectionString, connectionTimeoutMillis: 5000 });
   const pool = new Pool({ connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000 });
   let schemaCreated = false;
-  const publicHttps = createHttpsServer({key: readFileSync(new URL("./testing/device-control/localhost-key.pem", import.meta.url)),
-    cert: readFileSync(new URL("./testing/device-control/localhost-cert.pem", import.meta.url))});
+  const tls = await ensureLocalhostTls();
+  const publicHttps = createHttpsServer({key: readFileSync(tls.key), cert: readFileSync(tls.certificate)});
   publicHttps.listen(0, "127.0.0.1"); await once(publicHttps, "listening");
   const audience = `https://127.0.0.1:${(publicHttps.address() as {port: number}).port}`;
   try {

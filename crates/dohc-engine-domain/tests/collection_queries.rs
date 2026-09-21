@@ -1217,8 +1217,8 @@ fn empty_frontmatter_record_is_adopted_with_only_the_minted_id() {
 #[test]
 fn json_frontmatter_record_keeps_a_valid_flow_mapping_when_adopted() {
     for markdown in [
-        "---\n{\"name\":\"Ice\",\"destination\":\"Tokyo\"}\n---\nBody\n",
-        "---\r\n# Keep this comment\r\n  {name: Ice, destination: Tokyo}\r\n---\r\nBody\r\n",
+        "---\n{\"name\":\"Sam\",\"destination\":\"Tokyo\"}\n---\nBody\n",
+        "---\r\n# Keep this comment\r\n  {name: Sam, destination: Tokyo}\r\n---\r\nBody\r\n",
         "---\n{}\n---\n",
         "---\n{ # empty mapping\n}\n---",
     ] {
@@ -1261,7 +1261,7 @@ fn json_frontmatter_record_keeps_a_valid_flow_mapping_when_adopted() {
 fn record_adoption_refuses_an_insertion_outside_the_root_mapping() {
     for markdown in [
         "---\n{a: 1}: value\nother: 2\n---\n",
-        "---\n  name: Ice\n---\n",
+        "---\n  name: Sam\n---\n",
     ] {
         assert!(markdown_frontmatter_json_with_provenance(markdown).is_some());
         assert_eq!(

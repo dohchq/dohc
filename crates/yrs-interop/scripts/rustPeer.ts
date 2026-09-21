@@ -1,4 +1,4 @@
-// Client for the yrs stdio harness (crates/yrs-spike/src/main.rs).
+// Client for the yrs stdio harness (crates/yrs-interop/src/main.rs).
 // One long-lived child process; line-delimited JSON; bytes as base64.
 
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
@@ -36,7 +36,7 @@ interface ErrResponse {
 type Response = OkResponse | ErrResponse;
 
 function binaryPath(): string {
-  const exe = process.platform === "win32" ? "dohc-yrs-spike.exe" : "dohc-yrs-spike";
+  const exe = process.platform === "win32" ? "dohc-yrs-interop.exe" : "dohc-yrs-interop";
   // A relative CARGO_TARGET_DIR is interpreted by cargo relative to the
   // build cwd (the crate dir) — resolve the spawn path the same way, never
   // against the Node process cwd.

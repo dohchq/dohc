@@ -297,7 +297,7 @@ describe("two-client presence over a real relay child", () => {
     // A appears.
     const afterA = await publish(baseUrl, "owner", ws, "general", {
       clientId: "A",
-      state: { displayName: "Ice", typing: false },
+      state: { displayName: "Sam", typing: false },
     });
     expect(afterA.map((p) => p.clientId)).toEqual(["A"]);
 

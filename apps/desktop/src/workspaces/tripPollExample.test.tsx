@@ -14,11 +14,11 @@ it("loads shared responses, pages, refreshes and submits a named destination", a
   render(<Poll client={{list, create}} />);
   await screen.findByText("Sam"); fireEvent.click(screen.getByRole("button", {name: "Show more responses"}));
   await screen.findByText("Someone"); expect(list).toHaveBeenLastCalledWith({limit: 50, afterPath: "a"});
-  fireEvent.change(screen.getByLabelText("Name (optional)"), {target: {value: " Ice "}});
+  fireEvent.change(screen.getByLabelText("Name (optional)"), {target: {value: " Sam "}});
   fireEvent.change(screen.getByLabelText("Destination"), {target: {value: "Manila"}});
   fireEvent.click(screen.getByRole("button", {name: "Send response"}));
   await screen.findByText("Response saved.");
-  expect(create).toHaveBeenCalledWith({idempotencyKey: expect.any(String), fields: {name: "Ice", destination: "Manila"}});
+  expect(create).toHaveBeenCalledWith({idempotencyKey: expect.any(String), fields: {name: "Sam", destination: "Manila"}});
 });
 it("retries uncertain acceptance with the same key and unchanged payload", async () => {
   const create = vi.fn<CollectionClient["create"]>().mockRejectedValueOnce(new CollectionError(503)).mockResolvedValueOnce(receipt);

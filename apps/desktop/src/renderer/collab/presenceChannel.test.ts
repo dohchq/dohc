@@ -68,7 +68,7 @@ describe("createPresenceChannel", () => {
       transport: f.transport,
       topic: "general",
       clientId: "c1",
-      initialState: { displayName: "Ice", typing: false },
+      initialState: { displayName: "Sam", typing: false },
       onPeers: peers,
     });
     await flush();

@@ -157,7 +157,7 @@ function GlobalRecoveryList() {
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
-  rootPath: "/home/ice/dohc/personal",
+  rootPath: "/home/sam/dohc/personal",
   kind: "personal",
   mode: "local-first",
 };
@@ -165,7 +165,7 @@ const WORKSPACE: Workspace = {
 const OTHER_WORKSPACE: Workspace = {
   ...WORKSPACE,
   workspaceId: "ws-shell-other",
-  rootPath: "/home/ice/dohc/other",
+  rootPath: "/home/sam/dohc/other",
 };
 
 const SYNC_STATUS: SyncStatusResult = {
@@ -1059,7 +1059,7 @@ describe("direct message workspace picker", () => {
     const sharedView: Workspace = {
       ...SHARE_VIEW,
       workspaceId: "ws-shared-view",
-      rootPath: "/home/ice/dohc/shared-view",
+      rootPath: "/home/sam/dohc/shared-view",
     };
 
     renderShell(bridge, WORKSPACE, [WORKSPACE, sharedView]);
@@ -1235,7 +1235,7 @@ describe("plugin panel tabs", () => {
     const otherWorkspace: Workspace = {
       ...WORKSPACE,
       workspaceId: "ws-other",
-      rootPath: "/home/ice/dohc/other",
+      rootPath: "/home/sam/dohc/other",
     };
 
     view.rerender(
@@ -1367,7 +1367,7 @@ describe("plugin web app tabs", () => {
     const otherWorkspace: Workspace = {
       ...WORKSPACE,
       workspaceId: "ws-other",
-      rootPath: "/home/ice/dohc/other",
+      rootPath: "/home/sam/dohc/other",
     };
     view.rerender(
       <DesktopWorkspaceShell
@@ -7386,7 +7386,7 @@ describe("engine store recovery", () => {
     const workspaceB: Workspace = {
       ...WORKSPACE,
       workspaceId: "ws-shell-b",
-      rootPath: "/home/ice/dohc/b",
+      rootPath: "/home/sam/dohc/b",
     };
     let currentStatus: SyncStatusResult = {
       ...SYNC_STATUS,
@@ -7580,7 +7580,7 @@ describe("engine store recovery", () => {
     const workspaceB: Workspace = {
       ...WORKSPACE,
       workspaceId: "ws-shell-b",
-      rootPath: "/home/ice/dohc/b",
+      rootPath: "/home/sam/dohc/b",
     };
     const user = userEvent.setup();
     const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);

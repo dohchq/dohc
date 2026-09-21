@@ -14,11 +14,11 @@ import { WebSocket } from "ws";
 import { build } from "esbuild";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { DEVICE_CONTROL_PROTOCOL, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import { ensureLocalhostTls } from "./testing/device-control/localhostTls.js";
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL("../../..", import.meta.url));
-const certificate = fileURLToPath(new URL("./testing/device-control/localhost-cert.pem", import.meta.url));
-const privateKey = fileURLToPath(new URL("./testing/device-control/localhost-key.pem", import.meta.url));
+const { certificate, key: privateKey } = await ensureLocalhostTls();
 let relayMain: string, shareMain: string, deploymentCommand: string, credentialCommand: string, connectorCommand: string;
 const limits: DeviceControlLimits = { maxConnections: 8, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
   maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,

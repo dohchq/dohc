@@ -14,7 +14,7 @@
 // docs mint random client ids). A failing seed replays exactly. This is the
 // permanent R11 regression harness.
 //
-// Usage: pnpm --filter @dohc/yrs-spike-scripts fuzz [-- --seeds 200 --start 1 --strict]
+// Usage: pnpm --filter @dohc/yrs-interop-scripts fuzz [-- --seeds 200 --start 1 --strict]
 // Certification runs must pass --strict: it promotes fault-injection
 // caveats (e.g. a truncated update being accepted) to hard failures.
 

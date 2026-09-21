@@ -150,6 +150,7 @@ For a manual deployment, configure both services:
 
 - On the relay, set `DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_RELAY_SHARE_WEB_ORIGIN`, and `DOHC_RELAY_EXCHANGE_KEY`.
   Enable `DOHC_RELAY_NAMED_LIVE_CONFIG` and `DOHC_RELAY_NAMED_LIVE_HOSTS` with the existing link key and a configured native document host.
+  Set `DOHC_RELAY_NAMED_EDITOR_LIMITS` to enable desktop live editing; its receive frame size must not exceed the named live frame size.
 - On share-web, set `DOHC_SHARE_WEB_AUTH_URL` and `DOHC_SHARE_WEB_PUBLIC_ORIGIN` with the matching public Host and relay exchange key.
   Set `DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS`, `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS`, and `DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS`.
 
@@ -232,6 +233,10 @@ Caller-supplied internal client-address headers cannot select a bucket.
 The limiter bounds repeated attempts per retained address; it does not guarantee admission during a distributed flood.
 
 Set `DOHC_RELAY_DEVICE_CONTROL_HOSTS` on the relay to its exact comma-separated internal Host values, including non-default ports.
+
+A relay that hosts live documents on a device also needs `DOHC_RELAY_DEVICE_DELIVERY_CONFIG`: the absolute path of a JSON file that names the device host, its engine executable, and each workspace root it serves.
+Private owner admission is optional: `DOHC_RELAY_OWNER_ADMISSION_CONFIG` names a second JSON file listing one share per delivered workspace with its validation budgets and drain limits.
+The relay refuses to start when either file is missing a required field, names a workspace it does not deliver, or exceeds 1 MiB.
 Both services require their configured relay exchange key, including in development and tests.
 The internal relay URL must be an HTTP or HTTPS origin without a path.
 Share-web sends its configured exchange key and never forwards a caller's internal authentication headers.

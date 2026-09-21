@@ -1874,7 +1874,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
             "messageId": "replicated-message",
             "threadId": "replicated-thread",
             "authorKind": "human",
-            "authorDisplayName": "Ice",
+            "authorDisplayName": "Sam",
             "body": "Synchronized quasar content",
             "createdAtMs": 20
         }),
@@ -1939,7 +1939,7 @@ fn parked_replicated_message_is_findable_after_thread_promotion() {
             "messageId": "parked-message",
             "threadId": "late-thread",
             "authorKind": "human",
-            "authorDisplayName": "Ice",
+            "authorDisplayName": "Sam",
             "body": "Parked comet content",
             "createdAtMs": 20
         }),
@@ -2010,7 +2010,7 @@ fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
             "messageId": "shared-message",
             "threadId": "shared-thread",
             "authorKind": "human",
-            "authorDisplayName": "Ice",
+            "authorDisplayName": "Sam",
             "body": "Shared supernova content",
             "createdAtMs": 3
         }),

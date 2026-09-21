@@ -5,7 +5,7 @@
 //! `ydoc.update` replication idempotently with echo suppression. Settles a
 //! Y.Doc into artifact content with provenance through the job pipeline.
 //!
-//! It enforces the yrs spike's four caveats (`crates/yrs-spike/README.md`)
+//! It enforces the yrs interop harness's four caveats (`crates/yrs-interop/README.md`)
 //! plus the shared root schema; see [`ydoc`] for the per-constraint enforcement.
 //!
 //! # Two regimes (do not conflate)

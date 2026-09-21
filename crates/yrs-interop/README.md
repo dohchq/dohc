@@ -1,4 +1,4 @@
-# yrs-spike: yrs and Yjs interoperability harness
+# yrs-interop: yrs and Yjs interoperability harness
 
 Reader: anyone bumping `yjs` or `yrs`, or changing how the engine constructs or re-encodes a Y.Doc.
 
@@ -8,8 +8,8 @@ This crate and its `scripts/` directory hold the harness that proved the Rust `y
 
 | side | package | version | where pinned |
 | ---- | ------- | ------- | ------------ |
-| TypeScript | `yjs` | 13.6.30 | `crates/yrs-spike/scripts/package.json` pins `"yjs": "13.6.30"` exactly |
-| Rust | `yrs` | 0.27.3 | `crates/yrs-spike/Cargo.toml` pins `yrs = "=0.27.3"` |
+| TypeScript | `yjs` | 13.6.30 | `crates/yrs-interop/scripts/package.json` pins `"yjs": "13.6.30"` exactly |
+| Rust | `yrs` | 0.27.3 | `crates/yrs-interop/Cargo.toml` pins `yrs = "=0.27.3"` |
 
 Treat these as one audited unit. A lone upgrade of either side can silently reopen interop divergence. Any bump must re-run the fidelity and fuzz harnesses before landing.
 
@@ -32,9 +32,9 @@ One engine-side observation: `yDocToMarkdown` is not read-only. y-prosemirror's 
 The scripts always `cargo build` before spawning the Rust peer, so a stale binary can never certify.
 
 ```
-pnpm install --filter @dohc/yrs-spike-scripts...
-pnpm --filter @dohc/yrs-spike-scripts fidelity
-pnpm --filter @dohc/yrs-spike-scripts fuzz -- --seeds 500 --strict
+pnpm install --filter @dohc/yrs-interop-scripts...
+pnpm --filter @dohc/yrs-interop-scripts fidelity
+pnpm --filter @dohc/yrs-interop-scripts fuzz -- --seeds 500 --strict
 ```
 
 `--strict` promotes fault-injection caveats to hard failures and is required for certification. A failing fuzz seed replays exactly with `fuzz -- --seeds 1 --start <seed> --strict`.

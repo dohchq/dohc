@@ -180,14 +180,14 @@ test("agent-authored messages render as \"their stored name\"", async () => {
         await chats.sendMessage({
           workspaceId,
           threadId: thread.id,
-          author: { kind: "human", displayName: "Ice de Vera" },
+          author: { kind: "human", displayName: "Sam Rivera" },
           body: "Can you tighten the agenda?",
         });
         await chats.sendMessage({
           workspaceId,
           threadId: thread.id,
           author: { kind: "agent", displayName: "Nova" },
-          authorOwnerDisplayName: "Ice de Vera",
+          authorOwnerDisplayName: "Sam Rivera",
           body: "Done — trimmed it to three items.",
         });
       },
@@ -206,7 +206,7 @@ test("agent-authored messages render as \"their stored name\"", async () => {
 
     const authors = page.getByTestId("linked-chat-message-author");
     await expect(authors).toHaveCount(2);
-    await expect(authors.nth(0)).toHaveText("Ice de Vera");
+    await expect(authors.nth(0)).toHaveText("Sam Rivera");
     await expect(authors.nth(1)).toHaveText("Nova");
     await expect(
       page.locator('[data-testid="linked-chat-message-author"][data-author-kind="agent"]'),

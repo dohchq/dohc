@@ -60,6 +60,8 @@ Evidence: a self-signed RSA key used only by integration tests. Not CA-trusted, 
 
 Fix if desired: generate the pair inside the test run instead of committing it. Confidence: certain, no production impact.
 
+Follow-up: the tracked pair is deleted. `services/share-web/src/testing/device-control/localhostTls.ts` mints a self-signed localhost certificate on first use into gitignored files, and every consumer calls it before reading.
+
 ### 5. LOW — Loopback preview servers accept any Host header
 
 Location: `apps/desktop/src/security/staticDirectoryPreview.ts:123-251` (the request handler); the same pattern serves plugin panels and site previews.

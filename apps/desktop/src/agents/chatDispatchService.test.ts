@@ -551,7 +551,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     identityFor: async () =>
       options.identity ?? {
         displayName: "Nova",
-        ownerDisplayName: "Ice",
+        ownerDisplayName: "Sam",
         verifiedUserId: "user_local",
       },
     stateDir: () => stateRoot,
@@ -690,8 +690,8 @@ async function createAgentThread(
     ...(input.title === undefined ? {} : { title: input.title }),
     author:
       actor === "human"
-        ? { kind: "human", displayName: "Ice" }
-        : { kind: "agent", displayName: "Ice" },
+        ? { kind: "human", displayName: "Sam" }
+        : { kind: "agent", displayName: "Sam" },
     ...(input.authorUserId === undefined ? {} : { authorUserId: input.authorUserId }),
     ...(input.origin === undefined ? {} : { origin: input.origin }),
     body: input.body,
@@ -708,7 +708,7 @@ async function linkAgentReply(
   const message = await fixture.chat.sendMessage({
     workspaceId: WORKSPACE_ID,
     threadId,
-    author: { kind: "agent", displayName: "Ice" },
+    author: { kind: "agent", displayName: "Sam" },
     origin: "cli",
     body,
   });
@@ -788,7 +788,7 @@ describe("chatDispatchService", () => {
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
     const fixture = await createFixture({
       runner: { enabled: false },
-      identity: { displayName: "Nova", ownerDisplayName: "Ice", verifiedUserId: "user_local" },
+      identity: { displayName: "Nova", ownerDisplayName: "Sam", verifiedUserId: "user_local" },
     });
     const agentHuman = await createAgentThread(fixture, {
       body: "Please review the launch.",
@@ -816,14 +816,14 @@ describe("chatDispatchService", () => {
     const mention = await fixture.chat.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "Could @agent audit this plan?",
     });
     await fixture.chat.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       body: "@agent does not recursively dispatch itself.",
     });
 
@@ -864,7 +864,7 @@ describe("chatDispatchService", () => {
               workspaceId: WORKSPACE_ID,
               channelId:
                 channelKind === "agent" ? agentChannel.id : generalChannel.id,
-              author: { kind: authorKind, displayName: "Ice" },
+              author: { kind: authorKind, displayName: "Sam" },
               authorUserId: "user_local",
               ...(cliOrigin ? { origin: "cli" as const } : {}),
               body: `Trigger predicate case ${caseNumber}${
@@ -916,7 +916,7 @@ describe("chatDispatchService", () => {
     const unrelated = await fixture.chat.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: generalChannel.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "A general message with no agent mention.",
     });
@@ -1276,7 +1276,7 @@ describe("chatDispatchService", () => {
       await fixture.chat.sendMessage({
         workspaceId: WORKSPACE_ID,
         threadId: trigger.threadId,
-        author: { kind: "human", displayName: "Ice" },
+        author: { kind: "human", displayName: "Sam" },
         authorUserId: "user_local",
         body,
       });
@@ -1304,7 +1304,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "Arrived after spawn.",
     });
@@ -1367,7 +1367,7 @@ describe("chatDispatchService", () => {
         await chat.startChannelThread({
           workspaceId: WORKSPACE_ID,
           channelId: channel.id,
-          author: { kind: "human", displayName: "Ice" },
+          author: { kind: "human", displayName: "Sam" },
           authorUserId: "user_local",
           body: "Remote tray-only task.",
         });
@@ -1499,7 +1499,7 @@ describe("chatDispatchService", () => {
       (message) => message.body === NO_RUNNER_NOTE,
     );
     expect(setupNotes).toHaveLength(1);
-    expect(setupNotes[0]?.authorOwnerDisplayName).toBe("Ice");
+    expect(setupNotes[0]?.authorOwnerDisplayName).toBe("Sam");
     expect(setupNotes[0]?.author).toEqual({
       kind: "agent",
       displayName: "Nova",
@@ -1508,7 +1508,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "Still needs the same missing runner.",
     });
@@ -1530,7 +1530,7 @@ describe("chatDispatchService", () => {
     const pausedFollowUp = await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: paused.threadId,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "This second trigger is paused too.",
     });
@@ -1782,7 +1782,7 @@ describe("chatDispatchService", () => {
     const followUp = await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: pending.threadId,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
       body: "Continue after workspace hydration recovers.",
     });
@@ -2810,7 +2810,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: marker,
     });
@@ -2840,7 +2840,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: retryMarker,
     });
@@ -2911,7 +2911,7 @@ describe("chatDispatchService", () => {
     await fixture.chat.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
     });

@@ -22,6 +22,7 @@ import { LiveCommittedDeliveryStore } from "../../../services/sync-relay/src/sto
 import { beginStopRestore, advanceStopRestoreFence, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { LiveHostConnectionCoordinate } from "../../../services/sync-relay/src/storage.js";
+import { ensureLocalhostTls } from "../../../services/share-web/src/testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Test inputs, not a release policy.
@@ -66,8 +67,7 @@ it("delivers through the outbound TLS device pipe and replays a lost durable ack
   const limits = { maxConnections: 4, maxHeaderBytes: 8192, maxCredentialBytes: 4096, maxPayloadBytes: 4096,
     maxPendingBytes: 4_000_000, maxFragments: 8, maxBufferedChunks: 16, handshakeTimeoutMs: 10_000,
     heartbeatIntervalMs: 500, heartbeatTimeoutMs: 10_000, closeTimeoutMs: 1000 };
-  const certificate = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-cert.pem", import.meta.url));
-  const key = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-key.pem", import.meta.url));
+  const { certificate, key } = await ensureLocalhostTls();
   const connectorCommand = fileURLToPath(new URL("../../../services/sync-relay/dist/device-host-connect.js", import.meta.url));
   const guard = join(root, "device-network-guard.mjs");
   writeFileSync(guard, `import net from 'node:net';

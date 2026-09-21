@@ -55,7 +55,7 @@ function fixture() {
   const owner={workspaceId:"w",publicationId:publication.publicationId,ownerUserId:"owner",limits};
   storage.approveAppCollection({...owner,expectedAuthorityRevision:1,capability});
   storage.mintLinkSession({session:{sessionId:"session",capabilityHash:"session-secret-hash",grantId:"g",generation:1,mintedAtMs:2,expiresAtMs:10000}});
-  const input:AcceptAppCollectionInput={publicationId:publication.publicationId,capabilityHash:"session-secret-hash",profileTokenHash:"profile-secret-hash",nowMs:20,limits,expectedAuthorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Ice"}};
+  const input:AcceptAppCollectionInput={publicationId:publication.publicationId,capabilityHash:"session-secret-hash",profileTokenHash:"profile-secret-hash",nowMs:20,limits,expectedAuthorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Sam"}};
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
@@ -66,12 +66,12 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(row.originId).toBe("relay:collection-create:g");
   const payload=JSON.parse(row.payloadJson),blob=f.storage.getBlob("w",payload.payloadAfterBlobSha256)!;
   const record=parseCollectionRecordFields(Buffer.from(blob).toString("utf8"))!;
-  expect(record).toMatchObject({destination:"Tokyo",name:"Ice",created_at:20,grant_id:"g",idempotency_key:"vote-1",acceptance_id:receipt.acceptanceId});
+  expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,grant_id:"g",idempotency_key:"vote-1",acceptance_id:receipt.acceptanceId});
   expect(record).not.toHaveProperty("id");expect(record.created_by).toMatch(/^public_/);
   expect(payload).toMatchObject({metadata:{origin:"sync"},author:{kind:"public",principalId:record.created_by,grantId:"g"}});
   const privatePrincipal=f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").get()!.principal_id;
   expect(JSON.stringify(payload)+Buffer.from(blob).toString()).not.toContain(privatePrincipal);
-  expect(f.accept({fields:{name:"Ice",destination:"Tokyo"}})).toEqual(receipt);
+  expect(f.accept({fields:{name:"Sam",destination:"Tokyo"}})).toEqual(receipt);
   f.restart();expect(f.accept()).toEqual(receipt);
   expect(()=>f.accept({fields:{destination:"Manila"}})).toThrow(/another payload/);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
@@ -113,7 +113,7 @@ it("charges fresh keys for the grant lifetime while replay and owner deletion ne
 
 it("reads owner-updated projection and only approved fields, including adopted record IDs",()=>{
   const f=fixture(),receipt=f.accept();
-  expect(f.storage.readAppCollection({...f.input,limit:1})).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Ice"}}],nextPath:null});
+  expect(f.storage.readAppCollection({...f.input,limit:1})).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:null});
   f.write(receipt.path,"---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nname: Owner changed\ndestination: Manila\nsecret: DO_NOT_SHARE\n---\n",receipt.objectId);
   const page=f.storage.readAppCollection({...f.input,limit:10});
   expect(page.records[0]).toEqual({path:receipt.path,recordId:"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",fields:{destination:"Manila",name:"Owner changed"}});
@@ -274,7 +274,7 @@ function httpFixture(options:Partial<CreateSyncRelayHandlerOptions>={}) {
   const path=`/sync/link/app-publications/${f.input.publicationId}/collection`;
   const headers={authorization:`LinkCapability ${token}`,"x-dohc-link-profile-secret":profile};
   const request=(method="GET",body?:unknown,query=method==="GET"?"?authorityRevision=2":"",extra:RequestInit={})=>handler(new Request(`https://relay${path}${query}`,{method,...extra,headers:{...headers,...(method==="POST"?{"content-type":"application/json"}:{}),...Object.fromEntries(new Headers(extra.headers))},...(body===undefined?{}:{body:JSON.stringify(body)})}));
-  const body={authorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Ice"}};
+  const body={authorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Sam"}};
   return {...f,handler,path,headers,body,request,setTime(value:number){now=value;}};
 }
 
@@ -317,7 +317,7 @@ it("uses the same authenticated HTTP read and create contract for an agent and b
   const created=await f.request("POST",f.body);expect(created.status).toBe(200);const receipt=await created.json();expect(receipt.kind).toBe("accepted");
   const replay=await f.request("POST",f.body,"",{headers:{origin:"https://trusted-app.example"}});expect(await replay.json()).toEqual(receipt);
   const page=await f.request();expect(page.status).toBe(200);expect(page.headers.get("cache-control")).toBe("private, no-store");expect(page.headers.get("access-control-allow-origin")).toBeNull();
-  expect(await page.json()).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Ice"}}],nextPath:null});
+  expect(await page.json()).toEqual({records:[{path:receipt.path,recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:null});
   expect((await f.request("POST",{...f.body,fields:{destination:"Manila"}})).status).toBe(409);
 });
 it("keeps collection HTTP off by default and rejects ambient or forged authority",async()=>{

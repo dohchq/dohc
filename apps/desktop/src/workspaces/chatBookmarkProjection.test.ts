@@ -19,7 +19,7 @@ describe("formatChatBookmarkProjection", () => {
         {
           id: "message-1",
           authorKind: "human",
-          authorDisplayName: "Ice",
+          authorDisplayName: "Sam",
           body: "Keep the individual plan simple.",
           createdAtMs: Date.UTC(2026, 6, 16, 4, 0, 0),
         },
@@ -27,7 +27,7 @@ describe("formatChatBookmarkProjection", () => {
           id: "message-2",
           parentMessageId: "message-1",
           authorKind: "agent",
-          authorDisplayName: "Ice",
+          authorDisplayName: "Sam",
           body: "I checked the assumptions.",
           createdAtMs: Date.UTC(2026, 6, 16, 4, 1, 0),
         },
@@ -39,7 +39,7 @@ describe("formatChatBookmarkProjection", () => {
     expect(text).toContain("projection_mode: live");
     expect(text).toContain("projection_state: current");
     expect(text).toContain("Saved from #product");
-    expect(text).toContain("## Ice");
+    expect(text).toContain("## Sam");
     expect(text).toContain("Reply to message message-1");
     expect(text.endsWith("\n")).toBe(true);
   });

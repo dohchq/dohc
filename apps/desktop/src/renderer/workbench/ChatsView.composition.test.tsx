@@ -132,7 +132,7 @@ describe("ChatsView My agent", () => {
     });
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
-        preferredName: "Ice",
+        preferredName: "Sam",
         agentName: "Nova",
         runnerConfigured: true,
         runnerEnabled: true,

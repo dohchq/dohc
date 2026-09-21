@@ -91,8 +91,8 @@ test("switching A->B while panels load never shows A's history or chats in B", a
             threadId: thread.id,
             author:
               index % 2 === 0
-                ? { kind: "human", displayName: "Ice de Vera" }
-                : { kind: "agent", displayName: "Ice de Vera" },
+                ? { kind: "human", displayName: "Sam Rivera" }
+                : { kind: "agent", displayName: "Sam Rivera" },
             body: `Message ${index} about doc zero.`,
           });
         }

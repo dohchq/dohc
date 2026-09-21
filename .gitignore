@@ -43,3 +43,8 @@ target-*/
 
 # Read-only external source clones for agent exploration.
 /.agent-sources/
+
+# Test TLS material minted on first use by services/share-web/src/testing/device-control/localhostTls.ts.
+/services/share-web/src/testing/device-control/localhost-cert.pem
+/services/share-web/src/testing/device-control/localhost-key.pem
+/services/share-web/src/testing/device-control/tls-*/

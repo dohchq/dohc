@@ -34,6 +34,7 @@ import {createDeviceControlBridge} from "../../../services/share-web/src/deviceC
 import {createLiveMarkdownJournalValidator,createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
 import {yDocToMarkdown} from "./import-export.js";
 import {policy} from "./liveCommittedDeliveryTestSupport.js";
+import { ensureLocalhostTls } from "../../../services/share-web/src/testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function assertIndependentRelayReader(root: string,baseline: Uint8Array,expected: Y.Doc) {
@@ -138,8 +139,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
       delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
     relay.on("upgrade",control.handleUpgrade);
-    const certificate = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-cert.pem",import.meta.url));
-    const key = fileURLToPath(new URL("../../../services/share-web/src/testing/device-control/localhost-key.pem",import.meta.url));
+    const {certificate, key} = await ensureLocalhostTls();
     const share = createTlsServer({cert: readFileSync(certificate),key: readFileSync(key)}); share.listen(0,"127.0.0.1"); await once(share,"listening");
     const sharePort = (share.address() as {port: number}).port;
     const bridge = createDeviceControlBridge({publicHosts: new Set([`localhost:${sharePort}`]),relayUrl: `http://127.0.0.1:${relayPort}`,relayExchangeKey: exchangeKey,limits,

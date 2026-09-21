@@ -63,7 +63,7 @@ describe("buildRunnerThreadContext", () => {
         messageId: "msg_1",
         nowMs: FIRST_MESSAGE_AT_MS,
         authorKind: "human",
-        authorDisplayName: "Ice",
+        authorDisplayName: "Sam",
         body: "Please audit the launch plan.\nFocus on rollback safety.",
         attachments: [
           { objectId: "object_metrics", pathHint: "data/metrics.csv" },
@@ -81,7 +81,7 @@ describe("buildRunnerThreadContext", () => {
         messageId: "msg_2",
         nowMs: FIRST_MESSAGE_AT_MS + 1_000,
         authorKind: "agent",
-        authorDisplayName: "Ice",
+        authorDisplayName: "Sam",
         body: "I found one rollback gap and documented it.",
         attachments: [{ objectId: "object_without_path" }],
       },
@@ -103,7 +103,7 @@ describe("buildRunnerThreadContext", () => {
       messages: [
         {
           id: "msg_1",
-          author: { kind: "human", displayName: "Ice" },
+          author: { kind: "human", displayName: "Sam" },
           body: "Please audit the launch plan.\nFocus on rollback safety.",
           createdAtMs: FIRST_MESSAGE_AT_MS,
           attachments: [
@@ -113,7 +113,7 @@ describe("buildRunnerThreadContext", () => {
         },
         {
           id: "msg_2",
-          author: { kind: "agent", displayName: "Ice" },
+          author: { kind: "agent", displayName: "Sam" },
           body: "I found one rollback gap and documented it.",
           createdAtMs: FIRST_MESSAGE_AT_MS + 1_000,
           attachments: [{ objectId: "object_without_path" }],

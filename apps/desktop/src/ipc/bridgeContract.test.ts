@@ -1625,7 +1625,7 @@ describe("chat IPC contract", () => {
         openingMessage: {
           id: "message-1",
           authorKind: "agent",
-          authorDisplayName: "Ice",
+          authorDisplayName: "Sam",
           createdAtMs: 1,
           bodySnippet: "Launch checks are green.",
           reactions: [
@@ -1636,7 +1636,7 @@ describe("chat IPC contract", () => {
               emoji: "👍",
               authorId: "user-1",
               authorKind: "human",
-              authorDisplayName: "Ice",
+              authorDisplayName: "Sam",
             },
           ],
         },
@@ -2464,7 +2464,7 @@ describe("menu command boundaries", () => {
 describe("workspace activated event boundary", () => {
   const activated = {
     workspaceId: "ws-123",
-    rootPath: "/home/ice/dohc",
+    rootPath: "/home/sam/dohc",
     kind: "personal",
     mode: "local-first",
   };
@@ -4259,7 +4259,7 @@ describe("a persisted share refusal stays readable", () => {
   });
   const summary = (opKind: string) => ({
     workspaceId: "ws-1",
-    rootPath: "/home/ice/dohc/shared",
+    rootPath: "/home/sam/dohc/shared",
     kind: "personal" as const,
     mode: "local-first" as const,
     shareView: {

@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, type LiveFrame,
   type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
+import {ensureLocalhostTls} from "./testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 type Ticket = {discriminator: string; token: string; expiresAtMs: number};
@@ -48,7 +49,7 @@ export async function prepareHostileRestoreProof(input: {
     const url = new URL("/api/live", audience); url.protocol = "wss:"; url.searchParams.set("session", minted.discriminator);
     const ws = new WebSocket(url, ["dohc-live-v1", `dohc-live-ticket.${minted.token}`], {
       headers: {origin: audience, cookie: cookies}, perMessageDeflate: false,
-      ca: readFileSync(new URL("./testing/device-control/localhost-cert.pem", import.meta.url)),
+      ca: readFileSync((await ensureLocalhostTls()).certificate),
     });
     sockets.add(ws);
     const protocol = createLiveFrameSession("client", frames), received: LiveFrame[] = [];

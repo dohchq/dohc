@@ -24,7 +24,7 @@ function fixture() {
   let row = { ...bookmark };
   const messages: ChatMessage[] = [{
     id: "message", workspaceId: "workspace", threadId: "thread",
-    author: { kind: "human", displayName: "Ice" }, body: "Keep this reply",
+    author: { kind: "human", displayName: "Sam" }, body: "Keep this reply",
     createdAtMs: 100, attachments: [],
   }];
   const store = {
