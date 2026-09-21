@@ -1,5 +1,6 @@
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { LocalAppBackendHost } from "./localAppBackend";
+import { OwnerAppBackendRestore } from "@dohc/cli/app-backend";
 
 /** Freeze local writes before restoring the exact snapshot to the new shared authority. */
 export async function activatePublishedAppBackend(input: {
@@ -7,6 +8,10 @@ export async function activatePublishedAppBackend(input: {
 }, local: Pick<LocalAppBackendHost, "findByDataPath" | "transfer" | "advanceSharedAuthority">,
 request: (action: "activate" | "restore" | "describe", body: unknown) => Promise<unknown>, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
+  const confirm = (value: unknown) => {
+    const result = OwnerAppBackendRestore.parse(value);
+    if (result.publicationId !== input.publicationId || result.authorityRevision !== input.authorityRevision) throw new Error("The app activation changed. Refresh its publications.");
+  };
   const capability = input.candidate.capabilities.find(capability => capability.kind === "app-backend");
   if (!capability) throw new Error("This app has no backend capability.");
   const existing = local.findByDataPath(capability.dataPath);
@@ -21,9 +26,9 @@ request: (action: "activate" | "restore" | "describe", body: unknown) => Promise
   if (existing && (!existing.sharedPublicationId || existing.sharedPublicationId === input.publicationId)) {
     const bundle = local.transfer(capability.dataPath, input.publicationId);
     signal.throwIfAborted();
-    await request("restore", { authorityRevision: input.authorityRevision, bundle });
+    confirm(await request("restore", { authorityRevision: input.authorityRevision, bundle }));
   } else {
-    await request("activate", { authorityRevision: input.authorityRevision });
+    confirm(await request("activate", { authorityRevision: input.authorityRevision }));
     signal.throwIfAborted();
     if (existing?.sharedPublicationId) local.advanceSharedAuthority(capability.dataPath, existing.sharedPublicationId, input.publicationId);
   }

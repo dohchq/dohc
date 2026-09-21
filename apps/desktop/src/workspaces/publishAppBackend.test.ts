@@ -10,7 +10,7 @@ function harness() {
   const bundle = { formatVersion: 1, snapshot: { revision: 3 } };
   const existing = { publicationId: "d".repeat(64), authorityRevision: 2, appRoot: "app", sourceRevision: "e".repeat(64), capability, active: true, revision: 3, sharedPublicationId: null as string | null };
   const local = { findByDataPath: vi.fn(() => existing as typeof existing | null), transfer: vi.fn(() => bundle as never), advanceSharedAuthority: vi.fn() };
-  const request = vi.fn(async (_action: string, _body: unknown) => ({}));
+  const request = vi.fn(async (_action: string, _body: unknown) => ({ publicationId: selection.publicationId, authorityRevision: 1, revision: 3 }));
   return { local, request, existing, bundle, signal: new AbortController().signal };
 }
 it("transfers local data before shared restore without initializing an empty database", async () => {
@@ -49,4 +49,9 @@ it("advances a shared publication mapping only after activation succeeds", async
   await activatePublishedAppBackend(selection, h.local, h.request, h.signal);
   expect(h.local.advanceSharedAuthority).toHaveBeenCalledWith("data.sqlite", "e".repeat(64), selection.publicationId);
   expect(h.local.transfer).not.toHaveBeenCalled();
+});
+it("does not confirm an activation response for a different publication", async () => {
+  const h = harness(); h.local.findByDataPath.mockReturnValue(null);
+  h.request.mockResolvedValueOnce({ publicationId: "f".repeat(64), authorityRevision: 1, revision: 3 });
+  await expect(activatePublishedAppBackend(selection, h.local, h.request, h.signal)).rejects.toThrow(/activation changed/);
 });
