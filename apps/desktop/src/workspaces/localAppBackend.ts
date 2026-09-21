@@ -66,11 +66,11 @@ export async function createLocalAppBackendHost(options: {
     catch (error) { db.exec("ROLLBACK"); throw error; }
   }
   function byPath(path: string) { return db.prepare("SELECT * FROM apps WHERE data_path=?").get(path) as State | undefined; }
-  function state(publicationId: string, authorityRevision?: number) {
+  function state(publicationId: string, authorityRevision?: number, allowSharedRead = false) {
     assertCurrent();
     const row = db.prepare("SELECT * FROM apps WHERE publication_id=?").get(publicationId) as State | undefined;
     if (!row) throw new Error("This local app publication is unavailable. Prepare the app again.");
-    if (row.shared_publication) throw new Error("This app uses its shared host. Connect to that host to read or change its current data.");
+    if (row.shared_publication && !allowSharedRead) throw new Error("This app uses its shared host. Connect to that host to change its current data.");
     if (authorityRevision !== undefined && row.authority_revision !== authorityRevision) throw new Error("The app approval changed. Reload the app.");
     return row;
   }
@@ -103,7 +103,7 @@ export async function createLocalAppBackendHost(options: {
     return files;
   }
   function description(row: State) { return { publicationId: row.publication_id, authorityRevision: row.authority_revision,
-    capability: parseAppBackendCapability(JSON.parse(row.capability)), active: true, revision: row.revision }; }
+    capability: parseAppBackendCapability(JSON.parse(row.capability)), active: !row.shared_publication, revision: row.revision }; }
 
   async function activate(prepared: Prepared, signal?: AbortSignal) {
     checkSignal(signal);
@@ -148,9 +148,10 @@ export async function createLocalAppBackendHost(options: {
     const payloadHash = hash(JSON.stringify([request.operation, request.input]));
     for (let attempt = 0; attempt < 3; attempt++) {
       checkSignal(signal);
-      const row = state(publicationId,request.authorityRevision), capability = parseAppBackendCapability(JSON.parse(row.capability));
+      const row = state(publicationId,request.authorityRevision,true), capability = parseAppBackendCapability(JSON.parse(row.capability));
       const operation = capability.operations.find(operation=>operation.name===request.operation);
       if (!operation) throw new Error("This operation was not approved for this app.");
+      if (row.shared_publication && !operation.readOnly) throw new Error("This app uses its shared host. Connect to that host to change its current data.");
       const receipt = !operation.readOnly && db.prepare("SELECT * FROM receipts WHERE data_path=? AND key=?").get(row.data_path,request.idempotencyKey);
       if (receipt) {
         if (receipt.payload_hash !== payloadHash) throw new Error("This retry key was already used for another operation.");
@@ -163,7 +164,7 @@ export async function createLocalAppBackendHost(options: {
       checkSignal(signal);
       const result = transaction(() => {
         checkSignal(signal);
-        const current = state(publicationId,request.authorityRevision);
+        const current = state(publicationId,request.authorityRevision,operation.readOnly);
         if (current.revision !== row.revision) return null;
         if (operation.readOnly) return {result:evaluated.result,revision:row.revision,replayed:false};
         const revision = row.revision + 1;
@@ -183,15 +184,16 @@ export async function createLocalAppBackendHost(options: {
 
   async function request(publicationId: string, action: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
     checkSignal(signal);
-    if (action === "describe") return description(state(publicationId));
+    if (action === "describe") return description(state(publicationId,undefined,true));
     if (action === "invoke") return invoke(publicationId,body,signal);
     const authorityRevision = (body as {authorityRevision?:unknown})?.authorityRevision;
     if (!Number.isSafeInteger(authorityRevision) || (authorityRevision as number) < 1) throw new Error("Invalid app authority revision.");
     return transaction(() => {
       checkSignal(signal);
-      const row = state(publicationId,authorityRevision as number);
+      const row = state(publicationId,authorityRevision as number, action === "export" || action === "file");
       if (action === "helper") throw new Error("Share the app before adding helpers.");
       if (action === "upload") {
+        if (row.shared_publication) throw new Error("This app uses its shared host. Connect to that host to upload files.");
         const input = parseAppBackendUploadRequest(body), bytes = Buffer.from(input.bytesBase64,"base64"), sha256 = hash(bytes);
         const existing = db.prepare("SELECT * FROM files WHERE data_path=? AND key=?").get(row.data_path,input.idempotencyKey);
         if (existing) {
@@ -224,7 +226,8 @@ export async function createLocalAppBackendHost(options: {
     has(publicationId: string) { assertCurrent(); return !!db.prepare("SELECT 1 FROM apps WHERE publication_id=?").get(publicationId); },
     list(appRoot: string) { assertCurrent(); return db.prepare("SELECT * FROM apps WHERE app_root=? ORDER BY publication_id").all(appRoot).map(record=>{
       const row = record as unknown as State;
-      return {...description(row),appRoot:row.app_root,backendCapability:JSON.parse(row.capability),sharedPublicationId:row.shared_publication};
+      return {...description(row),appRoot:row.app_root,sourceRevision:JSON.parse(row.candidate).sourceRevision,
+        backendCapability:JSON.parse(row.capability),sharedPublicationId:row.shared_publication};
     }); },
     setSharedAuthority(dataPath: string, publicationId: string) {
       if (!publicationId || publicationId.length > 128) throw new Error("Invalid shared app publication.");

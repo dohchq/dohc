@@ -98,6 +98,8 @@ describe("local app backend",()=>{
     const operation=invoke(host,publication,"order","first",{quantity:1});
     await waiting;host.setSharedAuthority("data/orders.sqlite","shared-pub");release();
     await expect(operation).rejects.toThrow(/shared host/);
+    const staleRead=await invoke(host,{...publication,authorityRevision:publication.authorityRevision+1},"list","stale-read");
+    expect(staleRead.result.rows).toHaveLength(0);
     await expect(host.activate(await prepared())).rejects.toThrow(/shared host/);
   });
   it("keeps upload retries private and attaches files in the data commit",async()=>{
