@@ -6,6 +6,7 @@ import {
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
+import { readAppBackendResponse } from "./ipc/readAppBackendResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -938,7 +939,10 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (options && "retainRestoreConflict" in options
+  const backendAction = /\/app-publications\/[a-f0-9]{64}\/backend\/([a-z]+)$/.exec(path)?.[1];
+  const data = (backendAction
+    ? await readAppBackendResponse(response, backendAction, init?.signal ?? new AbortController().signal)
+    : options && "retainRestoreConflict" in options
     ? await readOwnerRestoreResponse(response)
     : await response.json().catch(() => null)) as {
     ok?: boolean;
