@@ -4111,7 +4111,7 @@ function registerIpcHandlers(): void {
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
   const localAppLaunches = new WeakMap<LocalAppBackendHost, Promise<LocalAppLaunchHost>>();
-  const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "resources"), "app-backend-runtime", "child.mjs"));
+  const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime", "child.mjs"));
   const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
     workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
       signal.throwIfAborted(); operation.assertCurrent();
