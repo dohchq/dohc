@@ -1,5 +1,6 @@
 {
   "name": "@dohc/collection-views",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

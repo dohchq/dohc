@@ -1,5 +1,6 @@
 {
   "name": "@dohc/workspace-engine-client",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

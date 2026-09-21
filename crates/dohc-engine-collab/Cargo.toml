@@ -6,6 +6,7 @@
 # cross-engine fixtures before bumping):
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below, matching yrs-spike)
 [package]
+license.workspace = true
 name = "dohc-engine-collab"
 version.workspace = true
 # edition 2021 / rust 1.82 match the yrs-spike baseline this crate's CRDT core is

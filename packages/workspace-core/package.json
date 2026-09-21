@@ -1,5 +1,6 @@
 {
   "name": "@dohc/workspace-core",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

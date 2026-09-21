@@ -1,5 +1,6 @@
 {
   "name": "@dohc/workspace-contracts",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

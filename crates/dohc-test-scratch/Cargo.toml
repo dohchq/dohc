@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "dohc-test-scratch"
 version.workspace = true
 edition = "2024"
