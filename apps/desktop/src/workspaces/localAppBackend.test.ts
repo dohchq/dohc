@@ -26,14 +26,14 @@ const source = `globalThis.operations = {
   receipt(ctx,input) { return {fileId:input.fileId}; }
 };`;
 
-async function prepared(backendSource = source) {
+async function prepared(backendSource = source, frontendSource = "document.body.textContent='Orders';") {
   const backend = {entryPath:"app/backend.ts",schemaPath:"app/schema.sql",dataPath:"data/orders.sqlite",schemaVersion:1,
     operations:[{name:"order",access:"link",readOnly:false},{name:"list",access:"owner",readOnly:true},{name:"receipt",access:"owner",readOnly:true}],
     tables:[{name:"orders",primaryKey:"id",readOperation:"list",writeOperation:"order"}]};
   const declaration={entryPath:"app/main.ts",inputs:["app/main.ts","app/backend.ts","app/schema.sql"],packageMap:{},backend};
   const sources = new Map([
     ["app/app.publish.json",Buffer.from(JSON.stringify(declaration))],
-    ["app/main.ts",Buffer.from("document.body.textContent='Orders';")],
+    ["app/main.ts",Buffer.from(frontendSource)],
     ["app/backend.ts",Buffer.from(backendSource)], ["app/schema.sql",Buffer.from(schema)],
   ]);
   const blobs = new Map<string,Uint8Array>();
@@ -97,7 +97,9 @@ describe("local app backend",()=>{
     await expect(invoke(host,next,"order","first",{quantity:1})).rejects.toThrow(/retry key/);
     const exact=await host.activate(await prepared(source.replace("No stock remains.","All stock is reserved.")));
     const accepted=await invoke(host,exact,"order","second",{quantity:1});
-    expect(await invoke(host,await host.activate(await prepared(source.replace("No stock remains.","All stock is reserved."))),"order","second",{quantity:1})).toEqual({...accepted,replayed:true});
+    const frontendUpdate=await host.activate(await prepared(source.replace("No stock remains.","All stock is reserved."),"document.body.textContent='Updated orders';"));
+    expect(frontendUpdate.publicationId).not.toBe(exact.publicationId);
+    expect(await invoke(host,frontendUpdate,"order","second",{quantity:1})).toEqual({...accepted,replayed:true});
   });
   it("fences an in-flight local operation when the owner chooses shared authority",async()=>{
     let evaluated!:()=>void, release!:()=>void;
