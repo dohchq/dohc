@@ -4,12 +4,12 @@ import { fixture, limits, input } from "./appBackendTestFixture";
 import { createSyncRelayHandler } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 
-function httpFixture(enabled = true) {
+function httpFixture(enabled = true, maxParticipantsPerGrant?: number) {
   const f = fixture();
   const key = "app-backend-test-key", token = "A".repeat(43), profile = "P".repeat(43);
   f.storage.mintLinkSession({session: {sessionId: "http-session", capabilityHash: hashLinkBearer(token, key), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
   let authCalls = 0;
-  const handler = createSyncRelayHandler({storage: f.storage, appPublicationLimits: limits, appBackendsEnabled: enabled, nowMs: () => 10, linkKey: key,
+  const handler = createSyncRelayHandler({storage: f.storage, appPublicationLimits: limits, appBackendsEnabled: enabled, appBackendMaxParticipantsPerGrant:maxParticipantsPerGrant, nowMs: () => 10, linkKey: key,
     resolveActor: (request, workspaceId) => {
       authCalls++;
       const value = request.headers.get("authorization");
@@ -25,6 +25,17 @@ function httpFixture(enabled = true) {
   }));
   return {...f, http, handler, get authCalls() {return authCalls;}};
 }
+
+it("passes the deployment participant limit to the app host", async () => {
+  const f=httpFixture(true,1);
+  expect((await f.http("named","activate",{authorityRevision:1})).status).toBe(200);
+  expect((await f.http("link","invoke",input("write","attach",{fileIds:[]}))).status).toBe(200);
+  const token="B".repeat(43);
+  f.storage.mintLinkSession({session:{sessionId:"other-http-session",capabilityHash:hashLinkBearer(token,"app-backend-test-key"),grantId:"g",generation:1,mintedAtMs:2,expiresAtMs:1000}});
+  const other={authorization:`LinkCapability ${token}`,"x-dohc-link-profile-secret":"Q".repeat(43)};
+  expect((await f.http("link","invoke",input("second","attach",{fileIds:[]}),other)).status).toBe(413);
+  expect((await f.http("link","invoke",input("read","read"),other)).status).toBe(200);
+});
 
 it("runs public submission and private owner file management over the relay routes", async () => {
   const f = httpFixture();

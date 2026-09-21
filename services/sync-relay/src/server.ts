@@ -76,6 +76,7 @@ export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
   appCollectionPolicy?: AppCollectionPolicy;
   appBackendsEnabled?: boolean;
+  appBackendMaxParticipantsPerGrant?: number;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -162,6 +163,7 @@ export function createSyncRelayHandler({
   appPublicationLimits,
   appCollectionPolicy,
   appBackendsEnabled = false,
+  appBackendMaxParticipantsPerGrant,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -209,7 +211,7 @@ export function createSyncRelayHandler({
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   if (appBackendsEnabled && !appPublicationLimits) throw new TypeError("App backends require app publications.");
   const respondToAppBackend = appBackendsEnabled ? createAppBackendRoutes(
-    storage.createAppBackendHost({limits: appPublicationLimits!, nowMs}), storage.unavailable,
+    storage.createAppBackendHost({limits: appPublicationLimits!, nowMs, maxParticipantsPerGrant:appBackendMaxParticipantsPerGrant}), storage.unavailable,
   ) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");

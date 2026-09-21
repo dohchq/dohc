@@ -25,3 +25,11 @@ export function readAppCollectionPolicy(value: string | undefined): AppCollectio
   if (!Number.isSafeInteger(max) || max < 1) throw new Error("DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT must be 0 or a positive safe integer.");
   return { maxCreatesPerGrant: max };
 }
+
+export function readAppBackendParticipantLimit(value: string | undefined): number {
+  if (value === undefined) return 1000;
+  if (!/^[1-9]\d*$/u.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error("DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT must be a positive safe integer.");
+  }
+  return Number(value);
+}

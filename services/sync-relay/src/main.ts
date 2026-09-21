@@ -28,7 +28,7 @@ import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
-import { readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
+import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
@@ -186,6 +186,10 @@ if (process.env.DOHC_RELAY_APP_BACKENDS !== undefined && !["0", "1"].includes(pr
   fatal("FATAL: DOHC_RELAY_APP_BACKENDS must be 0 or 1.");
 }
 if (appBackendsEnabled && !appPublicationLimits) fatal("FATAL: App backends require DOHC_RELAY_APP_PUBLICATIONS=1.");
+const appBackendMaxParticipantsPerGrant = (() => {
+  try { return readAppBackendParticipantLimit(process.env.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT); }
+  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app backend participant limit"}`); }
+})();
 const appCollectionPolicy = (() => {
   try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
   catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
@@ -324,6 +328,7 @@ const relayApplication = createSyncRelayHandler({
   publicEditRelease,
   appPublicationLimits,
   appBackendsEnabled,
+  appBackendMaxParticipantsPerGrant,
   appCollectionPolicy,
 });
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
