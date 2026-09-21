@@ -91,7 +91,7 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
       return new Response(JSON.stringify(encodeBinary(result)), {headers:{...headers,"content-type":"application/json"}});
     } catch (error) {
       if (error instanceof AppBackendRuntimeError) {
-        return Response.json({ok:false,code:error.refusal.code,error:error.refusal.message}, {status:409,headers});
+        return Response.json({code:error.refusal.code,message:error.refusal.message}, {status:409,headers});
       }
       throw error;
     } finally { pending--; }
