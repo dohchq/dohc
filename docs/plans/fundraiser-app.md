@@ -1,58 +1,46 @@
 # Fundraiser as a test of dohc's direction
 
-Reader: Ice and the people implementing and verifying dohc apps, sharing, and collections.
+Reader: Ice and the people implementing and verifying the fundraiser example.
 
-Status: product direction discussed with Ice. Architecture and implementation remain undecided. Source inspection does not establish that the current product meets this target.
+The target is the complete participant and organizer flow from `C:/Users/ice/dev/mom-fundraiser`. A form that only collects responses does not prove this use case. The [example](../../examples/fundraiser/README.md) now expresses its rules through the [general app backend](app-backend.md), with synthetic event details and no real participant data or payment accounts.
 
-The [app backend proposal](app-backend.md) develops the next design step. It separates agreed product requirements from proposed storage, execution, and permission changes.
+## Agreed product target
 
-## Agreed target
+An owner already has an agent connected. They ask it to build an app, share it, and manage its data through dohc or an admin app. They need no separate per-app database, storage bucket, or hosting account. Their agent controls the schema and workflow; dohc core contains no fundraiser-specific rules.
 
-- Provide a general-purpose backend that nontechnical owners can use through their agents and dohc's interfaces. Ice's comparison is Supabase's flexibility with the accessibility of a Notion database. The fundraiser tests that capability; it does not define a fixed set of supported app types.
-- Support app-defined data, queries, relationships, permissions, files, and trusted operations. Fundraiser rules belong in the owner's app, not in dohc core. The concrete backend contracts remain to be designed.
-- Treat receipt uploads as ordinary file uploads with scoped access. Images and PDFs are examples; dohc does not need a receipt-specific storage feature. Storage may use local files or an object store, but owners should not need to configure a separate storage product for each app.
-- Use the complete flow from `C:/Users/ice/dev/mom-fundraiser` to assess dohc's direction. A form that only collects responses is not sufficient evidence for the whole use case. This is not an instruction to port the fundraiser now.
-- Start with an external agent already connected to dohc.
-- Support an owner who keeps their computer online or operates a self-hosted server. Availability while the owner's computer is off is not required for the initial computer-hosted setup.
-- Keep eventual dohc Drive hosting in scope for the product direction, without making its launch a prerequisite for this proof.
-- Prove the capabilities on a prepared self-hosted server first. Technical hosting setup is acceptable for that proof.
-- The eventual nontechnical experience assumes dohc Drive handles hosting. Owners should create, share, and manage the app through dohc and their agent without configuring a separate database or hosting provider.
-- Browser administration through a shared dohc app is an acceptable direction. Native mobile workspace management can follow later; it is not a prerequisite for assessing the architecture.
-- The collection, admin app, and agent must manage the same records under the same business rules. A direct collection edit must not bypass capacity or payment rules.
-- Prefer private participant status links over lookup by mobile number alone. Preserve payment before reservation for the initial example. Recovery and temporary reservation details are deferred.
+A prepared self-hosted server is the first proof. Keeping the owner's computer or server online is acceptable. Drive should eventually make hosting accessible to a nontechnical owner, and mobile should add another management client. Neither is required to prove the current backend. Technical self-host setup is still required; it is not evidence of the eventual managed experience.
 
-## Source inspection
+## Implemented example behavior
 
-Inspected September 21, 2026. These are source findings, not results from a running fundraiser in dohc.
+- Group registration selects one or both sessions. Each session has 36 player slots; spectators consume none. The backend computes PHP 1,000 per player and PHP 150 per spectator, per session.
+- One transaction reserves both requested sessions. Pending, verified, and pay-at-venue registrations consume capacity. Rejection releases it; restoration must reacquire capacity in every session.
+- Participants pay outside the app, then upload a private JPEG, PNG, or PDF receipt before submission. Payment alone does not reserve a slot. If capacity fills first, the organizer handles the refund or another arrangement outside dohc.
+- A private status code retrieves a registration's status and attendee names without exposing its phone number or receipt. There is no lookup by phone number alone.
+- Before submission, the frontend saves an attempt containing a submission ID, retry secret, entered details, and receipt hash. The app can recover a committed registration in another browser profile, including after reuploading the same receipt bytes. Changed details or a wrong secret refuse without revealing the registration.
+- Organizers search registrations, inspect receipts, change payment status, inspect totals and attendees, and add manual or ReClub entries. ReClub is a source label, not an integration. Manual entries can omit phone and receipt. Verifying a pay-at-venue entry requires the actual payment method.
+- Organizer access requires a named Edit grant and an owner-assigned helper designation. The owner can revoke either. Owner table edits and agent operations enforce the same status and capacity rules, including optimistic versions that refuse stale updates.
 
-The existing fundraiser supports anonymous group registrations, players and spectators, two sessions, external payment, and private receipt uploads. Organizers can review receipts, record payments, reject or restore registrations, add walk-ins, and inspect totals and attendees. Owners can invite and revoke organizers.
+The SQL tables are app data, not Markdown Collections. The desktop App data panel provides table reads and declared edits over the same operations used by the custom admin interface.
 
-The backend calculates prices and reserves up to 36 player slots per session. Every non-rejected registration consumes player capacity, including pending and pay-at-venue registrations. Rejection releases capacity; restoration checks availability. A registration covering both sessions reserves both in one transaction. Retry credentials let participants recover a submission after a lost response without duplicating it.
+## Acceptance and evidence
 
-Payments happen outside the app through GCash or bank transfer. The current app reserves slots after payment, at submission time. A participant who pays after capacity runs out must contact the organizer. Status lookup currently accepts a mobile number without verification and returns attendee names and registration details. The agreed direction above preserves the payment sequence and changes status access.
+Focused tests exercise the actual isolated runtime and the real HTTP host with synthetic databases. They cover capacity contention, both-session rollback, backend totals, status transitions, manual entries, private receipt access, retry recovery, and organizer authority. The second [stock-order example](../../examples/stock-orders/README.md) exercises different rules without a new core API.
 
-The current dohc browser app transport exposes collection listing and creation in `services/share-web/src/appCollectionBroker.ts` and `appCollectionProxy.ts`. This does not establish support for private receipt uploads, atomic capacity rules, or organizer updates. Existing collection views and app publication are useful foundations, but the complete fundraiser remains unproven.
+These checks do not substitute for a complete browser run of this fundraiser. Final acceptance must demonstrate:
 
-## What this establishes
+| Scenario | Required result |
+| --- | --- |
+| Owner creates and publishes the example | App source, operations, and private data are approved through dohc on a prepared host |
+| Participant registers one or both sessions | The displayed total matches the committed backend total and the receipt remains private |
+| Two participants claim the last capacity | Only a transaction with enough remaining capacity commits |
+| Submission response is lost | Saved-attempt recovery returns one registration, including in a fresh browser profile |
+| Participant looks up status | Their private code works; a phone number or guessed record/file ID does not expose private data |
+| Organizer verifies, rejects, restores, or enters a walk-in | Status, totals, and capacity remain consistent; stale edits refuse |
+| Owner edits through the table or agent | The same operations and rules apply |
+| Organizer access or publication is revoked | Subsequent protected requests refuse, including file reads and receipt replay |
+| Host is unavailable or restarts | Unconfirmed work does not appear accepted; committed state survives restart |
+| Owner exports and restores into an empty store | Data, files, history, and retry identities remain usable |
 
-The use case fits dohc's product commitments: source-backed apps, owner-controlled data, human and agent management, and browser sharing. Implemented publications, collection submissions, collection views, and local agent tools provide part of that foundation.
+The current status UI uses a private code and downloadable recovery file. A portable status URL is a later interface improvement. Lost recovery secrets have no automatic identity-based recovery. The backend supplies no payment processing, temporary prepayment hold, email notification, or automated refund.
 
-Drive would provide managed availability and setup. Mobile would provide another management client. Neither alone supplies private uploads, authenticated browser administration, or trusted transactions that enforce app-specific rules. Those capabilities need explicit backend design and implementation.
-
-The current browser-only app execution model and narrow create-only data contract do not express the fundraiser's backend behavior. ADR 0004 limits anonymous writes, and ADR 0006 separates app execution from the trusted sharing service. Supporting richer operations requires a deliberate design within those boundaries or a reviewed revision of them. It does not authorize running arbitrary app code inside the sharing service.
-
-Collections also need a resolved relationship with application rules. Their current validation model preserves invalid values and flags them; it is not a transaction boundary for capacity reservations. Safe owner and agent edits therefore need more than a new form over the existing fields.
-
-No new glossary term or ADR is needed yet. The product example is clear, but the backend alternatives and their trade-offs have not been decided.
-
-## Architectural questions for later work
-
-- How does an agent define trusted app operations that enforce rules across records?
-- How do collection edits and agent writes preserve those rules, including during offline work?
-- How can a public app accept private data without granting participants access to the response files?
-- How do authenticated organizers get scoped app operations and private attachment access?
-- Which services run those operations in self-hosted deployments and, later, dohc Drive?
-
-## Verification still required
-
-The eventual proof must cover the complete participant and organizer flows, retry recovery, concurrent capacity claims, private receipt access, and owner management of the same data. Explicitly test whether the form's share link can read response files outside the app's filtered data API. No running-app test has been performed in this interview.
+The architecture now supports this class of app. Declaring the complete example ready still requires the browser, desktop, and deployment acceptance evidence above. Drive, mobile, and a smoother managed setup are separate work; they do not change the transaction or permission boundary.

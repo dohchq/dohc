@@ -10,6 +10,8 @@ Before approval, the owner sees which data and operations the app receives and t
 
 Collection responses are ordinary files within the share's selector. People with that share can read each response in full, including fields omitted by the app's collection view. Collection approval must permit reading every submitted field. Private responses require an app backend whose data is separate from shared files. Filtering the collection view does not create that boundary.
 
+[ADR 0010](0010-app-backends-own-private-transactional-data.md) extends publication to pin backend code, schema, and operations alongside the frontend. The host evaluates that code in an isolated runtime and commits private transactional data. Browser networking rules above do not grant backend networking or access to host credentials.
+
 The publication pins the executable bundle. Remote script and module loading remain blocked; dependencies must be included in the approved build. This constrains browser script loading, not every possible use of fetched data by approved code. Credential isolation, origin isolation, selector containment, server authorization, and abuse budgets remain mandatory with external networking enabled.
 
 ## Why networking is not a dohc capability

@@ -93,3 +93,11 @@ _Avoid_: site, dashboard, artifact
 **Publication**:
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
+
+**App backend**:
+An app's workspace-owned private database and approved operations over that data. Its host confirms transactions; sharing the app source alone does not expose the database.
+_Avoid_: collection (that is a folder of Markdown records), session host (that holds live documents)
+
+**App operation**:
+A named action in an approved app backend with declared caller access and read or write authority. App interfaces, owner tables, and agents use the same operation to enforce its rules.
+_Avoid_: raw database edit (for a governed app change)
