@@ -20,9 +20,16 @@ export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body:
     if (ids.has(id)) {reject(429);return;}
     let encoded: string;
     try {encoded = JSON.stringify(body);} catch {reject(400);return;}
-    if (new TextEncoder().encode(encoded).byteLength > 16_384) {reject(413);return;}
+    const upload = body.op === "backend.upload", backend = typeof body.op === "string" && body.op.startsWith("backend.");
+    const requestBytes = upload ? 8 * 1024 * 1024 : backend ? 128 * 1024 : 16_384;
+    if (new TextEncoder().encode(encoded).byteLength > requestBytes) {reject(413);return;}
     const keys = Object.keys(body).sort().join();
-    if (body.op === "collection.list" ? !["id,limit,op", "afterPath,id,limit,op"].includes(keys) : body.op === "collection.create" ? keys !== "fields,id,idempotencyKey,op" : true) {reject(400);return;}
+    const valid = body.op === "collection.list" ? ["id,limit,op", "afterPath,id,limit,op"].includes(keys)
+      : body.op === "collection.create" ? keys === "fields,id,idempotencyKey,op"
+      : body.op === "backend.invoke" ? keys === "id,idempotencyKey,input,op,operation"
+      : body.op === "backend.upload" ? keys === "bytesBase64,contentType,id,idempotencyKey,name,op"
+      : body.op === "backend.file" ? keys === "fileId,id,input,op,operation" : false;
+    if (!valid) {reject(400);return;}
     const now = Date.now();tokens = Math.min(12, tokens + (now - updated) / 5000);updated = now;
     if (pending >= 4 || tokens < 1) {reject(429);return;}
     tokens--;pending++;ids.add(id);
@@ -32,7 +39,8 @@ export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body:
       if (!response.ok) {await response.body?.cancel().catch(() => {});reject([400, 404, 409, 413, 429].includes(response.status) ? response.status : 503);return;}
       const reader = response.body?.getReader();if (!reader) {reject(503);return;}
       const chunks: Uint8Array[] = [];let size = 0;
-      try {while (true) {const item = await reader.read();if (closed) return;if (item.done) break;size += item.value.byteLength;if (size > 1024 * 1024) throw Error();chunks.push(item.value);}}
+      const responseBytes = upload || body.op === "backend.file" ? 8 * 1024 * 1024 : 1024 * 1024;
+      try {while (true) {const item = await reader.read();if (closed) return;if (item.done) break;size += item.value.byteLength;if (size > responseBytes) throw Error();chunks.push(item.value);}}
       finally {await reader.cancel().catch(() => {});}
       const bytes = new Uint8Array(size);let offset = 0;for (const chunk of chunks) {bytes.set(chunk, offset);offset += chunk.byteLength;}
       const value: unknown = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes));

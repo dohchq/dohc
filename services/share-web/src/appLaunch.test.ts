@@ -4,7 +4,7 @@ import { createAppLaunchHandler } from "./appLaunch";
 import { parseAppLaunchConfig } from "./appLaunchConfig";
 const config={viewerOrigin:'https://viewer.example.com',appDomain:'example.net'},publicationId='a'.repeat(64);
 function fixture(hold:()=>Promise<void>=async()=>{}){let now=1000000,revision=1,active=true,capability="server-capability";const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
-const handler=createAppLaunchHandler({config,relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null,currentCapability:async()=>capability}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();if(r.headers.get('authorization')!==`LinkCapability ${capability}`)return new Response(null,{status:401});expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
+const handler=createAppLaunchHandler({config,relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null,currentCapability:async()=>capability}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();if(r.headers.get('authorization')!==`LinkCapability ${capability}`)return new Response(null,{status:401});expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/backend/invoke')){const body=await r.json();return body.authorityRevision===revision?Response.json({result:body.input,revision:1,replayed:false}):new Response(null,{status:404});}if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
 const request=(url:string,body:string,headers:Record<string,string>={})=>new Request(url,{method:'POST',body,headers:{host:new URL(url).host,...headers}});
 const issue=()=>handler.handle(request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{origin:config.viewerOrigin,'content-type':'application/json',cookie:'viewer=session'}));
 const redeem=(launch:{action:string;handoff:string})=>handler.handle(request(launch.action,new URLSearchParams({handoff:launch.handoff}).toString(),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded'}));
@@ -111,4 +111,31 @@ it('keeps the app alive when viewer refresh races a status request and preserves
   expect((await app.read()).status).toBe(200);
   f.advance(600000);
   expect((await app.read('/status')).status).toBe(404);
+});
+
+it('routes backend requests through the isolated launch proof and current relay authority',async()=>{
+  const f=fixture(),app=await launch(f);
+  expect(app.html).toContain("body.op.startsWith('backend.')?'/backend':'/collection'");
+  const body={id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{quantity:2}};
+  const send=(custom:Record<string,string>={},payload:unknown=body,path='/backend')=>f.handler.handle(f.request(app.origin+path,JSON.stringify(payload),{
+    origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json',...custom,
+  }));
+  const before=f.requests.length;
+  for(const custom of [{origin:'null'},{cookie:''},{'x-dohc-app-proof':''},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await send(custom)).status).toBe(404);
+  expect((await send({},body,'/backend/invoke')).status).toBe(404);
+  expect(f.requests).toHaveLength(before);
+  expect((await send({},{...body,authorityRevision:99})).status).toBe(400);
+  const response=await send();expect(response.status).toBe(200);expect(await response.json()).toEqual({result:{quantity:2},revision:1,replayed:false});
+  f.refresh();expect((await send()).status).toBe(200);expect(f.requests.at(-1)!.headers.get('authorization')).toBe('LinkCapability fresh-capability');
+  f.narrow();expect((await send()).status).toBe(404);
+  f.revoke();expect((await send()).status).toBe(404);
+});
+
+it('shares backend admission tokens with collection operations without starving status',async()=>{
+  const f=fixture(),app=await launch(f);
+  const send=(path:string,body:unknown)=>f.handler.handle(f.request(app.origin+path,JSON.stringify(body),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
+  for(let index=0;index<12;index++)expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-'+index,input:{}})).status).toBe(200);
+  expect((await send('/collection',{id:'list',op:'collection.list',limit:1})).status).toBe(503);
+  expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(503);
+  expect((await app.read('/status')).status).toBe(204);
 });
