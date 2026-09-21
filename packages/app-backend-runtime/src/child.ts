@@ -220,6 +220,17 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
   }
 }
 
-process.once("message", (request: ChildRequest) => {
-  void handle(request).then(reply => process.send!(reply, () => process.disconnect()), () => process.exit(1));
-});
+const parentPort = (process as unknown as {parentPort?: {on(event:"message",callback:(event:{data:ChildRequest | {kind:"close"}})=>void):void;postMessage(message:ChildReply):void}}).parentPort;
+if (parentPort) {
+  let started = false, completed = false;
+  parentPort.on("message", ({data}) => {
+    if (data.kind === "close") { if(completed) process.exit(0); return; }
+    if (started) return;
+    started = true;
+    void handle(data).then(reply => { completed=true;parentPort.postMessage(reply); }, () => process.exit(1));
+  });
+} else {
+  process.once("message", (request: ChildRequest) => {
+    void handle(request).then(reply => process.send!(reply, () => process.disconnect()), () => process.exit(1));
+  });
+}

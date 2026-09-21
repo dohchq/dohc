@@ -87,3 +87,8 @@ Keep this package and its QuickJS dependencies external when bundling a Node hos
 Deployment must include `dist` and the QuickJS Wasm dependency files.
 The child export resolves through the package name, so bundling the host does not change its location.
 Desktop hosts must supply a compatible child launcher instead of treating Electron's executable as Node.
+Use `createAppBackendRuntime({ launch })` to inject that launcher.
+The launcher starts the compiled `entryPath` with an empty environment and maps utility-process messages, errors, exits, and kill.
+The child accepts one request on `process.parentPort` and sends one reply.
+The utility-process adapter should send `{ kind: "close" }` after it receives the reply.
+The child exits after that close message.

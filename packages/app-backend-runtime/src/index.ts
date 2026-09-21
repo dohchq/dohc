@@ -5,49 +5,62 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.js";
-import type { AppOperationResult, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
-export type { AppOperationResult, AppOperationFile, AppOperationRefusal, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput, JsonValue, RuntimeLimits } from "./protocol.js";
+import type { AppOperationResult, AppRuntimeChild, AppRuntimeLauncher, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
+export type { AppOperationResult, AppOperationFile, AppOperationRefusal, AppRuntimeChild, AppRuntimeLaunchOptions, AppRuntimeLauncher, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput, JsonValue, RuntimeLimits } from "./protocol.js";
 export { AppBackendRuntimeError } from "./protocol.js";
 
 let active = 0;
 const MAX_ACTIVE = 8;
 
-async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSignal): Promise<AppOperationResult> {
+const nodeLauncher: AppRuntimeLauncher = options => {
+  if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--max-old-space-size=96", options.entryPath], {
+    env: options.env, cwd: options.cwd, stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true,
+  });
+  child.on("message", options.onMessage);
+  child.on("error", options.onError);
+  child.on("close", options.onExit);
+  return { postMessage(message) { child.send(message as object, error => { if(error) options.onError(error); }); }, kill() { child.kill("SIGKILL"); } };
+};
+
+export interface AppBackendRuntimeOptions { launch?: AppRuntimeLauncher }
+
+async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSignal, launch: AppRuntimeLauncher = nodeLauncher): Promise<AppOperationResult> {
   if (signal?.aborted) throw new Error("App operation was cancelled.");
   if (active >= MAX_ACTIVE) throw new Error("App runtime is busy. Try again.");
   active += 1;
   let directory: string | undefined;
   try {
     directory = await mkdtemp(join(tmpdir(), "dohc-app-operation-"));
-    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--max-old-space-size=96", fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/child"))], {
-      env: {},
-      cwd: directory,
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
-      serialization: "advanced",
-      windowsHide: true,
-    });
+    const cwd = directory;
     const reply = await new Promise<ChildReply>((resolveReply, reject) => {
       let received: ChildReply | undefined;
       let failure: Error | undefined;
-      const abort = () => { failure = new Error("App operation was cancelled."); child.kill("SIGKILL"); };
+      let child: AppRuntimeChild | undefined;
+      const abort = () => { failure = new Error("App operation was cancelled."); child?.kill(); };
       const deadline = setTimeout(() => {
         failure = new Error("App operation exceeded its deadline.");
-        child.kill("SIGKILL");
+        child?.kill();
       }, request.limits.deadlineMs);
       signal?.addEventListener("abort", abort, {once:true});
       if (signal?.aborted) abort();
-      child.once("message", message => { received = message as ChildReply; });
-      child.once("error", error => { failure ??= error; child.kill(); });
-      child.once("close", code => {
+      const onError = (error: Error) => { failure ??= error; child?.kill(); };
+      const onExit = (code: number | null) => {
         clearTimeout(deadline);
         signal?.removeEventListener("abort",abort);
         if (failure) reject(failure);
         else if (code !== 0 || !received) reject(new Error("App operation process stopped."));
         else resolveReply(received);
-      });
-      child.send({ ...request, directory }, error => {
-        if (error) { failure ??= error; child.kill(); }
-      });
+      };
+      try {
+        child = launch({entryPath:fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/child")),cwd,env:{},
+          onMessage:message=>{ received=message as ChildReply; },onError,onExit});
+        if (failure) child.kill();
+        else child.postMessage({...request,directory});
+      } catch (error) {
+        if (child) onError(error instanceof Error ? error : new Error(String(error)));
+        else { clearTimeout(deadline);signal?.removeEventListener("abort",abort);reject(error); }
+      }
     });
     if (!reply.ok) {
       if (reply.refusal) throw new AppBackendRuntimeError(reply.refusal);
@@ -68,7 +81,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
   }
 }
 
-export async function evaluateAppOperation(input: EvaluateAppOperationInput): Promise<AppOperationResult> {
+export async function evaluateAppOperation(input: EvaluateAppOperationInput, options: AppBackendRuntimeOptions = {}): Promise<AppOperationResult> {
   const limits = runtimeLimits(input.limits);
   if (!(input.database instanceof Uint8Array) || input.database.byteLength > limits.databaseBytes || input.database.byteLength < 100) throw new Error("Invalid app database snapshot.");
   if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(input.operation)) throw new Error("Invalid app operation name.");
@@ -88,18 +101,26 @@ export async function evaluateAppOperation(input: EvaluateAppOperationInput): Pr
     inputJson: boundedText(JSON.stringify(input.input), limits.inputBytes, "Operation input"),
     nowMs: input.nowMs, requestId: input.requestId, database: input.database, readOnly: input.readOnly === true,
     files: files.map(({fileId,name,contentType,byteLength,sha256})=>({fileId,name,contentType,byteLength,sha256})), secret,
-  } as Omit<ChildRequest, "directory">,input.signal);
+  } as Omit<ChildRequest, "directory">,input.signal,options.launch);
 }
 
-export async function initializeAppDatabase(input: InitializeAppDatabaseInput): Promise<Uint8Array> {
+export async function initializeAppDatabase(input: InitializeAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<Uint8Array> {
   const limits = runtimeLimits(input.limits);
   return (await run({ kind: "initialize", tables: approvedTables(input.tables), limits,
-    schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal)).database;
+    schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal,options.launch)).database;
 }
 
-export async function validateAppDatabase(input: ValidateAppDatabaseInput): Promise<void> {
+export async function validateAppDatabase(input: ValidateAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<void> {
   const limits=runtimeLimits(input.limits);
   if (!(input.database instanceof Uint8Array) || input.database.byteLength < 100 || input.database.byteLength > limits.databaseBytes) throw new Error("Invalid app database snapshot.");
   await run({kind:"validate",tables:approvedTables(input.tables),limits,database:input.database,
-    schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal);
+    schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal,options.launch);
+}
+
+export function createAppBackendRuntime(options: AppBackendRuntimeOptions = {}) {
+  return {
+    evaluateAppOperation: (input: EvaluateAppOperationInput) => evaluateAppOperation(input,options),
+    initializeAppDatabase: (input: InitializeAppDatabaseInput) => initializeAppDatabase(input,options),
+    validateAppDatabase: (input: ValidateAppDatabaseInput) => validateAppDatabase(input,options),
+  };
 }

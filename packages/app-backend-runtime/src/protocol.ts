@@ -75,6 +75,20 @@ export interface ValidateAppDatabaseInput extends InitializeAppDatabaseInput {
   database: Uint8Array;
 }
 
+export interface AppRuntimeLaunchOptions {
+  entryPath: string;
+  cwd: string;
+  env: Record<string, string>;
+  onMessage(message: unknown): void;
+  onError(error: Error): void;
+  onExit(code: number | null): void;
+}
+export interface AppRuntimeChild {
+  postMessage(message: unknown): void;
+  kill(): void;
+}
+export type AppRuntimeLauncher = (options: AppRuntimeLaunchOptions) => AppRuntimeChild;
+
 export interface AppOperationResult {
   result: JsonValue;
   database: Uint8Array;
