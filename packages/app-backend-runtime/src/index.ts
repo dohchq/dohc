@@ -75,7 +75,10 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
       if (directory) {
         const expectedParent = resolve(tmpdir());
         if (!resolve(directory).startsWith(`${expectedParent}${process.platform === "win32" ? "\\" : "/"}dohc-app-operation-`)) throw new Error("Invalid app temporary directory.");
-        await rm(directory, { recursive: true, force: true });
+        // Windows keeps the utility child cwd handle open briefly after its
+        // exit event. Retry the bounded temp cleanup instead of leaking a
+        // workspace-owned operation directory on every request.
+        await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
       }
     } finally { active -= 1; }
   }
