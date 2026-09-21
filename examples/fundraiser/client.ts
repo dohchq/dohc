@@ -76,7 +76,7 @@ export function connectBackend(): BackendPort {
         const error = data.error;
         const refusal = status === 409 && record(error) && Object.keys(error).sort().join() === "code,message" &&
           typeof error.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) &&
-          typeof error.message === "string" && error.message.length > 0 && error.message.length <= 512 && !/[\u0000-\u001f\u007f]/.test(error.message)
+          typeof error.message === "string" && error.message.length > 0 && new TextEncoder().encode(error.message).byteLength <= 1024 && !/[\u0000-\u001f\u007f]/.test(error.message)
           ? {code: error.code, message: error.message} : undefined;
         item.reject(new BackendError(status, refusal));
       }

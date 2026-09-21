@@ -584,7 +584,9 @@ function createOrganizerView(client: FundraiserClient): View {
     }
     function replaceRow(updated: RegistrationRow): void {
       const keep = filter === "all" || updated.status === filter;
-      rows = keep ? rows.map(row => row.id === updated.id ? updated : row) : rows.filter(row => row.id !== updated.id);
+      rows = keep
+        ? rows.some(row => row.id === updated.id) ? rows.map(row => row.id === updated.id ? updated : row) : [updated, ...rows]
+        : rows.filter(row => row.id !== updated.id);
       renderList();
     }
 
@@ -703,9 +705,9 @@ function createOrganizerView(client: FundraiserClient): View {
         if (active?.id !== row.id) return;
         pendingChange = null;
         const updated: RegistrationRow = { ...row, ...summary, paymentMethod: change.input.paymentMethod ?? row.paymentMethod };
-        active = updated; replaceRow(updated);
+        active = updated; replaceRow(updated); attendeesLoaded = false;
         detailNotice = { kind: "success", text: STATUS_DONE[summary.status] };
-        void refreshTotals();
+        void loadList(0); void refreshTotals();
       } catch (error) {
         if (active?.id !== row.id) return;
         if (uncertain(error)) detailNotice = { kind: "error", text: `${describe(error)} Retry sends the same change once.`, retry: true };

@@ -210,7 +210,9 @@ it("keeps readable recovery data when a download cannot start and sends nothing 
 });
 
 it("changes a registration status with its expected version and updates the list", async () => {
-  const client = fakeClient({ listRegistrations: vi.fn<FundraiserClient["listRegistrations"]>(async () => ({ records: [row], nextOffset: null })) });
+  const client = fakeClient({ listRegistrations: vi.fn<FundraiserClient["listRegistrations"]>()
+    .mockResolvedValueOnce({ records: [row], nextOffset: null })
+    .mockResolvedValue({ records: [], nextOffset: null }) });
   mount(client);
   fireEvent.click(screen.getByRole("button", { name: "Organizer" }));
   fireEvent.click(await screen.findByRole("button", { name: "Ana Cruz" }));
@@ -221,4 +223,5 @@ it("changes a registration status with its expected version and updates the list
   expect(within(dialog).getByText("No longer in the pending verification list.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Ana Cruz" })).toBeNull();
   expect(client.totals).toHaveBeenCalledTimes(2);
+  expect(client.listRegistrations).toHaveBeenCalledTimes(2);
 });

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { actualFundraiserFixture, syntheticReceipt, viewerOrigin } from "./actualFundraiserFixture";
 
+// This Windows browser proof uses PowerShell 7 to create its temporary TLS certificate.
 test("actual fundraiser registers guests and organizers manage the same private database", async ({}, info) => {
   test.setTimeout(120_000);
   const f=await actualFundraiserFixture(),failures:string[]=[];
@@ -99,7 +100,13 @@ $cert.Dispose();$rsa.Dispose()`;
     await expect(dialog.getByText("Moved back to pending verification.")).toBeVisible();
     expect((await f.ownerRead("listPublicSessions")).result[0].available).toBe(35);
     await dialog.getByRole("button",{name:"Close",exact:true}).click();
+    await expect(admin.getByRole("button",{name:"Synthetic Contact",exact:true})).toBeVisible();
     await organizer.screenshot({path:info.outputPath("fundraiser-organizer-desktop.png")});
+    await admin.getByRole("button",{name:"Synthetic Contact",exact:true}).click();
+    await dialog.getByRole("button",{name:"Verify payment",exact:true}).click();
+    await expect(dialog.getByText("Payment verified.",{exact:true})).toBeVisible();
+    expect((await f.ownerRead("listPublicSessions")).result[0].available).toBe(35);
+    await dialog.getByRole("button",{name:"Close",exact:true}).click();
     await admin.getByRole("tab",{name:"Add entry",exact:true}).click();
     await admin.getByLabel("Full name",{exact:true}).fill("Venue Friend");
     await admin.getByRole("radio",{name:"Spectator",exact:true}).check();
