@@ -5,6 +5,7 @@ import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { chatAuthorLabel, MessageReactions, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
+import { useId } from "react";
 
 // A post in a group's feed. Drawn like a social card: who, where, when; the
 // title or the text; then one row of reactions, Comment, Save as file. The
@@ -48,11 +49,14 @@ export function ActionButton(props: {
   disabled?: boolean;
   onClick: () => void;
 }) {
+  // The pinned label stays the name; the count describes it.
+  const countId = useId();
   return (
     <button
       type="button"
       data-testid={props.testId}
       aria-pressed={props.active}
+      aria-describedby={props.count ? countId : undefined}
       disabled={props.disabled}
       onClick={(event) => {
         event.stopPropagation();
@@ -67,7 +71,7 @@ export function ActionButton(props: {
       {props.icon}
       <span className="sr-only">{props.label}</span>
       {props.count ? (
-        <span className="font-mono text-[11px] font-normal tabular-nums text-subtle">{props.count}</span>
+        <span id={countId} className="font-mono text-[11px] font-normal tabular-nums text-subtle">{props.count}</span>
       ) : null}
     </button>
   );
@@ -113,9 +117,7 @@ export function PostCard(props: {
   reactionControls: ChatReactionControls;
   onOpen: () => void;
   // Where the post lives, shown under the author when the list spans groups.
-  // With onOpenGroup the label opens that group.
   groupLabel?: string;
-  onOpenGroup?: () => void;
   bookmark?: ChatBookmarkRecord;
   bookmarkBusy?: boolean;
   onToggleBookmark?: (mode: "live" | "snapshot") => void;
@@ -184,18 +186,7 @@ export function PostCard(props: {
               ) : null}
             </span>
             <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-              {props.groupLabel && props.onOpenGroup ? (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    props.onOpenGroup?.();
-                  }}
-                  className="truncate rounded font-mono text-[11px] transition-colors duration-75 hover:text-ink dohc-focus-visible"
-                >
-                  {props.groupLabel}
-                </button>
-              ) : props.groupLabel ? (
+              {props.groupLabel ? (
                 <span className="truncate font-mono text-[11px]">{props.groupLabel}</span>
               ) : null}
               {props.groupLabel ? <span aria-hidden>·</span> : null}

@@ -340,6 +340,7 @@ function NavRow(props: {
 function SectionActionButton(props: {
   testId?: string;
   label: string;
+  disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -349,8 +350,9 @@ function SectionActionButton(props: {
       data-testid={props.testId}
       aria-label={props.label}
       title={props.label}
+      disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-line/50 hover:text-ink dohc-focus-visible"
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-40"
     >
       {props.children}
     </button>
@@ -3433,7 +3435,7 @@ export function ChatsView(props: {
           testId="chats-feed"
           onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
-          description="Posts and comments from your groups, newest first"
+          description="Posts and comments from your groups and files, newest first"
         />
         <PostFeedList
           key={`${workspaceId}:home`}
@@ -3523,6 +3525,9 @@ export function ChatsView(props: {
                   : fileThread?.path
                     ? basenameOf(fileThread.path)
                     : item.thread.title;
+                // A group's label opens the group; DMs, agents and files open the item.
+                const groupChannel =
+                  item.channel && item.channel.kind === "channel" ? item.channel : null;
                 const open = () => {
                   if (!item.channel) {
                     props.onOpenFileChat(fileThread!, item.message.id);
@@ -3592,7 +3597,30 @@ export function ChatsView(props: {
                             {chatAuthorLabel(item.message)}
                           </span>
                           <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-                            <span className="truncate font-mono text-[11px]">{where}</span>
+                            {groupChannel ? (
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openConversation({
+                                    level: "channel",
+                                    channel: {
+                                      ...groupChannel,
+                                      wireId: groupChannel.wireId,
+                                      createdAtMs: 0,
+                                      updatedAtMs: 0,
+                                      threadCount: 0,
+                                      unreadCount: 0,
+                                    },
+                                  });
+                                }}
+                                className="truncate rounded font-mono text-[11px] transition-colors duration-75 hover:text-ink dohc-focus-visible"
+                              >
+                                {where}
+                              </button>
+                            ) : (
+                              <span className="truncate font-mono text-[11px]">{where}</span>
+                            )}
                             <span aria-hidden>·</span>
                             <time dateTime={time.iso} title={time.iso} className="shrink-0">
                               {time.label}
@@ -4144,10 +4172,12 @@ export function ChatsView(props: {
                   ))}
                 </div>
               ) : null}
+              {/* Presence is a live status region, so it stays beside the
+                  members control rather than inside the button. */}
+              <PresenceFaces
+                others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
+              />
               {canShare ? (
-                // One control: who is here now, how many have access, and the
-                // member list behind it. The faces stay live presence; the
-                // grant avatars stand in until someone else arrives.
                 <button
                   type="button"
                   data-testid="chats-share-channel"
@@ -4156,9 +4186,7 @@ export function ChatsView(props: {
                   onClick={() => setSharePanelOpen((open) => !open)}
                   className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
                 >
-                  {presence.others.length > 0 ? (
-                    <PresenceFaces others={presence.others} />
-                  ) : channelGrants.length > 0 ? (
+                  {channelGrants.length > 0 ? (
                     <span className="flex items-center -space-x-1.5">
                       {channelGrants.slice(0, 3).map((grant) => (
                         <ChatAvatar
@@ -4175,11 +4203,7 @@ export function ChatsView(props: {
                   )}
                   {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
                 </button>
-              ) : (
-                <PresenceFaces
-                  others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
-                />
-              )}
+              ) : null}
             </>
           }
         />
@@ -4510,6 +4534,7 @@ export function ChatsView(props: {
             <SectionActionButton
               testId="chats-new-channel"
               label="New group"
+              disabled={creatingChannel !== null}
               onClick={() => setCreatingChannel("")}
             >
               <Plus size={12} aria-hidden />

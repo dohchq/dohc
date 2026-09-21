@@ -60,6 +60,7 @@ function RunLine(props: { run: ChatRunRecord }) {
   return (
     <div
       data-testid="chats-run-line"
+      role="status"
       data-state={endedAtMs === undefined ? "running" : failed ? "failed" : "done"}
       className="mt-1 flex items-center gap-2 px-2 text-[11px] text-subtle"
     >

@@ -32,6 +32,7 @@ export function AgentPresenceHint(props: {
   return (
     <span
       data-testid={props.testId}
+      role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
       className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-subtle"

@@ -314,6 +314,9 @@ export function ChatLane(props: {
         renderMessageFooter={renderMessageFooter}
         firstUnreadMessageId={firstUnreadMessageId}
       />
+      <span role="status" aria-live="polite" className="sr-only">
+        {newCount > 0 ? `${newCount} ${newCount === 1 ? "new message" : "new messages"}` : ""}
+      </span>
       {newCount > 0 ? (
         <div className="relative h-0">
           <button

@@ -522,7 +522,7 @@ export function MentionComposer(props: {
               <AtSign size={14} strokeWidth={1.9} aria-hidden />
               Mention
             </button>
-            {props.fileCandidates ? (
+            {props.fileCandidates?.length ? (
               <button
                 type="button"
                 aria-label="Attach a file"
@@ -586,7 +586,7 @@ export function MentionComposer(props: {
               @
             </span>
           </button>
-          {props.fileCandidates ? (
+          {props.fileCandidates?.length ? (
             <button
               type="button"
               aria-label="Attach a file"

@@ -266,8 +266,12 @@ describe("ChatLane", () => {
     expect(divider.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("m2");
     // The read cursor moves after the paint; the divider stays for this visit.
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3, lastReadSequence: 3, unreadCount: 0 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "m1", body: "Seen" }), message({ id: "m2", body: "First unread after refresh" }), message({ id: "m3", body: "Second unread" }),
+    ] });
     bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
     await act(async () => activity({ workspaceId: "workspace-a" }));
+    await screen.findByText("First unread after refresh");
     expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
   });
 
