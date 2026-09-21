@@ -163,8 +163,9 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       if (!value.capability.operations.some(operation => !operation.readOnly && canInvokeAppBackendOperation(value.caller, operation))) throw notFound();
       return value;
     });
+    const uploadedAt = nowMs();
     return stageAppBackendFile(storage, {...scope(value), caller: value.receiptCaller, idempotencyKey: parsed.idempotencyKey,
-        name: parsed.name, contentType: parsed.contentType, content, nowMs: nowMs(), expiresAtMs: nowMs() + 86_400_000,
+        name: parsed.name, contentType: parsed.contentType, content, nowMs: uploadedAt, expiresAtMs: uploadedAt + 86_400_000,
         authorize() { current(auth, value, signal); }});
   }
   async function readFile(auth: AppBackendAuth, publicationId: string, input: AppBackendReadFileRequest, signal?: AbortSignal) {
