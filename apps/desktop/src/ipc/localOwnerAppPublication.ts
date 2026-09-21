@@ -12,14 +12,22 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
   flushCapture(workspace: Workspace): Promise<void>;
   withAdapter<T>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
+  launchLocal?(workspace: Workspace, publicationId: string, signal: AbortSignal): Promise<string>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareLocalAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; workspaceId: string; callerKey: string; scope: string; signal: AbortSignal; digest: string; clear(): void }>();
   const preparing = new Set<string>();
   return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null> => {
-    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "approve" && input.action !== "cancel") return null;
+    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
+    if (input.action === "launchLocal") {
+      if (!deps.launchLocal) throw new Error("Local app launch is unavailable. Restart dohc and try again.");
+      const url = await deps.launchLocal(operation.workspace, input.publicationId, operation.signal); current();
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || !parsed.port || parsed.username || parsed.password) throw new Error("The local app launcher returned an invalid address.");
+      return OwnerAppPublicationResult.parse({ kind: "localLaunched", publicationId: input.publicationId, url });
+    }
     if (input.action === "approve" || input.action === "cancel") {
       const entry = pending.get(input.approvalId);
       if (!entry) return null;

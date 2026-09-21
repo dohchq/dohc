@@ -23,6 +23,7 @@ const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
 export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("listLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
   z.object({ action: z.literal("prepareLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
+  z.object({ action: z.literal("launchLocal"), workspaceId: id, publicationId: hash }).strict(),
   z.object({ action: z.literal("list"), workspaceId: id, appRoot: z.string().min(1).max(1024), cursor: hash.optional() }).strict(),
   z.object({ action: z.literal("prepare"), workspaceId: id, appRoot: z.string().min(1).max(1024), shareId: id, grantId: id }).strict(),
   z.object({ action: z.literal("approve"), workspaceId: id, approvalId: z.string().uuid(), candidateDigest: hash, initialize: z.boolean().optional() }).strict(),
@@ -33,6 +34,7 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
 ]);
 export type OwnerAppPublicationRequest = z.infer<typeof OwnerAppPublicationRequest>;
 export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
   z.object({ kind: z.literal("localListed"), publications: z.array(z.object({ publicationId: hash,
     authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash,
     backendCapability: OwnerAppBackendCapability, active: z.boolean() }).strict()).max(64) }).strict(),

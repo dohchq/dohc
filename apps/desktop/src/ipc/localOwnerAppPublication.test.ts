@@ -17,7 +17,8 @@ function harness() {
   const activate = vi.fn(async () => ({ publicationId: hash, authorityRevision: 1, capability, active: true, revision: 1 }));
   const local = { activate, list: vi.fn(() => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, backendCapability: capability, sharedPublicationId: null, capability, active: true, revision: 1 }]) };
   const localForWorkspace = vi.fn(async () => local);
-  const handler = createLocalOwnerAppPublicationHandler({ localForWorkspace,
+  const launchLocal = vi.fn(async () => "http://127.0.0.1:43210/bootstrap#handoff");
+  const handler = createLocalOwnerAppPublicationHandler({ localForWorkspace, launchLocal,
     flushCapture: vi.fn(async () => {}), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
   const prepare = async () => {
@@ -25,7 +26,7 @@ function harness() {
     if (result?.kind !== "prepared") throw new Error("Expected preparation.");
     return result;
   };
-  return { controller, operation, activate, localForWorkspace, handler, prepare };
+  return { controller, operation, activate, localForWorkspace, launchLocal, handler, prepare };
 }
 afterEach(() => vi.clearAllMocks());
 describe("local app publication review", () => {
@@ -52,5 +53,15 @@ describe("local app publication review", () => {
     const review = await h.prepare();
     expect(await h.handler({ action: "cancel", workspaceId: "w", approvalId: review.approvalId }, "caller", h.operation)).toEqual({ kind: "cancelled" });
     expect(h.activate).not.toHaveBeenCalled();
+  });
+  it("launches only a loopback approved publication and refuses a late result", async () => {
+    const h = harness();
+    const request = { action: "launchLocal" as const, workspaceId: "w", publicationId: hash };
+    expect(await h.handler(request, "caller", h.operation)).toEqual({ kind: "localLaunched", publicationId: hash, url: "http://127.0.0.1:43210/bootstrap#handoff" });
+    expect(h.launchLocal).toHaveBeenCalledWith(h.operation.workspace, hash, h.controller.signal);
+    h.launchLocal.mockResolvedValueOnce("https://outside.example/app");
+    await expect(h.handler(request, "caller", h.operation)).rejects.toThrow(/invalid address/);
+    h.launchLocal.mockImplementationOnce(async () => { h.controller.abort(); return "http://127.0.0.1:43210/bootstrap#handoff"; });
+    await expect(h.handler(request, "caller", h.operation)).rejects.toThrow();
   });
 });

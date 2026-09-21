@@ -46,7 +46,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       const local = await dependencies.localPublication?.(input, callerKey, operation);
       operation.assertCurrent(); operation.signal.throwIfAborted();
       if (local) return local;
-      if (input.action === "prepareLocal" || input.action === "listLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
+      if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
       const remote = await dependencies.remoteForWorkspace(operation.workspace);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();

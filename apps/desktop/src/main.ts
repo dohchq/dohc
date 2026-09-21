@@ -21,6 +21,7 @@ import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from
 import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
+import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { activatePublishedAppBackend } from "./workspaces/publishAppBackend";
 import { createDesktopAppBackendRuntime } from "./workspaces/localAppBackendRuntime";
 import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
@@ -4109,6 +4110,7 @@ function registerIpcHandlers(): void {
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
+  const localAppLaunches = new WeakMap<LocalAppBackendHost, Promise<LocalAppLaunchHost>>();
   const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "resources"), "app-backend-runtime", "child.mjs"));
   const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
     workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
@@ -4131,6 +4133,19 @@ function registerIpcHandlers(): void {
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
       ...ownerPublicationDependencies, localForWorkspace,
+      launchLocal: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+        signal.throwIfAborted(); operation.assertCurrent();
+        const backend = await localForWorkspace(workspace, signal);
+        let pending = localAppLaunches.get(backend);
+        if (!pending) {
+          pending = createLocalAppLaunchHost({ backend, lifetime: operation.signal });
+          localAppLaunches.set(backend, pending);
+          void pending.catch(() => localAppLaunches.delete(backend));
+        }
+        const launcher = await pending;
+        signal.throwIfAborted(); operation.assertCurrent();
+        return launcher.launch(publicationId, signal);
+      }),
     });
   const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
     const backend = candidate.capabilities.find(capability => capability.kind === "app-backend");
