@@ -16,7 +16,7 @@ members = [
     "crates/dohc-engine-sync",
     "crates/dohc-engine-sync-http",
     "crates/dohc-workspace-engine",
-    "crates/yrs-spike",
+    "crates/yrs-interop",
     "fuzz/dohc-fuzz-targets",
 ]
 exclude = [
@@ -36,7 +36,7 @@ file-guard = { path = "vendor/file-guard-0.2.0" }
 
 # Shared package metadata. Members opt in per field via `field.workspace = true`.
 # `edition` is intentionally NOT centralized here: dohc-engine-protocol is
-# edition 2024 while yrs-spike is pinned to edition 2021 (its yrs 0.27.3
+# edition 2024 while yrs-interop is pinned to edition 2021 (its yrs 0.27.3
 # baseline), so each crate declares its own edition.
 [workspace.package]
 version = "0.1.0"

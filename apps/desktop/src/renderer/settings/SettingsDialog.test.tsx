@@ -19,8 +19,8 @@ import { deferred } from "../../testing/deferred";
 
 const config = {
   command: "dohc-mcp",
-  args: ["--workspace", "/home/ice/dohc/personal", "--home", "/state/home"],
-  workspacePath: "/home/ice/dohc/personal",
+  args: ["--workspace", "/home/sam/dohc/personal", "--home", "/state/home"],
+  workspacePath: "/home/sam/dohc/personal",
   home: "/state/home",
 };
 
@@ -443,15 +443,15 @@ describe("SettingsDialog", () => {
       "You",
     );
     expect(screen.queryByText("Launch behavior")).toBeNull();
-    await user.type(input, "Ice");
+    await user.type(input, "Sam");
     expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
-      "Ice",
+      "Sam",
     );
     await user.tab();
 
     await waitFor(() =>
       expect(bridge.setUserSettings).toHaveBeenCalledWith({
-        settings: expect.objectContaining({ profile: { preferredName: "Ice" } }),
+        settings: expect.objectContaining({ profile: { preferredName: "Sam" } }),
       }),
     );
   });
@@ -535,7 +535,7 @@ describe("SettingsDialog", () => {
     render(
       <SettingsDialog
         workspaceId="ws-1"
-        workspacePath="/home/ice/dohc/personal"
+        workspacePath="/home/sam/dohc/personal"
         initialSection="agents"
         onClose={() => {}}
       />,
@@ -545,7 +545,7 @@ describe("SettingsDialog", () => {
     // The snippet is the literal config the user pastes into their AI tool.
     expect(snippet.textContent).toContain('"mcpServers"');
     expect(snippet.textContent).toContain("dohc-mcp");
-    expect(snippet.textContent).toContain("/home/ice/dohc/personal");
+    expect(snippet.textContent).toContain("/home/sam/dohc/personal");
     // Usage examples are present.
     expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
     expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();

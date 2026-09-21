@@ -20,21 +20,21 @@ describe("read-only agent detection", () => {
   it("finds native installs outside PATH and supports POSIX paths", () => {
     expect(agentExecutableCandidates("claude", fixture())).toContain("C:\\Users\\ice\\.local\\bin\\claude.EXE");
     expect(agentExecutableCandidates("opencode", fixture())).toContain("C:\\Users\\ice\\AppData\\Roaming\\npm\\opencode.CMD");
-    const posix = fixture({ platform: "darwin", home: "/Users/ice", env: { PATH: ".:/opt/bin" } });
+    const posix = fixture({ platform: "darwin", home: "/Users/sam", env: { PATH: ".:/opt/bin" } });
     expect(agentExecutableCandidates("codex", posix)).toContain("/opt/homebrew/bin/codex");
-    expect(agentExecutableCandidates("cursor", posix)).toContain("/Users/ice/.local/bin/agent");
+    expect(agentExecutableCandidates("cursor", posix)).toContain("/Users/sam/.local/bin/agent");
     expect(agentExecutableCandidates("codex", posix)).not.toContain("codex");
   });
   it("finds POSIX user installs and explicit version-manager locations without a shell", async () => {
-    const deps = fixture({ platform: "linux", home: "/home/ice", workspaceRoot: "/work/project",
-      env: { PATH: "", NVM_BIN: "/home/ice/.nvm/versions/node/v24/bin", VOLTA_HOME: "/opt/volta" },
-      isExecutable: (path) => path === "/home/ice/.npm-global/bin/claude" });
+    const deps = fixture({ platform: "linux", home: "/home/sam", workspaceRoot: "/work/project",
+      env: { PATH: "", NVM_BIN: "/home/sam/.nvm/versions/node/v24/bin", VOLTA_HOME: "/opt/volta" },
+      isExecutable: (path) => path === "/home/sam/.npm-global/bin/claude" });
     const candidates = agentExecutableCandidates("claude", deps);
-    expect(candidates).toContain("/home/ice/.volta/bin/claude");
-    expect(candidates).toContain("/home/ice/.npm-global/bin/claude");
-    expect(candidates).toContain("/home/ice/.nvm/versions/node/v24/bin/claude");
+    expect(candidates).toContain("/home/sam/.volta/bin/claude");
+    expect(candidates).toContain("/home/sam/.npm-global/bin/claude");
+    expect(candidates).toContain("/home/sam/.nvm/versions/node/v24/bin/claude");
     expect(candidates).toContain("/opt/volta/bin/claude");
-    expect((await probeAgentTools(deps))[0].executable).toBe("/home/ice/.npm-global/bin/claude");
+    expect((await probeAgentTools(deps))[0].executable).toBe("/home/sam/.npm-global/bin/claude");
     expect(deps.run).toHaveBeenCalledTimes(2);
   });
   it.each([

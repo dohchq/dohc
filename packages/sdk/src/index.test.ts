@@ -144,7 +144,7 @@ describe("@dohc/sdk", () => {
     });
 
     await expect(
-      client.files.read("/Users/ice/private.md"),
+      client.files.read("/Users/sam/private.md"),
     ).rejects.toMatchObject({
       code: DohcSdkErrorCodes.invalidInput,
       message: "File paths must be workspace-relative. Absolute paths are not allowed.",
@@ -155,7 +155,7 @@ describe("@dohc/sdk", () => {
       code: DohcSdkErrorCodes.invalidInput,
     });
     await expect(
-      client.files.read("file:///Users/ice/private.md"),
+      client.files.read("file:///Users/sam/private.md"),
     ).rejects.toMatchObject({
       code: DohcSdkErrorCodes.invalidInput,
     });

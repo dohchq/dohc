@@ -17,7 +17,7 @@ vi.mock("../bridge", () => ({
 
 const FILLED_SETTINGS = {
   ...DEFAULT_USER_SETTINGS,
-  profile: { preferredName: "Ice", agentName: "Nova" },
+  profile: { preferredName: "Sam", agentName: "Nova" },
   runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs" },
 };
 

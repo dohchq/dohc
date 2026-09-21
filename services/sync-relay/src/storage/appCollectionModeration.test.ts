@@ -100,6 +100,6 @@ function fixture() {
   const owner={workspaceId:"w",publicationId:publication.publicationId,ownerUserId:"owner",limits};
   storage.approveAppCollection({...owner,expectedAuthorityRevision:1,capability});
   storage.mintLinkSession({session:{sessionId:"session",capabilityHash:"session-secret-hash",grantId:"g",generation:1,mintedAtMs:2,expiresAtMs:10000}});
-  const input:AcceptAppCollectionInput={publicationId:publication.publicationId,capabilityHash:"session-secret-hash",profileTokenHash:"profile-secret-hash",nowMs:20,limits,expectedAuthorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Ice"}};
+  const input:AcceptAppCollectionInput={publicationId:publication.publicationId,capabilityHash:"session-secret-hash",profileTokenHash:"profile-secret-hash",nowMs:20,limits,expectedAuthorityRevision:2,idempotencyKey:"vote-1",fields:{destination:"Tokyo",name:"Sam"}};
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }

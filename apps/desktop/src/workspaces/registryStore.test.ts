@@ -45,7 +45,7 @@ let registryPath: string;
 
 const personal = {
   workspaceId: "ws-1",
-  rootPath: "/home/ice/dohc/personal",
+  rootPath: "/home/sam/dohc/personal",
   kind: "personal" as const,
   mode: "local-first" as const,
 };
@@ -615,7 +615,7 @@ describe("registry store", () => {
   it("rejects a second root carrying an already-registered workspace identity", () => {
     store.register(personal);
     expect(() =>
-      store.register({ ...personal, rootPath: "/home/ice/dohc/personal-copy" }),
+      store.register({ ...personal, rootPath: "/home/sam/dohc/personal-copy" }),
     ).toThrow(/identity .* already attached|already attached .* identity/i);
   });
 
@@ -784,7 +784,7 @@ describe("registry store", () => {
     const secondWorkspace = {
       ...personal,
       workspaceId: "ws-2",
-      rootPath: "/home/ice/dohc/second",
+      rootPath: "/home/sam/dohc/second",
     };
     const joined = {
       shareId: "share-1",

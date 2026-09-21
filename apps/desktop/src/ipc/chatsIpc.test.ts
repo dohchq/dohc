@@ -31,7 +31,7 @@ function fixture(kind: ScopeKind = "local") {
   };
   const message: ChatMessage = {
     id: "message", workspaceId: workspace.workspaceId, threadId: thread.id,
-    author: { kind: "human", displayName: "Ice" }, body: "A reply", createdAtMs: 3, attachments: [],
+    author: { kind: "human", displayName: "Sam" }, body: "A reply", createdAtMs: 3, attachments: [],
   };
   const bookmark: ChatBookmark = {
     bookmarkId: "bookmark", workspaceId: workspace.workspaceId, ownerUserId: "owner", targetKind: "thread",
@@ -134,7 +134,7 @@ function fixture(kind: ScopeKind = "local") {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor,
     findWorkspace: () => workspace,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
-    warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Ice",
+    warmCredentialCache, localUserId: () => "owner", localUserDisplayName: () => "Sam",
     localReactorFallbackId: () => "local-owner", currentCredentials: () => null,
     verifiedChatAuthorUserIdFor, revalidateChatWrite,
     chatRelayIdentityFor,
@@ -184,7 +184,7 @@ describe("the personal feed names each item's viewer", () => {
     const test = fixture();
     const reaction = (threadId: string, messageId: string, authorId: string) => ({
       reactionId: `reaction-${messageId}-${authorId}`, threadId, messageId,
-      emoji: "👍", author: { authorId, kind: "human" as const, displayName: "Ice" },
+      emoji: "👍", author: { authorId, kind: "human" as const, displayName: "Sam" },
       state: "added" as const, atMs: 4,
     });
     const item = (threadId: string, messageId: string, authorId: string) => ({
@@ -292,7 +292,7 @@ describe("registered chat write gates", () => {
     expect(test.revalidateChatWrite).toHaveBeenCalledWith(test.workspace, { threadId: "thread" }, "verified-owner", expect.anything());
     expect(test.storeMethods.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", body: "Hello",
-      author: { kind: "human", displayName: "Ice" }, authorUserId: "verified-owner",
+      author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
       attachments: [{ objectId: "object", pathHint: "notes/a.md" }],
     });
     expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);
@@ -314,7 +314,7 @@ describe("registered chat write gates", () => {
     expect(await test.invoke(CHANNELS.setChatReaction, mutations[3].payload)).toMatchObject({ viewerAuthorId: "local-owner" });
     expect(test.storeMethods.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
-      author: { authorId: "local-owner", kind: "human", displayName: "Ice" },
+      author: { authorId: "local-owner", kind: "human", displayName: "Sam" },
     });
   });
 });
@@ -373,7 +373,7 @@ describe("registered channels and personal chat projections", () => {
     expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
-    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Ice" }, authorUserId: "verified-owner" });
+    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner" });
     expect(test.desktopChatBookmarks.materializePendingChatBookmarks).toHaveBeenCalledWith(test.workspace, test.capture);
   });
 

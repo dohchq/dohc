@@ -106,7 +106,7 @@ function registerChatFlowHandlers(
       run: async ({ store }, input) =>
         await store.startChannelThread({
           ...input,
-          author: { kind: "human", displayName: "Ice" },
+          author: { kind: "human", displayName: "Sam" },
         }),
     }),
   );
@@ -132,7 +132,7 @@ function registerChatFlowHandlers(
       run: async ({ store }, input) =>
         await store.sendMessage({
           ...input,
-          author: { kind: "human", displayName: "Ice" },
+          author: { kind: "human", displayName: "Sam" },
         }),
     }),
   );
@@ -210,7 +210,7 @@ function registerChatFlowHandlers(
           author: {
             authorId: "local-user",
             kind: "human",
-            displayName: "Ice",
+            displayName: "Sam",
           },
         }),
       syncJoinedChannels: () => undefined,

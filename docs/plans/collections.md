@@ -2,6 +2,8 @@
 
 Reader: the agent or person implementing the collections program, one phase at a time. Each phase names what it builds, what it must settle first, and the gate that ends it. Do not start a phase before its predecessor's gate passes.
 
+Status: complete. Every phase shipped and passed its gate. The file stays as the record of the settled decisions.
+
 The vocabulary is in `CONTEXT.md` (Collections section) and the load-bearing decision is `docs/adr/0007`. Design summary in one paragraph: a collection is a folder whose `collection.yaml` schema file types its md-file records; each record's properties live in the frontmatter Y.Map of its live document and its body is the document itself, so sync, merge, and attribution ride the existing `ydoc.update` path; the engine validates against the schema, indexes frontmatter into engine.db for queries, and derives per-field history and events by diffing the map at apply; views (table, board, calendar) ship built into the desktop app and through the SDK as the same components; automations are event-triggered plugins and arrive last.
 
 ## Product bar

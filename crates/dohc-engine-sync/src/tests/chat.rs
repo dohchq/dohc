@@ -1298,7 +1298,7 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
             "threadId": "late-thread",
             "authorKind": "agent",
             "authorDisplayName": "Nova",
-            "authorOwnerDisplayName": "Ice",
+            "authorOwnerDisplayName": "Sam",
             "authorUserId": "ice",
             "body": "@agent arrived first",
             "createdAtMs": 30
@@ -1375,7 +1375,7 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
             "@agent arrived first".to_owned(),
             "Nova\nNova (agent)\n@agent arrived first".to_owned(),
             0,
-            "Ice".to_owned()
+            "Sam".to_owned()
         ),
         "missing-thread refusal loses the message instead of replaying it"
     );
@@ -3796,7 +3796,7 @@ fn replicated_untitled_thread_indexes_its_first_message_snippet() {
             "messageId": "snippet-message",
             "threadId": "snippet-thread",
             "authorKind": "human",
-            "authorDisplayName": "Ice",
+            "authorDisplayName": "Sam",
             "body": "First replicated snippet\nwith more detail",
             "createdAtMs": 20
         }),

@@ -46,7 +46,7 @@ Only the controlled loopback `DOHC_UPDATE_URL` is added.
 `--profile-renderer true` records diagnostic switch CPU profiles.
 `--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.
 Main profiling must produce a log matching the recorded main PID. Profiled runs are marked diagnostic in summaries.
-Keep them separate from unprofiled comparisons. `packaged-host-load.ps1` captures host counters without process command lines.
+Keep them separate from unprofiled comparisons.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, and summary checks.
 These tests also run through the canonical root test command. They do not launch the GUI workload.
@@ -148,32 +148,3 @@ scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
 
-## Measure relay catch-up and reconnect
-
-Run the network benchmark from an otherwise idle Windows machine.
-Prepare the debug engine with `node scripts/verification/build.mjs --engine-only`.
-Then run this command from the repository root:
-
-```powershell
-$env:DOHC_TEST_ENGINE_BINARY = "$PWD/target/debug/dohc-workspace-engine.exe"
-node --import ./services/sync-relay/node_modules/tsx/dist/loader.mjs tools/perf-profiling/run-network-bench.mts --output test-results/network-bench
-```
-
-The benchmark uses two real daemons and a real relay with HTTP and test authentication.
-It does not verify production TLS, login, or a deployed relay.
-The runner verifies the selected engine against the checkout's preparation receipt.
-
-Each case seeds 1,000 text files of about 8 KiB each.
-The cases measure an unshaped connection, a constrained connection, and recovery after an interrupted pull.
-The constrained cases add 40 ms to each response and share a 10 Mbit/s downstream budget.
-This response shaping does not simulate packet-level latency or loss.
-
-The reconnect case returns HTTP 503 for one blob request, restarts the reader, and resumes the pull.
-Every case checks all file bytes on disk and in the reopened store.
-It also checks an empty pull after restart and delivery of a subsequent edit.
-The catch-up timer includes materialization and cursor persistence.
-
-Add `--tiny` for a six-file plumbing check.
-Read `network-bench.json` for timings, request counts, fixture hashes, build provenance, and assertion results.
-Tiny results and debug timings do not establish release performance.
-Run `node --test tools/perf-profiling/network-proxy.test.mjs` after changing the proxy.

@@ -84,7 +84,7 @@ if (phase === "prepare") {
       mintedAtMs: 2, expiresAtMs: 10_000}});
     const input: AcceptAppCollectionInput = {publicationId: publication.publicationId, capabilityHash: "session-hash",
       profileTokenHash: "profile-hash", nowMs: 20, limits, expectedAuthorityRevision: 2, idempotencyKey: "vote-1",
-      fields: {destination: "Tokyo", name: "Ice"}};
+      fields: {destination: "Tokyo", name: "Sam"}};
     await snapshot("before-acceptance.sqlite");
     const receipt = storage.acceptAppCollection(input, {maxCreatesPerGrant: 1});
     const envelopes = storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: 0, limit: 10}).rows

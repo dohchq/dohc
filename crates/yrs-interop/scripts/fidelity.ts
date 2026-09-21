@@ -12,7 +12,7 @@
 // Plus: state vectors agree semantically, cross diffs are no-ops, and a yrs
 // merge_updates of the whole log reconstructs the same content (compaction).
 //
-// Usage: pnpm --filter @dohc/yrs-spike-scripts fidelity [-- --require-harvested]
+// Usage: pnpm --filter @dohc/yrs-interop-scripts fidelity [-- --require-harvested]
 // Harvested fixtures are optional for a dev run (scripts/harvest.mjs
 // produces them); certification runs must pass --require-harvested so the
 // real-lineage half of criterion 1 cannot silently drop out.
@@ -557,7 +557,7 @@ if (!harvestedPresent) {
   );
 }
 if (caveats.length > 0) {
-  console.warn(`\n${caveats.length} known-caveat divergence(s) (nested frontmatter Any::Map key order — see SPIKE_REPORT.md):`);
+  console.warn(`\n${caveats.length} known-caveat divergence(s) (nested frontmatter Any::Map key order — see README.md):`);
   for (const c of caveats) console.warn(`  - ${c}`);
 }
 if (failures.length > 0) {

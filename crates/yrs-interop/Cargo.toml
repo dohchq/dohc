@@ -7,7 +7,7 @@
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below)
 [package]
 license.workspace = true
-name = "dohc-yrs-spike"
+name = "dohc-yrs-interop"
 version.workspace = true
 # edition/rust-version stay pinned to this crate's yrs 0.27.3 spike baseline
 # (not inherited from the workspace, which centralizes edition 2024 members).

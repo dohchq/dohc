@@ -34,15 +34,15 @@ describe("ChatAvatar hue", () => {
   it("hashes the display name to a stable hue", () => {
     expect(identityHue("user-1")).toBe(identityHue("user-1"));
     expect(IDENTITY_HUES).toContain(identityHue("user-1"));
-    render(<ChatAvatar name="Ice" kind="human" />);
+    render(<ChatAvatar name="Ada" kind="human" />);
     render(<ChatAvatar name="Nova" kind="human" />);
-    expect(screen.getByTitle("Ice").className).toContain(`text-hue-${identityHue("Ice")}`);
+    expect(screen.getByTitle("Ada").className).toContain(`text-hue-${identityHue("Ada")}`);
     expect(screen.getByTitle("Nova").className).toContain(`text-hue-${identityHue("Nova")}`);
   });
 
   it("spreads people across the hues", () => {
     const hues = new Set(
-      ["Ice", "Nova", "Sam", "Priya", "Lena", "Omar", "Kai", "Yuki", "Ana", "Theo"].map(identityHue),
+      ["Ada", "Nova", "Sam", "Priya", "Lena", "Omar", "Kai", "Yuki", "Ana", "Theo"].map(identityHue),
     );
     expect(hues.size).toBeGreaterThan(4);
   });

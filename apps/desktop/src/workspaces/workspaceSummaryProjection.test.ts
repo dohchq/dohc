@@ -12,7 +12,7 @@ import {
 const entry = (extra: Record<string, unknown> = {}): RegistryEntry =>
   ({
     workspaceId: "ws-1",
-    rootPath: "/home/ice/dohc/ws",
+    rootPath: "/home/sam/dohc/ws",
     kind: "personal",
     mode: "local-first",
     ...extra,

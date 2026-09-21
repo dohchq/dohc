@@ -592,7 +592,7 @@ export function MessageReactions(props: {
           disabled={props.controls.readOnly}
           // The emoji glyph is aria-hidden, so without this the button announces
           // as just its count. Expose emoji + count + reactor names, e.g.
-          // "👍 3 — Ice, Nova".
+          // "👍 3 — Sam, Nova".
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}

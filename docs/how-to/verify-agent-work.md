@@ -93,4 +93,4 @@ Use `--tiny` to check the harness; use the full fixture for performance claims.
 
 ## Finish the task
 
-Follow the [cleanup skill](../../.agents/skills/workspace-cleanup/SKILL.md). Keep verification evidence until review finishes.
+Keep verification evidence until review finishes, then remove the task worktree, its build targets, and the evidence.

@@ -108,13 +108,13 @@ describe("desktop user settings model", () => {
 
     const named = DesktopUserSettings.parse({
       ...DEFAULT_USER_SETTINGS,
-      profile: { preferredName: "  Ice de Vera  " },
+      profile: { preferredName: "  Sam Rivera  " },
     });
-    expect(named.profile.preferredName).toBe("Ice de Vera");
+    expect(named.profile.preferredName).toBe("Sam Rivera");
     expect(
       DesktopUserSettings.safeParse({
         ...DEFAULT_USER_SETTINGS,
-        profile: { preferredName: "Ice\u0000Admin" },
+        profile: { preferredName: "Sam\u0000Admin" },
       }).success,
     ).toBe(false);
 

@@ -37,7 +37,7 @@ describe("live linked chat store real daemon", () => {
         const started = await store.startChannelThread({
           workspaceId: workspace.workspaceId,
           channelId: channel.id,
-          author: { kind: "human", displayName: "Ice" },
+          author: { kind: "human", displayName: "Sam" },
           body: "First message",
         });
         const reply = await store.sendMessage({

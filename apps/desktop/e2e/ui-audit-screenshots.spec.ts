@@ -71,7 +71,7 @@ async function writeCaptureManifest(): Promise<void> {
 
 const RICH_DOC = `---
 status: In progress
-owner: Ice
+owner: Sam
 release: September launch
 ---
 
@@ -90,9 +90,9 @@ polish, collaboration, and making the editor feel effortless.
 
 | Workstream | Owner | Status |
 | --- | --- | --- |
-| Editor polish | Ice | In progress |
+| Editor polish | Sam | In progress |
 | Sync relay | Agent | Shipping |
-| Apps preview | Ice | Planned |
+| Apps preview | Sam | Planned |
 
 ### Launch checklist
 
@@ -117,7 +117,7 @@ See [[research/competitors]] for the landscape review and
 
 const MEETING_DOC = `# Weekly sync — 2026-07-08
 
-Attendees: Ice, flagship agent
+Attendees: Sam, flagship agent
 
 ## Decisions
 

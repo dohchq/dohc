@@ -276,7 +276,7 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
         threadId: "thread-race",
         messageId: "message-race",
         authorKind: "human",
-        authorDisplayName: "Ice",
+        authorDisplayName: "Sam",
         body: "Race archive against restore",
         nowMs: 10_002,
       },

@@ -3531,7 +3531,7 @@ async fn named_chat_lists_page_without_losing_rows() {
                 "threadId": thread_id,
                 "messageId": message_id,
                 "authorKind": "human",
-                "authorDisplayName": "Ice",
+                "authorDisplayName": "Sam",
                 "body": thread_id,
                 "nowMs": now_ms,
             }),
