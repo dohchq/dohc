@@ -1,0 +1,22 @@
+{
+  "entryPath": "stock-orders/backend.ts",
+  "schemaPath": "stock-orders/schema.sql",
+  "dataPath": "stock-orders/data.sqlite",
+  "schemaVersion": 1,
+  "operations": [
+    {"name": "listItems", "access": "link", "readOnly": true},
+    {"name": "placeOrder", "access": "link", "readOnly": false},
+    {"name": "listOrders", "access": "helper", "readOnly": true},
+    {"name": "listOrderItems", "access": "helper", "readOnly": true},
+    {"name": "setStatus", "access": "helper", "readOnly": false},
+    {"name": "updateOrder", "access": "helper", "readOnly": false},
+    {"name": "tableItems", "access": "owner", "readOnly": true},
+    {"name": "tableOrders", "access": "owner", "readOnly": true},
+    {"name": "tableOrderItems", "access": "owner", "readOnly": true}
+  ],
+  "tables": [
+    {"name": "items", "primaryKey": "id", "readOperation": "tableItems", "writeOperation": null},
+    {"name": "orders", "primaryKey": "id", "readOperation": "tableOrders", "writeOperation": "updateOrder"},
+    {"name": "order_items", "primaryKey": "id", "readOperation": "tableOrderItems", "writeOperation": null}
+  ]
+}

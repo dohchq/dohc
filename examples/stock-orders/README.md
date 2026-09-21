@@ -14,8 +14,15 @@ Cancelling an order returns its stock. Restoring it requires enough stock for ev
 Both paths require the expected row version.
 
 [schema.sql](schema.sql) defines `items`, `orders`, and `order_items`, each with an explicit primary key named `id`.
-Publish declarations should expose `listItems` and `placeOrder` to link callers.
-The other operations require helper access. Only `placeOrder`, `setStatus`, and `updateOrder` write data.
+[backend.publish.json](backend.publish.json) is the backend declaration to place under `backend` in an app's `app.publish.json`.
+It uses workspace-relative paths under `stock-orders`. Add the backend, schema, and your own frontend to that app's declared inputs.
+`listItems` and `placeOrder` allow link callers; management operations require helper access.
+Only `placeOrder`, `setStatus`, and `updateOrder` write data.
+
+Owner tables use `tableItems`, `tableOrders`, and `tableOrderItems`.
+They accept `offset`, `limit` (1–100), and `search`, and return `{ rows, total }` with a filtered total.
+Search matches literal substrings in IDs and text fields, ignoring ASCII case; `%` and `_` are ordinary characters.
+Pagination runs in SQL. Existing public and organizer list operations retain their original result shapes.
 
 The shared runtime test proves atomic reservation, cancellation, restoration, stale update rejection, and private order lists:
 

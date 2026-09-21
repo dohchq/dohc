@@ -13,6 +13,22 @@
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) invalid(ctx, "The page is invalid.");
     return {limit, offset};
   }
+  function search(ctx, input) {
+    const value = input.search === undefined ? "" : input.search;
+    if (typeof value !== "string" || value.length > 100) invalid(ctx, "The search is invalid.");
+    return value;
+  }
+  function tablePage(ctx, input, table, columns, searchColumns, order) {
+    organizer(ctx); object(ctx, input);
+    const {limit, offset} = page(ctx, input);
+    const term = search(ctx, input);
+    const where = term ? " WHERE " + searchColumns.map(column => "instr(lower(" + column + "), lower(?)) > 0").join(" OR ") : "";
+    const params = term ? searchColumns.map(() => term) : [];
+    return {
+      rows: ctx.db.query("SELECT " + columns + " FROM " + table + where + " ORDER BY " + order + " LIMIT ? OFFSET ?", [...params, limit, offset]),
+      total: ctx.db.query("SELECT COUNT(*) AS total FROM " + table + where, params)[0].total,
+    };
+  }
   function listItems(ctx) {
     return ctx.db.query("SELECT id,name,price_cents AS priceCents,remaining FROM items ORDER BY id LIMIT 100");
   }
@@ -75,5 +91,16 @@
     if (input.field !== "status") invalid(ctx, "Use the status action to update an order.");
     return setStatus(ctx, {id: input.rowId, status: input.value, expectedVersion: input.expectedVersion});
   }
-  globalThis.operations = {listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder};
+  function tableItems(ctx, input) {
+    return tablePage(ctx, input, "items", "id,name,price_cents AS priceCents,remaining", ["id", "name"], "id");
+  }
+  function tableOrders(ctx, input) {
+    return tablePage(ctx, input, "orders", "id,customer_name AS customerName,status,total_cents AS totalCents,version,created_at_ms AS createdAtMs",
+      ["id", "customer_name", "status"], "created_at_ms DESC,id DESC");
+  }
+  function tableOrderItems(ctx, input) {
+    return tablePage(ctx, input, "order_items", "id,order_id AS orderId,item_id AS itemId,quantity,unit_price_cents AS unitPriceCents",
+      ["id", "order_id", "item_id"], "id");
+  }
+  globalThis.operations = {listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder, tableItems, tableOrders, tableOrderItems};
 }());
