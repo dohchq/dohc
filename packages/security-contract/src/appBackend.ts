@@ -11,6 +11,7 @@ export const APP_BACKEND_REQUEST_BYTES = 128 * 1024;
 export const APP_BACKEND_RESULT_BYTES = 1024 * 1024;
 export const APP_BACKEND_UPLOAD_BYTES = 5 * 1024 * 1024;
 export const APP_BACKEND_UPLOAD_REQUEST_BYTES = 8 * 1024 * 1024;
+export const APP_BACKEND_REFUSAL_BYTES = 8 * 1024;
 export const APP_BACKEND_JSON_MAX_DEPTH = 32;
 export const APP_BACKEND_JSON_MAX_NODES = 16_384;
 
@@ -62,6 +63,15 @@ export interface AppBackendFile {
   contentType: string;
   byteLength: number;
   sha256: string;
+}
+export interface AppBackendRefusal { code: string; message: string }
+
+export function parseAppBackendRefusal(value: unknown): AppBackendRefusal {
+  const row = record(value);
+  if (Object.keys(row).sort().join() !== "code,message" || typeof row.code !== "string" ||
+    !/^[a-z][a-z0-9_]{0,63}$/.test(row.code) || row.code.includes("\n") ||
+    typeof row.message !== "string" || bytes(row.message) > 1024) throw new Error("Invalid app refusal.");
+  return { code: row.code, message: row.message };
 }
 
 const encoder = new TextEncoder();

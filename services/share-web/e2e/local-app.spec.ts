@@ -13,16 +13,17 @@ import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps
 const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const dataPath = "data/orders.sqlite";
 const frontend = `
-const root=document.getElementById('root');root.innerHTML='<h1>Local orders</h1><button id="order">Save order</button><button id="list">List orders</button><button id="receipt">Read receipt</button><p id="result" role="status">Connecting</p>';
+const root=document.getElementById('root');root.innerHTML='<h1>Local orders</h1><button id="order">Save order</button><button id="list">List orders</button><button id="receipt">Read receipt</button><button id="full">Check capacity</button><p id="result" role="status">Connecting</p>';
 let port;const result=document.getElementById('result');let pending=new Map();
 const send=body=>new Promise(resolve=>{pending.set(body.id,resolve);port.postMessage(body);});
 addEventListener('message',event=>{if(event.data?.kind!=='dohc-app-channel')return;port=event.ports[0];port.onmessage=event=>{pending.get(event.data.id)?.(event.data);pending.delete(event.data.id);};port.start();result.textContent='Ready';},{once:true});
 document.getElementById('order').onclick=async()=>{const upload=await send({id:'upload',op:'backend.upload',idempotencyKey:'receipt-1',name:'receipt.pdf',contentType:'application/pdf',bytesBase64:'JVBERg=='});if(!upload.ok){result.textContent='Access ended';return;}const saved=await send({id:'order',op:'backend.invoke',operation:'order',idempotencyKey:'order-1',input:{fileId:upload.value.file.fileId}});result.textContent=JSON.stringify(saved);};
+document.getElementById('full').onclick=async()=>{result.textContent=JSON.stringify(await send({id:'full',op:'backend.invoke',operation:'order',idempotencyKey:'full-1',input:{refuse:true}}));};
 document.getElementById('list').onclick=async()=>{result.textContent=JSON.stringify(await send({id:'list',op:'backend.invoke',operation:'list',idempotencyKey:'list-1',input:{}}));};
 document.getElementById('receipt').onclick=async()=>{const listed=await send({id:'files',op:'backend.invoke',operation:'list',idempotencyKey:'list-2',input:{}});if(!listed.ok){result.textContent='Access ended';return;}const fileId=listed.value.result.rows[0].file_id;result.textContent=JSON.stringify(await send({id:'receipt',op:'backend.file',fileId,operation:'receipt',input:{fileId}}));};
 `;
 const backendSource = `globalThis.operations={
-order(ctx,input){ctx.db.execute('INSERT INTO orders VALUES(?,?)',[ctx.requestId,input.fileId]);ctx.files.attach(input.fileId);return {saved:true};},
+order(ctx,input){if(input.refuse)ctx.refuse('capacity_full','This session is full.');ctx.db.execute('INSERT INTO orders VALUES(?,?)',[ctx.requestId,input.fileId]);ctx.files.attach(input.fileId);return {saved:true};},
 list(ctx){return {rows:ctx.db.query('SELECT * FROM orders ORDER BY id')};},
 receipt(ctx,input){const rows=ctx.db.query('SELECT file_id FROM orders WHERE file_id=?',[input.fileId]);if(!rows.length)ctx.refuse('missing','Receipt unavailable.');return {fileId:rows[0].file_id};}
 };`;
@@ -89,6 +90,14 @@ test("local app works without an account, survives restart, and stops at shared 
     const listed = JSON.parse(await status.innerText()); expect(listed.value.result.rows).toHaveLength(1);
     await app.getByRole("button", { name: "Read receipt" }).click();
     await expect(status).toContainText('"bytesBase64":"JVBERg=="');
+    await app.getByRole("button", { name: "Check capacity" }).click();
+    await expect(status).toContainText('"error":{"code":"capacity_full","message":"This session is full."}');
+    for (let count = 0; count < 17; count++) {
+      const tab = await context.newPage(), launch = await launcher.launch(publication.publicationId, lifetime.signal);
+      await tab.goto(launch); await expect(tab.frameLocator("iframe").getByRole("status")).toHaveText("Ready");
+      await tab.close({ runBeforeUnload: true });
+      await expect.poll(async () => { try { await fetch(new URL(launch).origin + "/bootstrap"); return false; } catch { return true; } }).toBe(true);
+    }
     backend.setSharedAuthority(dataPath, "shared-publication");
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"ok":false');

@@ -48,7 +48,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
   const stagedSlots = new Set<Launch>();
   const issueRate = new TokenBucketLimiter(12, 0.2, 2048), sessionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES);
-  const collectionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES); let pending = 0, statusPending = 0, collectionPending = 0;
+  const collectionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES), backendRate = new TokenBucketLimiter(30, 0.5, MAX_LAUNCHES); let pending = 0, statusPending = 0, collectionPending = 0;
   const hostPattern = new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`);
   const appHost = (host: string) => hostPattern.test(host);
   async function fetchForLaunch(launch: Pick<Launch, "material">, request: Request) {
@@ -173,7 +173,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         const cookies = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
         const cookie = cookies.length === 1 ? cookies[0]!.slice(COOKIE.length + 1) : "", proof = request.headers.get("x-dohc-app-proof") ?? "";
         if (!launch.cookieHash || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash || !TOKEN.test(proof) || hash(proof) !== launch.proofHash || request.headers.get("origin") !== launch.origin) return refusal();
-        if (!(collectionRequest ? collectionRate : sessionRate).allow(host, now())) return unavailable();
+        if (!(url.pathname === "/backend" ? backendRate : collectionRequest ? collectionRate : sessionRate).allow(host, now())) return unavailable();
         if (url.pathname === "/collection" && !namedMaterial(launch.material)) return await forwardAppCollection({request,relayUrl:options.relayUrl,publicationId:launch.publicationId,
           authorityRevision:launch.revision,capability:launch.material.capabilityToken,profileSecret:launch.material.profileSecret,signal,fetchRelay:request => fetchForLaunch(launch, request)});
         if (url.pathname === "/backend") return await forwardAppBackend({request,relayUrl:options.relayUrl,publicationId:launch.publicationId,

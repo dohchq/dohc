@@ -131,10 +131,11 @@ it('routes backend requests through the isolated launch proof and current relay 
   f.revoke();expect((await send()).status).toBe(404);
 });
 
-it('shares backend admission tokens with collection operations without starving status',async()=>{
+it('bounds backend workflow bursts without changing collection or status admission',async()=>{
   const f=fixture(),app=await launch(f);
   const send=(path:string,body:unknown)=>f.handler.handle(f.request(app.origin+path,JSON.stringify(body),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
-  for(let index=0;index<12;index++)expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-'+index,input:{}})).status).toBe(200);
+  for(let index=0;index<30;index++)expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-'+index,input:{}})).status).toBe(200);
+  for(let index=0;index<12;index++)await send('/collection',{id:'list',op:'collection.list',limit:1});
   expect((await send('/collection',{id:'list',op:'collection.list',limit:1})).status).toBe(503);
   expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(503);
   expect((await app.read('/status')).status).toBe(204);

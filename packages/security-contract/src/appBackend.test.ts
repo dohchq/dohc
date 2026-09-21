@@ -3,9 +3,18 @@ import {
   APP_BACKEND_INPUT_BYTES, APP_BACKEND_JSON_MAX_DEPTH, APP_BACKEND_JSON_MAX_NODES,
   APP_BACKEND_MAX_OPERATIONS, APP_BACKEND_MAX_TABLES, APP_BACKEND_UPLOAD_BYTES,
   canInvokeAppBackendOperation, parseAppBackendCaller, parseAppBackendCapability,
-  parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
+  parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest, parseAppBackendRefusal,
   type AppBackendCaller, type AppBackendCapability,
 } from "./appBackend";
+
+it("accepts only bounded safe app refusal fields", () => {
+  const refusal = {code:"capacity_full",message:"This session is full."};
+  expect(parseAppBackendRefusal(refusal)).toEqual(refusal);
+  for (const value of [{...refusal,stack:"private"},{...refusal,code:"full\n"},{...refusal,message:"é".repeat(513)},{code:"",message:""}]) {
+    expect(() => parseAppBackendRefusal(value)).toThrow();
+  }
+  expect(parseAppBackendRefusal({code:"full",message:"é".repeat(512)}).message).toHaveLength(512);
+});
 
 function capability(): AppBackendCapability {
   return {

@@ -1,7 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import {
-  APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES,
-  parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
+  APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, APP_BACKEND_REFUSAL_BYTES,
+  parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest, parseAppBackendRefusal,
 } from "@dohc/security-contract/app-backend";
 
 const responseHeaders = { "cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff" };
@@ -51,6 +51,11 @@ export async function forwardAppBackend(input: {
     }));
   } catch { return error(503); }
   try {
+    if (relay.status === 409 && !relay.redirected && !relay.headers.has("location") && relay.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+      const refusal = parseAppBackendRefusal(await readBoundedJson(relay, APP_BACKEND_REFUSAL_BYTES, input.signal));
+      input.signal.throwIfAborted();
+      return Response.json(refusal, { status: 409, headers: responseHeaders });
+    }
     if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return error(relay.status === 401 || relay.status === 403 ? 404 : [400, 404, 409, 413, 429].includes(relay.status) ? relay.status : 503);
     const value = await readBoundedJson(relay, action === "file" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_RESULT_BYTES, input.signal);
     if (!record(value)) return error(503);

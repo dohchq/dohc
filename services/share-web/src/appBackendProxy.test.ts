@@ -95,3 +95,17 @@ it("bounds relay bodies and refuses a response after launch cancellation", async
   const response = await forward(invoke, async () => { controller.abort(); return Response.json({ result: null, revision: 1, replayed: false }); }, "application/json", controller.signal);
   expect(response.status).toBe(503);
 });
+
+it("passes only bounded typed app refusals while discarding private or malformed error details", async () => {
+  const refusal = { code: "capacity_full", message: "This session is full." };
+  const response = await forward(invoke, async () => Response.json(refusal, { status: 409 }));
+  expect(response.status).toBe(409); expect(await response.json()).toEqual(refusal);
+  for (const invalid of [{ ...refusal, stack: "private" }, { code: "private\n", message: "bad" }, { code: "full", message: "x".repeat(1025) }, { error: "private" }]) {
+    const hidden = await forward(invoke, async () => Response.json(invalid, { status: 409 }));
+    expect(hidden.status).toBe(503); expect(await hidden.text()).toBe("");
+  }
+  expect((await forward(invoke, async () => Response.json({ code: "full", message: "x".repeat(9000) }, { status: 409 }))).status).toBe(503);
+  const controller = new AbortController();
+  const stale = await forward(invoke, async () => { controller.abort(); return Response.json(refusal, { status: 409 }); }, "application/json", controller.signal);
+  expect(stale.status).toBe(503);
+});

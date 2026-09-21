@@ -40,10 +40,11 @@ it('uses bounded file budgets without widening operation replies',async()=>{
     expect((await f.request({id:'oversize',op:'backend.upload',idempotencyKey:'upload-2',name:'file',contentType:'application/pdf',bytesBase64:'A'.repeat(8*1024*1024)})).status).toBe(413);
   }finally{f.close();}
 });
-it('charges backend uploads against the same request tokens as collection operations',async()=>{
+it('bounds backend workflow bursts while preserving the collection budget',async()=>{
   const f=harness();
   try{
-    for(let index=0;index<12;index++)expect((await f.request({id:'u'+index,op:'backend.upload',idempotencyKey:'upload-'+index,name:'file',contentType:'application/pdf',bytesBase64:'JVBERg=='})).ok).toBe(true);
+    for(let index=0;index<30;index++)expect((await f.request({id:'u'+index,op:'backend.upload',idempotencyKey:'upload-'+index,name:'file',contentType:'application/pdf',bytesBase64:'JVBERg=='})).ok).toBe(true);
+    for(let index=0;index<12;index++)expect((await f.request({id:'c'+index,op:'collection.list',limit:1})).ok).toBe(true);
     expect((await f.request({id:'list',op:'collection.list',limit:1})).status).toBe(429);
     expect((await f.request({id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}})).status).toBe(429);
   }finally{f.close();}
@@ -76,4 +77,14 @@ it('bounds reply bytes and cancels unread error bodies',async()=>{
   const f=harness(async()=>responses.shift()!);
   try{expect(await f.request({id:'large',op:'collection.list',limit:1})).toEqual({id:'large',ok:false,status:503});expect(await f.request({id:'error',op:'collection.list',limit:1})).toEqual({id:'error',ok:false,status:404});expect(cancelled).toBe(true);}
   finally{f.close();}
+});
+
+it('returns safe app refusal text and hides invalid backend errors',async()=>{
+  const values=[{code:'full',message:'This session is full.'},{code:'full',message:'private',stack:'secret'},{code:'full',message:'x'.repeat(8193)}];
+  const f=harness(async()=>Response.json(values.shift(),{status:409}));
+  try{
+    const request={op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
+    expect(await f.request({...request,id:'safe'})).toEqual({id:'safe',ok:false,status:409,error:{code:'full',message:'This session is full.'}});
+    for(const id of ['private','large'])expect(await f.request({...request,id})).toEqual({id,ok:false,status:503});
+  }finally{f.close();}
 });

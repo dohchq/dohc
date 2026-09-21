@@ -1,16 +1,20 @@
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
 
 const publicationId = "a".repeat(64);
 const hosts: LocalAppLaunchHost[] = [];
-afterEach(async () => { await Promise.all(hosts.splice(0).map(host => host.close())); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(hosts.splice(0).map(host => host.close())); });
 async function fixture() {
   const lifetime = new AbortController(), session = new AbortController();
   let revision = 1, shared = false;
   const bytes = Buffer.from("document.getElementById('root').textContent='Approved app';");
   const backend = {
+    assertBrowserPublication: vi.fn((id: string, expected: number) => {
+      if (id !== publicationId || shared || expected !== revision) throw Error("Unavailable publication");
+    }),
     browserPublication: vi.fn((id: string) => {
       if (id !== publicationId || shared) throw Error("Unavailable publication");
       return { publicationId, authorityRevision: revision, appRoot: "app", files: [{ path: "bundle.js", contentType: "text/javascript; charset=utf-8", sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, bytes }] };
@@ -103,4 +107,36 @@ it("limits abandoned staging and stops all launch listeners with workspace lifet
   await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow("Close another app");
   f.lifetime.abort(); await f.host.close();
   await expect(fetch(f.origin + "/bootstrap")).rejects.toThrow();
+});
+
+it("releases an authenticated closed launch and never lets another origin close it", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  expect((await f.post("/close", undefined, { ...headers, origin: "null" })).status).toBe(404);
+  expect((await f.post("/close")).status).toBe(404);
+  expect((await f.post("/status", undefined, headers)).status).toBe(204);
+  expect((await f.post("/close", undefined, headers)).status).toBe(204);
+  await expect.poll(async () => { try { return (await fetch(f.origin + "/bootstrap")).status; } catch { return null; } }).toBeNull();
+});
+
+it("renews a short active lease and expires a launch after its browser disappears", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+  now += 80_000;
+  expect((await f.post("/status", undefined, headers)).status).toBe(204);
+  now += 80_000;
+  expect((await f.post("/status", undefined, headers)).status).toBe(204);
+  now += 90_001;
+  expect((await f.post("/backend", invoke, headers)).status).toBe(404);
+  expect(f.backend.request).not.toHaveBeenCalled();
+});
+
+it("returns only validated app refusals after rechecking current authority", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  f.backend.request.mockRejectedValue(new AppBackendRuntimeError({ code: "full", message: "This session is full." }));
+  const response = await f.post("/backend", invoke, headers);
+  expect(response.status).toBe(409); expect(await response.json()).toEqual({ code: "full", message: "This session is full." });
+  f.backend.request.mockRejectedValue(new Error("private implementation failure"));
+  const internal = await f.post("/backend", invoke, headers); expect(internal.status).toBe(404); expect(await internal.text()).toBe("");
+  f.backend.request.mockImplementation(async () => { f.narrow(); throw new AppBackendRuntimeError({ code: "full", message: "Private data after revocation" }); });
+  const stale = await f.post("/backend", invoke, headers); expect(stale.status).toBe(404); expect(await stale.text()).toBe("");
 });
