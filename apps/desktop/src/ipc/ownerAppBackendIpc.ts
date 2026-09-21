@@ -18,13 +18,13 @@ export function createRemoteAppBackendTransport(input: {
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration, currentGeneration: input.currentCredentialGeneration, assertCurrent() {} });
   return { assertCurrent: session.assertCurrent, request: (publicationId, action, body, signal) => session.run(() => input.relayJson(input.credentials,
     `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${publicationId}/backend/${action}`,
-    { method: action === "describe" ? "GET" : "POST", signal, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })) };
+    { method: "POST", signal, body: JSON.stringify(action === "describe" || action === "export" ? {} : body ?? {}) })) };
 }
 
 export function createOwnerAppBackendHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends { workspace: Workspace; signal: AbortSignal; assertCurrent(): void }>(deps: {
   withWorkspaceOperation<T>(caller: Caller, workspaceId: string, work: (operation: Operation) => Promise<T>): Promise<T>;
   transportForWorkspace(workspace: Workspace, publicationId: string, signal: AbortSignal): Promise<OwnerAppBackendTransport>;
-  saveExport(workspace: Workspace, publicationId: string, bundle: unknown, signal: AbortSignal, destination?: { path: string; overwrite: boolean }): Promise<string>;
+  saveExport(workspace: Workspace, publicationId: string, bundle: unknown, signal: AbortSignal, destination?: { path: string; overwrite: boolean }): Promise<string | null>;
   readRecovery?(path: string, signal: AbortSignal): Promise<unknown>;
 }) {
   return async (caller: Caller, raw: unknown) => {

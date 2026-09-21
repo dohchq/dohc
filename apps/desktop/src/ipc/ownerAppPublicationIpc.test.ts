@@ -251,7 +251,7 @@ describe("owner app publication", () => {
     if (kind === "renderer") h.switchRenderer();
     if (kind === "credential") h.switchCredential();
     if (kind === "physical") h.controller.abort();
-    await expect(h.approve(prepared)).rejects.toThrow("expired");
+    await expect(h.approve(prepared)).rejects.toThrow(kind === "physical" ? "aborted" : "expired");
     expect(h.upload).not.toHaveBeenCalled();
   });
   it("keeps the prepared grant generation for the relay CAS", async () => {

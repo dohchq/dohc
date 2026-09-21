@@ -24,11 +24,12 @@ function harness() {
       if (workspaceId !== "w") throw new Error("wrong workspace");
       return work({ workspace, signal: controller.signal, assertCurrent() { if (!current) throw new Error("retired"); } });
     } };
-  const handler = createOwnerAppBackendHandler(deps);
+  const readRecovery = vi.fn(async () => ({ formatVersion: 1 }));
+  const handler = createOwnerAppBackendHandler({ ...deps, readRecovery });
   let renderer!: (event: { sender: number }, raw: unknown) => unknown;
-  registerOwnerAppBackendIpc({ ...deps, registerHandler(_channel, handler) { renderer = handler; }, assertTrustedSender({ sender }) { if (sender !== 1) throw new Error("untrusted"); },
+  registerOwnerAppBackendIpc({ ...deps, registerHandler(_channel, handler) { renderer = handler; }, assertTrustedSender({ sender }: { sender: number }) { if (sender !== 1) throw new Error("untrusted"); },
     withRendererWorkspaceOperation: (sender, workspaceId, _message, work) => deps.withWorkspaceOperation(sender, workspaceId, work) });
-  return { relay, transport, save, workspace, controller, renderer, invoke: (raw: unknown) => handler(1, raw), retire() { current = false; }, changeCredentials() { generation++; } };
+  return { relay, transport, save, readRecovery, workspace, controller, renderer, invoke: (raw: unknown) => handler(1, raw), retire() { current = false; }, changeCredentials() { generation++; } };
 }
 
 describe("owner backend IPC", () => {
@@ -73,5 +74,17 @@ describe("owner backend IPC", () => {
     expect(await h.invoke({ workspaceId: "w", publicationId, action: "helper", grantId: "g", enabled: true })).toEqual({ grantId: "g", enabled: true });
     h.relay.mockResolvedValueOnce(description).mockResolvedValueOnce({ grantId: "another", enabled: true });
     await expect(h.invoke({ workspaceId: "w", publicationId, action: "helper", grantId: "g", enabled: true })).rejects.toThrow(/confirm/);
+  });
+
+  it("restores an uninitialized publication only through the owner CLI file boundary", async () => {
+    const h = harness();
+    h.relay.mockResolvedValueOnce({ ...description, active: false, revision: 0 })
+      .mockResolvedValueOnce({ publicationId, authorityRevision: 7, revision: 5 });
+    const request = { workspaceId: "w", publicationId, action: "restore", sourcePath: "C:\\Exports\\app.json" };
+    expect(await h.invoke(request)).toEqual({ publicationId, authorityRevision: 7, revision: 5 });
+    expect(h.readRecovery).toHaveBeenCalledWith(request.sourcePath, h.controller.signal);
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2].body))).toEqual({ authorityRevision: 7, bundle: { formatVersion: 1 } });
+    expect(() => h.renderer({ sender: 1 }, request)).toThrow(/owner CLI/);
+    await expect(h.invoke(request)).rejects.toThrow(/already has data/);
   });
 });

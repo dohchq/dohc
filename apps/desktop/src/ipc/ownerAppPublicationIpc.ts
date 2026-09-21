@@ -1,5 +1,5 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
@@ -24,6 +24,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
+  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null>;
+  beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
@@ -39,6 +41,10 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Only the original workspace can publish this app.");
+      const local = await dependencies.localPublication?.(input, callerKey, operation);
+      operation.assertCurrent(); operation.signal.throwIfAborted();
+      if (local) return local;
+      if (input.action === "prepareLocal" || input.action === "listLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
       const remote = await dependencies.remoteForWorkspace(operation.workspace);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
@@ -109,6 +115,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         // Consume before the first upload so duplicate approvals cannot race.
         entry.clear();
         const { prepared } = entry, { candidate } = prepared;
+        await dependencies.beforeSharedPublish?.(operation.workspace, candidate, operation.signal);
+        session.assertCurrent(); operation.signal.throwIfAborted();
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
           if (published.kind !== "published") throw new Error("Invalid publication result.");

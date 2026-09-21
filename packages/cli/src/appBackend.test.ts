@@ -4,8 +4,8 @@ import { OwnerAppBackendRequest, OwnerAppBackendResult } from "./appBackend";
 
 const selection = { workspaceId: "workspace", publicationId: "a".repeat(64) };
 describe("owner app backend CLI", () => {
-  it.each(["describe", "helper", "invoke", "export"])("parses %s owner commands", action => {
-    const fields = action === "helper" ? { grantId: "grant", enabled: true } : action === "invoke" ? { operation: "list", idempotencyKey: "request-1", input: {} } : action === "export" ? { savePath: "C:\\Exports\\app.json" } : {};
+  it.each(["describe", "helper", "invoke", "export", "restore"])("parses %s owner commands", action => {
+    const fields = action === "helper" ? { grantId: "grant", enabled: true } : action === "invoke" ? { operation: "list", idempotencyKey: "request-1", input: {} } : action === "export" ? { savePath: "C:\\Exports\\app.json" } : action === "restore" ? { sourcePath: "C:\\Exports\\app.json" } : {};
     const request = { ...selection, ...fields, action };
     expect(parseCliArguments(["--as-agent", "app", action, JSON.stringify({ ...selection, ...fields })], {})).toMatchObject({ actor: "agent", verb: "appBackend", request });
   });

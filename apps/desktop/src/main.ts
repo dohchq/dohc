@@ -18,6 +18,9 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
+import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
+import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
+import { createDesktopAppBackendRuntime } from "./workspaces/localAppBackendRuntime";
 import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
 import type { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -4100,9 +4103,41 @@ function registerIpcHandlers(): void {
       if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
-  registerOwnerAppPublicationIpc(ownerPublicationDependencies);
+  const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
+  const localRuntime = createDesktopAppBackendRuntime(utilityProcess);
+  const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+      signal.throwIfAborted(); operation.assertCurrent();
+      if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The app workspace attachment changed.");
+      let pending = localAppHosts.get(operation.signal);
+      if (!pending) {
+        pending = createLocalAppBackendHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, runtime: localRuntime });
+        localAppHosts.set(operation.signal, pending);
+        const capturedSignal = operation.signal;
+        void pending.then(host => {
+          if (capturedSignal.aborted) host.close();
+          else capturedSignal.addEventListener("abort", () => host.close(), { once: true });
+        }, () => localAppHosts.delete(capturedSignal));
+      }
+      const host = await pending;
+      signal.throwIfAborted(); operation.assertCurrent(); host.assertCurrent();
+      return host;
+    });
+  const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
+    { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
+      ...ownerPublicationDependencies, localForWorkspace,
+    });
+  const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
+    const backend = candidate.capabilities.find(capability => capability.kind === "app-backend");
+    if (!backend) return;
+    const local = await localForWorkspace(workspace, signal);
+    if (local.list(candidate.appRoot).some(row => row.backendCapability.dataPath === backend.dataPath && !row.sharedPublicationId)) {
+      throw new Error("This app has local data. Transfer its data to the shared host before publishing.");
+    }
+  };
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish });
   const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerPublicationDependencies,
+    ...ownerPublicationDependencies, localPublication, beforeSharedPublish,
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
@@ -4124,7 +4159,9 @@ function registerIpcHandlers(): void {
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
   const ownerBackendDependencies = {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler), assertTrustedSender, withRendererWorkspaceOperation,
-    transportForWorkspace: async (workspace, _publicationId, signal) => {
+    transportForWorkspace: async (workspace, publicationId, signal) => {
+      const local = await localForWorkspace(workspace, signal);
+      if (local.has(publicationId)) return local;
       const remote = await remoteForWorkspace(workspace);
       signal.throwIfAborted();
       return createRemoteAppBackendTransport({ workspaceId: workspace.workspaceId, ...remote,
@@ -4135,7 +4172,7 @@ function registerIpcHandlers(): void {
         const chosen = await dialog.showSaveDialog({ title: "Export app recovery data",
           defaultPath: `app-recovery-${publicationId.slice(0, 12)}.json`, filters: [{ name: "Recovery JSON", extensions: ["json"] }] });
         signal.throwIfAborted();
-        if (chosen.canceled || !chosen.filePath) throw new Error("App export was cancelled.");
+        if (chosen.canceled || !chosen.filePath) return null;
         destination = { path: chosen.filePath, overwrite: true };
       }
       return writeAppBackendExport({ ...destination, bundle, signal });

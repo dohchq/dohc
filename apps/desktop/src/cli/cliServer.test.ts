@@ -509,6 +509,17 @@ describe("CLI socket server", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("routes app backend commands only through the owning CLI attachment", async () => {
+    const requests: unknown[] = [];
+    context.appBackend = async request => { requests.push(request); return { result: [], revision: 1, replayed: false }; };
+    const request = { action: "invoke" as const, workspaceId: WORKSPACE_ID, publicationId: "a".repeat(64), operation: "list", idempotencyKey: "read-1", input: {} };
+    expect(await invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).toEqual({ result: [], revision: 1, replayed: false });
+    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
+    context.readOnly = true;
+    await expect(invoke("appBackend", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
+    expect(requests).toHaveLength(1);
+  });
+
   it("writes a random capability endpoint descriptor for a Windows named pipe", async (ctx) => {
     if (process.platform !== "win32") ctx.skip();
     if (!server) ctx.skip();
