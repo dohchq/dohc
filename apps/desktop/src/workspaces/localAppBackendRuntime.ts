@@ -2,7 +2,7 @@ import type { utilityProcess } from "electron";
 import { createAppBackendRuntime, type AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 
 /** Electron's runAsNode fuse is disabled; guest work uses a utility process. */
-export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityProcess, "fork">) {
+export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityProcess, "fork">, entryPath?: string) {
   const launch: AppRuntimeLauncher = options => {
     const child = processes.fork(options.entryPath, [], {
       cwd: options.cwd, env: {}, stdio: "ignore", execArgv: ["--max-old-space-size=96"],
@@ -21,5 +21,5 @@ export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityPro
       kill() { stopping = true; child.kill(); },
     };
   };
-  return createAppBackendRuntime({ launch });
+  return createAppBackendRuntime({ launch, ...(entryPath ? { entryPath } : {}) });
 }
