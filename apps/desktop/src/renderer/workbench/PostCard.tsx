@@ -234,10 +234,11 @@ export function PostCard(props: {
       </div>
 
       {/* One row: who reacted and the picker on the left; Comment, with its
-          count, and Save as file on the right. */}
+          count, and Save as file on the right. In a narrow panel the actions
+          wrap under the pills instead of crushing them. */}
       <div
         data-testid="chats-post-footer"
-        className="mt-2.5 flex items-center gap-1.5 border-t border-line py-1.5"
+        className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line py-1.5"
       >
         {[...byEmoji.entries()].map(([emoji, records]) => (
           <button
