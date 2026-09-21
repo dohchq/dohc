@@ -139,3 +139,12 @@ it("restores a fresh app store without reopening accepted work or importing help
   const unauthorized = fixture();
   await expect(unauthorized.host.restore({kind: "named", workspaceId: "w", userId: "stranger"}, unauthorized.publicationId, {authorityRevision: 1, bundle})).rejects.toThrow();
 });
+
+it("does not attach another participant's staged upload", async () => {
+  const f = fixture();
+  await f.host.activate(owner, f.publicationId, 1);
+  const upload = f.host.upload(f.link("a"), f.publicationId, {authorityRevision: 1, idempotencyKey: "upload", name: "private.txt", contentType: "text/plain", bytesBase64: Buffer.from("private").toString("base64")});
+  await expect(f.host.invoke(f.link("b"), f.publicationId, input("steal", "reserve", {fileId: upload.file.fileId}))).rejects.toThrow();
+  expect((await f.host.invoke(owner, f.publicationId, input("read", "read"))).result).toEqual([{id: "only", remaining: 1}]);
+  expect(f.storage.db.prepare("SELECT attached_revision FROM sync_relay_app_backend_files WHERE file_id=?").get(upload.file.fileId)?.attached_revision).toBeNull();
+});

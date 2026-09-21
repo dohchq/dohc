@@ -194,7 +194,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       const snapshot = readAppBackendSnapshot(storage, scope(value));
       return {publicationId, authorityRevision: value.authorityRevision, capability: value.capability,
         active: snapshot?.publicationId === publicationId && snapshot.publicationRevision === value.authorityRevision,
-        revision: snapshot?.revision ?? null};
+        revision: snapshot?.revision ?? 0};
     });
   }
   function helper(auth: AppBackendAuth, publicationId: string, input: AppBackendHelperRequest, signal?: AbortSignal) {
