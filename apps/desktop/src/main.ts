@@ -21,6 +21,7 @@ import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from
 import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
+import { activatePublishedAppBackend } from "./workspaces/publishAppBackend";
 import { createDesktopAppBackendRuntime } from "./workspaces/localAppBackendRuntime";
 import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
 import type { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
@@ -4108,7 +4109,7 @@ function registerIpcHandlers(): void {
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
-  const localRuntime = createDesktopAppBackendRuntime(utilityProcess);
+  const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "resources"), "app-backend-runtime", "child.mjs"));
   const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
     workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
       signal.throwIfAborted(); operation.assertCurrent();
@@ -4135,13 +4136,17 @@ function registerIpcHandlers(): void {
     const backend = candidate.capabilities.find(capability => capability.kind === "app-backend");
     if (!backend) return;
     const local = await localForWorkspace(workspace, signal);
-    if (local.list(candidate.appRoot).some(row => row.backendCapability.dataPath === backend.dataPath && !row.sharedPublicationId)) {
-      throw new Error("This app has local data. Transfer its data to the shared host before publishing.");
+    const existing = local.findByDataPath(backend.dataPath);
+    if (existing && (existing.appRoot !== candidate.appRoot || existing.capability.schemaSha256 !== backend.schemaSha256 ||
+        (!existing.sharedPublicationId && existing.capability.backendSha256 !== backend.backendSha256))) {
+      throw new Error("The shared app does not match its local data. Approve its current backend locally before transferring.");
     }
   };
-  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish });
+  const activateBackend: NonNullable<Parameters<typeof createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>>[0]["activateBackend"]> =
+    async (workspace, input, request, signal) => activatePublishedAppBackend(input, await localForWorkspace(workspace, signal), request, signal);
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend });
   const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerPublicationDependencies, localPublication, beforeSharedPublish,
+    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend,
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
@@ -4165,11 +4170,21 @@ function registerIpcHandlers(): void {
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler), assertTrustedSender, withRendererWorkspaceOperation,
     transportForWorkspace: async (workspace, publicationId, signal) => {
       const local = await localForWorkspace(workspace, signal);
-      if (local.has(publicationId)) return local;
+      const sharedPublicationId = local.sharedPublicationFor(publicationId);
+      if (local.has(publicationId) && !sharedPublicationId) return local;
       const remote = await remoteForWorkspace(workspace);
       signal.throwIfAborted();
-      return createRemoteAppBackendTransport({ workspaceId: workspace.workspaceId, ...remote,
+      const transport = createRemoteAppBackendTransport({ workspaceId: workspace.workspaceId, ...remote,
         currentCredentialGeneration: () => credentialCacheGeneration, relayJson: relayShareJsonWithCredentials });
+      if (!sharedPublicationId) return transport;
+      return { assertCurrent: transport.assertCurrent, request: async (_publicationId, action, body, requestSignal) => {
+        const result = await transport.request(sharedPublicationId, action, body, requestSignal);
+        if ((action === "describe" || action === "restore") && result && typeof result === "object" && "publicationId" in result) {
+          if (result.publicationId !== sharedPublicationId) throw new Error("The shared app identity changed. Refresh and try again.");
+          return { ...result, publicationId };
+        }
+        return result;
+      } } satisfies import("./ipc/ownerAppBackendIpc").OwnerAppBackendTransport;
     },
     saveExport: async (_workspace, publicationId, bundle, signal, destination) => {
       if (!destination) {

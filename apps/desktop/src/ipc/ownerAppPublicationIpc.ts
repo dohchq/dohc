@@ -26,6 +26,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null>;
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
+  activateBackend?(workspace: Workspace, input: { publicationId: string; authorityRevision: number; candidate: AppPublicationCandidate; initialize: boolean },
+    request: (action: "activate" | "restore" | "describe", body: unknown) => Promise<unknown>, signal: AbortSignal): Promise<void>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
@@ -123,6 +125,15 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           const capability = candidate.capabilities[0];
           if (!capability) return published;
           if (capability.kind === "app-backend") {
+            if (dependencies.activateBackend) {
+              await dependencies.activateBackend(operation.workspace, { publicationId: published.publicationId,
+                authorityRevision: published.authorityRevision, candidate, initialize: input.initialize !== false },
+                (action, body) => session.run(() => dependencies.relayJson(remote.credentials,
+                  `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/${action}`,
+                  { method: "POST", signal: operation.signal, body: JSON.stringify(body) })), operation.signal);
+              session.assertCurrent(); operation.signal.throwIfAborted();
+              return published;
+            }
             if (input.initialize === false) return published;
             await session.run(() => dependencies.relayJson(remote.credentials,
               `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/activate`,

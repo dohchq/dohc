@@ -26,10 +26,9 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       if (entry.workspaceId !== input.workspaceId || entry.callerKey !== callerKey || entry.scope !== (operation.scope ?? callerKey) || entry.signal !== operation.signal) throw new Error("This local app preparation expired. Prepare it again.");
       if (input.action === "cancel") { entry.clear(); return { kind: "cancelled" }; }
       if (input.candidateDigest !== entry.digest) throw new Error("The app candidate changed. Review it again.");
-      if (input.initialize === false) throw new Error("Local app preparation requires initialization. Use the recovery workflow for a shared host.");
       entry.clear();
       const local = await deps.localForWorkspace(operation.workspace, operation.signal); current();
-      const result = await local.activate(entry.prepared, operation.signal); current();
+      const result = await local.activate(entry.prepared, operation.signal, { initialize: input.initialize !== false }); current();
       return OwnerAppPublicationResult.parse({ kind: "published", publicationId: result.publicationId, authorityRevision: result.authorityRevision, local: true });
     }
     if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");

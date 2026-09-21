@@ -34,7 +34,7 @@ describe("local app publication review", () => {
     expect(review.local).toBe(true); expect(h.activate).not.toHaveBeenCalled();
     expect(await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation))
       .toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal);
+    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, { initialize: true });
     expect(await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation)).toBeNull();
   });
   it.each(["digest", "caller", "session", "abort"])("refuses changed %s before local activation", async kind => {
