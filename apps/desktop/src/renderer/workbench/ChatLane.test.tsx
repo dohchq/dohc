@@ -256,6 +256,53 @@ describe("ChatLane", () => {
     expect(onThreadRead).not.toHaveBeenCalled();
   });
 
+  it("marks the first unread message with a New divider when the lane opens", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3, lastReadSequence: 1, unreadCount: 2 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "m1", body: "Seen" }), message({ id: "m2", body: "First unread" }), message({ id: "m3", body: "Second unread" }),
+    ] });
+    render(lane());
+    const divider = await screen.findByTestId("chats-lane-new-divider");
+    expect(divider.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("m2");
+    // The read cursor moves after the paint; the divider stays for this visit.
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3, lastReadSequence: 3, unreadCount: 0 })] });
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
+  });
+
+  it("shows no New divider when everything was read", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    expect(screen.queryByTestId("chats-lane-new-divider")).toBeNull();
+  });
+
+  it("counts arrivals while reading history and returns to the end on click", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const list = screen.getByRole("list");
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });
+    list.scrollTop = 200;
+    fireEvent.scroll(list);
+    expect(screen.queryByTestId("chats-lane-new-messages")).toBeNull();
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ body: "Old message" }), message({ id: "m2", body: "Arrived" }), message({ id: "m3", body: "Arrived too" }),
+    ] });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await screen.findByText("Arrived too");
+    const pill = screen.getByTestId("chats-lane-new-messages");
+    expect(pill.textContent).toBe("2new messages");
+    const scrollIntoView = vi.fn();
+    list.lastElementChild!.scrollIntoView = scrollIntoView;
+    fireEvent.click(pill);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
+    list.scrollTop = 1500;
+    fireEvent.scroll(list);
+    expect(screen.queryByTestId("chats-lane-new-messages")).toBeNull();
+  });
+
   it("uses the oldest chat thread, breaking timestamp ties by id", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [
       thread({ id: "new", createdAtMs: 20 }), thread({ id: "old-b", createdAtMs: 10 }), thread({ id: "old-a", createdAtMs: 10 }),

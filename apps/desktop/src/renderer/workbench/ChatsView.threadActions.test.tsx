@@ -331,6 +331,7 @@ describe("ChatsView work and run links", () => {
           triggerMessageId: opening.id,
           command: "dohc agent run review",
           startedAtMs: NOW,
+          endedAtMs: NOW + 84_000,
           exitCode: 0,
           logPath: "logs/run-123456789.log",
         },
@@ -351,6 +352,9 @@ describe("ChatsView work and run links", () => {
     await user.click(attachment);
     expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md");
 
+    const runLine = screen.getByTestId("chats-run-line");
+    expect(runLine.getAttribute("data-state")).toBe("done");
+    expect(runLine.textContent).toBe("Ran dohc · 1m 24srun run-123");
     const runChip = screen.getByTestId("chats-run-chip");
     expect(runChip.textContent).toBe("run run-123");
     await user.click(runChip);

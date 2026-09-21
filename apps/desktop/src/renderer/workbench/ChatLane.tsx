@@ -1,3 +1,4 @@
+import { ArrowDown } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatChannelRecord,
@@ -21,6 +22,10 @@ type PaintedLane = {
   messageCount: number;
   readState: "retry" | "pending" | "done";
 };
+
+// Within this distance of the end the reader is following the conversation.
+// Matches the list's own maintain-at-end threshold.
+const FOLLOW_THRESHOLD_PX = 40;
 
 // A group's chat lane: one running conversation, kept out of the feed. The
 // lane is the group's oldest chat-lane thread; the first message starts it.
@@ -47,6 +52,11 @@ export function ChatLane(props: {
   const [loading, setLoading] = useState(true);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
+  // The first message the reader had not seen when the lane opened.
+  const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
+  const [atEnd, setAtEnd] = useState(true);
+  // Messages the reader had seen when last at the end.
+  const seenCount = useRef(0);
   const token = useRef(0);
   const loadSequence = useRef(0);
   const onThreadRead = useRef(props.onThreadRead);
@@ -110,6 +120,11 @@ export function ChatLane(props: {
         bridge().listChatThreadDecisions({ workspaceId, threadId: lane.id }),
       ]);
       if (!isCurrent()) return;
+      if (paintedRevision.current?.threadId !== lane.id) {
+        // Sequences are 1-based, so the read cursor indexes the first unread.
+        const firstUnread = lane.unreadCount > 0 ? page.messages[lane.lastReadSequence] : undefined;
+        setFirstUnreadMessageId(firstUnread?.id ?? null);
+      }
       const painted: PaintedLane = { threadId: lane.id, revision, messageCount: page.messages.length, readState: "retry" };
       paintedRevision.current = painted;
       setThreadId(lane.id);
@@ -134,11 +149,31 @@ export function ChatLane(props: {
     setComposer("");
     setSending(false);
     setViewerAuthorId("");
+    setFirstUnreadMessageId(null);
+    setAtEnd(true);
     reactionSeq.current.clear();
     paintedRevision.current = null;
     setLoading(true);
     return () => { token.current += 1; };
   }, [channelId, workspaceId]);
+
+  // Follow the reader's position so arrivals while reading history are
+  // counted instead of pulling the view to the end.
+  const hasList = !loading && messages.length > 0;
+  useEffect(() => {
+    const node = hasList ? listRef.current?.getScrollableNode() : null;
+    if (!node) return;
+    const onScroll = () => {
+      setAtEnd(node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX);
+    };
+    onScroll();
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [hasList, channelId, workspaceId]);
+  useEffect(() => {
+    if (atEnd) seenCount.current = messages.length;
+  }, [atEnd, messages.length]);
+  const newCount = atEnd ? 0 : Math.max(0, messages.length - seenCount.current);
 
   useEffect(() => {
     void load();
@@ -277,7 +312,22 @@ export function ChatLane(props: {
         onOpenPath={props.onOpenPath}
         reactionControls={reactionControls}
         renderMessageFooter={renderMessageFooter}
+        firstUnreadMessageId={firstUnreadMessageId}
       />
+      {newCount > 0 ? (
+        <div className="relative h-0">
+          <button
+            type="button"
+            data-testid="chats-lane-new-messages"
+            onClick={() => listRef.current?.scrollToEnd()}
+            className="dohc-pop-in absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-panel-2 dohc-focus-visible"
+          >
+            <ArrowDown size={11} aria-hidden />
+            <span className="tabular-nums">{newCount}</span>
+            {newCount === 1 ? "new message" : "new messages"}
+          </button>
+        </div>
+      ) : null}
       {props.locked ? (
         <ComposerNotice testId="chats-lane-readonly">
           This group is read-only for you.

@@ -16,13 +16,14 @@ import { bridge } from "../bridge";
 import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import {
+  ChatFileIcon,
   MentionText,
   MessageReactions,
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions } from "./PostCard";
-import type { ChatsNav } from "./ChatsView";
+import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 
 function pathBasename(pathHint: string | undefined): string {
@@ -36,24 +37,39 @@ function isRunnerFailure(body: string): boolean {
   return body.startsWith("⚠ Agent run failed");
 }
 
-// What the agent ran, under its reply: the chip that opens the details,
-// with the outcome in a word.
+// "4s", "1m 20s", "2h 5m".
+function formatRunDuration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+// What the agent ran, under its reply: the program and how it ended, then
+// the chip that opens the details.
 function RunLine(props: { run: ChatRunRecord }) {
-  const running = props.run.endedAtMs === undefined;
-  const failed = !running && props.run.exitCode !== 0;
+  const { endedAtMs, exitCode } = props.run;
+  const failed = endedAtMs !== undefined && exitCode !== 0;
+  const program = runnerProgram(props.run.command);
+  const label = endedAtMs === undefined
+    ? `Running ${program}`
+    : failed
+      ? `Failed ${program}${exitCode === undefined ? "" : ` · exit ${exitCode}`}`
+      : `Ran ${program} · ${formatRunDuration(endedAtMs - props.run.startedAtMs)}`;
   return (
     <div
       data-testid="chats-run-line"
-      data-state={running ? "running" : failed ? "failed" : "done"}
+      data-state={endedAtMs === undefined ? "running" : failed ? "failed" : "done"}
       className="mt-1 flex items-center gap-2 px-2 text-[11px] text-subtle"
     >
       <span
         aria-hidden
         className={`size-1.5 rounded-full ${
-          running ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
+          endedAtMs === undefined ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
         }`}
       />
-      <span>{running ? "Running" : failed ? "Failed" : "Done"}</span>
+      <span>{label}</span>
       <RunChip run={props.run} />
     </div>
   );
@@ -171,7 +187,7 @@ function AttachmentChip(props: {
     "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
   const content = (
     <>
-      <FileText size={11} aria-hidden className="shrink-0" />
+      <ChatFileIcon path={props.attachment.pathHint ?? ""} className="shrink-0" />
       <span className="max-w-56 truncate">{label}</span>
       {props.attachment.headingText ? (
         <span className="max-w-48 truncate text-subtle">
