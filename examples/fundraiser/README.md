@@ -17,12 +17,17 @@ The participant pays outside dohc and uploads a JPG, PNG, or PDF receipt, up to 
 Submitting the form reserves the slots. Payment alone does not reserve them.
 If the slots fill before submission, the organizer must arrange another session or refund outside the app.
 
-Successful submission returns a private status token. The frontend can preserve it in a status link.
+Successful submission returns a private status token. Copy it or download its text file from the confirmation.
+Reopen the app and paste that token into **My registration**. This example does not create a portable status URL.
 Anyone holding that token can inspect that registration's status and attendee names.
 The lookup omits contact information and receipts. There is no mobile-number lookup or automatic lost-link recovery.
 
 The frontend also generates a submission ID and a random retry secret before uploading.
 A saved recovery file preserves both, the entered details, and the receipt hash.
+Sending starts a recovery-file download before the request. Keep that private file until registration is confirmed.
+If a response is lost, use **Retry same registration**. After closing the page, import the saved recovery file.
+If the browser blocks downloads, the retry screen offers selectable recovery text to save manually.
+The app does not persist drafts in browser storage. Closing it without a recovery file loses the retry identity.
 The backend recognizes that submission after a browser profile changes and returns its existing confirmation.
 A wrong secret or changed details refuse. Receipt identity is bound to its bytes, so reuploading the same receipt does not reserve slots twice.
 Organizer lists omit these recovery secrets.
