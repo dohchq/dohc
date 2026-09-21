@@ -5,7 +5,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { openSyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
 import { initializeAppBackendSchema } from "./appBackendSchema";
-import { activateAppBackend, commitAppBackendOperation, findAppBackendReceipt, stageAppBackendFile, readAppBackendFile, listAppBackendCallerFiles, exportAppBackend, restoreAppBackend, readAppBackendSnapshot, collectExpiredAppBackendFiles, setAppBackendHelper, isAppBackendHelper, type CommitAppBackendOperationInput } from "./appBackendData";
+import { activateAppBackend, commitAppBackendOperation, findAppBackendReceipt, stageAppBackendFile, readAppBackendFile, listAppBackendCallerFiles, exportAppBackend, restoreAppBackend, readAppBackendSnapshot, collectExpiredAppBackendFiles, setAppBackendHelper, isAppBackendHelper, APP_BACKEND_RECOVERY_BYTES, APP_BACKEND_RECOVERABLE_STORAGE_BYTES, APP_BACKEND_RECOVERY_ROWS, type CommitAppBackendOperationInput } from "./appBackendData";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -138,11 +138,11 @@ describe("app backend durable store", () => {
     let validations=0;
     const restored=await restoreAppBackend(target.context,{...target.snapshot,expectedRevision:null,bundle,nowMs:6,authorize:target.authorize,
       async validateDatabase(database){validations++; expect(database).toEqual(new Uint8Array([9]));}});
-    expect(validations).toBe(1); expect(restored.revision).toBe(3);
+    expect(validations).toBe(1); expect(restored.revision).toBe(2);
     expect(target.commit()).toEqual({kind:"replayed",revision:2,result:{accepted:true}});
     expect(readAppBackendFile(target.context,{...target.snapshot,fileId:file.fileId,authorize:target.authorize})?.content).toEqual(new Uint8Array([1,2,3]));
     expect(isAppBackendHelper(target.context,{...target.snapshot,grantId:"helper"})).toBe(false);
-    expect(exportAppBackend(target.context,{...target.snapshot,authorize:target.authorize}).history.at(-1)?.kind).toBe("restore");
+    expect(exportAppBackend(target.context,{...target.snapshot,authorize:target.authorize}).history).toEqual(bundle.history);
     target.restart(); expect(target.commit().kind).toBe("replayed");
   });
   it("refuses rollback, corrupt recovery, schema mismatch, and validation failure without importing rows",async()=>{
@@ -167,5 +167,49 @@ describe("app backend durable store", () => {
     authorized=true;
     await expect(restoreAppBackend(f.context,{...input,async validateDatabase(){activateAppBackend(f.context,{...f.snapshot,expectedRevision:null,nowMs:4,authorize:f.authorize});}})).rejects.toThrow(/initialized during recovery/);
     expect(readAppBackendSnapshot(f.context,f.snapshot)?.revision).toBe(1);
+  });
+  it("keeps every accepted attachment exportable when the app reaches its recovery budget",async()=>{
+    const f=fixture(256*1024*1024), caller={grantId:"g",principalId:"p"}, attachedFileIds:string[]=[];
+    const content=new Uint8Array(5*1024*1024);
+    for(let index=0;index<12;index++) attachedFileIds.push(stageAppBackendFile(f.context,{...f.snapshot,caller,idempotencyKey:`file-${index}`,name:`receipt-${index}.png`,contentType:"image/png",content,nowMs:3,expiresAtMs:100,authorize:f.authorize}).file.fileId);
+    expect(f.commit({attachedFileIds}).kind).toBe("committed");
+    const before=f.context.db.prepare("SELECT * FROM sync_relay_app_backend_usage").get();
+    expect(Number(before?.storage_bytes)).toBeLessThan(APP_BACKEND_RECOVERABLE_STORAGE_BYTES);
+    expect(()=>stageAppBackendFile(f.context,{...f.snapshot,caller,idempotencyKey:"file-overflow",name:"overflow.png",contentType:"image/png",content,nowMs:5,expiresAtMs:100,authorize:f.authorize})).toThrow(/recovery capacity/);
+    expect(f.context.db.prepare("SELECT * FROM sync_relay_app_backend_usage").get()).toEqual(before);
+    const exported=exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize});
+    expect(exported.files).toHaveLength(12);
+    expect(Buffer.byteLength(JSON.stringify(exported))).toBeLessThan(APP_BACKEND_RECOVERY_BYTES);
+    const target=fixture(256*1024*1024); target.context.db.prepare("DELETE FROM sync_relay_app_backends WHERE workspace_id='w'").run();
+    const restored=await restoreAppBackend(target.context,{...target.snapshot,expectedRevision:null,bundle:exported,nowMs:10,authorize:target.authorize,async validateDatabase(){}});
+    expect(restored.revision).toBe(2);
+    expect(target.context.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_backend_files").get()?.n).toBe(12);
+  },30000);
+  it("uses atomic accounting for byte and row admission and rejects without partial writes",()=>{
+    const f=fixture();
+    const usage=f.context.db.prepare("SELECT * FROM sync_relay_app_backend_usage").get()!;
+    f.context.db.prepare("UPDATE sync_relay_app_backend_usage SET storage_bytes=?").run(APP_BACKEND_RECOVERABLE_STORAGE_BYTES);
+    expect(()=>f.commit()).toThrow(/recovery capacity/);
+    expect(()=>activateAppBackend(f.context,{...f.snapshot,expectedRevision:1,publicationId:"upgrade",nowMs:5,authorize:f.authorize})).toThrow(/recovery capacity/);
+    expect(readAppBackendSnapshot(f.context,f.snapshot)?.revision).toBe(1);
+    f.context.db.prepare("UPDATE sync_relay_app_backend_usage SET storage_bytes=?,history_rows=?").run(usage.storage_bytes,APP_BACKEND_RECOVERY_ROWS);
+    expect(()=>f.commit()).toThrow(/recovery capacity/);
+    f.context.db.prepare("UPDATE sync_relay_app_backend_usage SET history_rows=?,receipt_rows=?").run(usage.history_rows,APP_BACKEND_RECOVERY_ROWS);
+    expect(()=>f.commit()).toThrow(/recovery capacity/);
+    f.context.db.prepare("UPDATE sync_relay_app_backend_usage SET receipt_rows=?,file_rows=?").run(usage.receipt_rows,APP_BACKEND_RECOVERY_ROWS);
+    expect(()=>stageAppBackendFile(f.context,{...f.snapshot,caller:{grantId:"g",principalId:"p"},idempotencyKey:"file",name:"receipt.png",contentType:"image/png",content:new Uint8Array([1]),nowMs:5,expiresAtMs:100,authorize:f.authorize})).toThrow(/recovery capacity/);
+    f.context.db.prepare("UPDATE sync_relay_app_backend_usage SET file_rows=?").run(usage.file_rows);
+    expect(exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize}).snapshot.revision).toBe(1);
+  });
+  it("repeated recovery preserves data revision and can bind the same source to current publication authority",async()=>{
+    const original=fixture(); original.commit();
+    let bundle=exportAppBackend(original.context,{...original.snapshot,authorize:original.authorize});
+    for(let index=0;index<3;index++){
+      const target=fixture(); target.context.db.prepare("DELETE FROM sync_relay_app_backends WHERE workspace_id='w'").run();
+      const snapshot=await restoreAppBackend(target.context,{...target.snapshot,publicationId:`recovered-${index}`,expectedRevision:null,bundle,nowMs:100+index,authorize:target.authorize,async validateDatabase(){}});
+      expect(snapshot.revision).toBe(2); expect(snapshot.updatedAtMs).toBe(4);
+      bundle=exportAppBackend(target.context,{...snapshot,authorize:target.authorize});
+      expect(bundle.history).toHaveLength(2);
+    }
   });
 });

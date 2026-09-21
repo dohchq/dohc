@@ -7,8 +7,24 @@ const MAX_DATABASE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_PENDING_FILES_PER_CALLER = 32;
 const MAX_RESULT_BYTES = 1024 * 1024;
+export const APP_BACKEND_RECOVERY_BYTES = 128 * 1024 * 1024;
+export const APP_BACKEND_RECOVERABLE_STORAGE_BYTES = (APP_BACKEND_RECOVERY_BYTES - 4096) / 2;
+export const APP_BACKEND_RECOVERY_ROWS = 100000;
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+
+function assertRecoverableAppQuota(storage: StorageContext, scope: AppBackendScope, addedBytes: number,
+  added: {history?:number;receipts?:number;files?:number} = {}): void {
+  const usage = storage.db.prepare("SELECT * FROM sync_relay_app_backend_usage WHERE workspace_id=? AND data_path=?").get(scope.workspaceId,scope.dataPath);
+  // Each stored row reserves 256 bytes beyond its JSON-escaped values. Doubling
+  // covers field names, framing, numeric metadata, and base64's 4/3 expansion.
+  if (Number(usage?.storage_bytes ?? 0)+addedBytes > APP_BACKEND_RECOVERABLE_STORAGE_BYTES ||
+      Number(usage?.history_rows ?? 0)+(added.history ?? 0) > APP_BACKEND_RECOVERY_ROWS ||
+      Number(usage?.receipt_rows ?? 0)+(added.receipts ?? 0) > APP_BACKEND_RECOVERY_ROWS ||
+      Number(usage?.file_rows ?? 0)+(added.files ?? 0) > APP_BACKEND_RECOVERY_ROWS) {
+    throw relayError("quota_exceeded","App recovery capacity reached. This app cannot accept more data.");
+  }
+}
 
 function authorizeNow(authorize: () => void): void {
   const result: unknown = authorize();
@@ -108,7 +124,7 @@ export function readAppBackendSnapshot(storage: StorageContext, scope: AppBacken
   return row ? rowSnapshot(row) : null;
 }
 
-function historyRow(snapshot: AppBackendSnapshot, kind: "activate" | "operation" | "restore", actor: AppBackendCaller, changeset: Uint8Array) {
+function historyRow(snapshot: AppBackendSnapshot, kind: "activate" | "operation", actor: AppBackendCaller, changeset: Uint8Array) {
   return [snapshot.workspaceId, snapshot.dataPath, snapshot.revision, snapshot.publicationId, snapshot.publicationRevision,
     snapshot.sourceSha256, kind, actor.grantId, actor.principalId, changeset, sha(snapshot.database), snapshot.updatedAtMs] as const;
 }
@@ -144,6 +160,7 @@ export function activateAppBackend(storage: StorageContext, input: ActivateAppBa
       revision: previous ? nextRevision(previous.revision) : 1, updatedAtMs: input.nowMs,
     };
     const bytes = snapshotBytes(snapshot), history = historyRow(snapshot, "activate", {grantId: "", principalId: ""}, new Uint8Array());
+    assertRecoverableAppQuota(storage,input,bytes-(previous ? snapshotBytes(previous) : 0)+historyBytes(history),{history:1});
     assertWorkspaceQuota(storage, input.workspaceId, bytes - (previous ? snapshotBytes(previous) : 0) + historyBytes(history));
     storage.db.prepare(`INSERT INTO sync_relay_app_backends(workspace_id,data_path,app_root,publication_id,publication_revision,
       schema_sha256,schema_version,source_sha256,source,capability_json,revision,database,updated_at_ms,storage_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -192,6 +209,7 @@ export function commitAppBackendOperation(storage: StorageContext, input: Commit
     const snapshot = {...previous, database: input.database, revision: nextRevision(previous.revision), updatedAtMs: input.nowMs};
     const bytes = snapshotBytes(snapshot), history = historyRow(snapshot, "operation", input.caller, input.changeset);
     const receiptBytes = size([input.workspaceId,input.dataPath,input.caller,input.idempotencyKey,input.payloadSha256,resultJson])+256;
+    assertRecoverableAppQuota(storage,input,bytes-snapshotBytes(previous)+historyBytes(history)+receiptBytes,{history:1,receipts:1});
     assertWorkspaceQuota(storage,input.workspaceId,bytes-snapshotBytes(previous)+historyBytes(history)+receiptBytes);
     storage.db.prepare(`UPDATE sync_relay_app_backends SET database=?,revision=?,updated_at_ms=?,storage_bytes=? WHERE workspace_id=? AND data_path=?`)
       .run(snapshot.database,snapshot.revision,snapshot.updatedAtMs,bytes,input.workspaceId,input.dataPath);
@@ -237,6 +255,7 @@ export function stageAppBackendFile(storage: StorageContext, input: StageAppBack
     if (Number(pending?.n) >= MAX_PENDING_FILES_PER_CALLER) throw relayError("quota_exceeded", "Submit pending uploads before uploading more files.");
     const fileId = randomUUID();
     const bytes = input.content.byteLength+size([input.workspaceId,input.dataPath,input.caller,input.idempotencyKey,input.name,input.contentType,fileId,hash])+256;
+    assertRecoverableAppQuota(storage,input,bytes,{files:1});
     assertWorkspaceQuota(storage,input.workspaceId,bytes);
     storage.db.prepare(`INSERT INTO sync_relay_app_backend_files(workspace_id,data_path,file_id,grant_id,principal_id,idempotency_key,name,content_type,sha256,content,created_at_ms,expires_at_ms,attached_revision,storage_bytes)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`).run(input.workspaceId,input.dataPath,fileId,input.caller.grantId,input.caller.principalId,input.idempotencyKey,input.name,input.contentType,hash,input.content,input.nowMs,input.expiresAtMs,bytes);
@@ -285,6 +304,7 @@ export function setAppBackendHelper(storage: StorageContext, input: AppBackendSc
     if (input.enabled) {
       if (isAppBackendHelper(storage,input)) return;
       const bytes = size([input.workspaceId,input.dataPath,input.grantId])+128;
+      assertRecoverableAppQuota(storage,input,bytes);
       assertWorkspaceQuota(storage,input.workspaceId,bytes);
       storage.db.prepare("INSERT INTO sync_relay_app_backend_helpers(workspace_id,data_path,grant_id,created_at_ms,storage_bytes) VALUES(?,?,?,?,?)")
         .run(input.workspaceId,input.dataPath,input.grantId,input.nowMs,bytes);
@@ -295,8 +315,6 @@ export function isAppBackendHelper(storage: StorageContext, scope: AppBackendSco
   return !!storage.db.prepare("SELECT 1 FROM sync_relay_app_backend_helpers WHERE workspace_id=? AND data_path=? AND grant_id=?").get(scope.workspaceId,scope.dataPath,scope.grantId);
 }
 
-export const APP_BACKEND_RECOVERY_BYTES = 128 * 1024 * 1024;
-const MAX_RECOVERY_ROWS = 100000;
 export interface AppBackendRecoveryBundle {
   formatVersion: 1;
   integritySha256: string;
@@ -319,7 +337,7 @@ function recoveryIntegrity(bundle: Omit<AppBackendRecoveryBundle,"integritySha25
   return sha(canonical);
 }
 function recoveryBinary(value: unknown, max: number): Uint8Array {
-  if (typeof value !== "string" || value.length > Math.ceil(max/3)*4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw badRequest("Invalid recovery bytes.");
+  if (typeof value !== "string" || value.length > Math.ceil(max/3)*4 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw badRequest("Invalid recovery bytes.");
   const decoded = Buffer.from(value,"base64");
   if (decoded.byteLength > max || decoded.toString("base64") !== value) throw badRequest("Invalid recovery bytes.");
   return decoded;
@@ -335,7 +353,7 @@ function recoveryInteger(row: Record<string,unknown>, name: string, minimum = 0)
   return value;
 }
 function recoveryRows(value: unknown): Record<string,unknown>[] {
-  if (!Array.isArray(value) || value.length > MAX_RECOVERY_ROWS || value.some(row => !row || typeof row !== "object" || Array.isArray(row))) throw badRequest("Invalid recovery rows.");
+  if (!Array.isArray(value) || value.length > APP_BACKEND_RECOVERY_ROWS || value.some(row => !row || typeof row !== "object" || Array.isArray(row))) throw badRequest("Invalid recovery rows.");
   return value;
 }
 
@@ -350,7 +368,7 @@ export function exportAppBackend(storage: StorageContext, input: AppBackendScope
     if (storedBytes > APP_BACKEND_RECOVERY_BYTES) throw badRequest("App recovery bundle exceeds its size limit.");
     const rows = (table: string, order: string, where = "") => {
       const count = Number(storage.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE workspace_id=? AND data_path=? ${where}`).get(input.workspaceId,input.dataPath)?.n);
-      if (count > MAX_RECOVERY_ROWS) throw badRequest("App recovery bundle exceeds its row limit.");
+      if (count > APP_BACKEND_RECOVERY_ROWS) throw badRequest("App recovery bundle exceeds its row limit.");
       return storage.db.prepare(`SELECT * FROM ${table} WHERE workspace_id=? AND data_path=? ${where} ORDER BY ${order}`).all(input.workspaceId,input.dataPath)
         .map(({storage_bytes: _storageBytes, ...row}) => row);
     };
@@ -383,7 +401,7 @@ export async function restoreAppBackend(storage: StorageContext, input: RestoreA
   if (recoveryIntegrity(payload) !== integritySha256) throw badRequest("App recovery integrity check failed.");
   const previous = bundle.snapshot;
   if (previous.workspaceId !== input.workspaceId || previous.dataPath !== input.dataPath || previous.appRoot !== input.appRoot ||
-      previous.schemaSha256 !== input.schemaSha256 || previous.schemaVersion !== input.schemaVersion) throw relayError("conflict","Recovery scope or schema differs from the approved app.");
+      previous.schemaSha256 !== input.schemaSha256 || previous.schemaVersion !== input.schemaVersion || previous.sourceSha256 !== input.sourceSha256) throw relayError("conflict","Recovery scope, source, or schema differs from the approved app.");
   positive(previous.revision); positive(previous.publicationRevision); timestamp(previous.updatedAtMs);
   digest(previous.sourceSha256);
   if (typeof previous.source !== "string" || sha(previous.source) !== previous.sourceSha256 ||
@@ -399,7 +417,7 @@ export async function restoreAppBackend(storage: StorageContext, input: RestoreA
   const history = histories.map((row,index) => {
     scopeRow(row);
     const revision=recoveryInteger(row,"revision",1), pubRevision=recoveryInteger(row,"publication_revision",1);
-    if (revision !== index+1 || revision > previous.revision || !["activate","operation","restore"].includes(String(row.kind))) throw badRequest("Recovery history is incomplete.");
+    if (revision !== index+1 || revision > previous.revision || !["activate","operation"].includes(String(row.kind))) throw badRequest("Recovery history is incomplete.");
     const sourceHash=recoveryText(row,"source_sha256"), databaseHash=recoveryText(row,"database_sha256"); digest(sourceHash); digest(databaseHash);
     const actor={grantId:row.grant_id as string,principalId:row.principal_id as string};
     if (row.kind === "operation") caller(actor);
@@ -407,12 +425,14 @@ export async function restoreAppBackend(storage: StorageContext, input: RestoreA
     const changeset=recoveryBinary(row.changeset_base64,MAX_DATABASE_BYTES);
     if (row.kind !== "operation" && changeset.byteLength !== 0) throw badRequest("Invalid recovery activation changeset.");
     historyKinds.set(revision,String(row.kind));
-    const values=[input.workspaceId,input.dataPath,revision,recoveryText(row,"publication_id"),pubRevision,sourceHash,row.kind as "activate"|"operation"|"restore",actor.grantId,actor.principalId,changeset,databaseHash,recoveryInteger(row,"recorded_at_ms")] as const;
+    const values=[input.workspaceId,input.dataPath,revision,recoveryText(row,"publication_id"),pubRevision,sourceHash,row.kind as "activate"|"operation",actor.grantId,actor.principalId,changeset,databaseHash,recoveryInteger(row,"recorded_at_ms")] as const;
     return values;
   });
   const latestHistory=history.at(-1);
-  if (history.length !== previous.revision || latestHistory?.[10] !== sha(database) || latestHistory?.[3] !== previous.publicationId ||
-      latestHistory?.[4] !== previous.publicationRevision || latestHistory?.[5] !== previous.sourceSha256 || latestHistory?.[11] !== previous.updatedAtMs) throw badRequest("Recovery snapshot does not match its history.");
+  // History retains the original host's publication authority; the snapshot
+  // binds the recovered data to the currently approved publication.
+  if (history.length !== previous.revision || latestHistory?.[10] !== sha(database) ||
+      latestHistory?.[5] !== previous.sourceSha256 || latestHistory?.[11] !== previous.updatedAtMs) throw badRequest("Recovery snapshot does not match its history.");
   const receiptKeys=new Set<string>(), receiptRevisions=new Set<number>();
   const receiptRows=receipts.map(row => {
     scopeRow(row);
@@ -450,13 +470,13 @@ export async function restoreAppBackend(storage: StorageContext, input: RestoreA
     if (readAppBackendSnapshot(storage,input)) throw relayError("conflict","App data was initialized during recovery.");
     const snapshot:AppBackendSnapshot={workspaceId:input.workspaceId,dataPath:input.dataPath,appRoot:input.appRoot,publicationId:input.publicationId,
       publicationRevision:input.publicationRevision,schemaSha256:input.schemaSha256,schemaVersion:input.schemaVersion,sourceSha256:input.sourceSha256,
-      source:input.source,capabilityJson:input.capabilityJson,revision:nextRevision(previous.revision),database,updatedAtMs:input.nowMs};
-    const restoreHistory=historyRow(snapshot,"restore",{grantId:"",principalId:""},new Uint8Array()), bytes=snapshotBytes(snapshot);
-    assertWorkspaceQuota(storage,input.workspaceId,bytes+history.reduce((sum,row)=>sum+historyBytes(row),0)+historyBytes(restoreHistory)+receiptRows.reduce((sum,row)=>sum+row.bytes,0)+fileRows.reduce((sum,row)=>sum+row.bytes,0));
+      source:input.source,capabilityJson:input.capabilityJson,revision:previous.revision,database,updatedAtMs:previous.updatedAtMs};
+    const bytes=snapshotBytes(snapshot), totalBytes=bytes+history.reduce((sum,row)=>sum+historyBytes(row),0)+receiptRows.reduce((sum,row)=>sum+row.bytes,0)+fileRows.reduce((sum,row)=>sum+row.bytes,0);
+    assertRecoverableAppQuota(storage,input,totalBytes,{history:history.length,receipts:receiptRows.length,files:fileRows.length});
+    assertWorkspaceQuota(storage,input.workspaceId,totalBytes);
     storage.db.prepare(`INSERT INTO sync_relay_app_backends(workspace_id,data_path,app_root,publication_id,publication_revision,schema_sha256,schema_version,source_sha256,source,capability_json,revision,database,updated_at_ms,storage_bytes)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(snapshot.workspaceId,snapshot.dataPath,snapshot.appRoot,snapshot.publicationId,snapshot.publicationRevision,snapshot.schemaSha256,snapshot.schemaVersion,snapshot.sourceSha256,snapshot.source,snapshot.capabilityJson,snapshot.revision,snapshot.database,snapshot.updatedAtMs,bytes);
     for(const row of history) insertHistory(storage,row);
-    insertHistory(storage,restoreHistory);
     for(const row of receiptRows) storage.db.prepare(`INSERT INTO sync_relay_app_backend_receipts(workspace_id,data_path,grant_id,principal_id,idempotency_key,payload_sha256,revision,result_json,recorded_at_ms,storage_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(...row.values,row.bytes);
     for(const row of fileRows) storage.db.prepare(`INSERT INTO sync_relay_app_backend_files(workspace_id,data_path,file_id,grant_id,principal_id,idempotency_key,name,content_type,sha256,content,created_at_ms,expires_at_ms,attached_revision,storage_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...row.values,row.bytes);
     return snapshot;
