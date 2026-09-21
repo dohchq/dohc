@@ -1,0 +1,30 @@
+{
+  "entryPath": "fundraiser/frontend.ts",
+  "inputs": ["fundraiser/frontend.ts", "fundraiser/frontend.css", "fundraiser/client.ts", "fundraiser/ui-types.ts", "fundraiser/backend.ts", "fundraiser/schema.sql"],
+  "packageMap": {},
+  "backend": {
+    "entryPath": "fundraiser/backend.ts",
+    "schemaPath": "fundraiser/schema.sql",
+    "dataPath": "fundraiser/data.sqlite",
+    "schemaVersion": 1,
+    "operations": [
+      {"name": "listPublicSessions", "access": "link", "readOnly": true},
+      {"name": "register", "access": "link", "readOnly": false},
+      {"name": "lookupStatus", "access": "link", "readOnly": true},
+      {"name": "listRegistrations", "access": "helper", "readOnly": true},
+      {"name": "listRegistrationSessions", "access": "helper", "readOnly": true},
+      {"name": "attendees", "access": "helper", "readOnly": true},
+      {"name": "totals", "access": "helper", "readOnly": true},
+      {"name": "receiptAccess", "access": "helper", "readOnly": true},
+      {"name": "setStatus", "access": "helper", "readOnly": false},
+      {"name": "updateRegistration", "access": "helper", "readOnly": false},
+      {"name": "manualEntry", "access": "helper", "readOnly": false}
+    ],
+    "tables": [
+      {"name": "sessions", "primaryKey": "id", "readOperation": "listPublicSessions", "writeOperation": null},
+      {"name": "registrations", "primaryKey": "id", "readOperation": "listRegistrations", "writeOperation": "updateRegistration"},
+      {"name": "registration_sessions", "primaryKey": "id", "readOperation": "listRegistrationSessions", "writeOperation": null},
+      {"name": "attendees", "primaryKey": "id", "readOperation": "attendees", "writeOperation": null}
+    ]
+  }
+}

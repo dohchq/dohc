@@ -8,7 +8,7 @@ CREATE TABLE sessions (
 );
 CREATE TABLE registrations (
   id TEXT PRIMARY KEY NOT NULL,
-  status_token TEXT NOT NULL,
+  status_token TEXT NOT NULL UNIQUE,
   full_name TEXT NOT NULL,
   mobile TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('website','reclub','manual')),
@@ -38,7 +38,8 @@ CREATE TABLE attendees (
   name_key TEXT NOT NULL,
   UNIQUE (registration_id, session_id, name_key)
 );
+CREATE INDEX registration_listing ON registrations(created_at_ms DESC,id DESC);
+CREATE INDEX attendee_listing ON attendees(session_id,role,name,id);
 INSERT INTO sessions(id,name,starts_at,player_capacity) VALUES
   ('s1','Session 1','2026-10-10T09:00:00+08:00',36),
   ('s2','Session 2','2026-10-10T13:00:00+08:00',36);
-

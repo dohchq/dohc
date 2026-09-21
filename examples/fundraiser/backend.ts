@@ -28,7 +28,10 @@
     if (optional && (input === undefined || input === "")) return "";
     if (typeof input !== "string" || input.length > 24 || !/^[\d+()\s-]+$/.test(input)) invalid(ctx, "Enter a Philippine mobile number.");
     let digits = input.replace(/[()\s-]/g, "");
+    if (digits.startsWith("00")) digits = "+" + digits.slice(2);
     if (/^09\d{9}$/.test(digits)) digits = "+63" + digits.slice(1);
+    if (/^639\d{9}$/.test(digits)) digits = "+" + digits;
+    if (/^9\d{9}$/.test(digits)) digits = "+63" + digits;
     if (!/^\+639\d{9}$/.test(digits)) invalid(ctx, "Enter a Philippine mobile number, such as 0917 123 4567.");
     return digits;
   }
