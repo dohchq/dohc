@@ -904,6 +904,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@dohc/app-backend-runtime':
+        specifier: workspace:*
+        version: link:../../packages/app-backend-runtime
       '@dohc/sync-relay':
         specifier: workspace:*
         version: link:../sync-relay
