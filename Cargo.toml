@@ -1,5 +1,5 @@
 # The dohc Rust workspace. `dohc-workspace-engine` builds the daemon the
-# desktop app runs; the other crates are its parts, test support, and fuzz
+# desktop app runs; the other crates are its parts, test support, and property
 # targets.
 [workspace]
 resolver = "3"
@@ -17,7 +17,7 @@ members = [
     "crates/dohc-engine-sync-http",
     "crates/dohc-workspace-engine",
     "crates/yrs-interop",
-    "fuzz/dohc-fuzz-targets",
+    "crates/dohc-proptest-targets",
 ]
 exclude = [
     "vendor/yrs-0.27.3",
