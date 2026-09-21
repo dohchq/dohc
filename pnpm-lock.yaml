@@ -207,9 +207,6 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.8
         version: 6.43.8
-      '@dohc/app-backend-runtime':
-        specifier: workspace:*
-        version: link:../../packages/app-backend-runtime
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand

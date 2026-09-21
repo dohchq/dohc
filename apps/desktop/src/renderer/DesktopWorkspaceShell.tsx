@@ -5212,6 +5212,7 @@ export function DesktopWorkspaceShell(props: {
                 <Suspense fallback={<PanelLoading label="app" />}>
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
+                    reportError={reportShellError}
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onShareSite={(target) =>

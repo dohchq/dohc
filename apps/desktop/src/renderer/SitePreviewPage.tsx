@@ -204,6 +204,7 @@ export function SitePreviewPage(props: {
   siteRoot: string;
   sharedView?: boolean;
   onShareSite?: (target: SiteShareTarget) => void;
+  reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -590,7 +591,7 @@ export function SitePreviewPage(props: {
             </IconButton>
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
-            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot}
+            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
               onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
           {modes.length > 0 ? (

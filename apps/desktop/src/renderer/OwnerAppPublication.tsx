@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
+import type { AppBackendCapability, AppBackendOperation } from "@dohc/security-contract/app-backend";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
+import { OwnerAppBackend, type ReportError } from "./OwnerAppBackend";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -12,6 +14,45 @@ import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
 type ActiveLink = RelayShareLinkRow & { selector: NonNullable<RelayShareLinkRow["selector"]> };
+const availableBackend = (publication: Publication): AppBackendCapability | null =>
+  publication.backendCapability && publication.backendCapability !== "unavailable" ? publication.backendCapability : null;
+const names = (operations: AppBackendOperation[], access: AppBackendOperation["access"]) => operations.filter(operation => operation.access === access).map(operation => operation.name).join(", ") || "None";
+
+function BackendSummary({ capability }: { capability: AppBackendCapability | null }) {
+  if (!capability) return null;
+  return <details className="mt-1"><summary className="cursor-pointer">Approved backend access</summary>
+    <p className="mb-0 break-all font-mono">{capability.dataPath}</p>
+    <p className="mb-0 break-words">Link: {names(capability.operations, "link")}</p>
+    <p className="mb-0 break-words">Helper: {names(capability.operations, "helper")}</p>
+    <p className="mb-0 break-words">Owner: {names(capability.operations, "owner")}</p>
+    <p className="mb-0 break-words">Tables: {capability.tables.map(table => table.name).join(", ") || "None"}</p>
+  </details>;
+}
+
+function OperationNames({ operations }: { operations: AppBackendOperation[] }) {
+  if (operations.length === 0) return <>None</>;
+  return <>{operations.map((operation, index) => <span key={operation.name}>{index ? ", " : ""}<span className="font-mono">{operation.name}</span> ({operation.readOnly ? "reads only" : "changes data"})</span>)}</>;
+}
+
+function BackendApproval({ capability }: { capability: AppBackendCapability }) {
+  const group = (access: AppBackendOperation["access"]) => capability.operations.filter(operation => operation.access === access);
+  return <div data-testid="app-publication-capability" className="space-y-2">
+    <p className="m-0">Stores its data in <span className="break-all font-mono">{capability.dataPath}</span>. This gives the app no access to workspace files.</p>
+    <dl className="m-0 space-y-1 text-[12px]">
+      <div><dt className="inline font-medium text-ink">Anyone with the link can run: </dt><dd className="m-0 inline break-words"><OperationNames operations={group("link")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Helpers you allow can also run: </dt><dd className="m-0 inline break-words"><OperationNames operations={group("helper")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Only you can run: </dt><dd className="m-0 inline break-words"><OperationNames operations={group("owner")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Tables you can browse: </dt><dd className="m-0 inline break-words">{capability.tables.length === 0 ? "None" :
+        capability.tables.map((table, index) => <span key={table.name}>{index ? ", " : ""}<span className="font-mono">{table.name}</span>{table.writeOperation ? "" : " (read-only)"}</span>)}</dd></div>
+    </dl>
+    <p className="m-0 text-[12px]">Link holders see only what these operations return. They cannot read the data file.</p>
+    <details className="text-[12px]"><summary className="cursor-pointer">Backend revision</summary>
+      <dl className="space-y-1 font-mono"><div><dt>Schema version</dt><dd className="m-0">{capability.schemaVersion}</dd></div>
+        <div><dt>Backend</dt><dd className="m-0 break-all">{capability.backendSha256}</dd></div>
+        <div><dt>Schema</dt><dd className="m-0 break-all">{capability.schemaSha256}</dd></div></dl>
+    </details>
+  </div>;
+}
 
 function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   const checked = OwnerAppPublicationResult.safeParse(result);
@@ -19,7 +60,7 @@ function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   return checked.data;
 }
 
-type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void };
+type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError };
 
 export function OwnerAppPublication(props: PublicationProps) {
   return <PublicationControl key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
@@ -46,12 +87,7 @@ function linkLabel(link: ActiveLink) {
   return `${paths}${version} · ${link.access} · ${link.grantId.slice(0, 8)}`;
 }
 
-function PublicationDialog(props: {
-  workspaceId: string;
-  appRoot: string;
-  onShareSource?: () => void;
-  onClose: () => void;
-}) {
+function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
   const [links, setLinks] = useState<ActiveLink[]>([]);
   const [selected, setSelected] = useState("");
   const [loading, setLoading] = useState(true);
@@ -87,6 +123,8 @@ function PublicationDialog(props: {
   const api = useRef(bridge()).current;
   const selectedLink = links.find(link => link.grantId === selected);
   const committing = busy === "approve" || busy === "withdraw" || busy === "revokeCollection" || responsesBusy;
+  // Backend data errors go to the shell's Notices when root passes reportShellError; otherwise this dialog's own alert line.
+  const reportError: ReportError = props.reportError ?? ((fallback, cause) => setError(ipcErrorMessage(cause, fallback)));
 
   useEffect(() => { heading.current?.focus(); }, [prepared]);
 
@@ -278,11 +316,12 @@ function PublicationDialog(props: {
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "app-backend" ? <BackendApproval key={capability.dataPath} capability={capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
             <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
             <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
               <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
-              <div><dt className="inline font-medium text-ink">Fields it can read: </dt><dd className="m-0 inline break-words font-mono">{capability.readFields.join(", ") || "None"}</dd></div></dl>
+              <div><dt className="inline font-medium text-ink">Fields shown in the app: </dt><dd className="m-0 inline break-words font-mono">{capability.readFields.join(", ") || "None"}</dd></div></dl>
+            <p className="m-0 text-[12px]">People with this share can read every response file and all its fields.</p>
             <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
             <details className="text-[12px]"><summary className="cursor-pointer">Collection schema revision</summary><p className="break-all font-mono">{capability.schemaSha256}</p></details>
           </div>)}
@@ -313,8 +352,10 @@ function PublicationDialog(props: {
                       <p className="mb-0 break-all font-mono">{publication.collectionCapability.collectionPath}</p>
                       <p className="mb-0 break-words">Create: {publication.collectionCapability.allowedFields.join(", ")}</p>
                       <p className="mb-0 break-words">Required: {publication.collectionCapability.requiredFields.join(", ") || "None"}</p>
-                      <p className="mb-0 break-words">Read: {publication.collectionCapability.readFields.join(", ") || "None"}</p>
-                    </details> : <p className="mb-0 mt-1">No collection access</p>}
+                      <p className="mb-0 break-words">Shown in the app: {publication.collectionCapability.readFields.join(", ") || "None"}</p>
+                      <p className="mb-0">People with this share can read every response file and all its fields.</p>
+                    </details> : availableBackend(publication) ? null : <p className="mb-0 mt-1">No collection access</p>}
+                    {publication.backendCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Backend data details unavailable.</p> : <BackendSummary capability={availableBackend(publication)} />}
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-2">
                     {publication.collectionCapability ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Revoke collection access ${publication.publicationId}`} onClick={() => setPendingRevoke(publication)}>{busy === "revokeCollection" && busyPublicationId === publication.publicationId ? "Revoking…" : "Revoke collection access"}</SecondaryButton> : null}
@@ -328,6 +369,13 @@ function PublicationDialog(props: {
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Link {grantId}</p>
           <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
         </div>)}
+        {publications.flatMap(publication => {
+          const capability = availableBackend(publication);
+          return !capability || publication.manifestUnavailable || publication.appRoot !== props.appRoot ? [] : [<div key={publication.publicationId}>
+            <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Publication {publication.publicationId.slice(0, 12)} · Link {publication.grantId}</p>
+            <OwnerAppBackend workspaceId={props.workspaceId} publicationId={publication.publicationId} capability={capability} disabled={publicationsLoading || !!busy} onError={reportError} />
+          </div>];
+        })}
         <label className="text-[13px] text-ink">Share link
           <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
             className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
