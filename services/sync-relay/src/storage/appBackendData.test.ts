@@ -5,7 +5,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { openSyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
 import { initializeAppBackendSchema } from "./appBackendSchema";
-import { activateAppBackend, commitAppBackendOperation, findAppBackendReceipt, stageAppBackendFile, readAppBackendFile, listAppBackendCallerFiles, exportAppBackend, readAppBackendSnapshot, collectExpiredAppBackendFiles, setAppBackendHelper, isAppBackendHelper, type CommitAppBackendOperationInput } from "./appBackendData";
+import { activateAppBackend, commitAppBackendOperation, findAppBackendReceipt, stageAppBackendFile, readAppBackendFile, listAppBackendCallerFiles, exportAppBackend, restoreAppBackend, readAppBackendSnapshot, collectExpiredAppBackendFiles, setAppBackendHelper, isAppBackendHelper, type CommitAppBackendOperationInput } from "./appBackendData";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -72,7 +72,7 @@ describe("app backend durable store", () => {
     f.context.db.exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON sync_relay_app_backend_receipts BEGIN SELECT RAISE(ABORT,'injected failure'); END;`);
     expect(() => f.commit()).toThrow("injected failure");
     const exported=exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize});
-    expect(exported.snapshot.revision).toBe(1); expect(exported.snapshot.database).toEqual(new Uint8Array([1]));
+    expect(exported.snapshot.revision).toBe(1); expect(Buffer.from(exported.snapshot.databaseBase64,"base64")).toEqual(Buffer.from([1]));
     expect(exported.history).toHaveLength(1); expect(exported.receipts).toHaveLength(0);
     f.context.db.exec("DROP TRIGGER fail_receipt");
     expect(f.commit().kind).toBe("committed");
@@ -115,5 +115,48 @@ describe("app backend durable store", () => {
     expect(readAppBackendSnapshot(f.context,f.snapshot)?.revision).toBe(1);
     expect(() => stageAppBackendFile(f.context,{...f.snapshot,caller:{grantId:"g",principalId:"p"},idempotencyKey:"u",name:"receipt.png",contentType:"image/png",content:new Uint8Array(10000),nowMs:3,expiresAtMs:20,authorize:f.authorize})).toThrow(/quota/);
     expect(listAppBackendCallerFiles(f.context,{...f.snapshot,caller:{grantId:"g",principalId:"p"},nowMs:3})).toEqual([]);
+  });
+  it("recovers an absent store with receipts and attachments without resurrecting helper grants",async()=>{
+    const f=fixture(), caller={grantId:"g",principalId:"p"};
+    const {file}=stageAppBackendFile(f.context,{...f.snapshot,caller,idempotencyKey:"upload",name:"receipt.png",contentType:"image/png",content:new Uint8Array([1,2,3]),nowMs:3,expiresAtMs:100,authorize:f.authorize});
+    f.commit({attachedFileIds:[file.fileId]});
+    stageAppBackendFile(f.context,{...f.snapshot,caller,idempotencyKey:"unused",name:"unused.png",contentType:"image/png",content:new Uint8Array([1]),nowMs:3,expiresAtMs:100,authorize:f.authorize});
+    setAppBackendHelper(f.context,{...f.snapshot,grantId:"helper",enabled:true,nowMs:5,authorize:f.authorize});
+    const bundle=JSON.parse(JSON.stringify(exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize})));
+    expect(bundle.files).toHaveLength(1); expect(bundle).not.toHaveProperty("helpers");
+    const target=fixture();
+    target.context.db.prepare("DELETE FROM sync_relay_app_backends WHERE workspace_id='w'").run();
+    let validations=0;
+    const restored=await restoreAppBackend(target.context,{...target.snapshot,expectedRevision:null,bundle,nowMs:6,authorize:target.authorize,
+      async validateDatabase(database){validations++; expect(database).toEqual(new Uint8Array([9]));}});
+    expect(validations).toBe(1); expect(restored.revision).toBe(3);
+    expect(target.commit()).toEqual({kind:"replayed",revision:2,result:{accepted:true}});
+    expect(readAppBackendFile(target.context,{...target.snapshot,fileId:file.fileId,authorize:target.authorize})?.content).toEqual(new Uint8Array([1,2,3]));
+    expect(isAppBackendHelper(target.context,{...target.snapshot,grantId:"helper"})).toBe(false);
+    expect(exportAppBackend(target.context,{...target.snapshot,authorize:target.authorize}).history.at(-1)?.kind).toBe("restore");
+    target.restart(); expect(target.commit().kind).toBe("replayed");
+  });
+  it("refuses rollback, corrupt recovery, schema mismatch, and validation failure without importing rows",async()=>{
+    const f=fixture(); f.commit();
+    const bundle=exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize});
+    const input={...f.snapshot,expectedRevision:null,bundle,nowMs:5,authorize:f.authorize,async validateDatabase(){}};
+    await expect(restoreAppBackend(f.context,input)).rejects.toThrow(/existing app data/);
+    f.context.db.prepare("DELETE FROM sync_relay_app_backends WHERE workspace_id='w'").run();
+    await expect(restoreAppBackend(f.context,{...input,bundle:{...bundle,integritySha256:"0".repeat(64)}})).rejects.toThrow(/integrity/);
+    await expect(restoreAppBackend(f.context,{...input,schemaVersion:2})).rejects.toThrow(/schema/);
+    await expect(restoreAppBackend(f.context,{...input,async validateDatabase(){throw new Error("invalid SQLite schema");}})).rejects.toThrow(/SQLite/);
+    expect(readAppBackendSnapshot(f.context,f.snapshot)).toBeNull();
+    expect(f.context.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_backend_receipts").get()?.n).toBe(0);
+  });
+  it("rechecks authority and store absence after asynchronous recovery validation",async()=>{
+    const f=fixture(), bundle=exportAppBackend(f.context,{...f.snapshot,authorize:f.authorize});
+    f.context.db.prepare("DELETE FROM sync_relay_app_backends WHERE workspace_id='w'").run();
+    let authorized=true;
+    const input={...f.snapshot,expectedRevision:null,bundle,nowMs:5,authorize(){if(!authorized)throw new Error("revoked");},async validateDatabase(){authorized=false;}};
+    await expect(restoreAppBackend(f.context,input)).rejects.toThrow("revoked");
+    expect(readAppBackendSnapshot(f.context,f.snapshot)).toBeNull();
+    authorized=true;
+    await expect(restoreAppBackend(f.context,{...input,async validateDatabase(){activateAppBackend(f.context,{...f.snapshot,expectedRevision:null,nowMs:4,authorize:f.authorize});}})).rejects.toThrow(/initialized during recovery/);
+    expect(readAppBackendSnapshot(f.context,f.snapshot)?.revision).toBe(1);
   });
 });

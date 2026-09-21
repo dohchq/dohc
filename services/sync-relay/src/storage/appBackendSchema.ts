@@ -15,7 +15,7 @@ export function initializeAppBackendSchema(db: SqliteDb): void {
     CREATE TABLE IF NOT EXISTS sync_relay_app_backend_history (
       workspace_id TEXT NOT NULL, data_path TEXT NOT NULL, revision INTEGER NOT NULL,
       publication_id TEXT NOT NULL, publication_revision INTEGER NOT NULL,
-      source_sha256 TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('activate','operation')),
+      source_sha256 TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('activate','operation','restore')),
       grant_id TEXT NOT NULL, principal_id TEXT NOT NULL, changeset BLOB NOT NULL,
       database_sha256 TEXT NOT NULL, recorded_at_ms INTEGER NOT NULL,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes > 0),
