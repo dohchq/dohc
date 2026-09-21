@@ -148,3 +148,26 @@ it("does not attach another participant's staged upload", async () => {
   expect((await f.host.invoke(owner, f.publicationId, input("read", "read"))).result).toEqual([{id: "only", remaining: 1}]);
   expect(f.storage.db.prepare("SELECT attached_revision FROM sync_relay_app_backend_files WHERE file_id=?").get(upload.file.fileId)?.attached_revision).toBeNull();
 });
+
+it("keeps reads and new submissions working after more than 32 attached uploads", async () => {
+  const f = fixture();
+  await f.host.activate(owner, f.publicationId, 1);
+  const upload = (index: number) => f.host.upload(owner, f.publicationId, {authorityRevision: 1, idempotencyKey: `upload-${index}`, name: "receipt.txt", contentType: "text/plain", bytesBase64: Buffer.from("receipt").toString("base64")});
+  const pending = Array.from({length: 32}, (_, index) => upload(index));
+  expect(() => upload(32)).toThrow(/Submit pending uploads/);
+  expect(upload(0)).toEqual({...pending[0], replayed: true});
+  expect((await f.host.invoke(owner, f.publicationId, input("read-pending", "read"))).result).toEqual([{id: "only", remaining: 1}]);
+  await f.host.invoke(owner, f.publicationId, input("attach-first", "attach", {fileIds: pending.map(row => row.file.fileId)}));
+  const next = upload(32);
+  await f.host.invoke(owner, f.publicationId, input("attach-next", "attach", {fileIds: [next.file.fileId]}));
+  expect((await f.host.invoke(owner, f.publicationId, input("read-attached", "read"))).result).toEqual([{id: "only", remaining: 1}]);
+  expect((await f.host.readFile(owner, f.publicationId, {authorityRevision: 1, fileId: pending[0]!.file.fileId, operation: "fileAccess", input: {fileId: pending[0]!.file.fileId}})).file.fileId).toBe(pending[0]!.file.fileId);
+  expect(upload(33).replayed).toBe(false);
+});
+
+it("uses one timestamp when staging an upload while the clock advances", async () => {
+  let now = 10;
+  const f = fixture(evaluateAppOperation, () => now++);
+  await f.host.activate(owner, f.publicationId, 1);
+  expect(f.host.upload(owner, f.publicationId, {authorityRevision: 1, idempotencyKey: "upload", name: "receipt.txt", contentType: "text/plain", bytesBase64: Buffer.from("receipt").toString("base64")})).toMatchObject({replayed: false});
+});

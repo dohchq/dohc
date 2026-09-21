@@ -41,7 +41,7 @@ describe("app backend durable store", () => {
     expect(commitAppBackendOperation(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,caller,idempotencyKey:"op-1",payloadSha256:"c".repeat(64),expectedRevision:1,publicationId:"pub-1",publicationRevision:1,schemaSha256:f.snapshot.schemaSha256,database:new Uint8Array([4]),changeset:new Uint8Array(),result:{ok:true},attachedFileIds:[],nowMs:5,authorize:f.authorize})).toEqual({kind:"replayed",revision:2,result:{ok:true}});
     expect(findAppBackendReceipt(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,caller,idempotencyKey:"op-1",payloadSha256:"c".repeat(64)})).toEqual({revision:2,result:{ok:true}});
     expect(readAppBackendFile(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,fileId:uploaded.file.fileId,authorize:f.authorize})?.content).toEqual(new Uint8Array([1,2,3]));
-    expect(listAppBackendCallerFiles(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,caller,nowMs:5})).toHaveLength(1);
+    expect(listAppBackendCallerFiles(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,caller,nowMs:5})).toHaveLength(0);
     expect(exportAppBackend(f.context,{workspaceId:f.snapshot.workspaceId,dataPath:f.snapshot.dataPath,authorize:f.authorize}).history).toHaveLength(2);
   });
   it("refuses schema changes and stale compare-and-set", () => {
@@ -98,6 +98,15 @@ describe("app backend durable store", () => {
     expect(collectExpiredAppBackendFiles(f.context,20)).toBe(1);
     expect(readAppBackendFile(f.context,{...f.snapshot,fileId:first.file.fileId,authorize:f.authorize})).not.toBeNull();
     expect(() => readAppBackendFile(f.context,{...f.snapshot,fileId:first.file.fileId,authorize(){throw new Error("unauthorized");}})).toThrow("unauthorized");
+  });
+  it("bounds pending uploads per caller and releases capacity when they expire", () => {
+    const f = fixture(), upload = {...f.snapshot, caller: {grantId:"g",principalId:"p"}, name:"file.txt",contentType:"text/plain",content:new Uint8Array([1]),nowMs:3,expiresAtMs:20,authorize:f.authorize};
+    for (let index=0;index<32;index++) stageAppBackendFile(f.context,{...upload,idempotencyKey:`u-${index}`});
+    expect(() => stageAppBackendFile(f.context,{...upload,idempotencyKey:"overflow"})).toThrow(/Submit pending uploads/);
+    expect(stageAppBackendFile(f.context,{...upload,idempotencyKey:"u-0"}).replayed).toBe(true);
+    expect(stageAppBackendFile(f.context,{...upload,caller:{grantId:"g",principalId:"other"},idempotencyKey:"other"}).replayed).toBe(false);
+    expect(stageAppBackendFile(f.context,{...upload,nowMs:20,expiresAtMs:40,idempotencyKey:"after-expiry"}).replayed).toBe(false);
+    expect(listAppBackendCallerFiles(f.context,{...f.snapshot,caller:upload.caller,nowMs:20})).toHaveLength(1);
   });
   it("charges all private data against workspace quota and removes it with the workspace", () => {
     const f=fixture(); f.commit();

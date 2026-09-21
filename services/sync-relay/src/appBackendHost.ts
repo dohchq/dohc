@@ -112,7 +112,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
         const receiptScope = {...scope(value), caller: value.receiptCaller, idempotencyKey: parsed.idempotencyKey,
           payloadSha256: sha(JSON.stringify(["dohc-app-operation-v1", publicationId, parsed.operation, parsed.input]))};
         const receipt = operation.readOnly ? null : findAppBackendReceipt(storage, receiptScope);
-        const files = listAppBackendCallerFiles(storage, {...scope(value), caller: value.receiptCaller, nowMs: nowMs()});
+        const files = operation.readOnly ? [] : listAppBackendCallerFiles(storage, {...scope(value), caller: value.receiptCaller, nowMs: nowMs()});
         return {value, operation, snapshot, receiptScope, receipt, files};
       });
       const {value, snapshot, operation} = captured;

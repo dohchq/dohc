@@ -5,6 +5,7 @@ import { assertWorkspaceQuota } from "./workspaces";
 
 const MAX_DATABASE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_PENDING_FILES_PER_CALLER = 32;
 const MAX_RESULT_BYTES = 1024 * 1024;
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
@@ -230,6 +231,10 @@ export function stageAppBackendFile(storage: StorageContext, input: StageAppBack
       if (previous.attached_revision === null && Number(previous.expires_at_ms) <= input.nowMs) throw relayError("conflict","App upload expired.");
       return {file: fileMetadata(previous), replayed: true};
     }
+    const pending = storage.db.prepare(`SELECT COUNT(*) AS n FROM sync_relay_app_backend_files
+      WHERE workspace_id=? AND data_path=? AND grant_id=? AND principal_id=? AND attached_revision IS NULL AND expires_at_ms>?`)
+      .get(input.workspaceId,input.dataPath,input.caller.grantId,input.caller.principalId,input.nowMs);
+    if (Number(pending?.n) >= MAX_PENDING_FILES_PER_CALLER) throw relayError("quota_exceeded", "Submit pending uploads before uploading more files.");
     const fileId = randomUUID();
     const bytes = input.content.byteLength+size([input.workspaceId,input.dataPath,input.caller,input.idempotencyKey,input.name,input.contentType,fileId,hash])+256;
     assertWorkspaceQuota(storage,input.workspaceId,bytes);
@@ -244,8 +249,8 @@ export function listAppBackendCallerFiles(storage: StorageContext, input: AppBac
 }): AppBackendFile[] {
   identity(input); caller(input.caller); timestamp(input.nowMs);
   return storage.db.prepare(`SELECT file_id,name,content_type,sha256,length(content) AS byte_length FROM sync_relay_app_backend_files
-    WHERE workspace_id=? AND data_path=? AND grant_id=? AND principal_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)
-    ORDER BY created_at_ms DESC,file_id LIMIT 64`).all(input.workspaceId,input.dataPath,input.caller.grantId,input.caller.principalId,input.nowMs)
+    WHERE workspace_id=? AND data_path=? AND grant_id=? AND principal_id=? AND attached_revision IS NULL AND expires_at_ms>?
+    ORDER BY created_at_ms DESC,file_id LIMIT ?`).all(input.workspaceId,input.dataPath,input.caller.grantId,input.caller.principalId,input.nowMs,MAX_PENDING_FILES_PER_CALLER)
     .map(row => ({fileId:String(row.file_id),name:String(row.name),contentType:String(row.content_type),sha256:String(row.sha256),byteLength:Number(row.byte_length)}));
 }
 

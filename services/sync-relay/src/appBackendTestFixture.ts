@@ -25,13 +25,14 @@ const source = `globalThis.operations = {
     return {id:ctx.requestId,secret:ctx.secret};
   },
   read(ctx) {return ctx.db.query('SELECT * FROM slots');},
+  attach(ctx,input) {for(const fileId of input.fileIds)ctx.files.attach(fileId);return null;},
   fileAccess(ctx,input) {return {fileId:input.fileId};},
   administer(ctx) {return {kind:ctx.caller.kind};},
   ownerOnly(ctx) {return {kind:ctx.caller.kind};}
 };`;
 const cleanups: (() => void)[] = [];
 afterEach(() => {for (const cleanup of cleanups.splice(0).reverse()) cleanup();});
-export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOperation) {
+export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOperation, nowMs: () => number = () => 10) {
   const dir = mkdtempSync(join(tmpdir(), "app-backend-host-test-"));
   cleanups.push(() => rmSync(dir, {recursive: true, force: true}));
   let storage = openSyncRelayStorage(join(dir, "relay.sqlite")) as StorageContext;
@@ -50,7 +51,7 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
     inputs: [{path: "app/index.ts", sha256: "7".repeat(64), byteLength: 10}], dependencies: ["app/index.ts"],
     files: blobs.map(({path, bytes, contentType}) => ({path, sha256: sha(bytes), byteLength: bytes.byteLength, contentType})),
     capabilities: [{kind: "app-backend", dataPath: "data/signups.sqlite", backendPath: "backend.js", schemaPath: "schema.sql", backendSha256: sha(source), schemaSha256: sha(schema), schemaVersion: 1,
-      operations: [{name: "reserve", access: "link", readOnly: false}, {name: "read", access: "link", readOnly: true},
+      operations: [{name: "reserve", access: "link", readOnly: false}, {name: "read", access: "link", readOnly: true}, {name: "attach", access: "link", readOnly: false},
         {name: "fileAccess", access: "helper", readOnly: true}, {name: "administer", access: "helper", readOnly: true}, {name: "ownerOnly", access: "owner", readOnly: true}],
       tables: [{name: "slots", primaryKey: "id", readOperation: "read", writeOperation: "reserve"}, {name: "registrations", primaryKey: "id", readOperation: "read", writeOperation: null}]}]}, limits);
   candidate.sourceDigest = digest("dohc-app-source-v2", {entry: candidate.entryPath, files: candidate.inputs, packages: []});
@@ -59,7 +60,7 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
   candidate.buildDigest = digest("dohc-app-build-v1", {sourceDigest: candidate.sourceDigest, dependencyLockDigest: candidate.dependencyLockDigest, compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
   const publication = storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate, limits, nowMs: 5,
     blobs: blobs.map(({bytes}) => ({sha256: sha(bytes), bytes}))});
-  let host = createAppBackendHost({storage, limits, nowMs: () => 10, runtime: {initializeAppDatabase, evaluateAppOperation: evaluate}});
+  let host = createAppBackendHost({storage, limits, nowMs, runtime: {initializeAppDatabase, evaluateAppOperation: evaluate}});
   const link = (id: string): AppBackendAuth => {
     storage.mintLinkSession({session: {sessionId: `session-${id}`, capabilityHash: `capability-${id}`, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
     return {kind: "link", capabilityHash: `capability-${id}`, profileTokenHash: `profile-${id}`};
@@ -68,7 +69,7 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
     restart() {
       storage.close();
       storage = openSyncRelayStorage(join(dir, "relay.sqlite")) as StorageContext;
-      host = createAppBackendHost({storage, limits, nowMs: () => 10, runtime: {initializeAppDatabase, evaluateAppOperation: evaluate}});
+      host = createAppBackendHost({storage, limits, nowMs, runtime: {initializeAppDatabase, evaluateAppOperation: evaluate}});
     },
     publishUpgrade() {
       return storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1,
