@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import * as windowsSpawn from "../process/windowsSpawn";
+import * as posixSpawn from "../process/posixSpawn";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1132,68 +1134,56 @@ describe("startSiteDevServer", () => {
   });
 
   it("does not reject the ready-timeout until the child is fully stopped", async () => {
-    // Regression: the ready-timeout used to `void stopChild(child)` and reject
-    // immediately, so a caller could observe the failure and delete/switch the
-    // workspace while the dev server was still alive holding the site dir. The
-    // reject must now wait for stopChild to complete. A child that delays its
-    // exit on SIGTERM makes the ordering observable: with the await in place
-    // the rejection cannot arrive before that delay has elapsed.
     await mkdir(join(root, "site"), { recursive: true });
-    const pidFile = join(root, "site", "dev.pid");
-    const readyTimeoutMs = 150;
-    const sigtermExitDelayMs = 400;
-    const script = [
-      `process.on("SIGTERM", () => { setTimeout(() => process.exit(0), ${sigtermExitDelayMs}); });`,
-      `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
-      "setInterval(() => {}, 1000);",
-    ].join("\n");
-
-    const startedAt = Date.now();
-    await expect(
-      startSiteDevServer({
-        workspaceRoot: root,
-        siteRoot: "site",
-        command: process.execPath,
-        args: ["-e", script],
-        readyTimeoutMs,
-      }),
-    ).rejects.toThrow(/did not report a local URL/);
-    const elapsed = Date.now() - startedAt;
-
-    // Reject waited for the delayed exit; without the fix it fires at ~150ms.
-    // On win32 stopChild reaches killChildTreeWin32 (taskkill /T /F) before
-    // it ever sends SIGTERM, so the child dies immediately and the delay is
-    // unobservable; the pid liveness check below still catches the regression
-    // (verified: re-injecting `void stopChild` fails it 5/5 on Windows).
-    if (process.platform !== "win32") {
-      expect(elapsed).toBeGreaterThanOrEqual(readyTimeoutMs + sigtermExitDelayMs - 100);
-    }
-
-    // And the child is confirmed down by the time the rejection surfaces.
-    // The child writes its pid file asynchronously after spawn. File creation
-    // can become visible before the PID bytes do, so wait for the value this
-    // assertion needs instead of stopping at directory-entry existence.
-    let pid = 0;
-    await vi.waitFor(
-      async () => {
-        try {
-          pid = Number((await readFile(pidFile, "utf8")).trim());
-        } catch {
-          pid = 0;
-        }
-        expect(pid).toBeGreaterThan(0);
-      },
-      { timeout: 10_000 },
-    );
-    let alive = true;
+    let beginStop!: (pid: number) => void;
+    let releaseStop!: () => void;
+    const stopping = new Promise<number>((resolve) => { beginStop = resolve; });
+    const stopAllowed = new Promise<void>((resolve) => { releaseStop = resolve; });
+    let childPid = 0;
+    const realWindowsStop = windowsSpawn.killChildTreeWin32;
+    const realPosixStop = posixSpawn.killProcessTreePosix;
+    const stopSpy = process.platform === "win32"
+      ? vi.spyOn(windowsSpawn, "killChildTreeWin32").mockImplementation(async (child) => {
+          childPid = child.pid!;
+          beginStop(child.pid!);
+          await stopAllowed;
+          return realWindowsStop(child);
+        })
+      : vi.spyOn(posixSpawn, "killProcessTreePosix").mockImplementation(async (...args) => {
+          childPid = args[0];
+          beginStop(args[0]);
+          await stopAllowed;
+          return realPosixStop(...args);
+        });
+    let settled = false;
+    const starting = startSiteDevServer({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000);"],
+      readyTimeoutMs: 150,
+    });
+    void starting.then(() => { settled = true; }, () => { settled = true; });
     try {
-      process.kill(pid, 0);
-    } catch {
-      alive = false;
+      const pid = await stopping;
+      expect(pid).toBeGreaterThan(0);
+      // Drain the rejection microtasks while teardown is held, without a timing assertion.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(() => process.kill(pid, 0)).not.toThrow();
+      releaseStop();
+      await expect(starting).rejects.toThrow(/did not report a local URL/);
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      releaseStop();
+      await starting.catch(() => {});
+      try {
+        if (childPid > 0) expect(await waitForProcessDeath(childPid, 10_000)).toBe(true);
+      } finally {
+        stopSpy.mockRestore();
+      }
     }
-    expect(alive).toBe(false);
   });
-
   it("fails when the child exits before reporting a URL", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     await expect(
