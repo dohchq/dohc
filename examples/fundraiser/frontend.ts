@@ -232,7 +232,7 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
       el("p", { class: "hint" }, "Choose one or both sessions. Add the name of every player and spectator."), sessionsMessage, ...blocks.map(block => block.element)),
     el("section", { class: "group" }, el("h3", {}, "Estimated total"),
       el("table", { class: "totals" }, el("caption", { class: "sr-only" }, "Fee breakdown"), breakdown, el("tfoot", {}, el("tr", {}, el("th", { scope: "row" }, "Total"), el("td", { class: "num" }, totalCell)))),
-      el("p", { class: "hint" }, "Estimate from the current prices. The backend confirms the final amount.")),
+      el("p", { class: "hint" }, "Your total is confirmed when you register.")),
     el("section", { class: "group" }, el("h3", {}, "Payment"), el("p", { class: "banner-inline" }, EXAMPLE_NOTICE),
       el("div", { class: "field" }, el("span", { class: "label", id: "payment-label" }, "Payment method"), methods.element),
       receiptBlock),

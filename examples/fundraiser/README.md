@@ -68,3 +68,7 @@ pnpm --filter @dohc/app-backend-runtime test src/examples.test.ts
 
 These runtime tests do not prove browser publication, durable retry receipts, host commit ordering, or access revocation.
 Those require the host and browser integration tests. A successful runtime operation is only a candidate until the host commits it.
+
+The [fundraiser browser test](../../services/share-web/e2e/app-backend-fundraiser.spec.ts) passed in Chromium on Windows with the actual compiler, isolated runtime, and relay SQLite storage.
+It covers public registration, receipt upload, private status lookup, organizer sign-in, receipt download, rejection, restoration, payment verification, manual entries, attendees, and owner table reads.
+The test uses synthetic data and requires PowerShell 7 for its temporary TLS certificate.
