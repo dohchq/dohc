@@ -188,3 +188,14 @@ it("does not return private bytes when an access decision becomes stale", async 
   revoke = () => f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: f.publicationId, expectedAuthorityRevision: 1});
   await expect(f.host.readFile(owner, f.publicationId, {authorityRevision: 1, fileId: staged.file.fileId, operation: "fileAccess", input: {fileId: staged.file.fileId}})).rejects.toThrow();
 });
+
+it("rechecks authority before exposing an app refusal message", async () => {
+  let revoke: (() => void) | undefined;
+  const f = fixture(async () => {
+    revoke?.();
+    throw new Error("private data in a refusal");
+  });
+  await f.host.activate(owner, f.publicationId, 1);
+  revoke = () => f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: f.publicationId, expectedAuthorityRevision: 1});
+  await expect(f.host.invoke(f.link("a"), f.publicationId, input("one"))).rejects.toMatchObject({code: "not_found", message: "not found"});
+});
