@@ -295,6 +295,34 @@ export async function createLocalAppBackendHost(options: {
   }
   return {
     activate, request, assertCurrent,
+    browserPublication(publicationId:string) {
+      return transaction(()=>{
+        const row=state(publicationId);if(!row.database)throw new Error("Restore the app data before opening it.");
+        const capability=parseAppBackendCapability(JSON.parse(row.capability));
+        const candidate=parseAppPublicationCandidate(JSON.parse(row.candidate),APP_PUBLICATION_LIMITS);
+        const files=candidate.files.filter(file=>file.path!==capability.backendPath && file.path!==capability.schemaPath).map(file=>{
+          const bytes=db.prepare("SELECT content FROM artifacts WHERE data_path=? AND path=?").get(row.data_path,file.path)?.content as Uint8Array|undefined;
+          if(!bytes || bytes.byteLength!==file.byteLength || hash(bytes)!==file.sha256)throw new Error("The approved app artifact is unavailable.");
+          return {...file,bytes:Uint8Array.from(bytes)};
+        });
+        return {publicationId,authorityRevision:row.authority_revision,appRoot:row.app_root,files};
+      });
+    },
+    async readBrowserFile(publicationId:string,input:{authorityRevision:number;fileId:string;operation:string;input:unknown},signal?:AbortSignal) {
+      if(!/^[A-Za-z0-9_-]{16,128}$/.test(input.fileId))throw new Error("Invalid app file.");
+      const before=state(publicationId,input.authorityRevision),capability=parseAppBackendCapability(JSON.parse(before.capability));
+      if(!capability.operations.some(operation=>operation.name===input.operation && operation.readOnly))throw new Error("Choose an approved read operation for this file.");
+      const evaluated=await invoke(publicationId,{authorityRevision:input.authorityRevision,operation:input.operation,input:input.input,idempotencyKey:randomUUID()},signal);
+      return transaction(()=>{
+        checkSignal(signal);const current=state(publicationId,input.authorityRevision);
+        if(current.revision!==evaluated.revision)throw new Error("The app changed while it read this file. Try again.");
+        const result=evaluated.result;
+        if(!result || typeof result!=="object" || Array.isArray(result) || Object.keys(result).length!==1 || result.fileId!==input.fileId)throw new Error("This operation did not allow access to the file.");
+        const file=db.prepare("SELECT * FROM files WHERE data_path=? AND file_id=? AND attached_revision IS NOT NULL").get(current.data_path,input.fileId);
+        if(!file)throw new Error("This app file is unavailable.");
+        return {file:fileMetadata(file as {metadata:string}),bytesBase64:Buffer.from(file.content as Uint8Array).toString("base64")};
+      });
+    },
     has(publicationId: string) { assertCurrent(); return !!db.prepare("SELECT 1 FROM apps WHERE publication_id=?").get(publicationId); },
     findByDataPath(dataPath:string) {
       assertCurrent();const row=byPath(dataPath);
