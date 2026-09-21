@@ -606,6 +606,22 @@ describe("message reactions (WS-MU-C2)", () => {
     });
   });
 
+  it("toggles a quick reaction from the row toolbar and marks the viewer's own", () => {
+    const { onToggle } = renderList([reaction({ emoji: "🙌", authorId: "you@x", authorDisplayName: "You" })], "you@x");
+    const toolbar = screen.getByTestId("test-chat-message-toolbar");
+    const quick = within(toolbar).getAllByTestId("test-chat-quick-reaction");
+    expect(quick.map((button) => button.dataset.emoji)).toEqual(["👍", "🙌"]);
+    expect(quick[0]!.getAttribute("aria-pressed")).toBe("false");
+    expect(quick[1]!.getAttribute("aria-pressed")).toBe("true");
+    // The toolbar holds the one add-reaction trigger; the pill row keeps none.
+    expect(within(toolbar).getByTestId("test-chat-add-reaction")).toBeTruthy();
+    expect(screen.getAllByTestId("test-chat-add-reaction")).toHaveLength(1);
+    fireEvent.click(quick[0]!);
+    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "👍", nextState: "added" });
+    fireEvent.click(quick[1]!);
+    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "🙌", nextState: "removed" });
+  });
+
   it("keeps the add-reaction trigger visible but disabled when read-only", () => {
     const { onToggle } = renderList([reaction()], "you@x", vi.fn(), true);
     const trigger = screen.getByTestId("test-chat-add-reaction") as HTMLButtonElement;
@@ -616,6 +632,10 @@ describe("message reactions (WS-MU-C2)", () => {
     const pill = screen.getByTestId("test-chat-reaction-pill") as HTMLButtonElement;
     expect(pill.disabled).toBe(true);
     fireEvent.click(pill);
+    for (const quick of screen.getAllByTestId("test-chat-quick-reaction")) {
+      expect((quick as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(quick);
+    }
     expect(onToggle).not.toHaveBeenCalled();
   });
 

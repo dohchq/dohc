@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  chatFileKind,
   extractChatFileReferences,
   extractChatFileReferenceTokens,
   formatChatFileReferenceToken,
@@ -103,5 +104,17 @@ describe("chat file reference tokens", () => {
     expect(extractChatFileReferences(body)).toEqual([
       { path: "docs/live.md", headingAnchor: "scope" },
     ]);
+  });
+});
+
+describe("chatFileKind", () => {
+  it("picks the chip glyph by extension", () => {
+    expect(chatFileKind("docs/plan.md")).toBe("text");
+    expect(chatFileKind("notes.TXT")).toBe("text");
+    expect(chatFileKind("data/sales.csv")).toBe("data");
+    expect(chatFileKind("shots\cover.png")).toBe("image");
+    expect(chatFileKind("build/app.exe")).toBe("file");
+    expect(chatFileKind(".env")).toBe("file");
+    expect(chatFileKind("README")).toBe("file");
   });
 });

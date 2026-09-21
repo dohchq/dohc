@@ -78,6 +78,23 @@ export function extractChatFileReferences(body: string): ChatFileReferenceInput[
   return references;
 }
 
+// The glyph a file chip shows, chosen by extension the way the explorer
+// separates databases from files. The chat surfaces know only the path.
+export type ChatFileKind = "text" | "data" | "image" | "file";
+
+const TEXT_EXTENSIONS = new Set(["md", "mdx", "markdown", "txt", "json", "yaml", "yml", "toml"]);
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp"]);
+
+export function chatFileKind(path: string): ChatFileKind {
+  const name = path.split(/[\\/]/u).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  if (TEXT_EXTENSIONS.has(extension)) return "text";
+  if (extension === "csv" || extension === "tsv") return "data";
+  if (IMAGE_EXTENSIONS.has(extension)) return "image";
+  return "file";
+}
+
 export function formatChatFileReferenceToken(input: ChatFileReferenceInput): string {
   return `@[${encodeReferenceComponent(input.path)}${
     input.headingAnchor ? `#${encodeReferenceComponent(input.headingAnchor)}` : ""
