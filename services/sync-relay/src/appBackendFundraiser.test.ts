@@ -232,7 +232,7 @@ it("recovers an uncertain registration from another browser profile without rese
   ] as const) {
     const response = await f.invoke("third", key, "register", changed);
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ok: false, code: "submission_conflict", error: "This submission reference cannot be reused with these details."});
+    expect(await response.json()).toEqual({code: "submission_conflict", message: "This submission reference cannot be reused with these details."});
   }
   const fresh = await f.invoke("other", "mismatched-receipt", "register", {...registration(replacement.file.fileId), receiptSha256: "f".repeat(64)});
   expect(fresh.status).toBe(409);
