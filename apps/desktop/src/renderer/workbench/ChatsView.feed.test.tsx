@@ -61,7 +61,7 @@ describe("ChatsView hybrid feed", () => {
     const onNavCommand = vi.fn();
     renderView(vi.fn(), vi.fn(), { onNavCommand });
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
-    await screen.findByText("Nothing new yet");
+    await screen.findByText("No posts in your groups yet.");
     await userEvent.click(screen.getByTestId("chats-feed-empty-groups"));
     expect(onNavCommand).toHaveBeenLastCalledWith({ level: "channels" });
     expect(await screen.findByTestId("chats-channel")).toBeTruthy();

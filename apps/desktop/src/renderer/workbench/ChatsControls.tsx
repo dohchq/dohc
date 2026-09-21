@@ -18,15 +18,21 @@ export type ShareReadFailure =
       limit: number;
     };
 
+// The rail names the concrete action when it can: "Running codex" beats
+// "working", and an idle agent owes no word at all, only the dot.
 export function AgentPresenceHint(props: {
   activity: AgentPresenceActivity | null;
   testId: string;
+  // The program the runner starts, when the view knows it.
+  program?: string | null;
 }) {
   if (props.activity === null) return null;
   const working = props.activity === "working";
+  const text = working ? (props.program ? `Running ${props.program}` : "working") : null;
   return (
     <span
       data-testid={props.testId}
+      role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
       className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-subtle"
@@ -37,18 +43,22 @@ export function AgentPresenceHint(props: {
           working ? "bg-agent" : "border border-agent/60 bg-transparent"
         }`}
       />
-      {props.activity}
+      {text}
     </span>
   );
 }
 
-export function UnreadPill(props: { count: number; testId: string }) {
+// Ink means the user was addressed: a DM or their agent. Quiet marks unread
+// activity in a group the user only follows.
+export function UnreadPill(props: { count: number; testId: string; tone?: "ink" | "quiet" }) {
   if (props.count <= 0) return null;
   return (
     <span
       data-testid={props.testId}
       aria-label={`${props.count} unread`}
-      className="min-w-4 shrink-0 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
+      className={`min-w-4 shrink-0 rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums ${
+        props.tone === "quiet" ? "bg-line/70 text-ink" : "bg-ink text-bg"
+      }`}
     >
       {props.count > 99 ? "99+" : props.count}
     </span>
@@ -128,12 +138,14 @@ export function ChatHeader(props: {
   testId: string;
   onBack?: () => void;
   icon?: React.ReactNode;
+  // One muted line after the title: a group's purpose, or what a view lists.
+  description?: React.ReactNode;
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
+    <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
       {props.onBack ? (
         <button
           type="button"
@@ -147,11 +159,18 @@ export function ChatHeader(props: {
         </button>
       ) : null}
       {props.icon}
-      <span
-        data-testid={`${props.testId}-title`}
-        className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
-      >
-        {props.label}
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span
+          data-testid={`${props.testId}-title`}
+          className="min-w-0 truncate text-[13px] font-medium text-ink"
+        >
+          {props.label}
+        </span>
+        {props.description ? (
+          <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
+            {props.description}
+          </span>
+        ) : null}
       </span>
       {props.action}
       {props.trailing}

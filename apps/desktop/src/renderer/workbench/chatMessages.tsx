@@ -1,11 +1,11 @@
 import { EMOJI_DATA } from "../editor/emojiData";
 import { AgentBadge } from "./AgentBadge";
-import { LegendList, type LegendListRef } from "@legendapp/list/react";
+import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { FileText, SmilePlus, Send } from "lucide-react";
+import { Database, File, FileText, Image, SmilePlus, Send } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -32,7 +32,7 @@ import {
   findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { chatFileKind, extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
@@ -225,6 +225,14 @@ function resolveFileMentionNavigationTargets(
   return targets;
 }
 
+const FILE_KIND_ICONS = { text: FileText, data: Database, image: Image, file: File } as const;
+
+// The glyph on a file chip, shared by mentions and attachments.
+export function ChatFileIcon(props: { path: string; className?: string }) {
+  const Icon = FILE_KIND_ICONS[chatFileKind(props.path)];
+  return <Icon size={11} aria-hidden className={props.className} />;
+}
+
 // Renders a message body with @-mention chips. A mention that resolves to a
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
@@ -265,7 +273,7 @@ export function MentionText(props: {
       const testId = props.testId ? `${props.testId}-file-mention` : undefined;
       const chipContent = (
         <>
-          <FileText size={11} aria-hidden />
+          <ChatFileIcon path={fileToken.path} />
           {basenameOf(fileToken.path)}
           {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
         </>
@@ -326,6 +334,10 @@ export function MentionText(props: {
 
 // Common reactions lead the searchable Unicode catalog.
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+// One-click reactions on the row's hover toolbar.
+const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
+const TOOLBAR_BUTTON =
+  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
 const SINGLE_EMOJI = new RegExp("^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic})$", "v");
 
 export interface ChatReactionControls {
@@ -356,9 +368,10 @@ export function MessageReactions(props: {
   records: readonly ChatReactionRecord[];
   controls: ChatReactionControls;
   flush?: boolean;
-  // In the chat lane an empty row floats over the message's corner, so a
-  // run of short lines keeps its rhythm until someone reacts.
-  overlayWhenEmpty?: boolean;
+  // In a message list the add trigger sits with two quick reactions in a
+  // toolbar over the row's top-right corner, shown on hover or focus, so a
+  // run of short lines keeps its rhythm. Pills still flow under the body.
+  hoverToolbar?: boolean;
   actionTestId?: string;
   pickerOnly?: boolean;
 }) {
@@ -481,6 +494,79 @@ export function MessageReactions(props: {
     });
   };
 
+  const trigger = (
+    <button
+      ref={triggerRef}
+      type="button"
+      data-testid={props.actionTestId ?? `${props.testIdPrefix}-add-reaction`}
+      aria-label="Add reaction"
+      disabled={props.controls.readOnly}
+      aria-haspopup="true"
+      aria-expanded={pickerOpen}
+      aria-controls={pickerOpen ? pickerId : undefined}
+      title="Add reaction"
+      onClick={() => { setQuery(""); setVisibleCount(96); setPickerOpen((open) => !open); }}
+      className={
+        props.hoverToolbar
+          ? `${TOOLBAR_BUTTON} text-muted`
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-panel-2 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+      }
+    >
+      <SmilePlus size={16} aria-hidden />
+    </button>
+  );
+  const picker = pickerOpen && !props.controls.readOnly ? (
+    // A lightweight quick-pick, not an APG menu: role="group" with plain
+    // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
+    // viewer's state). We deliberately don't claim role="menu"/menuitem*,
+    // which would promise arrow-key roving semantics we don't implement.
+    // Escape (document-level) closes and returns focus to the trigger.
+    <div
+      ref={pickerRef}
+      id={pickerId}
+      popover="manual"
+      data-chat-escape-local="true"
+      style={{ margin: 0, inset: "auto", ...pickerPosition }}
+      role="group"
+      data-testid={`${props.testIdPrefix}-reaction-picker`}
+      aria-label="Choose a reaction"
+      className="dohc-popover dohc-pop-in fixed z-50 max-h-[calc(100vh-16px)] w-72 max-w-[calc(100vw-8px)] overflow-y-auto rounded-lg border border-line bg-panel p-2"
+    >
+      <input aria-label="Search emoji or paste any emoji" placeholder="Search or paste an emoji" value={query}
+        onChange={(event) => { setQuery(event.currentTarget.value); setVisibleCount(96); }}
+        className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
+        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
+      <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
+      {choices.slice(0, visibleCount).map((emoji) => {
+        const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
+        return (
+          <button
+            key={emoji}
+            type="button"
+            aria-pressed={mine}
+            data-testid={`${props.testIdPrefix}-reaction-choice`}
+            data-emoji={emoji}
+            aria-label={emoji}
+            title={emojiNames.get(emoji) ?? emoji}
+            onClick={() => {
+              toggle(emoji, mine);
+              setPickerOpen(false);
+              triggerRef.current?.focus();
+            }}
+            className={`grid size-7 place-items-center rounded text-[15px] hover:bg-accent/15 ${
+              mine ? "bg-accent/15" : ""
+            }`}
+          >
+            <span aria-hidden>{emoji}</span>
+          </button>
+        );
+      })}
+      {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-panel-2" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
+      </div>
+      {choices.length === 0 ? <p className="m-0 p-2 text-[12px] text-muted">No matching emoji. Paste an emoji to use it.</p> : null}
+    </div>
+  ) : null;
+
   return (
     <div
       ref={containerRef}
@@ -490,8 +576,8 @@ export function MessageReactions(props: {
       // local so a pill or quick-pick never also opens the post underneath it.
       onClick={(event) => event.stopPropagation()}
       className={
-        props.overlayWhenEmpty && byEmoji.length === 0
-          ? "absolute right-0 top-0 flex items-center"
+        props.hoverToolbar
+          ? byEmoji.length === 0 ? "absolute right-0 top-0" : "mt-1 flex flex-wrap items-center gap-1"
           : `relative flex flex-wrap items-center gap-1 ${props.flush ? "" : "mt-1"}`
       }
     >
@@ -512,82 +598,47 @@ export function MessageReactions(props: {
           onClick={() => toggle(group.emoji, group.mine)}
           className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default ${
             group.mine
-              ? "border-accent bg-accent/15 text-accent"
-              : "border-line bg-bg text-muted hover:border-accent/60"
+              ? "border-accent/60 bg-accent/15 text-ink"
+              : "border-line bg-bg text-muted hover:border-ink/40 hover:text-ink"
           }`}
         >
           <span aria-hidden>{group.emoji}</span>
           <span className="tabular-nums">{group.records.length}</span>
         </button>
       ))}
-      {(
-        <button
-          ref={triggerRef}
-          type="button"
-          data-testid={props.actionTestId ?? `${props.testIdPrefix}-add-reaction`}
-          aria-label="Add reaction"
-          disabled={props.controls.readOnly}
-          aria-haspopup="true"
-          aria-expanded={pickerOpen}
-          aria-controls={pickerOpen ? pickerId : undefined}
-          title="Add reaction"
-          onClick={() => { setQuery(""); setVisibleCount(96); setPickerOpen((open) => !open); }}
-          className={`grid ${props.overlayWhenEmpty ? "size-6" : "size-8"} place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-panel-2 hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default`}
-        >
-          <SmilePlus size={16} aria-hidden />
-        </button>
-      )}
-      {pickerOpen && !props.controls.readOnly ? (
-        // A lightweight quick-pick, not an APG menu: role="group" with plain
-        // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
-        // viewer's state). We deliberately don't claim role="menu"/menuitem*,
-        // which would promise arrow-key roving semantics we don't implement.
-        // Escape (document-level) closes and returns focus to the trigger.
+      {props.hoverToolbar ? (
         <div
-          ref={pickerRef}
-          id={pickerId}
-          popover="manual"
-          data-chat-escape-local="true"
-          style={{ margin: 0, inset: "auto", ...pickerPosition }}
-          role="group"
-          data-testid={`${props.testIdPrefix}-reaction-picker`}
-          aria-label="Choose a reaction"
-          className="dohc-popover dohc-pop-in fixed z-50 max-h-[calc(100vh-16px)] w-72 max-w-[calc(100vw-8px)] overflow-y-auto rounded-lg border border-line bg-panel p-2"
+          data-testid={`${props.testIdPrefix}-message-toolbar`}
+          className="absolute -top-1 right-0 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
         >
-          <input aria-label="Search emoji or paste any emoji" placeholder="Search or paste an emoji" value={query}
-            onChange={(event) => { setQuery(event.currentTarget.value); setVisibleCount(96); }}
-            className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
-            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
-          <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
-          {choices.slice(0, visibleCount).map((emoji) => {
-            const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
+          {QUICK_REACTION_EMOJIS.map((emoji) => {
+            const mine = byEmoji[index.get(emoji) ?? -1]?.mine ?? false;
             return (
               <button
                 key={emoji}
                 type="button"
-                aria-pressed={mine}
-                data-testid={`${props.testIdPrefix}-reaction-choice`}
+                data-testid={`${props.testIdPrefix}-quick-reaction`}
                 data-emoji={emoji}
-                aria-label={emoji}
-                title={emojiNames.get(emoji) ?? emoji}
-                onClick={() => {
-                  toggle(emoji, mine);
-                  setPickerOpen(false);
-                  triggerRef.current?.focus();
-                }}
-                className={`grid size-7 place-items-center rounded text-[15px] hover:bg-accent/15 ${
-                  mine ? "bg-accent/15" : ""
-                }`}
+                aria-pressed={mine}
+                aria-label={`React with ${emoji}`}
+                title={`React with ${emoji}`}
+                disabled={props.controls.readOnly}
+                onClick={() => toggle(emoji, mine)}
+                className={`${TOOLBAR_BUTTON} text-[13px] leading-none ${mine ? "bg-accent/15" : ""}`}
               >
                 <span aria-hidden>{emoji}</span>
               </button>
             );
           })}
-          {choices.length > visibleCount ? <button type="button" className="col-span-8 rounded-md p-2 text-[12px] text-muted hover:bg-panel-2" onClick={() => setVisibleCount((count) => count + 96)}>More emoji</button> : null}
-          </div>
-          {choices.length === 0 ? <p className="m-0 p-2 text-[12px] text-muted">No matching emoji. Paste an emoji to use it.</p> : null}
+          {trigger}
+          {picker}
         </div>
-      ) : null}
+      ) : (
+        <>
+          {trigger}
+          {picker}
+        </>
+      )}
     </div>
   );
 }
@@ -607,6 +658,9 @@ const messageKeyExtractor = (message: ChatMessageRecord) => message.id;
 export interface ChatMessageListHandle {
   scrollToEnd: () => void;
   scrollToMessage: (messageId: string) => boolean;
+  // The scrolling element while the list is mounted, for hosts that follow
+  // the reader's position.
+  getScrollableNode: () => HTMLElement | null;
 }
 
 export const ChatMessageList = memo(function ChatMessageList(props: {
@@ -624,6 +678,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   reactionControls?: ChatReactionControls;
   renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
   flashMessageId?: string | null;
+  // A "New" hairline sits before this message, the first the reader has not seen.
+  firstUnreadMessageId?: string | null;
 }) {
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const reactionsByMessage = useMemo(() => {
@@ -648,7 +704,22 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       void list.current?.scrollToIndex({ index, animated: false, viewPosition: 0.5 });
       return true;
     },
+    getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
+  // The day of the topmost visible message, pinned over the list while the
+  // reader is somewhere in history: neither the first nor the last message is
+  // in view. Legend reports viewability once per change of the visible set,
+  // and an unchanged label is a no-op update.
+  const [topDay, setTopDay] = useState<string | null>(null);
+  const messageCount = useRef(props.messages.length);
+  messageCount.current = props.messages.length;
+  const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
+    const first = info.viewableItems[0];
+    const last = info.viewableItems[info.viewableItems.length - 1];
+    const inHistory =
+      first !== undefined && first.index > 0 && last !== undefined && last.index < messageCount.current - 1;
+    setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
+  }, []);
 
   const messageKey = useCallback((node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -729,8 +800,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-testid={`${props.testIdPrefix}-message`}
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
-        className={`group relative flex flex-col transition-shadow ${
-          continues ? "mt-0.5" : "mt-3"
+        className={`relative flex flex-col transition-shadow ${
+          continues ? "mt-0.5" : "mt-4"
         } ${
           props.flashMessageId === message.id
             ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
@@ -745,13 +816,21 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             {formatChatDay(message.createdAtMs)}
           </span>
         ) : null}
-        <div className="flex gap-2.5">
+        {message.id === props.firstUnreadMessageId ? (
+          <span
+            data-testid={`${props.testIdPrefix}-new-divider`}
+            className="mb-2 flex items-center gap-2 text-[11px] text-muted before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+          >
+            New
+          </span>
+        ) : null}
+        <div className="group -mx-2 flex gap-2.5 rounded-md px-2 hover:bg-panel/60">
           <span className="flex h-5 w-9 shrink-0 items-start justify-end">
             {continues ? (
               <time
                 dateTime={time.iso}
                 title={time.iso}
-                className="block w-full whitespace-nowrap text-right font-mono text-[9px] leading-5 text-subtle opacity-0 group-hover:opacity-100"
+                className="block w-full whitespace-nowrap text-right font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
               >
                 {formatClock(message.createdAtMs)}
               </time>
@@ -787,7 +866,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             ) : null}
             <p
               data-testid={`${props.testIdPrefix}-message-body`}
-              className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-5 text-ink"
+              className="mb-0 mt-0 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-[22px] text-ink"
             >
               <MentionText
                 body={message.body}
@@ -804,7 +883,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 messageId={message.id}
                 records={reactions}
                 controls={props.reactionControls}
-                overlayWhenEmpty
+                hoverToolbar
               />
             ) : null}
           </div>
@@ -819,12 +898,23 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       </p>
     </div>;
   }
-  return <LegendList
+  return <div className="relative flex min-h-0 flex-1 flex-col">
+    {topDay ? (
+      <span
+        aria-hidden
+        data-testid={`${props.testIdPrefix}-sticky-day`}
+        className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] text-subtle"
+      >
+        {topDay}
+      </span>
+    ) : null}
+    <LegendList
     ref={list}
     data={props.messages}
     extraData={props}
     keyExtractor={messageKeyExtractor}
     renderItem={renderMessage}
+    onViewableItemsChanged={onViewableItemsChanged}
     estimatedItemSize={80}
     initialScrollAtEnd
     maintainScrollAtEnd={{ animated: false, on: { dataChange: true, itemLayout: true, layout: true } }}
@@ -853,7 +943,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     }}
     onFocusCapture={event => setFocusedMessage(messageKey(event.target))}
     onBlurCapture={event => setFocusedMessage(messageKey(event.relatedTarget))}
-  />;
+    />
+  </div>;
 });
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while

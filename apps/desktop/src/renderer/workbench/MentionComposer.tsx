@@ -287,8 +287,11 @@ export function MentionComposer(props: {
     const node = textareaRef.current;
     if (!node) return;
     const at = node.selectionStart ?? props.value.length;
-    const next = `${props.value.slice(0, at)}${text}${props.value.slice(at)}`;
-    pendingCaret.current = at + text.length;
+    const before = props.value.slice(0, at);
+    // A trigger glued to a word is not a mention; give it its own word.
+    const separator = text.startsWith("@") && before.length > 0 && !/\s$/u.test(before) ? " " : "";
+    const next = `${before}${separator}${text}${props.value.slice(at)}`;
+    pendingCaret.current = at + separator.length + text.length;
     props.onChange(next);
     openMenuFromCaret();
   };
@@ -519,7 +522,7 @@ export function MentionComposer(props: {
               <AtSign size={14} strokeWidth={1.9} aria-hidden />
               Mention
             </button>
-            {props.fileCandidates ? (
+            {props.fileCandidates?.length ? (
               <button
                 type="button"
                 aria-label="Attach a file"
@@ -583,6 +586,23 @@ export function MentionComposer(props: {
               @
             </span>
           </button>
+          {props.fileCandidates?.length ? (
+            <button
+              type="button"
+              aria-label="Attach a file"
+              title="Attach a file"
+              tabIndex={-1}
+              disabled={props.sending}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                highlightFileOnOpen.current = true;
+                insertAtCaret("@");
+              }}
+              className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-line/40 hover:text-ink disabled:opacity-40"
+            >
+              <FileText size={14} strokeWidth={1.9} aria-hidden />
+            </button>
+          ) : null}
           <button
             type="submit"
             data-testid={`${props.testIdPrefix}-send`}
