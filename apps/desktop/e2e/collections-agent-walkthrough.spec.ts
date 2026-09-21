@@ -12,7 +12,7 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// The Phase 3 agent walkthrough gate (docs/plans/collections.md): an agent
+// The Phase 3 agent walkthrough gate: an agent
 // creates a collection and records by ordinary file writes, sets fields and
 // creates a record through its MCP tools, and queries the result — while an
 // open desktop view reflects every step live, and record history attributes

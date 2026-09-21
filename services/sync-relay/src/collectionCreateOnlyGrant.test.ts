@@ -1,5 +1,5 @@
 // The seam share-links Phase 5 extends with the create-only collection grant
-// policy ("The create-only collection contract" in docs/plans/share-links.md):
+// policy:
 // the link-create surface, the public access levels, and the grant wire shape.
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
@@ -15,8 +15,7 @@ import {
 } from "./testing";
 
 // Lane D conformance: the create-only collection grant policy handed to the
-// share-links program ("The create-only collection contract" in
-// docs/plans/share-links.md). The policy is share-links Phase 5 work and does
+// share-links program. The policy is share-links Phase 5 work and does
 // not exist on the relay yet. The green tests pin the seam Phase 5 extends:
 // the link-create surface, the public access levels, and the grant wire
 // shape. The todo rows name the assertions the policy must pass; implement

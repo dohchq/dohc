@@ -6,8 +6,7 @@ import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { createTempWorkspace } from "./helpers/workspace";
 
-// A collection under a share, against the create-only contract in
-// docs/plans/share-links.md ("The create-only collection contract").
+// A collection under a share, against the create-only collection contract.
 //
 // Relay-direct: collections ride the file share substrate, a cross-device
 // granter edit converges to a link holder, and revocation stops every
