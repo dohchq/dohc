@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireAppCompiler } from "./stage-app-compiler.mjs";
+import { requireAppBackendRuntime } from "./stage-app-backend-runtime.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopDir = resolve(dirname(scriptPath), "..");
@@ -33,6 +34,7 @@ export function requireWorkspaceEngine(
 
 export default async function requireWorkspaceEngineBeforePack(context) {
   requireWorkspaceEngine();
+  await requireAppBackendRuntime();
   // electron-builder's architecture enum: x64=1, arm64=3. Reject mismatched
   // cross-packaging instead of shipping a compiler that cannot start.
   const arch = context?.arch === undefined ? process.arch : context.arch === 1 ? "x64" : context.arch === 3 ? "arm64" : "unsupported";

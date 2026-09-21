@@ -10,6 +10,7 @@ const electronMainTarget = "node24.18";
 const electronRendererTarget = "chrome150";
 
 export const mainBundledWorkspaceDeps = [
+  "@dohc/app-backend-runtime",
   "@dohc/cli",
   "@dohc/live-session-contract",
   "@dohc/sdk",
