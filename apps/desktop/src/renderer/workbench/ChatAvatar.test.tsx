@@ -31,7 +31,7 @@ describe("ChatAvatar initials", () => {
 });
 
 describe("ChatAvatar hue", () => {
-  it("hashes the id when given, else the name", () => {
+  it("hashes the display name to a stable hue", () => {
     expect(identityHue("user-1")).toBe(identityHue("user-1"));
     expect(IDENTITY_HUES).toContain(identityHue("user-1"));
     render(<ChatAvatar name="Ice" kind="human" />);

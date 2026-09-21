@@ -609,7 +609,7 @@ export function MessageReactions(props: {
       {props.hoverToolbar ? (
         <div
           data-testid={`${props.testIdPrefix}-message-toolbar`}
-          className="absolute -top-3.5 right-2 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
+          className="absolute -top-6 right-2 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
         >
           {QUICK_REACTION_EMOJIS.map((emoji) => {
             const mine = byEmoji[index.get(emoji) ?? -1]?.mine ?? false;
@@ -708,17 +708,27 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }), [indexes]);
   // The day of the topmost visible message, pinned over the list while the
   // reader is somewhere in history: the first message is out of view and the
-  // end is more than a few lines away. Legend reports viewability once per scroll
-  // frame at most, and an unchanged label is a no-op update.
+  // end is more than a few lines away. Viewability changes give the day;
+  // a passive scroll listener gives the distance, since Legend only reports
+  // viewability when the set of visible rows changes. Both updates are no-ops
+  // while their value holds.
   const [topDay, setTopDay] = useState<string | null>(null);
+  const [nearEnd, setNearEnd] = useState(true);
   const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
     const first = info.viewableItems[0];
-    const node = list.current?.getScrollableNode();
-    const fromEnd = node ? node.scrollHeight - node.scrollTop - node.clientHeight : 0;
-    // Reading the latest messages needs no label; scrolled into history it does.
-    const inHistory = first !== undefined && first.index > 0 && fromEnd > 40;
-    setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
+    setTopDay(first !== undefined && first.index > 0 ? formatChatDay(first.item.createdAtMs) : null);
   }, []);
+  const hasList = !props.loading && props.messages.length > 0;
+  useEffect(() => {
+    const node = hasList ? list.current?.getScrollableNode() : null;
+    if (!node) return;
+    const onScroll = () => {
+      setNearEnd(node.scrollHeight - node.scrollTop - node.clientHeight <= 40);
+    };
+    onScroll();
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [hasList]);
 
   const messageKey = useCallback((node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -898,7 +908,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     </div>;
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">
-    {topDay ? (
+    {topDay && !nearEnd ? (
       <span
         aria-hidden
         data-testid={`${props.testIdPrefix}-sticky-day`}
