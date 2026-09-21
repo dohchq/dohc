@@ -53,7 +53,7 @@ test("@app-backend-local fundraiser compiles and persists through the real deskt
     const app = browserPage.frameLocator("iframe");
     await expect(app.getByRole("heading", { name: "Pickleball fundraiser" })).toBeVisible();
     await app.getByRole("button", { name: "Organizer", exact: true }).click();
-    await app.getByLabel("Status", { exact: true }).selectOption("all");
+    await app.getByRole("tabpanel", { name: "Registrations" }).getByLabel("Status", { exact: true }).selectOption("all");
     await expect(app.getByRole("button", { name: "Synthetic Electron Player", exact: true })).toBeVisible();
     await browserPage.close();
 
