@@ -14,6 +14,9 @@ import { initializeAppBackendSchema } from "../../../../services/sync-relay/src/
 import { exportAppBackend, restoreAppBackend } from "../../../../services/sync-relay/src/storage/appBackendData";
 import type { StorageContext } from "../../../../services/sync-relay/src/storage/context";
 
+// Each case compiles source and runs multiple children with separate 8-second deadlines.
+vi.setConfig({ testTimeout: 20_000 });
+
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const schema = "CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL, quantity INTEGER NOT NULL);";
 const source = `globalThis.operations = {
