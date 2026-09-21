@@ -90,7 +90,7 @@ function approved(storage: StorageContext, input: LinkAppPublicationInput) {
   if (!row) throw notFound();
   const capability = parseAppCollectionCapability(JSON.parse(String(row.capability_json)));
   const requested = authority.candidate.capabilities[0];
-  if (!requested || !narrows(requested,capability)) throw notFound();
+  if (!requested || requested.kind !== "collection-create" || !narrows(requested,capability)) throw notFound();
   containment(storage,authority.result.shareId,authority.result.grantId,authority.candidate.versionId,capability);
   return {...authority, capability, schema: schema(storage,authority.workspaceId,authority.candidate.versionId,capability)};
 }

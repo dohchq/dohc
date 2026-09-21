@@ -114,6 +114,12 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           if (published.kind !== "published") throw new Error("Invalid publication result.");
           const capability = candidate.capabilities[0];
           if (!capability) return published;
+          if (capability.kind === "app-backend") {
+            await session.run(() => dependencies.relayJson(remote.credentials,
+              `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/activate`,
+              { method: "POST", signal: operation.signal, body: JSON.stringify({ authorityRevision: published.authorityRevision }) }));
+            return published;
+          }
           try {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
             `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/collection-approval`,
