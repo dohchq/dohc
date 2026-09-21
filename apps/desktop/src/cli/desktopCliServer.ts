@@ -1,5 +1,7 @@
 import { readCachedUserSettingsFile } from "../settings/userSettingsStore";
+import { createAppForm } from "../workspaces/createAppForm";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import {
   CHATS_METHOD,
@@ -149,26 +151,59 @@ export function createDesktopCliServer<State>(
       withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(await collectionEditContextFor(operation)),
       );
-    const publicationAttachment = (dependencies.ownerAppPublication || dependencies.ownerAppResponses || dependencies.appBackend)
-      ? await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+    const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;
-      }) : undefined;
+      });
     return {
       workspaceId: workspace.workspaceId,
+      appForm: request => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app workspace attachment changed.");
+        assertWritableWorkspace(operation.workspace);
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("Create the form in its owning workspace.");
+        const result = await createAppForm({ workspaceRoot: operation.workspace.rootPath, request, signal: operation.signal,
+          assertCurrent: () => operation.assertCurrent(),
+          getCollection: async collectionPath => {
+            const collection = await withEngineAdapter(operation.workspace, adapter => adapter.getCollection({ collectionPath }));
+            if (!collection) throw new Error("The workspace engine is not running. Try again.");
+            return collection;
+          },
+          captureFiles: async files => {
+            const captured = await withEngineAdapter(operation.workspace, async adapter => {
+              let capture = await adapter.reconcileCapture();
+              for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+                operation.assertCurrent(); operation.signal.throwIfAborted();
+                capture = await adapter.flushCapture();
+              }
+              if (!capture.settled || !capture.running || capture.degraded) throw new Error("The workspace has not finished capturing the form files.");
+              operation.assertCurrent(); operation.signal.throwIfAborted();
+              const metadata = await adapter.captureSourceMetadata({ workspaceId: workspace.workspaceId, versionId: "main",
+                paths: Object.keys(files), bounds: { maxInputFiles: 64, maxInputBytes: 2 * 1024 * 1024 }, signal: operation.signal });
+              for (const file of metadata.files) {
+                if (file.sha256 !== createHash("sha256").update(files[file.path]!).digest("hex")) throw new Error("The form source changed during capture. Review the files before preparing the app.");
+              }
+              return true;
+            });
+            if (!captured) throw new Error("The workspace engine is not running. Try again.");
+          },
+        });
+        activity.queueCloudSync(workspace.workspaceId);
+        notifyRenderer({ workspaceId: workspace.workspaceId });
+        return result;
+      }),
       ...(dependencies.appBackend ? { appBackend: (request: import("@dohc/cli/app-backend").OwnerAppBackendRequest) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment?.aborted) throw new Error("The app workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app workspace attachment changed.");
           return dependencies.appBackend!(request);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
-          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment?.aborted)throw new Error("The response workspace attachment changed.");
+          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
       ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment?.aborted) throw new Error("The app publication workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
           return dependencies.ownerAppPublication!(request);
         }) } : {}),
       rootPath: workspace.rootPath,

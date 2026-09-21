@@ -1,4 +1,8 @@
 import { resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createTestScratch } from "../workspaces/testTemp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -99,6 +103,30 @@ const joined: JoinedSharedChannel = {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("creates form source using the engine schema and pins the workspace attachment", async () => {
+    const root = await createTestScratch("cli-form-");
+    await mkdir(resolve(root, "Participants"));
+    await writeFile(resolve(root, "Participants", "collection.yaml"), "fields: {}\n");
+    const f = fixture(root);
+    const getCollection = vi.fn(async () => ({ path: "Participants", status: "valid", reasons: [], recordCount: 9,
+      schema: { name: "Participants", description: null, fields: [{ name: "name", type: "text" }], views: [] } }));
+    const reconcileCapture = vi.fn(async () => ({ settled: false, running: false, degraded: false }));
+    const flushCapture = vi.fn(async () => ({ settled: true, running: true, degraded: false }));
+    const captureSourceMetadata = vi.fn(async ({ paths }: { paths: string[] }) => ({ files: await Promise.all(paths.map(async path => ({ path,
+      sha256: createHash("sha256").update(await readFile(resolve(root, path))).digest("hex") }))) }));
+    f.dependencies.withEngineAdapter = async (_workspace, work) => work({ getCollection, reconcileCapture, flushCapture, captureSourceMetadata } as unknown as VersionedLiveAdapter);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    const request = { workspaceId: f.workspace.workspaceId, collectionPath: "Participants", appRoot: "registration", publicFields: ["name"] };
+    expect(await context.appForm!(request)).toMatchObject({ schemaSource: "Participants/collection.yaml", recordsCopied: 0 });
+    expect(getCollection).toHaveBeenCalledExactlyOnceWith({ collectionPath: "Participants" });
+    expect(reconcileCapture).toHaveBeenCalledOnce();
+    expect(flushCapture).toHaveBeenCalledOnce();
+    expect(captureSourceMetadata).toHaveBeenCalledOnce();
+    expect(f.dependencies.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId: f.workspace.workspaceId });
+    await f.authorities.invalidate(f.workspace.workspaceId);
+    await expect(context.appForm!({ ...request, appRoot: "second" })).rejects.toThrow("attachment changed");
+    expect(getCollection).toHaveBeenCalledOnce();
+  });
   it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
     const f = fixture();
     const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));

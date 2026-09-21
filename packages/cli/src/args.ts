@@ -2,6 +2,7 @@ import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppBackendRequest } from "./appBackend";
+import { OwnerAppFormRequest } from "./appForm";
 import {OwnerAppResponsesRequest} from "./appResponses";
 
 interface ParsedCliBase {
@@ -11,6 +12,7 @@ interface ParsedCliBase {
 
 export type ParsedCliCommand = ParsedCliBase &
   (
+    | { verb: "appForm"; request: OwnerAppFormRequest }
     | { verb: "appBackend"; request: OwnerAppBackendRequest }
     | { verb: "appPublication"; request: OwnerAppPublicationRequest }
     | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
@@ -357,10 +359,11 @@ export function parseCliArguments(
   const [family, verb, ...tokens] = global.tokens;
   if (family === "app") {
     const [json, ...rest] = tokens;
-    if (!verb || !json || rest.length) fail("usage: dohc app <list|prepare|approve|cancel|withdraw|revokeCollection|reviewReactivation|responses> '<JSON>'");
+    if (!verb || !json || rest.length) fail("usage: dohc app <createForm|list|prepare|approve|cancel|withdraw|revokeCollection|reviewReactivation|responses> '<JSON>'");
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value)) fail("app arguments must be a JSON object");
+      if (verb === "createForm") return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appForm", request: OwnerAppFormRequest.parse(value) };
       if (["describe", "invoke", "export", "helper", "restore"].includes(verb)) {
         const request = OwnerAppBackendRequest.parse({ ...value, action: verb });
         if (request.action === "export" && !request.savePath) fail("app export requires an explicit savePath");
@@ -368,7 +371,7 @@ export function parseCliArguments(
       }
       if(verb==="responses" || verb==="undo-responses")return {actor:global.actorFlag?"agent":"human",json:global.json,verb:"ownerAppResponses",request:OwnerAppResponsesRequest.parse({...value,action:verb==="responses"?"list":"undo"})};
       return { actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "appPublication", request: OwnerAppPublicationRequest.parse({ ...value, action: verb }) };
-    } catch { fail(verb === "responses" || verb === "undo-responses" ? "invalid app response arguments" : "invalid app publication arguments"); }
+    } catch { fail(verb === "createForm" ? "invalid app form arguments" : verb === "responses" || verb === "undo-responses" ? "invalid app response arguments" : "invalid app publication arguments"); }
   }
   if (family !== "chat") fail("usage: dohc chat <verb>");
   const actor: CliActor = global.actorFlag || env.DOHC_CHAT_ACTOR === "agent" ? "agent" : "human";
