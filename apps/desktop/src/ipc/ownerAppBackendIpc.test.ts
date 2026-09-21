@@ -85,6 +85,7 @@ describe("owner backend IPC", () => {
     expect(h.readRecovery).toHaveBeenCalledWith(request.sourcePath, h.controller.signal);
     expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2].body))).toEqual({ authorityRevision: 7, bundle: { formatVersion: 1 } });
     expect(() => h.renderer({ sender: 1 }, request)).toThrow(/owner CLI/);
-    await expect(h.invoke(request)).rejects.toThrow(/already has data/);
+    h.relay.mockResolvedValueOnce(description).mockRejectedValueOnce(new Error("Recovery cannot replace existing app data."));
+    await expect(h.invoke(request)).rejects.toThrow(/cannot replace/);
   });
 });

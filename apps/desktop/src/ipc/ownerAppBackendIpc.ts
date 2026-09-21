@@ -50,7 +50,6 @@ export function createOwnerAppBackendHandler<Caller, Workspace extends { workspa
       if (input.action === "describe") return OwnerAppBackendDescribe.parse({ capability, revision: description.revision, online: description.active });
       if (input.action === "restore") {
         if (!deps.readRecovery) throw new Error("Use the owner CLI to restore app recovery data.");
-        if (description.active) throw new Error("This app already has data. Restore into an uninitialized app.");
         const bundle = await deps.readRecovery(input.sourcePath, operation.signal);
         const restored = OwnerAppBackendRestore.parse(await request("restore", { authorityRevision: description.authorityRevision, bundle }));
         if (restored.publicationId !== input.publicationId || restored.authorityRevision !== description.authorityRevision) throw new Error("dohc could not confirm app recovery. Refresh and try again.");
