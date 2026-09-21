@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { evaluateAppOperation, initializeAppDatabase } from "@dohc/app-backend-runtime";
-import { canInvokeAppBackendOperation, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
+import { APP_BACKEND_RESULT_BYTES, canInvokeAppBackendOperation, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
   type AppBackendInvokeRequest, type AppBackendJson, type AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { badRequest, notFound, relayError } from "./errors";
@@ -127,7 +127,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
         if (!unchanged) continue;
         throw error;
       }
-      const result = parseAppBackendJson(evaluated.result);
+      const result = parseAppBackendJson(evaluated.result, APP_BACKEND_RESULT_BYTES - 1024);
       checkSignal(signal);
       if (operation.readOnly) {
         if (evaluated.changed || evaluated.attachedFileIds.length) throw badRequest("Read-only app operation changed data.");
