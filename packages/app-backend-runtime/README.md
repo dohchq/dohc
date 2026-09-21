@@ -67,7 +67,7 @@ SQLite sessions capture changes for host history and replication. Replicas must 
 ## Dependency evidence
 
 The runtime pins `quickjs-emscripten` to `0.32.0`.
-The inspected upstream source is [commit 7b7af98e4e69757c64c27aac46a74e1e07229545](https://github.com/justjake/quickjs-emscripten/tree/7b7af98e4e69757c64c27aac46a74e1e07229545).
+The inspected upstream source is [commit df4efb9ef2cb25c417ecb57986da462d11b244ed](https://github.com/justjake/quickjs-emscripten/tree/df4efb9ef2cb25c417ecb57986da462d11b244ed), the published package's `gitHead`.
 Its `runtime.ts` and `c/interface.c` implement explicit memory, stack, interrupt, and module-loader controls.
 Its `context.ts` implements host callbacks through QuickJS handles.
 The convenience module `evalCode` removes its memory limit before dumping results, so this package uses an explicit runtime and context.
