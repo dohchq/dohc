@@ -38,7 +38,7 @@ function sameAuthority(before: BackendAuthority, after: BackendAuthority): void 
   if (JSON.stringify(before.caller) !== JSON.stringify(after.caller) || before.workspaceId !== after.workspaceId ||
       before.candidate.appRoot !== after.candidate.appRoot || JSON.stringify(before.capability) !== JSON.stringify(after.capability)) throw notFound();
 }
-function activeBackend(storage: StorageContext, authority: BackendAuthority): Omit<AppBackendSnapshot,"database"> {
+function activeBackend(storage: StorageContext, authority: BackendAuthority): Omit<AppBackendSnapshot,"database"|"updatedAtMs"> {
   const snapshot = readAppBackendMetadata(storage, scope(authority));
   if (!snapshot) throw relayError("conflict", "The owner must activate this app backend first.");
   if (snapshot.publicationId !== authority.publicationId || snapshot.publicationRevision !== authority.authorityRevision ||

@@ -124,13 +124,13 @@ export function readAppBackendSnapshot(storage: StorageContext, scope: AppBacken
   return row ? rowSnapshot(row) : null;
 }
 
-export function readAppBackendMetadata(storage: StorageContext, scope: AppBackendScope): Omit<AppBackendSnapshot,"database"> | null {
+export function readAppBackendMetadata(storage: StorageContext, scope: AppBackendScope): Omit<AppBackendSnapshot,"database"|"updatedAtMs"> | null {
   identity(scope);
   const row=storage.db.prepare(`SELECT workspace_id,data_path,app_root,publication_id,publication_revision,schema_sha256,schema_version,
-    source_sha256,source,capability_json,revision,updated_at_ms FROM sync_relay_app_backends WHERE workspace_id=? AND data_path=?`)
+    source_sha256,source,capability_json,revision FROM sync_relay_app_backends WHERE workspace_id=? AND data_path=?`)
     .get(scope.workspaceId,scope.dataPath);
   if (!row) return null;
-  const {database: _database,...metadata}=rowSnapshot({...row,database:new Uint8Array()});
+  const {database: _database,updatedAtMs: _updatedAtMs,...metadata}=rowSnapshot({...row,database:new Uint8Array(),updated_at_ms:0});
   return metadata;
 }
 
