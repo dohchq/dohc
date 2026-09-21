@@ -37,7 +37,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
       signal?.addEventListener("abort", abort, {once:true});
       if (signal?.aborted) abort();
       child.once("message", message => { received = message as ChildReply; });
-      child.once("error", error => { failure = error; child.kill(); });
+      child.once("error", error => { failure ??= error; child.kill(); });
       child.once("close", code => {
         clearTimeout(deadline);
         signal?.removeEventListener("abort",abort);
@@ -46,7 +46,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
         else resolveReply(received);
       });
       child.send({ ...request, directory }, error => {
-        if (error) { failure = error; child.kill(); }
+        if (error) { failure ??= error; child.kill(); }
       });
     });
     if (!reply.ok) {
