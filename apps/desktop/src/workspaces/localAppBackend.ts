@@ -84,10 +84,10 @@ export async function createLocalAppBackendHost(options: {
   }
   function quota() {
     const bytes = db.prepare(`SELECT
-      (SELECT coalesce(sum(coalesce(length(database),0)+length(source)+length(candidate)+length(capability)),0) FROM apps)+
-      (SELECT coalesce(sum(length(result)+length(recovery)),0) FROM receipts)+
-      (SELECT coalesce(sum(length(changeset)+length(recovery)),0) FROM history)+
-      (SELECT coalesce(sum(length(content)+length(recovery)+length(metadata)),0) FROM files)+
+      (SELECT coalesce(sum(coalesce(length(database),0)+length(CAST(source AS BLOB))+length(CAST(candidate AS BLOB))+length(CAST(capability AS BLOB))),0) FROM apps)+
+      (SELECT coalesce(sum(length(CAST(result AS BLOB))+length(CAST(recovery AS BLOB))),0) FROM receipts)+
+      (SELECT coalesce(sum(length(changeset)+length(CAST(recovery AS BLOB))),0) FROM history)+
+      (SELECT coalesce(sum(length(content)+length(CAST(recovery AS BLOB))+length(CAST(metadata AS BLOB))),0) FROM files)+
       (SELECT coalesce(sum(length(content)),0) FROM artifacts) AS bytes`).get()!.bytes as number;
     if (bytes > storeBound) throw new Error("Local app storage is full. Export its data before removing old work.");
     for(const table of ["history","receipts","files"])if(Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n)>100000)throw new Error("Local app history is full. Export its data before continuing.");
@@ -322,6 +322,7 @@ export async function createLocalAppBackendHost(options: {
         const row = byPath(dataPath);
         if (!row) return;
         if (row.shared_publication && row.shared_publication !== publicationId) throw new Error("This app already has a shared host.");
+        if (row.shared_publication === publicationId) return;
         db.prepare("UPDATE apps SET shared_publication=?,authority_revision=authority_revision+1 WHERE data_path=?").run(publicationId,dataPath);
       });
     },
