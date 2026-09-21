@@ -6,7 +6,7 @@ import { authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
 import type { StorageContext } from "./storage/context";
 import { requireLinkAppPublication } from "./storage/publications";
-import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBytes, linkWriteRefusal, readLinkEnrollment } from "./storage/linkEnrollment";
+import { commitLinkEnrollment, linkPrincipalStorageBytes, linkWriteRefusal, readLinkEnrollment } from "./storage/linkEnrollment";
 import { assertWorkspaceQuota } from "./storage/workspaces";
 import { isAppBackendHelper } from "./storage/appBackendData";
 
@@ -32,25 +32,37 @@ export function backendCapability(candidate: AppPublicationCandidate): AppBacken
 
 /** Call inside the host's transaction. Enrollment is allowed only in a write transaction. */
 export function requireBackendAuthority(storage: StorageContext, limits: AppPublicationLimits, auth: AppBackendAuth,
-  publicationId: string, authorityRevision: number | undefined, nowMs: number, enroll = false): BackendAuthority {
+  publicationId: string, authorityRevision: number | undefined, nowMs: number, enroll = false, maxParticipantsPerGrant = 1000): BackendAuthority {
   if (auth.kind === "link") {
     const input = {...auth, publicationId, limits, nowMs, expectedAuthorityRevision: authorityRevision};
     const publication = requireLinkAppPublication(storage, input);
     const capability = backendCapability(publication.candidate);
     const enrollment = readLinkEnrollment(storage, auth, nowMs);
     if (!enrollment || linkWriteRefusal(enrollment)) throw notFound();
+    const profileId = `app_${sha(JSON.stringify(["dohc-app-profile-v1", publication.workspaceId, capability.dataPath, publication.result.grantId, auth.profileTokenHash]))}`;
     let principal = enrollment.principal;
+    if (enroll) {
+      const existing = storage.db.prepare("SELECT 1 FROM sync_relay_app_backend_participants WHERE workspace_id=? AND data_path=? AND grant_id=? AND profile_id=?")
+        .get(publication.workspaceId,capability.dataPath,publication.result.grantId,profileId);
+      if (!existing) {
+        const count = storage.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_backend_participants WHERE workspace_id=? AND data_path=? AND grant_id=?")
+          .get(publication.workspaceId,capability.dataPath,publication.result.grantId);
+        if (Number(count?.n) >= maxParticipantsPerGrant) throw relayError("quota_exceeded", "App participant limit reached.");
+        const bytes = Buffer.byteLength(JSON.stringify([publication.workspaceId,capability.dataPath,publication.result.grantId,profileId]))+128;
+        assertWorkspaceQuota(storage,publication.workspaceId,bytes);
+        storage.db.prepare("INSERT INTO sync_relay_app_backend_participants(workspace_id,data_path,grant_id,profile_id,storage_bytes) VALUES(?,?,?,?,?)")
+          .run(publication.workspaceId,capability.dataPath,publication.result.grantId,profileId,bytes);
+      }
+    }
     if (!principal && enroll) {
-      if (linkPrincipalLimitReached(storage, enrollment)) throw relayError("quota_exceeded", "App participant limit reached.");
       const principalId = randomUUID();
       assertWorkspaceQuota(storage, publication.workspaceId, linkPrincipalStorageBytes(principalId, publication.result.grantId, auth.profileTokenHash));
       principal = commitLinkEnrollment(storage, {...auth, enrollment, principalId, displayName: null,
         createdAtMs: nowMs, discussionRevision: Number(enrollment.authority.discussion_revision)});
     }
-    if (!principal) throw notFound();
     return {workspaceId: publication.workspaceId, publicationId, authorityRevision: publication.result.descriptor.authorityRevision,
-      candidate: publication.candidate, capability, caller: {kind: "link", principalId: principal.principalId, grantId: publication.result.grantId},
-      receiptCaller: {grantId: publication.result.grantId, principalId: principal.principalId}};
+      candidate: publication.candidate, capability, caller: {kind: "link", principalId: profileId, grantId: publication.result.grantId},
+      receiptCaller: {grantId: publication.result.grantId, principalId: profileId}};
   }
   const row = storage.db.prepare("SELECT * FROM sync_relay_app_publications WHERE publication_id=? AND workspace_id=?")
     .get(publicationId, auth.workspaceId);

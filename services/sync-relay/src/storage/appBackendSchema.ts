@@ -48,6 +48,19 @@ export function initializeAppBackendSchema(db: SqliteDb): void {
       PRIMARY KEY(workspace_id,data_path,grant_id),
       FOREIGN KEY(workspace_id,data_path) REFERENCES sync_relay_app_backends(workspace_id,data_path) ON DELETE CASCADE
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS sync_relay_app_backend_participants (
+      workspace_id TEXT NOT NULL, data_path TEXT NOT NULL, grant_id TEXT NOT NULL, profile_id TEXT NOT NULL,
+      storage_bytes INTEGER NOT NULL CHECK(storage_bytes > 0),
+      PRIMARY KEY(workspace_id,data_path,grant_id,profile_id),
+      FOREIGN KEY(workspace_id,data_path) REFERENCES sync_relay_app_backends(workspace_id,data_path) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS sync_relay_app_backend_recoveries (
+      workspace_id TEXT NOT NULL, data_path TEXT NOT NULL, integrity_sha256 TEXT NOT NULL,
+      revision INTEGER NOT NULL, publication_id TEXT NOT NULL, publication_revision INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+      storage_bytes INTEGER NOT NULL CHECK(storage_bytes > 0),
+      PRIMARY KEY(workspace_id,data_path),
+      FOREIGN KEY(workspace_id,data_path) REFERENCES sync_relay_app_backends(workspace_id,data_path) ON DELETE CASCADE
+    ) STRICT;
     CREATE TABLE IF NOT EXISTS sync_relay_app_backend_usage (
       workspace_id TEXT NOT NULL, data_path TEXT NOT NULL,
       storage_bytes INTEGER NOT NULL CHECK(storage_bytes >= 0),
@@ -64,7 +77,7 @@ export function initializeAppBackendSchema(db: SqliteDb): void {
       UPDATE sync_relay_app_backend_usage SET storage_bytes=storage_bytes+NEW.storage_bytes-OLD.storage_bytes
         WHERE workspace_id=NEW.workspace_id AND data_path=NEW.data_path; END;
   `);
-  for (const table of ["sync_relay_app_backends", "sync_relay_app_backend_history", "sync_relay_app_backend_receipts", "sync_relay_app_backend_files", "sync_relay_app_backend_helpers"]) {
+  for (const table of ["sync_relay_app_backends", "sync_relay_app_backend_history", "sync_relay_app_backend_receipts", "sync_relay_app_backend_files", "sync_relay_app_backend_helpers", "sync_relay_app_backend_participants", "sync_relay_app_backend_recoveries"]) {
     db.exec(`
       CREATE TRIGGER IF NOT EXISTS ${table}_usage_insert AFTER INSERT ON ${table} BEGIN
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+NEW.storage_bytes WHERE workspace_id=NEW.workspace_id; END;

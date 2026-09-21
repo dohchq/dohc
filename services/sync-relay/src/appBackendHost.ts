@@ -7,7 +7,7 @@ import { badRequest, notFound, relayError } from "./errors";
 import { backendArtifact, requireBackendAuthority, requireBackendOwner, type AppBackendAuth, type BackendAuthority } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { activateAppBackend, commitAppBackendOperation, exportAppBackend, findAppBackendReceipt, listAppBackendCallerFiles,
-  readAppBackendFileInTransaction, readAppBackendSnapshot, restoreAppBackend, setAppBackendHelper, stageAppBackendFile,
+  readAppBackendFileInTransaction, readAppBackendMetadata, readAppBackendSnapshot, restoreAppBackend, setAppBackendHelper, stageAppBackendFile,
   type AppBackendRecoveryBundle, type AppBackendSnapshot } from "./storage/appBackendData";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 import { targetVersionId, visibleSharePath } from "./shareFilter";
@@ -17,6 +17,7 @@ export interface AppBackendHostOptions {
   storage: StorageContext;
   limits: AppPublicationLimits;
   nowMs: () => number;
+  maxParticipantsPerGrant?: number;
   runtime?: { initializeAppDatabase: typeof initializeAppDatabase; evaluateAppOperation: typeof evaluateAppOperation; validateAppDatabase?: typeof validateAppDatabase };
 }
 export interface AppBackendInvokeResponse { result: AppBackendJson; revision: number; replayed: boolean }
@@ -37,8 +38,8 @@ function sameAuthority(before: BackendAuthority, after: BackendAuthority): void 
   if (JSON.stringify(before.caller) !== JSON.stringify(after.caller) || before.workspaceId !== after.workspaceId ||
       before.candidate.appRoot !== after.candidate.appRoot || JSON.stringify(before.capability) !== JSON.stringify(after.capability)) throw notFound();
 }
-function activeSnapshot(storage: StorageContext, authority: BackendAuthority): AppBackendSnapshot {
-  const snapshot = readAppBackendSnapshot(storage, scope(authority));
+function activeBackend(storage: StorageContext, authority: BackendAuthority): Omit<AppBackendSnapshot,"database"> {
+  const snapshot = readAppBackendMetadata(storage, scope(authority));
   if (!snapshot) throw relayError("conflict", "The owner must activate this app backend first.");
   if (snapshot.publicationId !== authority.publicationId || snapshot.publicationRevision !== authority.authorityRevision ||
       snapshot.appRoot !== authority.candidate.appRoot || snapshot.schemaSha256 !== authority.capability.schemaSha256 ||
@@ -46,17 +47,23 @@ function activeSnapshot(storage: StorageContext, authority: BackendAuthority): A
       snapshot.capabilityJson !== JSON.stringify(authority.capability) || sha(snapshot.source) !== snapshot.sourceSha256) throw notFound();
   return snapshot;
 }
+function activeSnapshot(storage: StorageContext, authority: BackendAuthority): AppBackendSnapshot {
+  activeBackend(storage,authority);
+  return readAppBackendSnapshot(storage,scope(authority))!;
+}
 
 export function createAppBackendHost(options: AppBackendHostOptions) {
   const {storage, limits, nowMs} = options;
+  const maxParticipantsPerGrant = options.maxParticipantsPerGrant ?? 1000;
+  if (!Number.isSafeInteger(maxParticipantsPerGrant) || maxParticipantsPerGrant < 1) throw new Error("Invalid app participant limit.");
   const runtime = options.runtime ?? {initializeAppDatabase, evaluateAppOperation};
   const authority = (auth: AppBackendAuth, publicationId: string, revision: number | undefined, enroll = false) =>
-    requireBackendAuthority(storage, limits, auth, publicationId, revision, nowMs(), enroll);
+    requireBackendAuthority(storage, limits, auth, publicationId, revision, nowMs(), enroll, maxParticipantsPerGrant);
   const current = (auth: AppBackendAuth, captured: BackendAuthority, signal?: AbortSignal) => {
     checkSignal(signal);
     const next = authority(auth, captured.publicationId, captured.authorityRevision);
     sameAuthority(captured, next);
-    return activeSnapshot(storage, next);
+    return activeBackend(storage, next);
   };
 
   async function activate(auth: AppBackendAuth, publicationId: string, expectedAuthorityRevision: number, signal?: AbortSignal) {
@@ -95,12 +102,13 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     checkSignal(signal);
     const parsed = request(parseAppBackendInvokeRequest, input);
     const invocationTime = nowMs(), secret = randomBytes(32).toString("base64url"), requestId = randomUUID();
-    // Explicit invocation enrolls an anonymous caller once, before any asynchronous evaluation.
+    // Browsing does not consume participant capacity; only admitted writes enroll.
     storage.tx(() => {
-      const value = authority(auth, publicationId, parsed.authorityRevision, true);
-      activeSnapshot(storage, value);
+      const value = authority(auth, publicationId, parsed.authorityRevision);
+      activeBackend(storage, value);
       const operation = value.capability.operations.find(item => item.name === parsed.operation);
       if (!operation || !canInvokeAppBackendOperation(value.caller, operation) || (readCommit && !operation.readOnly)) throw notFound();
+      if (!operation.readOnly) authority(auth,publicationId,parsed.authorityRevision,true);
     });
     for (let attempt = 0; attempt < 3; attempt++) {
       checkSignal(signal);
@@ -110,7 +118,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
         if (!operation || !canInvokeAppBackendOperation(value.caller, operation) || (readCommit && !operation.readOnly)) throw notFound();
         const snapshot = activeSnapshot(storage, value);
         const receiptScope = {...scope(value), caller: value.receiptCaller, idempotencyKey: parsed.idempotencyKey,
-          payloadSha256: sha(JSON.stringify(["dohc-app-operation-v1", publicationId, parsed.operation, parsed.input]))};
+          payloadSha256: sha(JSON.stringify(["dohc-app-operation-v1", value.capability.dataPath, value.capability.backendSha256, value.capability.schemaSha256, parsed.operation, parsed.input]))};
         const receipt = operation.readOnly ? null : findAppBackendReceipt(storage, receiptScope);
         const files = operation.readOnly ? [] : listAppBackendCallerFiles(storage, {...scope(value), caller: value.receiptCaller, nowMs: nowMs()});
         return {value, operation, snapshot, receiptScope, receipt, files};
@@ -158,10 +166,10 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     const content = Buffer.from(parsed.bytesBase64, "base64");
     validateFileSignature(parsed.contentType, content);
     const value = storage.tx(() => {
-      const value = authority(auth, publicationId, parsed.authorityRevision, true);
-      activeSnapshot(storage, value);
+      const value = authority(auth, publicationId, parsed.authorityRevision);
+      activeBackend(storage, value);
       if (!value.capability.operations.some(operation => !operation.readOnly && canInvokeAppBackendOperation(value.caller, operation))) throw notFound();
-      return value;
+      return authority(auth,publicationId,parsed.authorityRevision,true);
     });
     const uploadedAt = nowMs();
     return stageAppBackendFile(storage, {...scope(value), caller: value.receiptCaller, idempotencyKey: parsed.idempotencyKey,
@@ -192,7 +200,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     return storage.readTx(() => {
       const value = authority(auth, publicationId, undefined);
       requireBackendOwner(value);
-      const snapshot = readAppBackendSnapshot(storage, scope(value));
+      const snapshot = readAppBackendMetadata(storage, scope(value));
       return {publicationId, authorityRevision: value.authorityRevision, capability: value.capability,
         active: snapshot?.publicationId === publicationId && snapshot.publicationRevision === value.authorityRevision,
         revision: snapshot?.revision ?? 0};
@@ -204,7 +212,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     const value = storage.readTx(() => {
       const value = authority(auth, publicationId, input.authorityRevision);
       requireBackendOwner(value);
-      activeSnapshot(storage, value);
+      activeBackend(storage, value);
       return value;
     });
     setAppBackendHelper(storage, {...scope(value), grantId: input.grantId, enabled: input.enabled, nowMs: nowMs(), authorize() {
@@ -235,7 +243,6 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     const captured = storage.readTx(() => {
       const value = authority(auth, publicationId, input.authorityRevision);
       requireBackendOwner(value);
-      if (readAppBackendSnapshot(storage, scope(value))) throw relayError("conflict", "Recovery cannot replace existing app data.");
       return {value, source: backendArtifact(storage, value, value.capability.backendPath, value.capability.backendSha256),
         schemaSql: backendArtifact(storage, value, value.capability.schemaPath, value.capability.schemaSha256)};
     });
@@ -254,7 +261,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     return storage.readTx(() => {
       const value = authority(auth, publicationId, undefined);
       if (value.caller.kind !== "owner" && !(value.caller.kind === "named" && value.caller.helper && value.caller.access === "edit")) throw notFound();
-      activeSnapshot(storage, value);
+      activeBackend(storage, value);
       return {publicationId, authorityRevision: value.authorityRevision,
         files: value.candidate.files.filter(file => file.path !== value.capability.backendPath && file.path !== value.capability.schemaPath)};
     });
@@ -264,7 +271,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     return storage.readTx(() => {
       const value = authority(auth, publicationId, authorityRevision);
       if (value.caller.kind !== "owner" && !(value.caller.kind === "named" && value.caller.helper && value.caller.access === "edit")) throw notFound();
-      activeSnapshot(storage, value);
+      activeBackend(storage, value);
       const file = value.candidate.files.find(file => file.sha256 === sha256 && file.path !== value.capability.backendPath && file.path !== value.capability.schemaPath);
       if (!file) throw notFound();
       const bytes = storage.getBlob(value.workspaceId, sha256);

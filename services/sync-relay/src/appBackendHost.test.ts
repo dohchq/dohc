@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
-import { evaluateAppOperation, type EvaluateAppOperationInput } from "@dohc/app-backend-runtime";
-import type { AppBackendAuth } from "./appBackendHost";
-import { fixture, owner, input } from "./appBackendTestFixture";
+import { evaluateAppOperation, initializeAppDatabase, type EvaluateAppOperationInput } from "@dohc/app-backend-runtime";
+import { createAppBackendHost, type AppBackendAuth } from "./appBackendHost";
+import { fixture, owner, input, limits } from "./appBackendTestFixture";
 
 it("serializes concurrent last-slot reservations, preserving an invocation identity across retries", async () => {
   let release!: () => void;
@@ -132,10 +132,10 @@ it("restores a fresh app store without reopening accepted work or importing help
   const receipt = await original.host.invoke(owner, original.publicationId, input("one"));
   const bundle = original.host.export(owner, original.publicationId);
   const recovered = fixture();
-  expect(await recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).toMatchObject({revision: receipt.revision + 1});
+  expect(await recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).toMatchObject({revision: receipt.revision});
   expect(await recovered.host.invoke(owner, recovered.publicationId, input("one"))).toEqual({...receipt, replayed: true});
   expect((await recovered.host.invoke(owner, recovered.publicationId, input("read", "read"))).result).toEqual([{id: "only", remaining: 0}]);
-  await expect(recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).rejects.toMatchObject({code: "conflict"});
+  expect(await recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).toMatchObject({revision: receipt.revision});
   const unauthorized = fixture();
   await expect(unauthorized.host.restore({kind: "named", workspaceId: "w", userId: "stranger"}, unauthorized.publicationId, {authorityRevision: 1, bundle})).rejects.toThrow();
 });
@@ -170,4 +170,35 @@ it("uses one timestamp when staging an upload while the clock advances", async (
   const f = fixture(evaluateAppOperation, () => now++);
   await f.host.activate(owner, f.publicationId, 1);
   expect(f.host.upload(owner, f.publicationId, {authorityRevision: 1, idempotencyKey: "upload", name: "receipt.txt", contentType: "text/plain", bytesBase64: Buffer.from("receipt").toString("base64")})).toMatchObject({replayed: false});
+});
+
+it("does not enroll readers and applies a separate configured app write participant limit", async () => {
+  const f = fixture(async value => ({result: null, database:value.database, changed:false, changeset:new Uint8Array(), attachedFileIds:[]}));
+  await f.host.activate(owner,f.publicationId,1);
+  for (let index=0;index<101;index++) await f.host.invoke(f.link(`reader-${index}`),f.publicationId,input(`read-${index}`,"read"));
+  expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_link_principals").get()?.n).toBe(0);
+  expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_backend_participants").get()?.n).toBe(0);
+  const host=createAppBackendHost({storage:f.storage,limits,nowMs:()=>10,maxParticipantsPerGrant:2,runtime:{initializeAppDatabase,evaluateAppOperation:async value=>({result:null,database:value.database,changed:false,changeset:new Uint8Array(),attachedFileIds:[]})}});
+  await host.invoke(f.link("writer-1"),f.publicationId,input("write-1"));
+  await host.invoke(f.link("writer-2"),f.publicationId,input("write-2"));
+  await expect(host.invoke(f.link("writer-3"),f.publicationId,input("write-3"))).rejects.toMatchObject({code:"quota_exceeded"});
+  expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_link_principals").get()?.n).toBe(2);
+  expect((await host.invoke(f.link("still-readable"),f.publicationId,input("read","read"))).result).toBeNull();
+});
+
+it("preserves anonymous operation identity and recovery retries after fresh-host recovery", async () => {
+  const original=fixture();
+  await original.host.activate(owner,original.publicationId,1);
+  const receipt=await original.host.invoke(original.link("participant"),original.publicationId,input("original"));
+  const bundle=original.host.export(owner,original.publicationId);
+  const recovered=fixture();
+  const publicationId=recovered.publishUpgrade();
+  const restored=await recovered.host.restore(owner,publicationId,{authorityRevision:1,bundle});
+  const caller=recovered.link("participant");
+  expect(await recovered.host.invoke(caller,publicationId,input("original"))).toEqual({...receipt,replayed:true});
+  await recovered.host.invoke(owner,publicationId,input("later","attach",{fileIds:[]}));
+  recovered.restart();
+  expect(await recovered.host.restore(owner,publicationId,{authorityRevision:1,bundle})).toEqual(restored);
+  expect(recovered.host.describe(owner,publicationId).revision).toBe(restored.revision+1);
+  expect((await recovered.host.invoke(owner,publicationId,input("read","read"))).result).toEqual([{id:"only",remaining:0}]);
 });

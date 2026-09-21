@@ -108,6 +108,15 @@ describe("app backend durable store", () => {
     expect(stageAppBackendFile(f.context,{...upload,nowMs:20,expiresAtMs:40,idempotencyKey:"after-expiry"}).replayed).toBe(false);
     expect(listAppBackendCallerFiles(f.context,{...f.snapshot,caller:upload.caller,nowMs:20})).toHaveLength(1);
   });
+  it("reclaims expired staged bytes during upload admission before checking workspace quota", () => {
+    const f=fixture(5000), upload={...f.snapshot,caller:{grantId:"g",principalId:"p"},name:"file.txt",contentType:"text/plain",content:new Uint8Array(2000),nowMs:3,expiresAtMs:20,authorize:f.authorize};
+    const expired=stageAppBackendFile(f.context,{...upload,idempotencyKey:"expired"});
+    expect(()=>stageAppBackendFile(f.context,{...upload,idempotencyKey:"before-expiry"})).toThrow(/quota/);
+    const replacement=stageAppBackendFile(f.context,{...upload,idempotencyKey:"after-expiry",nowMs:20,expiresAtMs:40});
+    expect(replacement.replayed).toBe(false);
+    expect(f.context.db.prepare("SELECT 1 FROM sync_relay_app_backend_files WHERE file_id=?").get(expired.file.fileId)).toBeUndefined();
+    expect(f.context.db.prepare("SELECT file_rows FROM sync_relay_app_backend_usage").get()?.file_rows).toBe(1);
+  });
   it("charges all private data against workspace quota and removes it with the workspace", () => {
     const f=fixture(); f.commit();
     setAppBackendHelper(f.context,{...f.snapshot,grantId:"helper",enabled:true,nowMs:4,authorize:f.authorize});
