@@ -609,7 +609,7 @@ export function MessageReactions(props: {
       {props.hoverToolbar ? (
         <div
           data-testid={`${props.testIdPrefix}-message-toolbar`}
-          className="absolute right-0 top-0 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
+          className="absolute -top-3.5 right-2 z-10 flex items-center gap-0.5 rounded-md border border-line bg-panel p-0.5 shadow-sm opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100 has-[[popover]]:opacity-100"
         >
           {QUICK_REACTION_EMOJIS.map((emoji) => {
             const mine = byEmoji[index.get(emoji) ?? -1]?.mine ?? false;
@@ -707,17 +707,16 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
   // The day of the topmost visible message, pinned over the list while the
-  // reader is somewhere in history: neither the first nor the last message
-  // is in view. Legend reports viewability once per scroll
+  // reader is somewhere in history: the first message is out of view and the
+  // end is more than a few lines away. Legend reports viewability once per scroll
   // frame at most, and an unchanged label is a no-op update.
   const [topDay, setTopDay] = useState<string | null>(null);
-  const messageCount = useRef(props.messages.length);
-  messageCount.current = props.messages.length;
   const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
     const first = info.viewableItems[0];
-    const last = info.viewableItems[info.viewableItems.length - 1];
+    const node = list.current?.getScrollableNode();
+    const fromEnd = node ? node.scrollHeight - node.scrollTop - node.clientHeight : 0;
     // Reading the latest messages needs no label; scrolled into history it does.
-    const inHistory = first !== undefined && first.index > 0 && last !== undefined && last.index < messageCount.current - 1;
+    const inHistory = first !== undefined && first.index > 0 && fromEnd > 40;
     setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
   }, []);
 

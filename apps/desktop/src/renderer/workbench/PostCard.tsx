@@ -167,7 +167,6 @@ export function PostCard(props: {
         <div className="flex items-center gap-2.5">
           <ChatAvatar
             name={message?.authorDisplayName ?? "?"}
-            id={message?.authorUserId}
             kind={isAgent ? "agent" : "human"}
           />
           <div className="flex min-w-0 flex-1 flex-col leading-tight">

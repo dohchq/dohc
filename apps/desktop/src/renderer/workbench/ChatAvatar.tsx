@@ -25,7 +25,8 @@ const HUE_CLASSES: Record<IdentityHue, string> = {
   rose: "bg-hue-rose/15 text-hue-rose",
 };
 
-// FNV-1a over the key, so the same person gets the same hue everywhere.
+// FNV-1a over the display name, the one key every surface has, so a person
+// keeps one hue from the rail to their posts.
 export function identityHue(key: string): IdentityHue {
   let hash = 0x811c9dc5;
   for (const char of key) {
@@ -53,9 +54,6 @@ function initials(name: string): string {
 
 export function ChatAvatar(props: {
   name: string;
-  // A stable id keeps the hue when a person renames; the name stands in
-  // where the caller has none.
-  id?: string;
   kind: "human" | "agent";
   size?: keyof typeof SIZES;
   className?: string;
@@ -71,7 +69,7 @@ export function ChatAvatar(props: {
       } ${
         agent
           ? "border-agent/50 bg-bg text-agent"
-          : `border-line ${HUE_CLASSES[identityHue(props.id ?? props.name)]}`
+          : `border-line ${HUE_CLASSES[identityHue(props.name)]}`
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}

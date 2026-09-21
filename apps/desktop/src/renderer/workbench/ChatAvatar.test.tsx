@@ -34,9 +34,9 @@ describe("ChatAvatar hue", () => {
   it("hashes the id when given, else the name", () => {
     expect(identityHue("user-1")).toBe(identityHue("user-1"));
     expect(IDENTITY_HUES).toContain(identityHue("user-1"));
-    render(<ChatAvatar name="Ice" id="user-1" kind="human" />);
+    render(<ChatAvatar name="Ice" kind="human" />);
     render(<ChatAvatar name="Nova" kind="human" />);
-    expect(screen.getByTitle("Ice").className).toContain(`text-hue-${identityHue("user-1")}`);
+    expect(screen.getByTitle("Ice").className).toContain(`text-hue-${identityHue("Ice")}`);
     expect(screen.getByTitle("Nova").className).toContain(`text-hue-${identityHue("Nova")}`);
   });
 
