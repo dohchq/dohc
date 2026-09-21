@@ -1,6 +1,6 @@
 {
   "entryPath": "fundraiser/frontend.ts",
-  "inputs": ["fundraiser/frontend.ts", "fundraiser/frontend.css", "fundraiser/client.ts", "fundraiser/ui-types.ts", "fundraiser/backend.ts", "fundraiser/schema.sql"],
+  "inputs": ["fundraiser/frontend.ts", "fundraiser/frontend.css", "fundraiser/client.ts", "fundraiser/ui-types.ts", "fundraiser/recovery.ts", "fundraiser/backend.ts", "fundraiser/schema.sql"],
   "packageMap": {},
   "backend": {
     "entryPath": "fundraiser/backend.ts",

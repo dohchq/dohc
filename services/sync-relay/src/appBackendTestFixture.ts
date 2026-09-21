@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach } from "vitest";
 import { evaluateAppOperation, initializeAppDatabase } from "@dohc/app-backend-runtime";
-import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { createAppBackendHost, type AppBackendAuth } from "./appBackendHost";
 import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
@@ -32,14 +32,15 @@ const source = `globalThis.operations = {
 };`;
 const cleanups: (() => void)[] = [];
 afterEach(() => {for (const cleanup of cleanups.splice(0).reverse()) cleanup();});
-export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOperation, nowMs: () => number = () => 10) {
+export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOperation, nowMs: () => number = () => 10,
+  prepared?: {candidate: AppPublicationCandidate; blobs: Array<{sha256: string; bytes: Uint8Array}>}) {
   const dir = mkdtempSync(join(tmpdir(), "app-backend-host-test-"));
   cleanups.push(() => rmSync(dir, {recursive: true, force: true}));
   let storage = openSyncRelayStorage(join(dir, "relay.sqlite")) as StorageContext;
   cleanups.push(() => storage.close());
   initializeAppBackendSchema(storage.db);
   storage.claimWorkspace({workspaceId: "w", ownerUserId: "owner", createdAtMs: 1});
-  storage.createShare({share: {shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({paths: ["app"], versionId: null}), createdAtMs: 1},
+  storage.createShare({share: {shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({paths: [prepared?.candidate.appRoot ?? "app"], versionId: null}), createdAtMs: 1},
     grant: {grantId: "g", shareId: "s", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
   storage.tx(() => storage.db.prepare("UPDATE sync_relay_share_grants SET principal_kind='link',principal_user_id=NULL WHERE grant_id='g'").run());
   const blobs = [{path: "bundle.js", bytes: Buffer.from("document.body.textContent='app'"), contentType: "text/javascript; charset=utf-8"},
@@ -58,8 +59,9 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
   candidate.dependencyLockDigest = digest("dohc-app-dependencies-v1", candidate.inputs);
   candidate.bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
   candidate.buildDigest = digest("dohc-app-build-v1", {sourceDigest: candidate.sourceDigest, dependencyLockDigest: candidate.dependencyLockDigest, compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
-  const publication = storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate, limits, nowMs: 5,
-    blobs: blobs.map(({bytes}) => ({sha256: sha(bytes), bytes}))});
+  const publishedCandidate = prepared?.candidate ?? candidate;
+  const publication = storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate: publishedCandidate, limits, nowMs: 5,
+    blobs: prepared?.blobs ?? blobs.map(({bytes}) => ({sha256: sha(bytes), bytes}))});
   let host = createAppBackendHost({storage, limits, nowMs, runtime: {initializeAppDatabase, evaluateAppOperation: evaluate}});
   const link = (id: string): AppBackendAuth => {
     storage.mintLinkSession({session: {sessionId: `session-${id}`, capabilityHash: `capability-${id}`, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
@@ -73,7 +75,7 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
     },
     publishUpgrade() {
       return storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1,
-        candidate: {...candidate, sourceRevision: "a".repeat(64)}, limits, nowMs: 5, blobs: []}).publicationId;
+        candidate: {...publishedCandidate, sourceRevision: "a".repeat(64)}, limits, nowMs: 5, blobs: []}).publicationId;
     }};
 }
 export const input = (idempotencyKey: string, operation = "reserve", payload = {}) => ({authorityRevision: 1, operation, idempotencyKey, input: payload});
