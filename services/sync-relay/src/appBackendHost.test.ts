@@ -125,3 +125,17 @@ it("rechecks authority before exposing an app refusal message", async () => {
   revoke = () => f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: f.publicationId, expectedAuthorityRevision: 1});
   await expect(f.host.invoke(f.link("a"), f.publicationId, input("one"))).rejects.toMatchObject({code: "not_found", message: "not found"});
 });
+
+it("restores a fresh app store without reopening accepted work or importing helper access", async () => {
+  const original = fixture();
+  await original.host.activate(owner, original.publicationId, 1);
+  const receipt = await original.host.invoke(owner, original.publicationId, input("one"));
+  const bundle = original.host.export(owner, original.publicationId);
+  const recovered = fixture();
+  expect(await recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).toMatchObject({revision: receipt.revision + 1});
+  expect(await recovered.host.invoke(owner, recovered.publicationId, input("one"))).toEqual({...receipt, replayed: true});
+  expect((await recovered.host.invoke(owner, recovered.publicationId, input("read", "read"))).result).toEqual([{id: "only", remaining: 0}]);
+  await expect(recovered.host.restore(owner, recovered.publicationId, {authorityRevision: 1, bundle})).rejects.toMatchObject({code: "conflict"});
+  const unauthorized = fixture();
+  await expect(unauthorized.host.restore({kind: "named", workspaceId: "w", userId: "stranger"}, unauthorized.publicationId, {authorityRevision: 1, bundle})).rejects.toThrow();
+});

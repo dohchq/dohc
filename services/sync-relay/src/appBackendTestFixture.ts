@@ -49,7 +49,7 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
     compilerIdentity: {recipe: "closed-esbuild", version: "0.28.1", binarySha256: "6".repeat(64)},
     inputs: [{path: "app/index.ts", sha256: "7".repeat(64), byteLength: 10}], dependencies: ["app/index.ts"],
     files: blobs.map(({path, bytes, contentType}) => ({path, sha256: sha(bytes), byteLength: bytes.byteLength, contentType})),
-    capabilities: [{kind: "app-backend", dataPath: "data/signups", backendPath: "backend.js", schemaPath: "schema.sql", backendSha256: sha(source), schemaSha256: sha(schema), schemaVersion: 1,
+    capabilities: [{kind: "app-backend", dataPath: "data/signups.sqlite", backendPath: "backend.js", schemaPath: "schema.sql", backendSha256: sha(source), schemaSha256: sha(schema), schemaVersion: 1,
       operations: [{name: "reserve", access: "link", readOnly: false}, {name: "read", access: "link", readOnly: true},
         {name: "fileAccess", access: "helper", readOnly: true}, {name: "administer", access: "helper", readOnly: true}, {name: "ownerOnly", access: "owner", readOnly: true}],
       tables: [{name: "slots", primaryKey: "id", readOperation: "read", writeOperation: "reserve"}, {name: "registrations", primaryKey: "id", readOperation: "read", writeOperation: null}]}]}, limits);
@@ -76,4 +76,3 @@ export function fixture(evaluate: typeof evaluateAppOperation = evaluateAppOpera
     }};
 }
 export const input = (idempotencyKey: string, operation = "reserve", payload = {}) => ({authorityRevision: 1, operation, idempotencyKey, input: payload});
-

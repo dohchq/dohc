@@ -50,7 +50,8 @@ it("requires backend opt-in and refuses ambient or forged authority before accou
   const disabled = httpFixture(false);
   expect((await disabled.http("named", "activate", {authorityRevision: 1})).status).toBe(404);
   const f = httpFixture();
-  for (const headers of [{cookie: "ambient"}, {cookie: "ambient", origin: "https://attacker"}]) {
+  const cookieHeaders: Record<string, string>[] = [{cookie: "ambient"}, {cookie: "ambient", origin: "https://attacker"}];
+  for (const headers of cookieHeaders) {
     expect((await f.http("named", "activate", {authorityRevision: 1}, headers)).status).toBe(404);
     expect((await f.http("link", "invoke", input("a"), headers)).status).toBe(404);
   }

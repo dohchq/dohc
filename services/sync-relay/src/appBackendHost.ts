@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { evaluateAppOperation, initializeAppDatabase } from "@dohc/app-backend-runtime";
+import { evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "@dohc/app-backend-runtime";
 import { APP_BACKEND_RESULT_BYTES, canInvokeAppBackendOperation, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
   type AppBackendInvokeRequest, type AppBackendJson, type AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -7,7 +7,8 @@ import { badRequest, notFound, relayError } from "./errors";
 import { backendArtifact, requireBackendAuthority, requireBackendOwner, type AppBackendAuth, type BackendAuthority } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
 import { activateAppBackend, commitAppBackendOperation, exportAppBackend, findAppBackendReceipt, listAppBackendCallerFiles,
-  readAppBackendFileInTransaction, readAppBackendSnapshot, setAppBackendHelper, stageAppBackendFile, type AppBackendSnapshot } from "./storage/appBackendData";
+  readAppBackendFileInTransaction, readAppBackendSnapshot, restoreAppBackend, setAppBackendHelper, stageAppBackendFile,
+  type AppBackendRecoveryBundle, type AppBackendSnapshot } from "./storage/appBackendData";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 import { targetVersionId, visibleSharePath } from "./shareFilter";
 
@@ -16,7 +17,7 @@ export interface AppBackendHostOptions {
   storage: StorageContext;
   limits: AppPublicationLimits;
   nowMs: () => number;
-  runtime?: { initializeAppDatabase: typeof initializeAppDatabase; evaluateAppOperation: typeof evaluateAppOperation };
+  runtime?: { initializeAppDatabase: typeof initializeAppDatabase; evaluateAppOperation: typeof evaluateAppOperation; validateAppDatabase?: typeof validateAppDatabase };
 }
 export interface AppBackendInvokeResponse { result: AppBackendJson; revision: number; replayed: boolean }
 export interface AppBackendReadFileRequest {
@@ -226,6 +227,27 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     });
     return exportAppBackend(storage, {...scope(value), authorize() { current(auth, value, signal); }});
   }
+  async function restore(auth: AppBackendAuth, publicationId: string, input: {authorityRevision: number; bundle: AppBackendRecoveryBundle}, signal?: AbortSignal) {
+    signal = signal ? AbortSignal.any([signal, storage.unavailable]) : storage.unavailable;
+    checkSignal(signal);
+    if (!Number.isSafeInteger(input.authorityRevision) || input.authorityRevision < 1) throw badRequest("Invalid app authority revision.");
+    const captured = storage.readTx(() => {
+      const value = authority(auth, publicationId, input.authorityRevision);
+      requireBackendOwner(value);
+      if (readAppBackendSnapshot(storage, scope(value))) throw relayError("conflict", "Recovery cannot replace existing app data.");
+      return {value, source: backendArtifact(storage, value, value.capability.backendPath, value.capability.backendSha256),
+        schemaSql: backendArtifact(storage, value, value.capability.schemaPath, value.capability.schemaSha256)};
+    });
+    const {value} = captured;
+    const snapshot = await restoreAppBackend(storage, {...scope(value), appRoot: value.candidate.appRoot, publicationId,
+      publicationRevision: value.authorityRevision, schemaSha256: value.capability.schemaSha256, schemaVersion: value.capability.schemaVersion,
+      sourceSha256: value.capability.backendSha256, source: captured.source, capabilityJson: JSON.stringify(value.capability),
+      expectedRevision: null, nowMs: nowMs(), bundle: input.bundle,
+      validateDatabase: database => (options.runtime?.validateAppDatabase ?? validateAppDatabase)({database,
+        schemaSql: captured.schemaSql, tables: value.capability.tables.map(table => table.name), signal}),
+      authorize() { checkSignal(signal); const next = authority(auth, publicationId, value.authorityRevision); requireBackendOwner(next); sameAuthority(value, next); }});
+    return {publicationId, authorityRevision: value.authorityRevision, revision: snapshot.revision};
+  }
   function descriptor(auth: AppBackendAuth, publicationId: string, signal?: AbortSignal) {
     checkSignal(signal);
     return storage.readTx(() => {
@@ -249,7 +271,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       return {file, bytes};
     });
   }
-  return {activate, invoke, upload, readFile, describe, helper, export: exportData, descriptor, blob};
+  return {activate, invoke, upload, readFile, describe, helper, export: exportData, restore, descriptor, blob};
 }
 export type AppBackendHost = ReturnType<typeof createAppBackendHost>;
 
