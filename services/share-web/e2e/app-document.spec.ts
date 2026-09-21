@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { test, expect } from "@playwright/test";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
-import { createAppDocument } from "../src/appDocument";
+import { createAppDocument } from "@dohc/app-browser/document";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const input = (path: string, text: string) => {

@@ -1,7 +1,7 @@
 import {it,expect,vi} from 'vitest';
 import {MessageChannel as NodeMessageChannel, type MessagePort as NodeMessagePort} from 'node:worker_threads';
 import {once} from 'node:events';
-import {attachAppCollectionBroker} from './appCollectionBroker';
+import {attachAppCollectionBroker} from '@dohc/app-browser/broker';
 
 function harness(send:(body:unknown,signal:AbortSignal)=>Promise<Response> = async body=>Response.json(body)) {
   vi.stubGlobal('MessageChannel',NodeMessageChannel);

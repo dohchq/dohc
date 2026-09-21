@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
-import { createAppDocument, type AppDocumentFile } from "./appDocument";
+import { createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import type { LinkBrowserMaterial } from "./server";
-import { attachAppCollectionBroker } from "./appCollectionBroker";
+import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { forwardAppCollection } from "./appCollectionProxy";
 import { forwardAppBackend } from "./appBackendProxy";
 

@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/app-browser": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
