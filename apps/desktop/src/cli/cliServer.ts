@@ -545,7 +545,6 @@ async function loadChannels(
   });
   if (!context.readOnly) {
     await context.store.ensureGeneralChannel({ workspaceId: context.workspaceId });
-    await context.store.ensureAgentChannel({ workspaceId: context.workspaceId });
   }
   const channels = await context.store.listChannels({
     workspaceId: context.workspaceId,

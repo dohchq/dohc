@@ -20,6 +20,33 @@ import {
 import { runnerProgram } from "./ChatsView";
 
 describe("ChatsView My agent", () => {
+  it("discovers an opted-in agent after creation while navigator polling is suspended", async () => {
+    const listeners = new Set<(event: { workspaceId: string }) => void>();
+    bridgeMock.onWorkspaceActivity.mockImplementation((callback: (event: { workspaceId: string }) => void) => {
+      listeners.add(callback);
+      return () => listeners.delete(callback);
+    });
+    const view = render(navigatorView(0, { suspendPolling: true, userSettings: DEFAULT_USER_SETTINGS }));
+    await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-my-agent")).toBeNull();
+    const enabled = {
+      ...DEFAULT_USER_SETTINGS,
+      profile: { agentName: "Nova" },
+      runner: { ...DEFAULT_USER_SETTINGS.runner, command: "node agent.mjs", enabled: true },
+    };
+    view.rerender(navigatorView(0, { suspendPolling: true, userSettings: enabled }));
+    await waitFor(() => expect(listeners.size).toBe(1));
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), channel({
+      id: "new-agent", kind: "agent", name: "My agent", slug: "agent",
+    })], fileThreads: [] });
+    await act(async () => { for (const listener of listeners) listener({ workspaceId: "workspace-b" }); });
+    expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2);
+    await act(async () => { for (const listener of [...listeners]) listener({ workspaceId: "workspace-a" }); });
+    expect(await screen.findByTestId("chats-my-agent")).toBeTruthy();
+    await waitFor(() => expect(listeners.size).toBe(0));
+  });
+
   it.each([
     { title: "CLI title", body: "A separate body", visible: true },
     { title: "Derived title", body: "Derived title\nMore details", visible: false },

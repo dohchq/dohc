@@ -4377,7 +4377,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, stateDir, enqueueUserSettingsWrite,
     setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
-    chatDispatchService, withRendererWorkspaceOperation,
+    chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
     broadcastUserSettings: (result) => {
       for (const window of workspaceWindows.allLive()) {
         window.webContents.send(CHANNELS.userSettingsChanged, result);

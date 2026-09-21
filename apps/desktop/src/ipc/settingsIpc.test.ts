@@ -88,6 +88,7 @@ async function harness() {
   });
   const applyZoomLevelToWindows = vi.fn((value: number) => { effects.push({ kind: "zoom", value, persisted: persisted() }); });
   const broadcastUserSettings = vi.fn();
+  const notifyRenderer = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
   const openDispatchWorkspaces = vi.fn(() => [...entries.values()]);
   const scanWorkspace = vi.fn<(workspaceId: string) => Promise<unknown>>(async () => undefined);
@@ -101,7 +102,7 @@ async function harness() {
     stateDir: () => stateDirectory, enqueueUserSettingsWrite, setCachedPreferredName,
     applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
-    broadcastUserSettings,
+    broadcastUserSettings, notifyRenderer,
   });
   const zoom = createZoomMutation({
     enqueue: enqueueUserSettingsWrite,
@@ -119,7 +120,7 @@ async function harness() {
   return {
     handlers, firstGroup, effects, entries, authorities, sessions, first, second, open, zoom,
     enqueueUserSettingsWrite, setCachedPreferredName, applyZoomLevelToWindows,
-    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings,
+    refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
@@ -289,6 +290,9 @@ describe("registered settings IPC", () => {
       await logged.promise;
       expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]);
       expect(log).toHaveBeenCalledExactlyOnceWith("[desktop] runner-settings dispatch scan:", error);
+      expect(h.notifyRenderer).not.toHaveBeenCalled();
+      scanRelease.resolve();
+      await vi.waitFor(() => expect(h.notifyRenderer).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-b" }));
     } finally {
       trayRelease.resolve();
       scanRelease.resolve();

@@ -733,17 +733,56 @@ afterEach(async () => {
 });
 
 describe("chatDispatchService", () => {
-  it("provisions the agent channel during the first trigger scan", async () => {
+  it("does not provision an agent channel before the runner is enabled", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
 
     fixture.service.setPaused(true);
     await activate(fixture);
 
-    expect(
-      (await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
-        (channel) => channel.kind === "agent",
-      ),
-    ).toHaveLength(1);
+    expect((await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
+      (channel) => channel.kind === "agent",
+    )).toHaveLength(0);
+  });
+
+  it("provisions the agent channel after the runner is enabled", async () => {
+    const fixture = await createFixture({ runner: { enabled: false, command: "" } });
+
+    fixture.service.setPaused(true);
+    await activate(fixture);
+    expect(await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([]);
+
+    fixture.runner.enabled = true;
+    fixture.runner.command = "node agent.mjs";
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
+      (channel) => channel.kind === "agent",
+    )).toHaveLength(1);
+    fixture.runner.enabled = false;
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect((await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
+      (channel) => channel.kind === "agent",
+    )).toHaveLength(1);
+  });
+
+  it("notifies the renderer when a recovery scan provisions the opted-in agent", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({ runner: { enabled: false, command: "" } });
+    fixture.service.setPaused(true);
+    await activate(fixture);
+    fixture.runner.enabled = true;
+    fixture.runner.command = "node agent.mjs";
+    const failure = new Error("agent channel temporarily unavailable");
+    vi.spyOn(fixture.chat, "ensureAgentChannel").mockRejectedValueOnce(failure);
+
+    await expect(fixture.service.scanWorkspace(WORKSPACE_ID)).rejects.toBe(failure);
+    expect(fixture.runUpdatedWorkspaces).toEqual([]);
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+
+    expect((await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID })).filter(
+      (channel) => channel.kind === "agent",
+    )).toHaveLength(1);
+    expect(fixture.runUpdatedWorkspaces).toEqual([WORKSPACE_ID]);
   });
 
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
@@ -2586,7 +2625,7 @@ describe("chatDispatchService", () => {
     await vi.waitFor(
       () => {
         expect(fixture.failRunRequests).toBe(7);
-        expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 1);
+        expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 2);
       },
       { interval: 0 },
     );

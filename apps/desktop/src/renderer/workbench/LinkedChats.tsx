@@ -453,7 +453,7 @@ export function LinkedChatsPanel(props: {
                   data-testid="linked-chat-open"
                   data-thread-id={thread.id}
                   onClick={() => void openThread(thread)}
-                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  className="block w-full cursor-pointer px-3 py-2 text-left transition-colors duration-75 hover:bg-line/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
                 >
                   <span className="block truncate text-[12px] font-medium text-ink">
                     {thread.title}
