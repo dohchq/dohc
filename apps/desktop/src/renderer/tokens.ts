@@ -100,6 +100,44 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   selection: "--dohc-selection",
 };
 
+// Identity hues for human avatars. ChatAvatar hashes a stable key into this
+// list, so one person keeps one hue across every surface. Not part of the
+// plugin panel payload: a panel styles its own people.
+export const IDENTITY_HUES = [
+  "rust",
+  "amber",
+  "olive",
+  "teal",
+  "blue",
+  "indigo",
+  "plum",
+  "rose",
+] as const;
+export type IdentityHue = (typeof IDENTITY_HUES)[number];
+
+export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>> = {
+  light: {
+    rust: "#88412c",
+    amber: "#705012",
+    olive: "#50602a",
+    teal: "#22645a",
+    blue: "#285884",
+    indigo: "#4c528f",
+    plum: "#764580",
+    rose: "#8e3f5a",
+  },
+  dark: {
+    rust: "#dc9378",
+    amber: "#d9b05a",
+    olive: "#b9c47a",
+    teal: "#82c9bb",
+    blue: "#8fb8e2",
+    indigo: "#a7abee",
+    plum: "#d09fd9",
+    rose: "#e39bb2",
+  },
+};
+
 /**
  * The type stacks, which do not change with theme. Same duplication guard as
  * the palette: tokens.test.ts asserts these against styles.css :root.
