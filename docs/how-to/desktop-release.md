@@ -132,5 +132,4 @@ not run an installer or install an update. It supplies an isolated profile and
 Only use builds that implement this flag. The updater checks a loopback feed
 with no newer release or downloadable package.
 
-Keep its evidence until review ends,
-then follow the [cleanup procedure](../../.agents/skills/workspace-cleanup/SKILL.md).
+Keep its evidence until review ends, then remove it.

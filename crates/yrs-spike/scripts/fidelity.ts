@@ -557,7 +557,7 @@ if (!harvestedPresent) {
   );
 }
 if (caveats.length > 0) {
-  console.warn(`\n${caveats.length} known-caveat divergence(s) (nested frontmatter Any::Map key order — see SPIKE_REPORT.md):`);
+  console.warn(`\n${caveats.length} known-caveat divergence(s) (nested frontmatter Any::Map key order — see README.md):`);
   for (const c of caveats) console.warn(`  - ${c}`);
 }
 if (failures.length > 0) {

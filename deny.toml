@@ -5,11 +5,12 @@
 # current cargo-deny config schema (version = 2 tables).
 
 [graph]
-# The targets `cargo deny` checks: native Windows x64 and Linux x64 via WSL,
-# the two the gate runs on day to day.
+# The targets `cargo deny` checks: every platform the desktop app ships on.
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
 ]
 all-features = true
 

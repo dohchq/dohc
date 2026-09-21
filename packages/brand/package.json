@@ -7,11 +7,15 @@
     ".": "./src/index.ts",
     "./tokens.css": "./src/tokens.css"
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "peerDependencies": {
     "react": "^19.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
-    "react": "^19.2.8"
+    "react": "^19.2.8",
+    "typescript": "^7.0.2"
   }
 }
