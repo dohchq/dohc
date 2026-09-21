@@ -26,7 +26,11 @@ The SQL tables are app data, not Markdown Collections. The desktop App data pane
 
 Focused tests exercise the actual isolated runtime and the real HTTP host with synthetic databases. They cover capacity contention, both-session rollback, backend totals, status transitions, manual entries, private receipt access, retry recovery, and organizer authority. The second [stock-order example](../../examples/stock-orders/README.md) exercises different rules without a new core API.
 
-These checks do not substitute for a complete browser run of this fundraiser. Final acceptance must demonstrate:
+The [Chromium fundraiser test](../../services/share-web/e2e/app-backend-fundraiser.spec.ts) passed with the actual compiler, relay handlers, SQLite storage, and isolated runtime. It covers signup, private receipts and status, organizer actions, manual entries, attendees, and owner table reads. Account identity is a fixture; this is not a deployed public-service test.
+
+The [Electron test](../../apps/desktop/e2e/app-backend-local.spec.ts) also passed without an account. It approves the example, writes through native IPC, opens the organizer in a browser, restarts the desktop, and verifies persistence, retry replay, and agent CLI reads. The App data component has separate browser checks for both themes, keyboard access, loading, and failures; those checks use a mocked bridge.
+
+The acceptance checks cover these results:
 
 | Scenario | Required result |
 | --- | --- |
@@ -43,4 +47,4 @@ These checks do not substitute for a complete browser run of this fundraiser. Fi
 
 The current status UI uses a private code and downloadable recovery file. A portable status URL is a later interface improvement. Lost recovery secrets have no automatic identity-based recovery. The backend supplies no payment processing, temporary prepayment hold, email notification, or automated refund.
 
-The architecture now supports this class of app. Declaring the complete example ready still requires the browser, desktop, and deployment acceptance evidence above. Drive, mobile, and a smoother managed setup are separate work; they do not change the transaction or permission boundary.
+This proves the app's participant and organizer behavior on local test hosts, with the stated account fixture. It does not prove production deployment or nontechnical hosting setup. Drive, mobile, and managed onboarding remain separate work. Full-gate receipts, review reports, and screenshots accompany the implementation in `.agent-artifacts`; keep their tested commits when reusing evidence.

@@ -2,7 +2,7 @@
 
 Reader: engineers maintaining app execution, data, publication, and owner management.
 
-Status: implemented architecture, September 21, 2026. Focused runtime, storage, HTTP, publication, and interface tests cover the separate boundaries. They do not establish that the complete fundraiser browser experience has passed acceptance. See the [fundraiser acceptance target](fundraiser-app.md) and [author and operator guide](../how-to/app-backend.md).
+Status: implemented, September 21, 2026. The fundraiser passed browser and local Electron acceptance with synthetic data. Runtime, storage, HTTP, publication, and interface tests cover the remaining boundaries. See the [fundraiser evidence and limits](fundraiser-app.md) and [author and operator guide](../how-to/app-backend.md).
 
 An owner and their agent can define an app's schema and operations in workspace source. dohc supplies execution, private storage, publication, caller authority, and recovery. The fundraiser and stock-order examples use the same backend contract; their prices, capacity, payment states, and stock rules live in app source.
 
