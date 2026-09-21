@@ -956,6 +956,9 @@ importers:
 
   services/sync-relay:
     dependencies:
+      '@dohc/app-backend-runtime':
+        specifier: workspace:*
+        version: link:../../packages/app-backend-runtime
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../../packages/live-session-contract

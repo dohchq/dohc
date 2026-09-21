@@ -15,8 +15,8 @@ await build({
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node22",
+  target: "node24",
   sourcemap: true,
-  external: ["better-auth", "better-auth/*", "pg", "ws"],
+  external: ["@dohc/app-backend-runtime", "better-auth", "better-auth/*", "pg", "ws"],
   logLevel: "info",
 });

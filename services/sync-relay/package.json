@@ -21,6 +21,7 @@
     "host:connect": "node dist/device-host-connect.js"
   },
   "dependencies": {
+    "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",

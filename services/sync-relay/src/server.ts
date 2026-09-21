@@ -1,5 +1,8 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
+import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes";
+import { hashLinkProfileSecret } from "./linkSecurity";
+import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
 import {readOwnerAppResponses,type OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes, type LinkAppPublicationRoute } from "./linkAppPublicationRoutes";
@@ -72,6 +75,7 @@ export type SyncRelayHandler = (request: Request) => Promise<Response>;
 export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
   appCollectionPolicy?: AppCollectionPolicy;
+  appBackendsEnabled?: boolean;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -123,6 +127,7 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 type SyncRelayRoute =
+  | AppBackendRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -156,6 +161,7 @@ const MAX_LINK_CURRENT_FILES = 5_000;
 export function createSyncRelayHandler({
   appPublicationLimits,
   appCollectionPolicy,
+  appBackendsEnabled = false,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -201,6 +207,10 @@ export function createSyncRelayHandler({
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
+  if (appBackendsEnabled && !appPublicationLimits) throw new TypeError("App backends require app publications.");
+  const respondToAppBackend = appBackendsEnabled ? createAppBackendRoutes(
+    storage.createAppBackendHost({limits: appPublicationLimits!, nowMs}), storage.unavailable,
+  ) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
   }
@@ -602,6 +612,31 @@ export function createSyncRelayHandler({
         if(route.route==="owner-app-responses")return readOwnerAppResponses(request,route,actor.userId,storage);
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
+      if (route.route === "app-backend") {
+        if (!respondToAppBackend) throw notFound();
+        if (!route.workspaceId) {
+          if (!linkKey || request.headers.has("cookie")) throw notFound();
+          const {capability} = requireLinkRead(request, linkReadRateLimiter, linkGrantReadRateLimiter);
+          const secret = request.headers.get("x-dohc-link-profile-secret");
+          if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
+          return await respondToAppBackend(request, route, {kind:"link", capabilityHash:capability.session.capabilityHash,
+            profileTokenHash:hashLinkProfileSecret(secret, linkKey)});
+        }
+        const authorization = request.headers.get("authorization");
+        let actorRequest: Request;
+        if (request.headers.has("cookie")) {
+          // Browser account authority is accepted only through the trusted viewer.
+          if (authorization || !shareWebOrigin || !relayExchangeKeyHash ||
+              request.headers.get("origin") !== shareWebOrigin || !hasValidRelayExchangeKey(request)) throw notFound();
+          actorRequest = request;
+        } else {
+          if (!/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+          actorRequest = new Request(request.url, {headers:{authorization:authorization!},signal:request.signal});
+        }
+        const actor = await resolveNamedActor(actorRequest, route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToAppBackend(request, route, {kind:"named", workspaceId:route.workspaceId,userId:actor.userId});
+      }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
@@ -720,6 +755,9 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "link-app-publication", publicationId};
     if (parts.length === 5 && parts[4] === "collection") return {route: "link-app-collection", publicationId};
+    if (parts.length === 6 && parts[4] === "backend" && (parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file")) {
+      return {route:"app-backend", publicationId, action:parts[5]};
+    }
     if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
       return {route: "link-app-publication", publicationId, sha256: parts[5]};
     }
@@ -843,6 +881,14 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "withdraw") return {route: "owner-app-publication", workspaceId, publicationId, action: "withdraw"};
     if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
+    if (parts.length === 6 && parts[4] === "backend" &&
+        (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" ||
+         parts[5] === "describe" || parts[5] === "descriptor" || parts[5] === "export" || parts[5] === "helper")) {
+      return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
+    }
+    if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {
+      return {route:"app-backend",workspaceId,publicationId,action:"blob",sha256:parts[6]};
+    }
     throw notFound();
   }
   if (parts[2] === "live-restores") {

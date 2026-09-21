@@ -96,6 +96,7 @@ import * as workspacesStorage from "./storage/workspaces";
 import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
+import { createAppBackendHost, type AppBackendHostOptions } from "./appBackendHost";
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
@@ -534,6 +535,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   authorizeLinkAppCollection(input: publicationStorage.LinkAppPublicationInput) {
     return appCollectionStorage.authorizeLinkAppCollection(this,input);
+  }
+  createAppBackendHost(options: Omit<AppBackendHostOptions, "storage">) {
+    return createAppBackendHost({...options,storage:this});
   }
 
   readOwnerAppCollectionAcceptances(input: appCollectionModeration.OwnerAppCollectionAcceptancesInput) {
