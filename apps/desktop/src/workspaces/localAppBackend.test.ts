@@ -22,12 +22,13 @@ const source = `globalThis.operations = {
     ctx.db.execute('INSERT INTO orders VALUES(?,?)',[ctx.requestId,input.quantity]);
     if(input.fileId) ctx.files.attach(input.fileId);
     return {id:ctx.requestId,quantity:input.quantity}; },
-  list(ctx) { return {rows:ctx.db.query('SELECT * FROM orders ORDER BY id')}; }
+  list(ctx) { return {rows:ctx.db.query('SELECT * FROM orders ORDER BY id')}; },
+  receipt(ctx,input) { return {fileId:input.fileId}; }
 };`;
 
 async function prepared(backendSource = source) {
   const backend = {entryPath:"app/backend.ts",schemaPath:"app/schema.sql",dataPath:"data/orders.sqlite",schemaVersion:1,
-    operations:[{name:"order",access:"link",readOnly:false},{name:"list",access:"owner",readOnly:true}],
+    operations:[{name:"order",access:"link",readOnly:false},{name:"list",access:"owner",readOnly:true},{name:"receipt",access:"owner",readOnly:true}],
     tables:[{name:"orders",primaryKey:"id",readOperation:"list",writeOperation:"order"}]};
   const declaration={entryPath:"app/main.ts",inputs:["app/main.ts","app/backend.ts","app/schema.sql"],packageMap:{},backend};
   const sources = new Map([
@@ -173,5 +174,21 @@ describe("local app backend",()=>{
       expect((await invoke(restored,pending,"list","read")).result.rows).toHaveLength(1);
       expect(await invoke(restored,pending,"order","first",{quantity:2})).toEqual({...first,replayed:true});
     }finally{storage.close();}
+  });
+  it("serves only approved frontend bytes and operation-authorized attachments to the local browser",async()=>{
+    const {host}=await open(),publication=await host.activate(await prepared());
+    const browser=host.browserPublication(publication.publicationId);
+    expect(browser.files.map(file=>file.path)).toEqual(["bundle.js"]);
+    expect(hash(browser.files[0]!.bytes)).toBe(browser.files[0]!.sha256);
+    const upload=await host.request(publication.publicationId,"upload",{authorityRevision:publication.authorityRevision,
+      name:"receipt.pdf",contentType:"application/pdf",idempotencyKey:"upload",bytesBase64:Buffer.from("%PDF-synthetic").toString("base64")}) as any;
+    const request={authorityRevision:publication.authorityRevision,fileId:upload.file.fileId,operation:"receipt",input:{fileId:upload.file.fileId}};
+    await expect(host.readBrowserFile(publication.publicationId,request)).rejects.toThrow(/unavailable/);
+    await invoke(host,publication,"order","first",{quantity:1,fileId:upload.file.fileId});
+    expect((await host.readBrowserFile(publication.publicationId,request)).file).toEqual(upload.file);
+    await expect(host.readBrowserFile(publication.publicationId,{...request,operation:"order"})).rejects.toThrow(/read operation/);
+    await expect(host.readBrowserFile(publication.publicationId,{...request,operation:"list"})).rejects.toThrow(/did not allow/);
+    host.transfer("data/orders.sqlite","shared-pub");
+    expect(()=>host.browserPublication(publication.publicationId)).toThrow(/shared host/);
   });
 });
