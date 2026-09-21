@@ -34,7 +34,7 @@ describe("app backend capability", () => {
     expect(parseAppBackendCapability({ ...capability(), tables: [] }).tables).toEqual([]);
   });
 
-  it.each(["../private.sqlite", "/data.sqlite", "C:\\data.sqlite", "data\\app.sqlite", "data/./app.sqlite", ".dohc/app.sqlite", ".env", "data/app.env", "data//app.sqlite"])("rejects unsafe or noncanonical database path %s", dataPath => {
+  it.each(["../private.sqlite", "/data.sqlite", "C:\\data.sqlite", "data\\app.sqlite", "data/./app.sqlite", ".dohc/app.sqlite", ".env", "data/app.env", "data//app.sqlite", "data/app.db", "data/app.sqlite3"])("rejects unsafe or noncanonical database path %s", dataPath => {
     expect(() => parseAppBackendCapability({ ...capability(), dataPath })).toThrow();
   });
 

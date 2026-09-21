@@ -175,7 +175,7 @@ export function parseAppBackendCapability(value: unknown): AppBackendCapability 
   if (row.kind !== "app-backend" || row.backendPath !== "backend.js" || row.schemaPath !== "schema.sql") throw new Error("Invalid app backend artifacts.");
   const dataPath = text(row.dataPath, 1024);
   const checked = validateUserWritePath(dataPath);
-  if (!checked.ok || checked.normalized !== dataPath || classifyEngineFilePath(dataPath).kind !== "tracked") throw new Error("Invalid app backend data path.");
+  if (!checked.ok || checked.normalized !== dataPath || !dataPath.endsWith(".sqlite") || classifyEngineFilePath(dataPath).kind !== "tracked") throw new Error("Invalid app backend data path.");
   if (!Array.isArray(row.operations) || !row.operations.length || row.operations.length > APP_BACKEND_MAX_OPERATIONS ||
       !Array.isArray(row.tables) || row.tables.length > APP_BACKEND_MAX_TABLES) throw new Error("Invalid app backend inventory.");
   const operations: AppBackendOperation[] = row.operations.map(value => {
