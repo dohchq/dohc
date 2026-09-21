@@ -2,6 +2,8 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
+import { parseAppBackendCapability, type AppBackendCapability } from "./appBackend";
+export { parseAppBackendCapability, type AppBackendCapability } from "./appBackend";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
   APP_COLLECTION_CURSOR_BYTES,APP_COLLECTION_PAGE_BYTES,APP_COLLECTION_RESPONSE_BYTES,
@@ -31,7 +33,7 @@ export interface AppPublicationCandidate {
   inputs: AppPublicationFile[];
   dependencies: string[];
   files: Array<AppPublicationFile & { contentType: string }>;
-  capabilities: AppCollectionCapability[];
+  capabilities: Array<AppCollectionCapability | AppBackendCapability>;
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
@@ -57,7 +59,7 @@ function path(value: unknown, max: number): string {
   if (!checked.ok || checked.normalized !== raw || classifyEngineFilePath(raw).kind !== "tracked") throw new Error("Invalid publication source path.");
   return raw;
 }
-/** Fixed compiled bundles with at most one bounded create-only collection. */
+/** Fixed compiled bundles with at most one explicit data capability. */
 export function parseAppPublicationCandidate(value: unknown, limits: AppPublicationLimits): AppPublicationCandidate {
   if (!limits || typeof limits !== "object" ||
       !Number.isSafeInteger(limits.maxFiles) || limits.maxFiles < 1 ||
@@ -69,7 +71,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
   if (!Array.isArray(row.inputs) || row.inputs.length < 1 || row.inputs.length > limits.maxFiles ||
       row.inputs.length > limits.maxMetadataBytes ||
       !Array.isArray(row.dependencies) || row.dependencies.length < 1 || row.dependencies.length > row.inputs.length ||
-      !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 2 ||
+      !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 4 ||
       !Array.isArray(row.capabilities) || row.capabilities.length > 1) throw new Error("Unsupported publication inventory or capabilities.");
   let remainingTextBytes = limits.maxMetadataBytes;
   const readText = (value: unknown): string => {
@@ -100,24 +102,28 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     if (!seen.has(target)) throw new Error("Publication package is outside selected inputs.");
     return [name, target] as const;
   }).sort(([a], [b]) => compare(a, b)));
+  const capabilities = row.capabilities.map(value => value?.kind === "app-backend" ? parseAppBackendCapability(value) : parseAppCollectionCapability(value));
+  const backend = capabilities.find(capability => capability.kind === "app-backend");
   const outputs = new Set<string>();let total = 0;
   const files = row.files.map(value => {
     const file = object(value, ["path", "sha256", "byteLength", "contentType"]);
-    if (file.path !== "bundle.js" && file.path !== "bundle.css") throw new Error("Unsupported publication bundle path.");
-    const contentType = file.path === "bundle.js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8";
+    if (file.path !== "bundle.js" && file.path !== "bundle.css" && !(backend && (file.path === "backend.js" || file.path === "schema.sql"))) throw new Error("Unsupported publication bundle path.");
+    const contentType = file.path === "schema.sql" ? "application/sql; charset=utf-8" : file.path === "bundle.css" ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8";
     if (file.contentType !== contentType || outputs.has(file.path)) throw new Error("Invalid publication bundle type or duplicate.");
     outputs.add(file.path);const byteLength = size(file.byteLength);total += byteLength;
     if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes || byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Publication bundle bound exceeded.");
     return { path: file.path, sha256: hash(file.sha256), byteLength, contentType };
   }).sort((a, b) => compare(a.path, b.path));
   if (!outputs.has("bundle.js")) throw new Error("Publication script is missing.");
+  if (backend && (files.find(file => file.path === backend.backendPath)?.sha256 !== backend.backendSha256 ||
+      files.find(file => file.path === backend.schemaPath)?.sha256 !== backend.schemaSha256)) throw new Error("Publication backend files are missing or do not match the capability.");
   const compiler = object(row.compilerIdentity, ["recipe", "version", "binarySha256"]);
   const candidate: AppPublicationCandidate = {
     versionId: readText(row.versionId), appRoot, entryPath, packageMap,
     sourceRevision: hash(row.sourceRevision), sourceDigest: hash(row.sourceDigest),
     dependencyLockDigest: hash(row.dependencyLockDigest), bundleDigest: hash(row.bundleDigest), buildDigest: hash(row.buildDigest),
     compilerIdentity: { recipe: readText(compiler.recipe), version: readText(compiler.version), binarySha256: hash(compiler.binarySha256) },
-    inputs, dependencies, files, capabilities: row.capabilities.map(parseAppCollectionCapability),
+    inputs, dependencies, files, capabilities,
   };
   if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes) throw new Error("Publication metadata bound exceeded.");
   return candidate;

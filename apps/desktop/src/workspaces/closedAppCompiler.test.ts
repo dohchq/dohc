@@ -13,6 +13,15 @@ const bounds = { maxInputFiles: 8, maxInputBytes: 100_000, maxOutputBytes: 100_0
 afterEach(() => vi.unstubAllEnvs());
 
 describe("closed app compiler", () => {
+  it("captures SQL as metadata without admitting SQL imports into scripts", async () => {
+    const schema = file("app/schema.sql", "CREATE TABLE responses(id TEXT PRIMARY KEY);");
+    const result = await compileClosedApp({ entryPath: "app/backend.ts", bounds,
+      inputs: [file("app/backend.ts", "globalThis.operations = { list: () => [] };"), schema] });
+    expect(result.dependencyLock.map(input => input.path)).toEqual(["app/backend.ts"]);
+    await expect(compileClosedApp({ entryPath: "app/backend.ts", bounds,
+      inputs: [file("app/backend.ts", "import './schema.sql';"), schema] })).rejects.toThrow(/Unsupported closed app input type/);
+    await expect(compileClosedApp({ entryPath: schema.path, bounds, inputs: [schema] })).rejects.toThrow(/entry must be a script/);
+  });
   it("binds a collection schema as captured metadata without allowing it as code", async () => {
     const schema = file("responses/collection.yaml", "fields: {}\n");
     const result = await compileClosedApp({ entryPath: "main.js", bounds,
