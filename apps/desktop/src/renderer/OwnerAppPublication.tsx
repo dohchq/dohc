@@ -38,7 +38,7 @@ function OperationNames({ operations }: { operations: AppBackendOperation[] }) {
 function BackendApproval({ capability, local }: { capability: AppBackendCapability; local: boolean }) {
   const group = (access: AppBackendOperation["access"]) => capability.operations.filter(operation => operation.access === access);
   return <div data-testid="app-publication-capability" className="space-y-2">
-    <p className="m-0">Stores its data {local ? "on this device " : ""}in <span className="break-all font-mono">{capability.dataPath}</span>. This gives the app no access to workspace files.</p>
+    <p className="m-0">App data <span className="break-all font-mono">{capability.dataPath}</span> {local ? "stays in a private store on this device" : "lives in a private store on your dohc host"}. It is not a workspace file. This gives the app no access to workspace files.</p>
     {local ? <p className="m-0 text-[12px]">No link exists for this approval. Only you can use the data until you publish the app on a link.</p> : null}
     <dl className="m-0 space-y-1 text-[12px]">
       <div><dt className="inline font-medium text-ink">{local ? "Once published on a link, anyone with the link can run: " : "Anyone with the link can run: "}</dt><dd className="m-0 inline break-words"><OperationNames operations={group("link")} /></dd></div>

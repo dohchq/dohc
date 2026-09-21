@@ -145,7 +145,7 @@ function BackendPanel({ workspaceId, publicationId, capability, local, disabled,
         <SecondaryButton disabled={locked || online === false} onClick={() => void exportData()}>{busy === "export" ? "Exporting…" : "Export data"}</SecondaryButton>
       </div>
     </div>
-    <p className="mt-2 text-[12px] text-muted">{local ? "Stored on this device in " : "Stored in "}<span className="break-all font-mono">{capability.dataPath}</span>. {local ? "Not published on any link. " : ""}Every edit runs one of the app's own operations.</p>
+    <p className="mt-2 text-[12px] text-muted">App data <span className="break-all font-mono">{capability.dataPath}</span> {local ? "stays in a private store on this device. Not published on any link." : "lives in a private store on your dohc host."} Every edit runs one of the app's own operations.</p>
     {online === false ? <p role="status" className="text-[12px] text-warning">This app has no active data here. dohc cannot load rows or save edits.{local ? " If you moved its data to a share link, open that publication." : " Initialize or restore its data first."}</p> : null}
     {capability.tables.length === 0 ? <p className="text-[12px] text-muted">This app declares no tables. Export its data to inspect it.</p> :
       <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void load(0, search); }}>

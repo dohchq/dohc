@@ -393,7 +393,7 @@ describe("owner app publication", () => {
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await review();
     const scope = screen.getByTestId("app-publication-capability");
-    expect(scope.textContent).toContain("Stores its data in trip/data/app.sqlite. This gives the app no access to workspace files.");
+    expect(scope.textContent).toContain("App data trip/data/app.sqlite lives in a private store on your dohc host. It is not a workspace file. This gives the app no access to workspace files.");
     expect(scope.textContent).toContain("Anyone with the link can run: donate (changes data), listDonations (reads only)");
     expect(scope.textContent).toContain("Helpers you allow can also run: verifyDonation (changes data)");
     expect(scope.textContent).toContain("Only you can run: updateDonation (changes data)");
@@ -466,7 +466,7 @@ describe("owner app publication", () => {
     expect(screen.getByText("This device only")).toBeTruthy();
     expect(screen.getByText(/Approve this captured app for this device\. It is not published on any link\./)).toBeTruthy();
     const scope = screen.getByTestId("app-publication-capability");
-    expect(scope.textContent).toContain("Stores its data on this device in trip/data/app.sqlite");
+    expect(scope.textContent).toContain("App data trip/data/app.sqlite stays in a private store on this device. It is not a workspace file.");
     expect(scope.textContent).toContain("No link exists for this approval. Only you can use the data until you publish the app on a link.");
     expect(scope.textContent).toContain("Once published on a link, anyone with the link can run: donate (changes data)");
     expect(screen.queryByText(/Unpublishing stops new access/)).toBeNull();
@@ -477,7 +477,7 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "listLocal")).toHaveLength(2);
     await screen.findByText(/Approved on this device/);
     const region = screen.getByRole("region", { name: "App data" });
-    expect(region.textContent).toContain("Stored on this device in trip/data/app.sqlite. Not published on any link.");
+    expect(region.textContent).toContain("App data trip/data/app.sqlite stays in a private store on this device. Not published on any link.");
     fireEvent.click(screen.getByRole("button", { name: "Load table" }));
     await screen.findByRole("table");
     expect(appBackend).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-trip", publicationId: localRow.publicationId, action: "invoke", operation: "listDonations" }));

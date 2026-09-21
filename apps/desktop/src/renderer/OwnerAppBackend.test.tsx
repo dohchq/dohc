@@ -192,7 +192,8 @@ describe("owner app backend", () => {
     expect(api.appBackend.mock.calls.every(([input]) => input.action === "describe")).toBe(true);
     expect(onError).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Export data" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(local ? /Stored on this device in/ : /^Stored in/)).toBeTruthy();
+    expect(screen.getByText(local ? /stays in a private store on this device\. Not published on any link\./ : /lives in a private store on your dohc host\./).textContent)
+      .toBe(`App data trip/data/app.sqlite ${local ? "stays in a private store on this device. Not published on any link." : "lives in a private store on your dohc host."} Every edit runs one of the app's own operations.`);
   });
 
   it("offers no edit for a table without a write operation", async () => {
