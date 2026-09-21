@@ -9,6 +9,9 @@ CREATE TABLE sessions (
 CREATE TABLE registrations (
   id TEXT PRIMARY KEY NOT NULL,
   status_token TEXT NOT NULL UNIQUE,
+  submission_id TEXT UNIQUE,
+  retry_secret TEXT,
+  submission_json TEXT,
   full_name TEXT NOT NULL,
   mobile TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('website','reclub','manual')),

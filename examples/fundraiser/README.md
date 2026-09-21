@@ -21,6 +21,12 @@ Successful submission returns a private status token. The frontend can preserve 
 Anyone holding that token can inspect that registration's status and attendee names.
 The lookup omits contact information and receipts. There is no mobile-number lookup or automatic lost-link recovery.
 
+The frontend also generates a submission ID and a random retry secret before uploading.
+A saved recovery file preserves both, the entered details, and the receipt hash.
+The backend recognizes that submission after a browser profile changes and returns its existing confirmation.
+A wrong secret or changed details refuse. Receipt identity is bound to its bytes, so reuploading the same receipt does not reserve slots twice.
+Organizer lists omit these recovery secrets.
+
 Organizers can search registrations, inspect receipts, update payment status, and enter manual or ReClub registrations.
 ReClub is an entry label, not an integration. Manual entries may omit a phone number and receipt.
 Pay-at-venue entries reserve slots and require cash as their planned payment method.

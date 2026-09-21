@@ -120,12 +120,24 @@
   }
   function register(ctx, input) {
     object(ctx, input);
+    if (typeof input.submissionId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(input.submissionId) ||
+        typeof input.retrySecret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(input.retrySecret) ||
+        typeof input.receiptSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.receiptSha256)) invalid(ctx, "The saved submission details are invalid.");
     const contact = {fullName: name(ctx, input.fullName), mobile: mobile(ctx, input.mobile, false), paymentMethod: payment(ctx, input.paymentMethod, false)};
     const rows = roster(ctx, input.sessions);
+    const submissionJson = JSON.stringify({contact, rows, receiptSha256: input.receiptSha256});
+    const existing = ctx.db.query("SELECT * FROM registrations WHERE submission_id=?", [input.submissionId])[0];
+    if (existing) {
+      if (existing.retry_secret !== input.retrySecret || existing.submission_json !== submissionJson) ctx.refuse("submission_conflict", "This submission reference cannot be reused with these details.");
+      return Object.assign(summary(ctx, existing), {statusToken: existing.status_token});
+    }
     if (typeof input.receiptFileId !== "string" || !input.receiptFileId) ctx.refuse("receipt_required", "Upload your payment receipt.");
     const file = ctx.files.attach(input.receiptFileId);
     if (!["image/jpeg", "image/png", "application/pdf"].includes(file.contentType) || file.byteLength < 1 || file.byteLength > 5 * 1024 * 1024) ctx.refuse("invalid_receipt", "Upload a JPG, PNG, or PDF receipt, up to 5 MB.");
-    return Object.assign(insert(ctx, contact, "website", "pending_verification", rows, file.fileId), {statusToken: ctx.secret});
+    if (file.sha256 !== input.receiptSha256) ctx.refuse("invalid_receipt", "The receipt does not match this saved submission.");
+    const result = insert(ctx, contact, "website", "pending_verification", rows, file.fileId);
+    ctx.db.execute("UPDATE registrations SET submission_id=?,retry_secret=?,submission_json=? WHERE id=?", [input.submissionId, input.retrySecret, submissionJson, result.id]);
+    return Object.assign(result, {statusToken: ctx.secret});
   }
   function lookupStatus(ctx, input) {
     object(ctx, input);

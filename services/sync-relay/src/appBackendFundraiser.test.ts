@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { transform, version as esbuildVersion } from "esbuild";
@@ -92,7 +92,8 @@ function httpFixture() {
   };
 }
 function registration(receiptFileId: string, sessions = [{sessionId: "s1", players: ["First Player"], spectators: ["Watching Friend"]}]) {
-  return {fullName: "Synthetic Contact", mobile: "0917 123 4567", paymentMethod: "gcash", receiptFileId, sessions};
+  return {fullName: "Synthetic Contact", mobile: "0917 123 4567", paymentMethod: "gcash", receiptFileId, sessions,
+    submissionId: randomUUID(), retrySecret: randomBytes(32).toString("base64url"), receiptSha256: sha(receiptBytes)};
 }
 const players = (sessionId: string, count: number) => ({sessionId, players: Array.from({length: count}, (_, i) => `Player Person${i}`), spectators: [] as string[]});
 
@@ -197,4 +198,34 @@ it("serializes final-slot bookings and restores the same fundraiser after restar
   expect((await f.ok(f.invoke("owner", "attendees", "attendees", {limit: 200}))).result.records).toHaveLength(72);
   const failedFileId = winner === 0 ? b.file.fileId : a.file.fileId;
   expect(f.f.storage.db.prepare("SELECT attached_revision FROM sync_relay_app_backend_files WHERE file_id=?").get(failedFileId)?.attached_revision).toBeNull();
+}, 30000);
+
+it("recovers an uncertain registration from another browser profile without reserving twice", async () => {
+  const f = httpFixture();
+  await f.activate();
+  const upload = await f.upload("participant", "receipt");
+  const savedAttempt = registration(upload.file.fileId, [players("s1", 2), players("s2", 2)]);
+  const accepted = await f.ok(f.invoke("participant", "initial", "register", savedAttempt));
+  f.restart();
+  // A recovery file saved before upload has to upload the same bytes under the new profile.
+  const replacement = await f.upload("other", "recovered-receipt");
+  expect(replacement.file.fileId).not.toBe(upload.file.fileId);
+  const resumed = {...savedAttempt, receiptFileId: replacement.file.fileId};
+  const recovered = await f.ok(f.invoke("other", "recovered", "register", resumed));
+  expect(recovered.result).toEqual(accepted.result);
+  expect((await f.ok(f.invoke("owner", "records", "listRegistrations"))).result.records).toHaveLength(1);
+  expect((await f.ok(f.invoke("other", "capacity", "listPublicSessions"))).result.map((session: {available: number}) => session.available)).toEqual([34, 34]);
+  expect(f.f.storage.db.prepare("SELECT attached_revision FROM sync_relay_app_backend_files WHERE file_id=?").get(replacement.file.fileId)?.attached_revision).toBeNull();
+  for (const [key, changed] of [
+    ["wrong-secret", {...resumed, retrySecret: "Z".repeat(43)}],
+    ["changed-details", {...resumed, fullName: "Changed Contact"}],
+    ["changed-bytes", {...resumed, receiptSha256: "f".repeat(64)}],
+  ] as const) {
+    const response = await f.invoke("third", key, "register", changed);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ok: false, code: "submission_conflict", error: "This submission reference cannot be reused with these details."});
+  }
+  const fresh = await f.invoke("other", "mismatched-receipt", "register", {...registration(replacement.file.fileId), receiptSha256: "f".repeat(64)});
+  expect(fresh.status).toBe(409);
+  expect(await fresh.json()).toMatchObject({code: "invalid_receipt"});
 }, 30000);

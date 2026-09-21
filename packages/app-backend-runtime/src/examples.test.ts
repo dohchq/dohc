@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { evaluateAppOperation, initializeAppDatabase } from "./index.ts";
 import type { EvaluateAppOperationInput, JsonValue } from "./index.ts";
@@ -24,7 +24,8 @@ async function fixture(app = "fundraiser") {
   return {call, get database() { return database; }};
 }
 function registration(sessions: JsonValue[] = [{sessionId: "s1", players: ["First Player"], spectators: []}]) {
-  return {fullName: "Synthetic Contact", mobile: "0917 123 4567", sessions, paymentMethod: "gcash", receiptFileId: file.fileId};
+  return {fullName: "Synthetic Contact", mobile: "0917 123 4567", sessions, paymentMethod: "gcash", receiptFileId: file.fileId,
+    submissionId: randomUUID(), retrySecret: randomBytes(32).toString("base64url"), receiptSha256: file.sha256};
 }
 const group = (sessionId: string, count: number) => ({sessionId, players: Array.from({length: count}, (_, i) => `Player Person${i}`), spectators: []});
 const rows = (value: JsonValue) => value as Array<Record<string, unknown>>;

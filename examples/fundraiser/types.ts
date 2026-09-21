@@ -5,6 +5,7 @@ export interface RosterInput { sessionId: SessionId; players: string[]; spectato
 export interface RegisterInput {
   fullName: string; mobile: string; sessions: RosterInput[];
   paymentMethod: Exclude<PaymentMethod, "cash">; receiptFileId: string;
+  submissionId: string; retrySecret: string; receiptSha256: string;
 }
 export interface ManualEntryInput {
   fullName: string; mobile?: string; session: SessionId | "both"; role: "player" | "spectator";
