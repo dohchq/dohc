@@ -96,6 +96,17 @@ test('app backends remain opt-in and require app publications', () => {
   assert.ok(validateSettings({...settings(), DOHC_RELAY_APP_BACKENDS: 'true'}).some(error => error.includes('DOHC_RELAY_APP_BACKENDS to 0 or 1')));
 });
 
+test('app participant limit reaches the relay and validates positive safe integers', () => {
+  assert.equal(settings().DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT, '1000');
+  assert.equal(compose.services['sync-relay'].environment.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT, '${DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT:-1000}');
+  for (const value of [undefined, '1', '2500', '9007199254740991']) {
+    assert.deepEqual(validateSettings({...settings(),DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT:value}),[]);
+  }
+  for (const value of ['', '0', '-1', '1.5', '1e3', ' 1', '01', '9007199254740992']) {
+    assert.ok(validateSettings({...settings(),DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT:value}).some(error=>error.includes('MAX_PARTICIPANTS_PER_GRANT')));
+  }
+});
+
 test('private mode selects the private-only gateway overlay and the real env file', () => {
   const args = composeArgs('.env.self-host', {...settings(), DOHC_SERVER_NETWORK_ACCESS: 'private'}, 'up');
   assert.ok(args.includes('tools/self-host/compose.private.yml'));
