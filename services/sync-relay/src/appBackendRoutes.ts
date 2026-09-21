@@ -3,9 +3,10 @@ import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBa
   parseAppBackendJson, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppBackendAuth, AppBackendHost } from "./appBackendHost";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { APP_BACKEND_RECOVERY_BYTES, type AppBackendRecoveryBundle } from "./storage/appBackendData";
 import { badRequest, notFound, relayError } from "./errors";
 
-export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "describe" | "descriptor" | "blob" | "export" | "helper";
+export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "describe" | "descriptor" | "blob" | "export" | "restore" | "helper";
 export interface AppBackendRoute {
   route: "app-backend";
   publicationId: string;
@@ -55,7 +56,8 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
       }
       if (request.headers.get("content-type")?.split(";",1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("App operations require JSON.");
       let raw: unknown;
-      try { raw = await readBoundedJson(request, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_REQUEST_BYTES, signal); }
+      try { raw = await readBoundedJson(request, route.action === "restore" ? APP_BACKEND_RECOVERY_BYTES + 1024 :
+        route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_REQUEST_BYTES, signal); }
       catch (error) { signal.throwIfAborted(); if (error instanceof RangeError) throw relayError("payload_too_large"); throw badRequest("Invalid app JSON."); }
       signal.throwIfAborted();
       let result: unknown;
@@ -68,6 +70,10 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
       } else if (route.action === "activate") {
         const body = record(raw,["authorityRevision"]);
         result = await host.activate(auth, route.publicationId, revision(body.authorityRevision), signal);
+      } else if (route.action === "restore") {
+        const body = record(raw,["authorityRevision","bundle"]);
+        result = await host.restore(auth, route.publicationId, {authorityRevision:revision(body.authorityRevision),
+          bundle:body.bundle as AppBackendRecoveryBundle}, signal);
       } else if (route.action === "file") {
         const body = record(raw,["authorityRevision","fileId","operation","input"]);
         if (typeof body.fileId !== "string" || typeof body.operation !== "string") throw badRequest("Invalid app file request.");

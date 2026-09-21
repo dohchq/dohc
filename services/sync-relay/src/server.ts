@@ -883,7 +883,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
         (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" ||
-         parts[5] === "describe" || parts[5] === "descriptor" || parts[5] === "export" || parts[5] === "helper")) {
+         parts[5] === "describe" || parts[5] === "descriptor" || parts[5] === "export" || parts[5] === "restore" || parts[5] === "helper")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {

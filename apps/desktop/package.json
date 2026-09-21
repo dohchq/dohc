@@ -73,6 +73,7 @@
     "@types/ws": "8.18.1"
   },
   "dependencies": {
+    "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/cli": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",

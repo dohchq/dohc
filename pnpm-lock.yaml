@@ -80,6 +80,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@dohc/app-backend-runtime':
+        specifier: workspace:*
+        version: link:../../packages/app-backend-runtime
       '@dohc/cli':
         specifier: workspace:*
         version: link:../../packages/cli
