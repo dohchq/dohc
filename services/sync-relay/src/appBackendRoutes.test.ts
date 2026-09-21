@@ -36,6 +36,15 @@ it("passes the deployment participant limit to the app host", async () => {
   expect((await f.http("link","invoke",input("second","attach",{fileIds:[]}),other)).status).toBe(413);
   expect((await f.http("link","invoke",input("read","read"),other)).status).toBe(200);
 });
+it("enforces transfer provenance and preservation conditions through owner activation", async () => {
+  const f=httpFixture();
+  expect((await f.http("named","activate",{authorityRevision:1,preserveData:true})).status).toBe(409);
+  expect((await f.http("named","activate",{authorityRevision:1,preserveData:false})).status).toBe(400);
+  expect((await f.http("named","activate",{authorityRevision:1,expectedRecoverySha256:"invalid"})).status).toBe(400);
+  expect((await f.http("named","activate",{authorityRevision:1})).status).toBe(200);
+  expect((await f.http("named","activate",{authorityRevision:1,preserveData:true,expectedRecoverySha256:"a".repeat(64)})).status).toBe(409);
+  expect((await f.http("named","activate",{authorityRevision:1,preserveData:true})).status).toBe(200);
+});
 
 it("runs public submission and private owner file management over the relay routes", async () => {
   const f = httpFixture();

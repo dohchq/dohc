@@ -10,6 +10,14 @@ it("distinguishes absent data from initialized data under another publication", 
   f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_app_backends SET publication_id='previous'").run());
   expect(f.host.describe(owner, f.publicationId)).toMatchObject({ initialized: true, active: false, revision: 1 });
 });
+it("refuses guarded activation if shared data or exact transfer provenance is absent", async () => {
+  const f = fixture();
+  await expect(f.host.activate(owner, f.publicationId, 1, undefined, {preserveData:true})).rejects.toThrow(/data is missing/);
+  expect(f.host.describe(owner,f.publicationId).initialized).toBe(false);
+  await f.host.activate(owner, f.publicationId, 1);
+  await expect(f.host.activate(owner, f.publicationId, 1, undefined, {expectedRecoverySha256:"a".repeat(64)})).rejects.toThrow(/does not contain/);
+  expect(f.host.describe(owner,f.publicationId).restoredBundleSha256).toBeNull();
+});
 
 it("serializes concurrent last-slot reservations, preserving an invocation identity across retries", async () => {
   let release!: () => void;
@@ -209,4 +217,9 @@ it("preserves anonymous operation identity and recovery retries after fresh-host
   expect(await recovered.host.restore(owner,publicationId,{authorityRevision:1,bundle})).toEqual(restored);
   expect(recovered.host.describe(owner,publicationId).revision).toBe(restored.revision+1);
   expect((await recovered.host.invoke(owner,publicationId,input("read","read"))).result).toEqual([{id:"only",remaining:0}]);
+  expect(recovered.host.describe(owner,publicationId).restoredBundleSha256).toBe(bundle.integritySha256);
+  const newerPublication=recovered.publishUpgrade();
+  await recovered.host.activate(owner,newerPublication,1,undefined,{preserveData:true,expectedRecoverySha256:bundle.integritySha256});
+  expect(recovered.host.describe(owner,newerPublication).revision).toBeGreaterThan(restored.revision);
+  expect((await recovered.host.invoke(owner,newerPublication,input("new-read","read"))).result).toEqual([{id:"only",remaining:0}]);
 });

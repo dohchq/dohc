@@ -349,6 +349,11 @@ export async function createLocalAppBackendHost(options: {
     sharedPublicationFor(publicationId:string) {
       assertCurrent();return (db.prepare("SELECT shared_publication FROM apps WHERE publication_id=?").get(publicationId)?.shared_publication as string | null | undefined) ?? null;
     },
+    recoveryIntegrity(dataPath:string) {
+      assertCurrent(); const row=byPath(dataPath);
+      if(!row)throw new Error("This local app data is unavailable.");
+      return exportData(row).integritySha256;
+    },
     advanceSharedAuthority(dataPath:string,expectedPublicationId:string,publicationId:string) {
       if(!publicationId || publicationId.length>128)throw new Error("Invalid shared app publication.");
       transaction(()=>{

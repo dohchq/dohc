@@ -68,8 +68,12 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
         let input; try { input = parseAppBackendUploadRequest(raw); } catch { throw badRequest("Invalid app upload."); }
         result = await host.upload(auth, route.publicationId, input, signal);
       } else if (route.action === "activate") {
-        const body = record(raw,["authorityRevision"]);
-        result = await host.activate(auth, route.publicationId, revision(body.authorityRevision), signal);
+        const extra = raw && typeof raw === "object" && !Array.isArray(raw) ? Object.keys(raw).filter(key => key === "preserveData" || key === "expectedRecoverySha256") : [];
+        const body = record(raw,["authorityRevision",...extra]);
+        if (body.preserveData !== undefined && body.preserveData !== true) throw badRequest("Invalid app activation condition.");
+        if (body.expectedRecoverySha256 !== undefined && (typeof body.expectedRecoverySha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRecoverySha256))) throw badRequest("Invalid app recovery identity.");
+        result = await host.activate(auth, route.publicationId, revision(body.authorityRevision), signal, {
+          preserveData: body.preserveData === true, expectedRecoverySha256: body.expectedRecoverySha256 as string | undefined });
       } else if (route.action === "restore") {
         const body = record(raw,["authorityRevision","bundle"]);
         result = await host.restore(auth, route.publicationId, {authorityRevision:revision(body.authorityRevision),

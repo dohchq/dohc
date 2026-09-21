@@ -66,13 +66,21 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     return activeBackend(storage, next);
   };
 
-  async function activate(auth: AppBackendAuth, publicationId: string, expectedAuthorityRevision: number, signal?: AbortSignal) {
+  async function activate(auth: AppBackendAuth, publicationId: string, expectedAuthorityRevision: number, signal?: AbortSignal,
+    condition: { preserveData?: boolean; expectedRecoverySha256?: string } = {}) {
     signal = signal ? AbortSignal.any([signal, storage.unavailable]) : storage.unavailable;
     checkSignal(signal);
     if (!Number.isSafeInteger(expectedAuthorityRevision) || expectedAuthorityRevision < 1) throw badRequest("Invalid app authority revision.");
+    const {expectedRecoverySha256} = condition;
+    if (expectedRecoverySha256 !== undefined && !/^[a-f0-9]{64}$/.test(expectedRecoverySha256)) throw badRequest("Invalid app recovery identity.");
+    const checkRecovery = (value: BackendAuthority) => {
+      if (condition.preserveData && !readAppBackendMetadata(storage, scope(value))) throw relayError("conflict", "The shared app data is missing. Restore a current recovery export.");
+      if (expectedRecoverySha256 !== undefined && readRecoveryIntegrity(value) !== expectedRecoverySha256) throw relayError("conflict", "The shared app does not contain this local transfer.");
+    };
     const captured = storage.readTx(() => {
       const value = authority(auth, publicationId, expectedAuthorityRevision);
       requireBackendOwner(value);
+      checkRecovery(value);
       return {authority: value, previous: readAppBackendSnapshot(storage, scope(value)),
         source: backendArtifact(storage, value, value.capability.backendPath, value.capability.backendSha256),
         schemaSql: backendArtifact(storage, value, value.capability.schemaPath, value.capability.schemaSha256)};
@@ -92,7 +100,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       publicationId, publicationRevision: value.authorityRevision, schemaSha256: value.capability.schemaSha256,
       schemaVersion: value.capability.schemaVersion, sourceSha256: value.capability.backendSha256, source: captured.source,
       capabilityJson: JSON.stringify(value.capability), database, expectedRevision: captured.previous?.revision ?? null, nowMs: nowMs(),
-      authorize() { checkSignal(signal); const next = authority(auth, publicationId, value.authorityRevision); requireBackendOwner(next); sameAuthority(value, next); }});
+      authorize() { checkSignal(signal); const next = authority(auth, publicationId, value.authorityRevision); requireBackendOwner(next); sameAuthority(value, next); checkRecovery(next); }});
     return {publicationId, authorityRevision: value.authorityRevision, revision: snapshot.revision};
   }
 
@@ -195,6 +203,10 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       return read(value);
     }) as ReturnType<typeof read>;
   }
+  function readRecoveryIntegrity(value: BackendAuthority): string | null {
+    return storage.db.prepare("SELECT integrity_sha256 FROM sync_relay_app_backend_recoveries WHERE workspace_id=? AND data_path=?")
+      .get(value.workspaceId,value.capability.dataPath)?.integrity_sha256 as string | undefined ?? null;
+  }
   function describe(auth: AppBackendAuth, publicationId: string, signal?: AbortSignal) {
     checkSignal(signal);
     return storage.readTx(() => {
@@ -203,6 +215,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       const snapshot = readAppBackendMetadata(storage, scope(value));
       return {publicationId, authorityRevision: value.authorityRevision, capability: value.capability,
         initialized: snapshot !== null,
+        restoredBundleSha256: readRecoveryIntegrity(value),
         active: snapshot?.publicationId === publicationId && snapshot.publicationRevision === value.authorityRevision,
         revision: snapshot?.revision ?? 0};
     });
