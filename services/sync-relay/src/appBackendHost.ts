@@ -116,9 +116,17 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       });
       const {value, snapshot, operation} = captured;
       if (captured.receipt) return {...captured.receipt, result: parseAppBackendJson(captured.receipt.result), replayed: true};
-      const evaluated = await runtime.evaluateAppOperation({source: snapshot.source, database: snapshot.database,
-        tables: value.capability.tables.map(table => table.name), operation: parsed.operation, caller: value.caller,
-        input: parsed.input, nowMs: invocationTime, requestId, secret, readOnly: operation.readOnly, files: captured.files, signal});
+      let evaluated: Awaited<ReturnType<typeof evaluateAppOperation>>;
+      try {
+        evaluated = await runtime.evaluateAppOperation({source: snapshot.source, database: snapshot.database,
+          tables: value.capability.tables.map(table => table.name), operation: parsed.operation, caller: value.caller,
+          input: parsed.input, nowMs: invocationTime, requestId, secret, readOnly: operation.readOnly, files: captured.files, signal});
+      } catch (error) {
+        // An app refusal can contain data read by its code, so it needs the same final authority check as a result.
+        const unchanged = storage.readTx(() => current(auth, value, signal).revision === snapshot.revision);
+        if (!unchanged) continue;
+        throw error;
+      }
       const result = parseAppBackendJson(evaluated.result);
       checkSignal(signal);
       if (operation.readOnly) {
