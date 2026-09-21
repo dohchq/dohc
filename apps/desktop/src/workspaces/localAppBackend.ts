@@ -3,7 +3,7 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { parseAppBackendCapability, parseAppBackendInvokeRequest, parseAppBackendUploadRequest,
+import { appBackendFileSignatureMatches, parseAppBackendCapability, parseAppBackendInvokeRequest, parseAppBackendUploadRequest,
   type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { AppOperationResult, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "@dohc/app-backend-runtime";
@@ -277,6 +277,7 @@ export async function createLocalAppBackendHost(options: {
       if (action === "upload") {
         if (row.shared_publication) throw new Error("This app uses its shared host. Connect to that host to upload files.");
         const input = parseAppBackendUploadRequest(body), bytes = Buffer.from(input.bytesBase64,"base64"), sha256 = hash(bytes);
+        if (!appBackendFileSignatureMatches(input.contentType, bytes)) throw new Error("File content does not match its type.");
         if (!row.database) throw new Error("Restore the app data before uploading files.");
         const staged=db.prepare("SELECT file_id,recovery FROM files WHERE data_path=? AND attached_revision IS NULL").all(row.data_path);
         for(const file of staged) if(JSON.parse(String(file.recovery)).expires_at_ms<=Date.now()) db.prepare("DELETE FROM files WHERE data_path=? AND file_id=? AND attached_revision IS NULL").run(row.data_path,String(file.file_id));

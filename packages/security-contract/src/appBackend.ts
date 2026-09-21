@@ -265,6 +265,15 @@ export function parseAppBackendUploadRequest(value: unknown): AppBackendUploadRe
   return request;
 }
 
+/** Check known binary signatures after validating the upload's nominal MIME type. */
+export function appBackendFileSignatureMatches(contentType: string, content: Uint8Array): boolean {
+  const starts = (expected: number[]) => expected.every((value, index) => content[index] === value);
+  if (contentType === "image/png") return starts([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (contentType === "image/jpeg") return starts([255, 216, 255]);
+  if (contentType === "application/pdf") return starts([37, 80, 68, 70, 45]);
+  return true;
+}
+
 export function parseAppBackendFile(value: unknown): AppBackendFile {
   const row = exact(value, ["fileId", "name", "contentType", "byteLength", "sha256"]);
   const fileId = text(row.fileId, 128);

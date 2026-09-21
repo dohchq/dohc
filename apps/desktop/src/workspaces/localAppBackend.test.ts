@@ -117,12 +117,30 @@ describe("local app backend",()=>{
   });
   it("keeps upload retries private and attaches files in the data commit",async()=>{
     const {host}=await open(),publication=await host.activate(await prepared());
-    const body={authorityRevision:publication.authorityRevision,idempotencyKey:"upload-1",name:"receipt.png",contentType:"image/png",bytesBase64:Buffer.from("synthetic image").toString("base64")};
+    const body={authorityRevision:publication.authorityRevision,idempotencyKey:"upload-1",name:"receipt.png",contentType:"image/png",bytesBase64:Buffer.from([137,80,78,71,13,10,26,10]).toString("base64")};
     const first=await host.request(publication.publicationId,"upload",body) as any;
     expect(await host.request(publication.publicationId,"upload",body)).toEqual({...first,replayed:true});
     await invoke(host,publication,"order","first",{quantity:1,fileId:first.file.fileId});
     const exported=await host.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision}) as any;
     expect(exported.files[0].attached_revision).toBe(2);
+  });
+  it("refuses mismatched file signatures before staging bytes or consuming retry keys",async()=>{
+    const {host}=await open(),publication=await host.activate(await prepared());
+    for(const [contentType,signature] of [
+      ["image/png",[137,80,78,71,13,10,26,10]],
+      ["image/jpeg",[255,216,255]],
+      ["application/pdf",[37,80,68,70,45]],
+    ] as const) {
+      const input={authorityRevision:publication.authorityRevision,idempotencyKey:contentType.replace("/","-"),name:"receipt",contentType};
+      for(const bytes of [Buffer.from("invalid"),Buffer.from(signature.slice(0,-1))]) {
+        await expect(host.request(publication.publicationId,"upload",{...input,bytesBase64:bytes.toString("base64")})).rejects.toThrow("File content does not match its type.");
+      }
+      const accepted=await host.request(publication.publicationId,"upload",{...input,bytesBase64:Buffer.from(signature).toString("base64")}) as any;
+      expect(accepted.replayed).toBe(false);
+      await invoke(host,publication,"order",input.idempotencyKey,{quantity:1,fileId:accepted.file.fileId});
+    }
+    const exported=await host.request(publication.publicationId,"export",{authorityRevision:publication.authorityRevision}) as any;
+    expect(exported.files).toHaveLength(3);
   });
   it("restores the portable bundle into an absent store and keeps retry receipts",async()=>{
     const {host}=await open(),approved=await prepared(),publication=await host.activate(approved);

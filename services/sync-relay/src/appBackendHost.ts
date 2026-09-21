@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { evaluateAppOperation, initializeAppDatabase, validateAppDatabase } from "@dohc/app-backend-runtime";
-import { APP_BACKEND_RESULT_BYTES, canInvokeAppBackendOperation, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
+import { APP_BACKEND_RESULT_BYTES, appBackendFileSignatureMatches, canInvokeAppBackendOperation, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest,
   type AppBackendInvokeRequest, type AppBackendJson, type AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { badRequest, notFound, relayError } from "./errors";
@@ -172,7 +172,7 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
     checkSignal(signal);
     const parsed = request(parseAppBackendUploadRequest, input);
     const content = Buffer.from(parsed.bytesBase64, "base64");
-    validateFileSignature(parsed.contentType, content);
+    if (!appBackendFileSignatureMatches(parsed.contentType, content)) throw badRequest("File content does not match its type.");
     const value = storage.tx(() => {
       const value = authority(auth, publicationId, parsed.authorityRevision);
       activeBackend(storage, value);
@@ -296,10 +296,3 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
   return {activate, invoke, upload, readFile, describe, helper, export: exportData, restore, descriptor, blob};
 }
 export type AppBackendHost = ReturnType<typeof createAppBackendHost>;
-
-function validateFileSignature(contentType: string, bytes: Uint8Array): void {
-  const starts = (expected: number[]) => expected.every((value, index) => bytes[index] === value);
-  if ((contentType === "image/png" && !starts([137, 80, 78, 71, 13, 10, 26, 10])) ||
-      (contentType === "image/jpeg" && !starts([255, 216, 255])) ||
-      (contentType === "application/pdf" && !starts([37, 80, 68, 70, 45]))) throw badRequest("File content does not match its type.");
-}
