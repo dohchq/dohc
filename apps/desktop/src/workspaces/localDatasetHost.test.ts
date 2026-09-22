@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +8,8 @@ import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
 import { compileClosedApp } from "./closedAppCompiler";
+import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
+import { writeDatasetRecoveryExport } from "./datasetRecoveryExport";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -64,6 +67,31 @@ afterEach(async () => {
 });
 
 describe("local dataset owner adapter", () => {
+  it("exports an actual committed dataset and receipt to a streamed recovery file", async () => {
+    const {host} = await open(), approved = await activate(host);
+    const attachment = Buffer.from("%PDF-synthetic-recovery-receipt");
+    const uploaded = await host.upload({datasetId:id(1),revision:approved.revision.revision,revisionSha256:approved.revision.revisionSha256,
+      idempotencyKey:"export-attachment",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:attachment.toString("base64")});
+    await host.action(call(approved,id(6),"export-write",{name:"Camera",fileId:uploaded.file.fileId}));
+    const directory = await mkdtemp(join(tmpdir(),"dohc-recovery-destination-")); roots.push(directory);
+    const archive = await host.prepareExport(id(1));
+    try {
+      const path = join(directory,"items.dohc-recovery");
+      const saved = await writeDatasetRecoveryExport({path,stream:archive.stream(),maxBytes:archive.maxBytes,
+        signal:new AbortController().signal,authorize(){}});
+      expect(saved.byteLength).toBeGreaterThan(4096);
+      const limits = {maxTotalBytes:archive.maxBytes};
+      const staged = await stageDatasetRecovery({stream:createReadStream(path),stagingParent:directory,limits,authorize(){},
+        expectedManifestSha256:recoveryManifestSha256(archive.manifest,limits)});
+      try {
+        expect(staged.manifest.cursor.datasetId).toBe(id(1));
+        const receipt = staged.files.find(file=>file.entry.kind==="attachment")!;
+        expect(await readFile(receipt.path)).toEqual(attachment);
+        const artifact = staged.files.find(file=>file.entry.role==="source")!;
+        expect(await readFile(artifact.path,"utf8")).toBe(source);
+      } finally { await staged.dispose(); }
+    } finally { await archive.dispose(); }
+  });
   it("persists a local fence before sharing and resumes the same archive after a lost remote response", async () => {
     const {host,workspaceRoot} = await open(), approved = await activate(host);
     const attachment = Buffer.from("%PDF-synthetic-transfer-receipt");

@@ -46,7 +46,7 @@ export async function writeDatasetRecoveryExport(input: {
         latest.dev !== original.dev || latest.ino !== original.ino || latest.mtimeMs !== original.mtimeMs || latest.size !== original.size)) {
       throw new Error("The destination changed during export. Choose another location.");
     }
-    if (input.overwrite) await rename(temporary, destination);
+    if (original && input.overwrite) await rename(temporary, destination);
     else await link(temporary, destination);
     return { savedPath: destination, byteLength };
   } finally {
