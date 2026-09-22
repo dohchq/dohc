@@ -21,7 +21,7 @@ export function connect() {
     pending.set(id, { message, resolve, reject, timer }); port?.postMessage(message);
   });
   return {
-    invoke: async (operation: string, input: object = {}, key = crypto.randomUUID()) => (await request({ op: "backend.invoke", operation, input, idempotencyKey: key })).result,
+    invoke: async (operation: string, input: object = {}, key: string = crypto.randomUUID()) => (await request({ op: "backend.invoke", operation, input, idempotencyKey: key })).result,
     attempt: (value: object) => request({ op: "backend.attempt", operation: "placeOrder", request: value }),
     upload: async (file: File, key: string) => {
       let binary = ""; for (const byte of new Uint8Array(await file.arrayBuffer())) binary += String.fromCharCode(byte);

@@ -20,7 +20,7 @@
     "test:e2e": "node ../../scripts/verification/verify.mjs e2e",
     "capture:ui-audit": "node scripts/capture-ui-audit.mjs",
     "test:apps:e2e": "node ../../scripts/verification/verify.mjs e2e --grep @apps",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json && tsc --noEmit -p tsconfig.stock-orders.json"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.10.4",
