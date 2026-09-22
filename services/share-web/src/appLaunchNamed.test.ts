@@ -17,7 +17,7 @@ function fixture() {
       resolutions.push({ workspace, publication, cookie });
       if (materialDown) return { ok: false, status: 503 };
       if (workspace !== workspaceId || publication !== publicationId || cookie !== "account=owner-session") return { ok: false, status: 401 };
-      return { ok: true, kind: "named", setCookie: null, fetchRelay: async request => {
+      return { ok: true, kind: "named", admissionKey: "owner-session-key", setCookie: null, fetchRelay: async request => {
         requests.push(request);
         expect(request.headers.has("cookie")).toBe(false);
         expect(request.headers.has("authorization")).toBe(false);

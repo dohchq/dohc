@@ -1,4 +1,5 @@
 import type { AppNamedBrowserMaterial } from "./appLaunch";
+import { createHash } from "node:crypto";
 import { namedAccountCookie } from "./namedAccountCookie";
 
 /** Bind a signed-in app launch to its workspace and publication on the trusted relay. */
@@ -18,7 +19,7 @@ export function createNamedAppMaterialResolver(options: {
     const prefix = `/sync/link/app-publications/${publicationId}`;
     const target = `/sync/${workspaceId}/app-publications/${publicationId}/backend`;
     return {
-      ok: true, kind: "named", setCookie: null,
+      ok: true, kind: "named", admissionKey: createHash("sha256").update(accountCookie).digest("hex"), setCookie: null,
       async fetchRelay(request: Request): Promise<Response> {
         request.signal.throwIfAborted();
         const url = new URL(request.url);

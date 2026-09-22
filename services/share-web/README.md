@@ -76,6 +76,18 @@ Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
 registrable domain. App launch stays off when the app domain is unset. Setting
 it without a public origin stops share-web at startup.
 
+Launch issuance allows each authorized link browser profile or signed-in account
+session a burst of 12, refilling 0.2 per second. People on the same network have
+separate allowances. The relay must authorize the publication before this budget
+is charged; a supplied profile or account cookie alone is not authority.
+Account session rotation starts a new session allowance.
+Before authorization, issuance admits 600 probes per address, refilling ten per
+second, and 2,400 globally, refilling 40 per second. Each address may hold 16 of
+the 64 issue slots. Bodies are limited to 1 KiB with a 15-second deadline.
+These issuance limits return 429. Document builds, status checks, and app
+operations retain separate admission lanes, so stalled issue bodies do not
+occupy their slots.
+
 Limits are shared with the desktop: 512 source files, 32 MiB per bundle,
 20 MiB per blob, and 256 KiB for the complete publication request.
 Withdrawal stops future authorized access. It cannot delete copies already received.

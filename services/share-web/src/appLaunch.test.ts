@@ -49,7 +49,7 @@ it('evicts oldest ready stage instead of letting idle clients monopolize capacit
   expect((await first.read()).status).toBe(404);
   expect((await second.read()).status).toBe(200);
 });
-it('does not let full build admission reject a valid status check', async () => {
+it('keeps in-flight launch authorizations independent from status checks', async () => {
   let hold = async () => {};
   const f = fixture(() => hold()), app = await launch(f);
   let release!: () => void, admitted!: () => void, count = 0;

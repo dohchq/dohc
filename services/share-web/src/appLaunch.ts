@@ -17,13 +17,15 @@ const MAX_LAUNCHES = 512, MAX_PENDING = 4, HANDOFF_MS = 30_000, SESSION_MS = 10 
 const headers = { "cache-control": "private, no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "cross-origin-resource-policy": "same-origin" };
 const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers });
 const unavailable = () => new Response(null, {status: 503, headers});
+const rateLimited = () => new Response(null, {status: 429, headers});
 class RelayUnavailable extends Error {}
+class RelayRateLimited extends Error {}
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
 interface Descriptor { publicationId: string; authorityRevision: number; files: Omit<AppDocumentFile, "bytes">[] }
 export type AppNamedBrowserMaterial =
-  | { ok: true; kind: "named"; setCookie: string | null; fetchRelay(request: Request): Promise<Response> }
+  | { ok: true; kind: "named"; admissionKey: string; setCookie: string | null; fetchRelay(request: Request): Promise<Response> }
   | { ok: false; status: 401 | 403 | 404 | 503 };
 type LaunchMaterial = Extract<LinkBrowserMaterial | AppNamedBrowserMaterial, { ok: true }>;
 const namedMaterial = (material: LaunchMaterial): material is Extract<AppNamedBrowserMaterial, { ok: true }> => "kind" in material && material.kind === "named";
@@ -48,6 +50,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
   const stagedSlots = new Set<Launch>();
   const issueRate = new TokenBucketLimiter(12, 0.2, 2048), sessionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES);
+  const issueAddressRate = new TokenBucketLimiter(600, 10, 10_000), issueGlobalRate = new TokenBucketLimiter(2400, 40, 1);
+  const issueByAddress = new Map<string, number>(); let issuePending = 0;
   const collectionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES), backendRate = new TokenBucketLimiter(30, 0.5, MAX_LAUNCHES); let pending = 0, statusPending = 0, collectionPending = 0;
   const hostPattern = new RegExp(`^[a-f0-9]{48}\\.${config.appDomain.replaceAll(".", "\\.")}$`);
   const appHost = (host: string) => hostPattern.test(host);
@@ -81,7 +85,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   async function descriptor(launch: Pick<Launch, "publicationId" | "material"> & { revision?: number }, signal: AbortSignal): Promise<Descriptor> {
     const response = await relay(launch, "", signal);
     try {
-      if (response.status === 429 || response.status >= 500) throw new RelayUnavailable();
+      if (response.status === 429) throw new RelayRateLimited();
+      if (response.status >= 500) throw new RelayUnavailable();
       if (response.status !== 200 || response.redirected || response.headers.has("location")) throw new Error("Unavailable publication.");
       const value = await readBoundedJson(response, 4096, signal);
       if (!exact(value, "authorityRevision,files,publicationId") || value.publicationId !== launch.publicationId ||
@@ -102,7 +107,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     const current = await descriptor(launch, signal), files: AppDocumentFile[] = [];
     for (const file of current.files) {
       const response = await relay(launch, `/blobs/${file.sha256}?authorityRevision=${launch.revision}`, signal);
-      try { if (response.status === 429 || response.status >= 500) throw new RelayUnavailable();
+      try { if (response.status === 429) throw new RelayRateLimited();
+        if (response.status >= 500) throw new RelayUnavailable();
         if (response.status !== 200 || response.redirected || response.headers.has("location") || !["text/javascript; charset=utf-8", "text/css; charset=utf-8"].includes(response.headers.get("content-type") ?? "")) throw new Error("Unavailable bundle.");
         files.push({ ...file, bytes: await boundedBytes(response, file.byteLength, signal) });
       } finally { await response.body?.cancel().catch(() => {}); }
@@ -120,11 +126,19 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
       const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
       if ((request.method !== "POST" && !(bootstrapRequest && request.method === "GET")) || url.search || request.signal.aborted) return refusal();
-      if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return unavailable();
       const issue = host === viewerHost && url.pathname === "/api/apps/launch";
       if (!issue && !appHost(host)) return refusal();
-      if (issue && !issueRate.allow(request.headers.get("x-dohc-share-web-client-ip") ?? "unknown", now())) return unavailable();
-      if (statusRequest) statusPending++; else if (collectionRequest) collectionPending++; else pending++; const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
+      const address = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
+      if (issue) {
+        // Untrusted bodies have their own bounded lane; they cannot occupy document builds.
+        if (issuePending >= 64 || (issueByAddress.get(address) ?? 0) >= 16 ||
+            !issueAddressRate.allow(address, now()) || !issueGlobalRate.allow("issue", now())) return rateLimited();
+        issuePending++; issueByAddress.set(address, (issueByAddress.get(address) ?? 0) + 1);
+      } else {
+        if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return unavailable();
+        if (statusRequest) statusPending++; else if (collectionRequest) collectionPending++; else pending++;
+      }
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
       try {
         if (issue) {
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/json" || launches.size >= MAX_LAUNCHES) return refusal();
@@ -139,6 +153,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           } else return refusal();
           if (!material.ok) return material.status === 503 ? unavailable() : refusal();
           const current = await descriptor({ publicationId: body.publicationId, material }, signal);
+          // The relay authorizes the resolved profile/account cookies before they get a budget.
+          const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;
+          if (!issueRate.allow(identity, now())) return rateLimited();
           signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
           launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, material,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
@@ -197,7 +214,12 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (!doc) return refusal();
         if (launch.expires <= now()) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-      } catch (error) { return error instanceof RelayUnavailable ? unavailable() : refusal(); } finally { if (statusRequest) statusPending--; else if (collectionRequest) collectionPending--; else pending--; }
+      } catch (error) { return error instanceof RelayRateLimited ? rateLimited() : error instanceof RelayUnavailable ? unavailable() : refusal(); } finally {
+        if (issue) {
+          issuePending--; const remaining = issueByAddress.get(address)! - 1;
+          if (remaining) issueByAddress.set(address, remaining); else issueByAddress.delete(address);
+        } else if (statusRequest) statusPending--; else if (collectionRequest) collectionPending--; else pending--;
+      }
     }
   };
 }
