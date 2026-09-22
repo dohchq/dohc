@@ -30,21 +30,22 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = input.action === "list" || input.action === "describe" || input.action === "createForm" || input.action === "invoke";
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
       if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
       if (input.action === "upload") {
-        const description = host.describe(input.datasetId);
+        const description = await data.describe(input.datasetId);
+        current();
         if (!description.tables.some(table => table.fields.some(field => field.fieldId === input.fieldId && field.type === "attachment")) ||
             !description.operations.some(action => !action.readOnly && action.fieldIds.includes(input.fieldId))) throw new Error("Choose an editable Collection file field.");
-        const result = await host.upload({ ...input, signal: operation.signal });
+        const result = await data.upload({ ...input, signal: operation.signal });
         current();
         return { kind: "uploaded" as const, ...result };
       }
       if (input.action === "file") {
-        const result = await host.file({ ...input, signal: operation.signal });
+        const result = await data.file({ ...input, signal: operation.signal });
         current();
         return { kind: "file" as const, ...result };
       }

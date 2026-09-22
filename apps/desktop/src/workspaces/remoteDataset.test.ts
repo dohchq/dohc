@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "./remoteDataset";
@@ -71,5 +72,16 @@ describe("remote Collection authority", () => {
     await expect(f.data.invoke(invocation)).rejects.toThrow("offline");
     f.relay.mockResolvedValue({ ...approved, active: false });
     await expect(resolveRemoteDatasetRevision(f.data, { kind: "dataset", ...invocation, operationIds: [id(4)] })).rejects.toThrow(/rules changed/);
+  });
+  it("uploads and retrieves owner files through the same remote authority and verifies returned bytes", async () => {
+    const f = fixture(), bytes = Buffer.from("receipt");
+    const file = { fileId: "a".repeat(32), name: "receipt.png", contentType: "image/png", byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    f.relay.mockResolvedValueOnce({ file, replayed: false });
+    expect(await f.data.upload({ action: "upload", workspaceId: "workspace", ...invocation, fieldId: id(3), name: file.name, contentType: file.contentType, bytesBase64: bytes.toString("base64") })).toEqual({ file, replayed: false });
+    expect(f.relay.mock.calls.at(-1)![1]).toMatch(/\/upload$/);
+    f.relay.mockResolvedValueOnce({ file, bytesBase64: bytes.toString("base64") });
+    expect(await f.data.file({ action: "file", workspaceId: "workspace", ...invocation, fileId: file.fileId })).toEqual({ file, bytesBase64: bytes.toString("base64") });
+    f.relay.mockResolvedValueOnce({ file, bytesBase64: Buffer.from("wrong").toString("base64") });
+    await expect(f.data.file({ action: "file", workspaceId: "workspace", ...invocation, fileId: file.fileId })).rejects.toThrow(/different Collection file/);
   });
 });

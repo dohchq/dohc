@@ -1,7 +1,10 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
+import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
+import type { AppBackendFile } from "@dohc/security-contract/app-backend";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
@@ -12,6 +15,8 @@ export interface OwnerDatasetData {
   describe(datasetId: string): Promise<DatasetDescription>;
   approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
   invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
+  upload(input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; replayed: boolean }>;
+  file(input: Extract<DatasetRequest, { action: "file" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; bytesBase64: string }>;
 }
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -66,6 +71,29 @@ export function createRemoteDatasetData(input: {
       const signal = invocation.signal ? AbortSignal.any([input.signal, invocation.signal]) : input.signal;
       return DatasetInvocationResult.parse(await request(`${path(datasetId)}/invoke`,
         { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey }, signal));
+    },
+    async upload(upload) {
+      const signal = upload.signal ? AbortSignal.any([input.signal, upload.signal]) : input.signal;
+      const result = DatasetResult.parse({ ...(await request(`${path(upload.datasetId)}/upload`, {
+        revision: upload.revision, revisionSha256: upload.revisionSha256, idempotencyKey: upload.idempotencyKey,
+        name: upload.name, contentType: upload.contentType, bytesBase64: upload.bytesBase64,
+      }, signal) as object), kind: "uploaded" });
+      if (result.kind !== "uploaded") throw new Error("Invalid Collection upload result.");
+      const bytes = Buffer.from(upload.bytesBase64, "base64");
+      if (result.file.name !== upload.name || result.file.contentType !== upload.contentType || result.file.byteLength !== bytes.byteLength ||
+        result.file.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new Error("The server returned a different Collection file.");
+      return { file: result.file, replayed: result.replayed };
+    },
+    async file(file) {
+      const signal = file.signal ? AbortSignal.any([input.signal, file.signal]) : input.signal;
+      const result = DatasetResult.parse({ ...(await request(`${path(file.datasetId)}/file`, {
+        revision: file.revision, revisionSha256: file.revisionSha256, fileId: file.fileId,
+      }, signal) as object), kind: "file" });
+      if (result.kind !== "file") throw new Error("Invalid Collection file result.");
+      const bytes = Buffer.from(result.bytesBase64, "base64");
+      if (result.file.fileId !== file.fileId || bytes.toString("base64") !== result.bytesBase64 || result.file.byteLength !== bytes.byteLength ||
+        result.file.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new Error("The server returned a different Collection file.");
+      return { file: result.file, bytesBase64: result.bytesBase64 };
     },
   };
 }

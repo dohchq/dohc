@@ -4,6 +4,7 @@ import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
 function fixture(remote?: OwnerDatasetData) {
@@ -55,6 +56,24 @@ it("refuses stale workspace results after an asynchronous invocation", async () 
   f.host.invoke.mockImplementation(async () => { f.stale(); return { result: [], revision: 1, replayed: false }; });
   await expect(f.handler("window", { action: "invoke", workspaceId: "workspace", datasetId,
     operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "retry" })).rejects.toThrow("stale workspace");
+});
+it("retains a remote operation refusal as a correction the owner can act on", async () => {
+  const remote = { invoke: vi.fn(async () => { throw new AppBackendRuntimeError({ code: "capacity_full", message: "Choose another session." }); }) } as unknown as OwnerDatasetData;
+  const f = fixture(remote);
+  expect(await f.handler("window", { action: "invoke", workspaceId: "workspace", datasetId,
+    operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "retry" }))
+    .toEqual({ kind: "refused", code: "capacity_full", message: "Choose another session." });
+});
+it("uses remote metadata and file operations after authority moves", async () => {
+  const fieldId = "00000000-0000-4000-8000-000000000004";
+  const remote = { describe: vi.fn(async () => ({ tables: [{ fields: [{ fieldId, type: "attachment" }] }], operations: [{ readOnly: false, fieldIds: [fieldId] }] })),
+    upload: vi.fn(async () => ({ file: { fileId: "f".repeat(32) }, replayed: false })), file: vi.fn(async () => ({ file: { fileId: "f".repeat(32) }, bytesBase64: "cA==" })) } as unknown as OwnerDatasetData;
+  const f = fixture(remote), pinned = { workspaceId: "workspace", datasetId, revision: 1, revisionSha256: "a".repeat(64) };
+  expect(await f.handler("window", { ...pinned, action: "upload", fieldId, name: "receipt.png", contentType: "image/png", bytesBase64: "cA==", idempotencyKey: "upload" })).toMatchObject({ kind: "uploaded" });
+  expect(remote.describe).toHaveBeenCalledWith(datasetId);
+  expect(remote.upload).toHaveBeenCalled();
+  expect(await f.handler("window", { ...pinned, action: "file", fileId: "f".repeat(32) })).toMatchObject({ kind: "file" });
+  expect(remote.file).toHaveBeenCalled();
 });
 it("does not accept authority or raw SQL in an invocation", async () => {
   const f = fixture();
