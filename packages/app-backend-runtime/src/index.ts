@@ -116,14 +116,14 @@ export async function evaluateAppOperation(input: EvaluateAppOperationInput, opt
 
 export async function initializeAppDatabase(input: InitializeAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<Uint8Array> {
   const limits = runtimeLimits(input.limits);
-  return (await run({ kind: "initialize", tables: approvedTables(input.tables), limits,
+  return (await run({ kind: "initialize", journaled:input.journaled===true, tables: approvedTables(input.tables), limits,
     schemaSql: boundedText(input.schemaSql, limits.sourceBytes, "Database schema") } as Omit<ChildRequest, "directory">,input.signal,options.launch,options.entryPath)).database;
 }
 
 export async function validateAppDatabase(input: ValidateAppDatabaseInput, options: AppBackendRuntimeOptions = {}): Promise<void> {
   const limits=runtimeLimits(input.limits);
   if (!(input.database instanceof Uint8Array) || input.database.byteLength < 100 || input.database.byteLength > limits.databaseBytes) throw new Error("Invalid app database snapshot.");
-  await run({kind:"validate",tables:approvedTables(input.tables),limits,database:input.database,
+  await run({kind:"validate",journaled:input.journaled===true,tables:approvedTables(input.tables),limits,database:input.database,
     schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema")} as Omit<ChildRequest,"directory">,input.signal,options.launch,options.entryPath);
 }
 

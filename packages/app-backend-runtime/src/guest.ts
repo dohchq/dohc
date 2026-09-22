@@ -18,6 +18,34 @@ interface AuthorizationOptions extends GuestOptions {
 const connectionCounters = new Set(["changes", "total_changes", "last_insert_rowid"]);
 const unsafeFunctions = new Set(["load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"]);
 const persistentRowidTables=new WeakMap<DatabaseSync,ReadonlySet<string>>();
+export function insertsImplicitRowid(sql:string, capturedTables:ReadonlySet<string>):boolean {
+  // SQLite's authorizer reports INSERT at table granularity, without its column list.
+  const tokens:Array<{value:string;quoted:boolean}>=[];
+  const pattern=/--[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_$]*|[^\s]/g;
+  for(const match of sql.matchAll(pattern)) {
+    const raw=match[0];if(raw.startsWith("--")||raw.startsWith("/*"))continue;
+    const quote=raw[0],quoted="'\"`[".includes(quote);
+    const value=quoted ? raw.slice(1,-1).replaceAll(quote+quote,quote) : raw;
+    tokens.push({value:value.toLowerCase(),quoted});
+  }
+  const keyword=(index:number,value:string)=>tokens[index]?.value===value&&!tokens[index].quoted;
+  for(let index=0;index<tokens.length;index++) {
+    if(!keyword(index,"insert")&&!keyword(index,"replace"))continue;
+    let next=index+1;
+    if(keyword(next,"or"))next+=2;
+    if(keyword(next,"into"))next++;
+    let table=tokens[next++]?.value;
+    if(tokens[next]?.value==="."){next++;table=tokens[next++]?.value;}
+    if(!table||capturedTables.has(table))continue;
+    if(keyword(next,"as"))next+=2;
+    if(tokens[next++]?.value!=="(")continue;
+    while(next<tokens.length&&tokens[next].value!==")") {
+      if(["rowid","oid","_rowid_"].includes(tokens[next].value))return true;
+      next++;
+    }
+  }
+  return false;
+}
 
 export function authorize(
   db: DatabaseSync,
@@ -43,6 +71,7 @@ export function authorize(
       return tables.has(table) || (initializing && schemaTables.has(table)) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     }
     if ([constants.SQLITE_INSERT, constants.SQLITE_UPDATE, constants.SQLITE_DELETE].includes(action)) {
+      if(persistentConnection && action===constants.SQLITE_UPDATE && second?.toUpperCase()==="ROWID" && !persistentRowidTables.get(db)?.has(table)) return constants.SQLITE_DENY;
       return writable && (tables.has(table) || (initializing && schemaTables.has(table))) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     }
     if (initializing) {
@@ -87,6 +116,7 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
       if (++statements > request.limits.statements || performance.now() >= deadline) throw new Error("App database operation limit exceeded.");
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");
+      if(options.persistentConnection && write && insertsImplicitRowid(sql,persistentRowidTables.get(db)!)) throw new Error("Implicit rowid access is unavailable for journaled datasets.");
       const paramsJson = boundedText(vm.getString(paramsValue), request.limits.inputBytes, "SQL parameters");
       const params: unknown = JSON.parse(paramsJson);
       if (!Array.isArray(params) || params.length > 128 || params.some(value => value !== null && typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value)))) throw new Error("SQL parameters must be scalar values.");

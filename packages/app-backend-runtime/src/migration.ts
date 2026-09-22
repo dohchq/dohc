@@ -1,5 +1,5 @@
 import { DatabaseSync, constants } from "node:sqlite";
-import { authorize } from "./guest.js";
+import { authorize, insertsImplicitRowid } from "./guest.js";
 import { reject } from "./persistent-protocol.js";
 import type { RuntimeLimits } from "./protocol.js";
 
@@ -24,13 +24,16 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
     const schema=expected.prepare(datasetSchema).all();
     const declaredTables=schema.filter(row=>row.type==="table");
     if (declaredTables.length!==tables.length || declaredTables.some(row=>!tables.includes(String(row.name))) || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","Invalid dataset schema.");
+    const capturedRowidTables=new Set<string>();
     for (const table of tables) {
       const columns=expected.prepare(`PRAGMA table_info("${table}")`).all();
       const primary=columns.filter(column=>Number(column.pk)>0);
       const rowid=primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !expected.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk");
       if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Dataset tables require non-null primary keys.");
+      if(rowid) capturedRowidTables.add(table.toLowerCase());
       if(columns.some(column=>/^(rowid|oid|_rowid_)$/i.test(String(column.name)) && !(rowid && column.name===primary[0].name))) reject("invalid_schema","Rowid aliases are reserved unless they name the INTEGER PRIMARY KEY.");
     }
+    if(schema.some(row=>row.type==="trigger" && insertsImplicitRowid(String(row.sql),capturedRowidTables))) reject("invalid_schema","Triggers cannot insert implicit rowid values into journaled datasets.");
     if (JSON.stringify(db.prepare(datasetSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","Checkpoint schema does not match the approved dataset.");
   } finally {expected.close();}
   // Trusted host checkpoints contain previously accepted predicates, including time-dependent CHECKs.

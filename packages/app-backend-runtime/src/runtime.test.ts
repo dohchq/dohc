@@ -24,6 +24,11 @@ async function request(overrides: Partial<EvaluateAppOperationInput> = {}): Prom
 }
 
 describe("app operation runtime", () => {
+  it("validates journaled schema restrictions before returning an activation checkpoint",async()=>{
+    await expect(initializeAppDatabase({tables:["items"],journaled:true,schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT);"})).rejects.toThrow("AUTOINCREMENT");
+    await expect(initializeAppDatabase({tables:["items"],journaled:true,schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toThrow("Rowid aliases");
+    expect((await initializeAppDatabase({tables:["items"],journaled:true,schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT);"})).byteLength).toBeGreaterThan(100);
+  });
   it("passes a captured absolute child path to the host launcher", async () => {
     const entryPath=join(tmpdir(),"packaged-runtime","child.mjs");
     const options={entryPath,launch({entryPath:actual}:{entryPath:string}):never { expect(actual).toBe(entryPath);throw new Error("launcher reached"); }};

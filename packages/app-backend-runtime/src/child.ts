@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { AppBackendRuntimeError } from "./protocol.js";
 import type { ChildReply, ChildRequest } from "./protocol.js";
 import { authorize, evaluate } from "./guest.js";
+import { assertReplayableSchema, verifyDatasetSchema } from "./migration.js";
 
 function verifySchema(db: DatabaseSync, request: ChildRequest): void {
   const actual = db.prepare("SELECT name, type, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all();
@@ -23,6 +24,9 @@ function verifySchema(db: DatabaseSync, request: ChildRequest): void {
 }
 
 async function handle(request: ChildRequest): Promise<ChildReply> {
+  if(request.kind!=="evaluate" && request.journaled) {
+    try {assertReplayableSchema(request.schemaSql);}catch(error){return {ok:false,error:error instanceof Error ? error.message : "Invalid journaled schema."};}
+  }
   const path = join(request.directory, "app.sqlite");
   if (request.kind !== "initialize") writeFileSync(path, request.database, { flag: "wx", mode: 0o600 });
   const db = new DatabaseSync(path, { allowExtension: false, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false });
@@ -38,8 +42,10 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
       db.exec(request.schemaSql);
       db.setAuthorizer(null);
       verifySchema(db, request);
+      if(request.journaled) verifyDatasetSchema(db,request.schemaSql,request.tables,request.limits);
     } else if (request.kind === "validate") {
       verifySchema(db,request);
+      if(request.journaled) verifyDatasetSchema(db,request.schemaSql,request.tables,request.limits);
       const expected = new DatabaseSync(join(request.directory,"expected.sqlite"),{allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false});
       try {
         expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA max_page_count=${Math.floor(request.limits.databaseBytes / 4096)}`);

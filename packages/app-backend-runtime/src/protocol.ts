@@ -78,6 +78,7 @@ export interface InitializeAppDatabaseInput {
   tables: string[];
   limits?: Partial<RuntimeLimits>;
   signal?: AbortSignal;
+  journaled?: boolean;
 }
 
 export interface ValidateAppDatabaseInput extends InitializeAppDatabaseInput {
@@ -110,7 +111,7 @@ export type ChildRequest = {
   directory: string;
   limits: RuntimeLimits;
   tables: string[];
-} & ({ kind: "initialize"; schemaSql: string } | {kind:"validate"; schemaSql:string; database:Uint8Array} | {
+} & ({ kind: "initialize"; schemaSql: string; journaled?:boolean } | {kind:"validate"; schemaSql:string; database:Uint8Array; journaled?:boolean} | {
   kind: "evaluate";
   source: string;
   operation: string;

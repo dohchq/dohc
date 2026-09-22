@@ -68,11 +68,21 @@ describe("persistent dataset worker",()=>{
       const worker=await open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); INSERT INTO items VALUES('id','value');"});
       for(const alias of ["rowid","_rowid_","oid"]) {
         await expect(worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('SELECT ${alias} FROM items')}}`})).rejects.toThrow();
+        await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO items(${alias},id,value) VALUES(100,'new','value')\")}}`})).rejects.toThrow();
       }
       await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
       await expect(open({schemaSql:"CREATE TABLE Items(id INTEGER PRIMARY KEY,value TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
+      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); CREATE TRIGGER hidden_row AFTER INSERT ON items BEGIN INSERT INTO items(rowid,id,value) VALUES(100,'other','value'); END;"})).rejects.toMatchObject({code:"invalid_schema"});
       const captured=await open({schemaSql:"CREATE TABLE items(ROWID INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(42,'value');"});
       expect((await captured.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT oid AS id FROM items')}}"})).result).toEqual([{id:42}]);
+      const explicit=await captured.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO items(ROWID,value) VALUES(43,'next')\")}}"});
+      expect(explicit.result).toEqual({changes:1});await captured.discard(explicit.proposalId);
+      for(const sql of [
+        "WITH c AS (SELECT 1) INSERT OR IGNORE INTO main.items AS target (\"rowid\",id,value) VALUES(100,'new','value')",
+        "REPLACE INTO 'items' ('oid',id,value) VALUES(100,'new','value')",
+        "INSERT/**/INTO [items] (`_rowid_`,id,value) VALUES(100,'new','value')",
+        "UPDATE items SET rowid=100 WHERE id='id'",
+      ]) await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(${JSON.stringify(sql)})}}`})).rejects.toThrow();
     });
   });
   it("commits only after host finalization and restores checkpoint scope/cursor",async()=>{
