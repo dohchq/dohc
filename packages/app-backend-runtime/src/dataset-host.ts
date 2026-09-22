@@ -285,6 +285,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const candidate=await options.supervisor.prepareMigration({scope:key,expected,tables:previous.definition.tables.map(table=>table.sqlName),newTables:approved.definition.tables.map(table=>table.sqlName),
         schemaSql,source:compiled,definitionJson:JSON.stringify(approved),approvedRevisionHash:approved.revisionSha256,migrationSql,authorize,authorityKey,signal:raw.signal,
         ...(options.accountCheckpointStage?{accountStage:allocation=>synchronous(()=>options.accountCheckpointStage!(context,allocation))}:{})});
+      authorize();
       for(const [id,saved] of migrationCandidates)if(saved.candidate.expiresAtMs<=Date.now()||(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId))migrationCandidates.delete(id);
       migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
     },
@@ -305,7 +306,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,saved.previous.revision,row.revision_json,row.artifacts_json);
           db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson,artifactsJson,key.workspaceId,key.datasetId);
         }});
-      migrationCandidates.delete(raw.candidateId);return {revision:saved.approved,cursor};
+      authorize();migrationCandidates.delete(raw.candidateId);return {revision:saved.approved,cursor};
     },
     migrationPreviewPage(context:Context,raw:DatasetScope & {candidateId:string;after?:string;limit?:number;signal?:AbortSignal}) {
       if(!options.supervisor.migrationPreviewPage)throw new DatasetHostError("invalid","Migration previews are unavailable.");
