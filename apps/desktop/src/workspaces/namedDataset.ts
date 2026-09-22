@@ -1,7 +1,7 @@
 import { createRemoteDatasetData, type OwnerDatasetData } from "./remoteDataset";
 import { recordedShareSelector } from "./shareViewRecords";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { readBoundedJson } from "@dohc/service-http";
+import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
 import { parseDatasetDescription } from "@dohc/security-contract/dataset";
 import type { NamedDatasetPageCache } from "./namedDatasetCache";
@@ -39,15 +39,18 @@ export function createNamedDatasetData(input: {
       const response = await relayResponse(credentials, path, init);
       try {
         current();
+        const action = path.includes("/invoke") ? "invoke" : path.includes("/file") ? "file" : path.includes("/upload") ? "upload"
+          : /\/datasets(?:\?|$)/.test(path) ? "list" : "describe";
         if ([401, 403, 404, 409].includes(response.status)) {
           await cache.clear();
+          if (response.status === 409) await readDatasetResponse(response, action, input.signal);
           throw Error("Collection access or rules changed. Reconnect and refresh this view.");
         }
         if (!response.ok) throw Error(`The sharing server returned ${response.status}. Try again.`);
         fingerprint = response.headers.get("x-dohc-dataset-access");
         if (!fingerprint || !/^[a-f0-9]{64}$/.test(fingerprint)) throw Error("The sharing server cannot save permitted pages. Update the server and try again.");
         await cache.accept(fingerprint, epoch);
-        const value = await readBoundedJson(response, 2 * 1024 * 1024, input.signal);
+        const value = await readDatasetResponse(response, action, input.signal);
         current(); return value;
       } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
     } });

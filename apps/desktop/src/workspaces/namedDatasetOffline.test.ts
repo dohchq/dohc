@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createNamedDatasetCacheRegistry } from "./namedDatasetCache";
 import { createNamedDatasetData } from "./namedDataset";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
+import { createHash } from "node:crypto";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -79,6 +80,17 @@ it("does not classify a TypeError from response handling as transport failure", 
   const f = await fixture(); await f.data().describe(id(1));
   f.relayResponse.mockRejectedValueOnce(new TypeError("response processing failed"));
   await expect(f.data().describe(id(1))).rejects.toThrow("response processing failed");
+});
+
+it("retains operation correction messages and allows full-sized online attachments without caching their bytes", async () => {
+  const f = await fixture(); await f.data().describe(id(1));
+  f.relayResponse.mockResolvedValueOnce(Response.json({ code: "capacity_reached", message: "Choose another time." }, { status: 409, headers: { "x-dohc-dataset-access": fingerprint } }));
+  await expect(f.data().invoke(invocation)).rejects.toMatchObject({ refusal: { code: "capacity_reached", message: "Choose another time." } });
+  const bytes = Buffer.alloc(3 * 1024 * 1024, 120), file = { fileId: "a".repeat(32), name: "receipt.png", contentType: "image/png", byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  f.relayResponse.mockResolvedValueOnce(Response.json({ file, bytesBase64: bytes.toString("base64") }, { headers: { "x-dohc-dataset-access": fingerprint } }));
+  expect((await f.data().file({ action: "file", workspaceId: "local-share", ...invocation, fileId: file.fileId,
+    read: { operationId: id(4), fieldId: id(3), input: {} } })).file).toEqual(file);
+  expect(await readFile(join(f.directory, "pages.json"), "utf8")).not.toContain("bytesBase64");
 });
 
 it("isolates share/workspace scopes and removes the previous account's disk pages", async () => {
