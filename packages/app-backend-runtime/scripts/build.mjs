@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 
 await build({
   entryPoints: {
+    recovery: fileURLToPath(new URL("../src/recovery.ts", import.meta.url)),
+    "recovery-export": fileURLToPath(new URL("../src/recovery-export.ts", import.meta.url)),
     "dataset-host": fileURLToPath(new URL("../src/dataset-host.ts", import.meta.url)),
     index: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     child: fileURLToPath(new URL("../src/child.ts", import.meta.url)),

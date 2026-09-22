@@ -7,6 +7,8 @@ import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
 import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } from "./supervisor.js";
 import type { JsonValue } from "./protocol.js";
+import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
+import type { RecoveryLimits } from "./recovery.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -43,6 +45,12 @@ export interface DatasetHostOptions<Context> {
   accountMigration?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number; capacityDeltaBytes: number }): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
+  recovery?: {
+    directory: string;
+    limits: RecoveryLimits;
+    captureAttachments?(context: Context, scope: DatasetScope, cursor: DatasetCursor): RecoveryAttachment[];
+    openAttachment?(context: Context, scope: DatasetScope, file: RecoveryAttachment): AsyncIterable<Uint8Array>;
+  };
 }
 export interface ActivateDatasetInput {
   workspaceId: string;
@@ -194,6 +202,23 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }) })), operations };
   }
   const host = {
+    async exportRecovery(context: Context, raw: DatasetScope & { signal?: AbortSignal }) {
+      const key=scope(raw),recovery=options.recovery;
+      if(!recovery)throw new DatasetHostError("invalid","Dataset recovery storage is not configured.");
+      if(Boolean(recovery.captureAttachments)!==Boolean(recovery.openAttachment))throw new Error("Dataset recovery attachments require capture and read callbacks.");
+      const ownerToken=JSON.stringify(owner(context,key)),authorize=()=>{if(JSON.stringify(owner(context,key))!==ownerToken)denied();};
+      return prepareDatasetRecoveryExport({db,journal,scope:key,directory:recovery.directory,limits:recovery.limits,signal:raw.signal,authorize,
+        attachments:recovery.captureAttachments&&recovery.openAttachment?{
+          capture:cursor=>recovery.captureAttachments!(context,key,cursor),open:file=>recovery.openAttachment!(context,key,file),
+        }:undefined});
+    },
+    /** Trusted host admission only; adapters must not publish this unfiltered metadata. */
+    authorize(context: Context, raw: Pick<InvokeDatasetInput,"workspaceId"|"datasetId"|"revision"|"revisionSha256"|"operationId"|"access">) {
+      const key=scope(raw),permitted=permissions(context,key,access(raw.access)),operation=permitted.operations.find(operation=>operation.operationId===text(raw.operationId));
+      if(raw.revision!==permitted.revision.revision||raw.revisionSha256!==permitted.revision.revisionSha256)throw new DatasetHostError("conflict","Dataset revision is stale. Reload it before retrying.");
+      if(!operation)denied();
+      return { authority: permitted.authority, revision: permitted.revision, operation };
+    },
     async activate(context: Context, raw: ActivateDatasetInput): Promise<DatasetRevision> {
       const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
       if (approved.revision !== 1) throw new Error("Initial dataset revision must be 1. Schema changes require a revision transition.");
