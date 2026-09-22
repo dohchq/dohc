@@ -7,9 +7,10 @@ import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollec
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; onRefresh?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; onRefresh?(): void; onHistory?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
   <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
+  {props.onHistory && <button onClick={props.onHistory}>History</button>}
   {props.onTransferCsv && <button onClick={props.onTransferCsv}>Import or export CSV</button>}
   {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
@@ -17,6 +18,30 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+it("opens wrapped history through the real dialog and reverses the saved edit", async () => {
+  let undone = false;
+  const current: DatasetDescription = { ...dataset, operations: [...dataset.operations, { operationId: id(5), tableId: id(2), name: "edit", label: "Edit", kind: "edit", reversible: true, access: "owner", readOnly: false, fieldIds: [id(3)] }] };
+  backend.dataset.mockImplementation(async input => {
+    if (input.action === "describe") return { kind: "description", dataset: current };
+    if (input.action === "history") return { kind: "history", datasetId: id(1), headRevision: undone ? 3 : 2, nextBeforeRevision: null,
+      entries: undone ? [] : [{ revision: 2, operation: "edit", callerReference: "b".repeat(64), recordedAtMs: 1000, approvedRevisionHash: current.revisionSha256, changesetBytes: 80, attachmentCount: 0,
+        undo: { operationId: id(5), revision: 1, revisionSha256: current.revisionSha256, recordId: "record", expectedVersion: 2, fields: [{ fieldId: id(3), name: "Name", value: "Original name" }] } }] };
+    if (input.action === "invoke") { undone = true; return { kind: "invoked", result: { id: "record", version: 3 }, revision: 3, replayed: false }; }
+    throw Error("Unexpected request");
+  });
+  const onError = vi.fn(), onNotice = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "History" }));
+  const history = within(screen.getByRole("dialog", { name: "Collection history" }));
+  fireEvent.click(await history.findByText("edit", { exact: true }));
+  expect(history.getByText('"Original name"')).toBeTruthy();
+  fireEvent.click(history.getByRole("button", { name: "Undo edit" }));
+  await history.findByText("No saved operations on this page. Refresh to check for changes.");
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "invoke", workspaceId: "workspace-a", datasetId: id(1), revision: 1,
+    revisionSha256: current.revisionSha256, operationId: id(5), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
+  expect(onNotice).toHaveBeenCalledWith("Reversed the edit");
+  expect(onError).not.toHaveBeenCalled();
+});
 it("keeps the page mounted through successful and failed metadata refreshes", async () => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset });
   const onError = vi.fn();

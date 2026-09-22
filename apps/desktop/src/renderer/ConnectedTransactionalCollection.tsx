@@ -224,7 +224,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         const result = await bridge().dataset({ ...input, action: "history" });
         signal.throwIfAborted();
         if (result.kind !== "history") throw Error("dohc could not read this Collection's history. Try again.");
-        return result;
+        const { kind: _, ...page } = result;
+        return page;
       }} />}
     {transferringCsv && <DatasetTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
       onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
