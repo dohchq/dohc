@@ -9,6 +9,11 @@ import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } fro
 import type { JsonValue } from "./protocol.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
+export class DatasetHostError extends Error {
+  constructor(readonly code: "not_authorized" | "conflict" | "invalid", message: string) {
+    super(message); this.name = "DatasetHostError";
+  }
+}
 export interface DatasetAuthority {
   caller: AppBackendCaller;
   /** Stable identity derived from the credential, never from request JSON. */
@@ -64,7 +69,7 @@ type StoredGrant = DatasetDataGrant;
 type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function text(value: string, maximum = 256): string {
-  if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new Error("Invalid dataset identifier.");
+  if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new DatasetHostError("invalid", "Invalid dataset identifier.");
   return value;
 }
 function synchronous<T>(run: () => T): T {
@@ -73,12 +78,12 @@ function synchronous<T>(run: () => T): T {
   if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Dataset host callbacks must be synchronous.");
   return result;
 }
-function denied(): never { throw new Error("Dataset access is not permitted."); }
+function denied(): never { throw new DatasetHostError("not_authorized", "Dataset access is not permitted."); }
 function scope(input: DatasetScope): DatasetScope { return { workspaceId: text(input.workspaceId), datasetId: text(input.datasetId) }; }
 function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
   if (input.kind === "data" && Object.keys(input).length === 1) return { kind: "data" };
   if (input.kind === "app" && Object.keys(input).length === 2) return { kind: "app", appId: text(input.appId) };
-  throw new Error("Invalid dataset access path.");
+  throw new DatasetHostError("invalid", "Invalid dataset access path.");
 }
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
@@ -132,7 +137,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   function currentGrant(value: unknown, approved: DatasetRevision): StoredGrant {
     const grant = value as StoredGrant;
-    if (grant.revision !== approved.revision || grant.revisionSha256 !== approved.revisionSha256) throw new Error("Dataset data grant needs approval for the current revision.");
+    if (grant.revision !== approved.revision || grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset data grant needs approval for the current revision.");
     return grant;
   }
   function permissions(context: Context, key: DatasetScope, through: DatasetAccess): Permission {
@@ -141,6 +146,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
       if (!row) denied();
+      const binding = JSON.parse(String(row.binding_json)) as AppDatasetBinding;
+      if (binding.revision !== approved.revision || binding.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "App binding needs approval for the current dataset revision.");
       let dataToken = "", allowedHelperIds = new Set<string>();
       if (verified.caller.kind === "named") {
         const grant = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
@@ -151,7 +158,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
-      operations = effectiveDatasetOperations(JSON.parse(String(row.binding_json)), approved, verified.caller)
+      operations = effectiveDatasetOperations(binding, approved, verified.caller)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
     } else if (verified.caller.kind !== "owner") {
@@ -188,7 +195,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const existing = db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
       if (existing) {
         const current = parseDatasetRevision(JSON.parse(String(existing.revision_json)));
-        if (current.revisionSha256 !== approved.revisionSha256) throw new Error("Dataset rules are already approved. Use a revision transition to change them.");
+        if (current.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset rules are already approved. Use a revision transition to change them.");
         const currentHead = journal.head(key, authorize);
         if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("Dataset authority is no longer active on this host.");
         authorize(); return current;
@@ -212,7 +219,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const expected = { ...raw.expected }, migrationSql = text(raw.migrationSql, 256 * 1024), schemaSql = raw.schemaSql, source = raw.operationSource, signal = raw.signal;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured), previous = revision(key);
       if (expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId || expected.approvedRevisionHash !== previous.revisionSha256 || approved.revision !== previous.revision + 1) {
-        throw new Error("Dataset revision transition does not match the current approval.");
+        throw new DatasetHostError("conflict", "Dataset revision transition does not match the current approval.");
       }
       const authorize = () => { signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
       const compiledSource = await compile(source, approved.definition.operationsPath);
@@ -330,7 +337,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     async invoke(context: Context, raw: InvokeDatasetInput): Promise<DatasetInvocationResult> {
       const key = scope(raw), through = access(raw.access), operationId = text(raw.operationId), idempotencyKey = text(raw.idempotencyKey, 128);
       const input = parseAppBackendJson(raw.input, 64 * 1024), permitted = permissions(context, key, through);
-      if (raw.revision !== permitted.revision.revision || raw.revisionSha256 !== permitted.revision.revisionSha256) throw new Error("Dataset revision is stale. Reload it before retrying.");
+      if (raw.revision !== permitted.revision.revision || raw.revisionSha256 !== permitted.revision.revisionSha256) throw new DatasetHostError("conflict", "Dataset revision is stale. Reload it before retrying.");
       const operation = permitted.operations.find(operation => operation.operationId === operationId);
       if (!operation) denied();
       const authorize = () => {
