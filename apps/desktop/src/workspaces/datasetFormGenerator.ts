@@ -1,4 +1,4 @@
-import { parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { generateDatasetFormFrontend, type DatasetFormField } from "./datasetFormFrontend";
 
@@ -9,6 +9,7 @@ export interface DatasetFormInput {
   appRoot: string;
   title?: string;
   fieldIds: string[];
+  relationChoices?: Array<{ fieldId: string; operationId: string; labelFieldId: string }>;
 }
 
 /** Generates a consumer app. The caller obtains the revision from the approved host catalog. */
@@ -22,26 +23,47 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   if (!table || !operation || operation.tableId !== table.tableId || operation.kind !== "create" || operation.access !== "link") {
     throw new Error("Choose an approved public create action for this Collection.");
   }
-  if (!Array.isArray(input.fieldIds) || !input.fieldIds.length || input.fieldIds.length > 24 || new Set(input.fieldIds).size !== input.fieldIds.length ||
+  if (!Array.isArray(input.fieldIds) || !input.fieldIds.length || input.fieldIds.length > DATASET_MAX_FIELDS || new Set(input.fieldIds).size !== input.fieldIds.length ||
       input.fieldIds.some(id => !operation.fieldIds.includes(id))) {
-    throw new Error("Choose 1 to 24 distinct fields allowed by the create action.");
+    throw new Error(`Choose 1 to ${DATASET_MAX_FIELDS} distinct fields allowed by the create action.`);
   }
   const required = table.fields.filter(field => operation.fieldIds.includes(field.fieldId) && field.required && !Object.hasOwn(field, "default") &&
     !(field.sqlColumn === table.primaryKey && field.type === "text"));
   if (required.some(field => !input.fieldIds.includes(field.fieldId))) throw new Error("Include every required field allowed by the create action.");
+  const choices = input.relationChoices ?? [];
+  if (!Array.isArray(choices) || choices.length > input.fieldIds.length || new Set(choices.map(choice => choice.fieldId)).size !== choices.length ||
+      choices.some(choice => !input.fieldIds.includes(choice.fieldId) || table.fields.find(field => field.fieldId === choice.fieldId)?.type !== "relation")) {
+    throw new Error("Choose a public read action for each related-record field.");
+  }
+  const relationOperations: string[] = [];
   const fields: DatasetFormField[] = input.fieldIds.map(id => {
     const field = table.fields.find(field => field.fieldId === id)!;
-    if (field.type === "relation") throw new Error("This form builder cannot select related records yet. Use a custom app for this field.");
+    let relation: DatasetFormField["relation"];
+    if (field.type === "relation") {
+      const choice = choices.find(choice => choice.fieldId === id);
+      const read = revision.definition.operations.find(action => action.operationId === choice?.operationId);
+      const target = revision.definition.tables.find(candidate => candidate.tableId === field.relation!.tableId)!;
+      const key = target.fields.find(candidate => candidate.fieldId === field.relation!.fieldId)!;
+      const label = target.fields.find(candidate => candidate.fieldId === choice?.labelFieldId);
+      // A form grants the read operation itself, not merely the fields its picker displays.
+      if (!read || read.kind !== "read" || !read.readOnly || read.access !== "link" || read.tableId !== target.tableId || !label ||
+          !["text", "number", "select"].includes(label.type) || !read.fieldIds.includes(key.fieldId) || !read.fieldIds.includes(label.fieldId) ||
+          read.fieldIds.some(fieldId => fieldId !== key.fieldId && fieldId !== label.fieldId)) {
+        throw new Error("Choose an approved public read action exposing only the related record key and label.");
+      }
+      relationOperations.push(read.operationId);
+      relation = { operation: read.name, keyFieldId: key.fieldId, labelFieldId: label.fieldId, keyType: key.type as "text" | "number", many: field.relation!.many };
+    }
     return { fieldId: field.fieldId, name: field.name, type: field.type,
       required: required.some(required => required.fieldId === field.fieldId), omitWhenEmpty: Object.hasOwn(field, "default") || field.sqlColumn === table.primaryKey,
       ...(Object.hasOwn(field, "default") ? { default: field.default } : {}),
+      ...(relation ? { relation } : {}),
       ...(field.options ? { options: [...field.options] } : {}) };
   });
-  if (fields.filter(field => field.type === "attachment").length > 1) throw new Error("This form builder supports 1 file field. Use a custom app for more files.");
   const title = input.title ?? revision.definition.name;
   if (typeof title !== "string" || !title.trim() || title.length > 200 || /[\u0000-\u001f\u007f]/u.test(title)) throw new Error("Use a form title with 1 to 200 characters.");
   const capability = resolveAppDatasetCapability({ kind: "dataset", datasetId: revision.datasetId, revision: revision.revision,
-    revisionSha256: revision.revisionSha256, operationIds: [operation.operationId], createFields: [{ operationId: operation.operationId, fieldIds: input.fieldIds }] }, revision);
+    revisionSha256: revision.revisionSha256, operationIds: [...new Set([operation.operationId, ...relationOperations])], createFields: [{ operationId: operation.operationId, fieldIds: input.fieldIds }] }, revision);
   const { operations: _, ...binding } = capability;
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return { files: {

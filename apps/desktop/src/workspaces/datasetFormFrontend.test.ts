@@ -30,6 +30,65 @@ beforeEach(() => { document.body.replaceChildren(); vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("dataset form frontend", () => {
+  it("uploads every field with separate retry identities and restores the complete saved response", async () => {
+    vi.stubGlobal("FileReader", class { result = "data:application/pdf;base64,JVBERg=="; onload?: () => void; readAsDataURL() { this.onload?.(); } });
+    const fields = [field("receipt", "attachment", { required: true }), field("waiver", "attachment", { required: true })];
+    const app = mount(fields); await app.connect();
+    for (const input of document.querySelectorAll("input")) Object.defineProperty(input, "files", { value: [new File(["%PDF"], `${input.name}.pdf`)] });
+    await app.submit(); await Promise.resolve();
+    await app.reply({ ok: true, value: { file: { fileId: "receipt_abcdefghijklmnop" } } }); await Promise.resolve();
+    expect(app.requests[1]!.op).toBe("backend.upload");
+    expect(app.requests[1]!.idempotencyKey).not.toBe(app.requests[0]!.idempotencyKey);
+    await vi.advanceTimersByTimeAsync(30000); await app.submit();
+    expect(app.requests[2]!.idempotencyKey).toBe(app.requests[1]!.idempotencyKey);
+    await app.reply({ ok: true, value: { file: { fileId: "waiver_abcdefghijklmnop" } } });
+    expect(app.requests[3]).toMatchObject({ op: "backend.invoke", input: { values: { receipt: "receipt_abcdefghijklmnop", waiver: "waiver_abcdefghijklmnop" } } });
+    await vi.advanceTimersByTimeAsync(30000);
+    document.body.replaceChildren(); const reopened = mount(fields, app.store); await reopened.connect(); await reopened.submit();
+    expect(reopened.requests).toHaveLength(1);
+    expect(reopened.requests[0]).toMatchObject({ op: "backend.invoke", idempotencyKey: app.requests[3]!.idempotencyKey, input: app.requests[3]!.input });
+    await reopened.success();
+  });
+
+  it("pages and searches only explicit relation actions and submits typed keys", async () => {
+    const app = mount([field("product", "relation", { required: true, relation: { operation: "publicChoices", keyFieldId: "code", labelFieldId: "label", keyType: "number", many: false } })]);
+    await app.connect();
+    expect(app.requests[0]).toMatchObject({ op: "backend.invoke", operation: "publicChoices", input: { limit: 50 } });
+    await app.reply({ ok: true, value: { result: { rows: [{ id: 2, values: { code: 2, label: "<img src=x>" } }], nextCursor: { id: 2, value: 2 } } } });
+    expect(document.querySelector("img")).toBeNull();
+    document.querySelector("select")!.value = "2";
+    [...document.querySelectorAll("button")].find(button => button.textContent === "More choices")!.click();
+    expect(app.requests[1]!.input).toEqual({ limit: 50, after: { id: 2, value: 2 } });
+    await app.reply({ ok: true, value: { result: { rows: [{ id: 3, values: { code: 3, label: "Three" } }], nextCursor: null } } });
+    expect(document.querySelector("select")!.value).toBe("2");
+    document.querySelector<HTMLInputElement>('[type="search"]')!.value = "Three";
+    [...document.querySelectorAll("button")].find(button => button.textContent === "Search")!.click();
+    expect(app.requests[2]!.input).toEqual({ limit: 50, search: "Three" });
+    await app.reply({ ok: true, value: { result: { rows: [{ id: 3, values: { code: 3, label: "Three" } }], nextCursor: null } } });
+    document.querySelector("select")!.value = "3"; await app.submit();
+    expect(app.requests[3]).toMatchObject({ operation: "register", input: { values: { product: 3 } } }); await app.success();
+  });
+
+  it("rejects malformed choice output and does not display undeclared private fields or counts", async () => {
+    const app = mount([field("product", "relation", { relation: { operation: "publicChoices", keyFieldId: "code", labelFieldId: "label", keyType: "text", many: true } })]);
+    await app.connect();
+    await app.reply({ ok: true, value: { result: { rows: [{ id: "one", values: { code: "one", label: "Visible", secret: "PRIVATE" } }], nextCursor: null, count: 999 } } });
+    expect(document.body.textContent).not.toMatch(/PRIVATE|999|Visible/);
+    expect(document.body.textContent).toContain("Choices could not load");
+    [...document.querySelectorAll("button")].find(button => button.textContent === "Search")!.click();
+    await app.reply({ ok: false, status: 404 });
+    expect(document.querySelectorAll("select option")).toHaveLength(0);
+  });
+
+  it("accepts more than 24 fields within the byte envelope and refuses oversized answers before writing", async () => {
+    const app = mount(Array.from({ length: 128 }, (_, index) => field(`field${index}`))); await app.connect();
+    for (const input of document.querySelectorAll("input")) input.value = "answer";
+    await app.submit(); expect(Object.keys(app.requests[0]!.input!.values)).toHaveLength(128); await app.success();
+    document.body.replaceChildren(); const large = mount(Array.from({ length: 128 }, (_, index) => field(`field${index}`))); await large.connect();
+    for (const input of document.querySelectorAll("input")) input.value = "x".repeat(2000);
+    await large.submit(); expect(large.requests).toHaveLength(0); expect(status()).toContain("too long");
+  });
+
   it("submits typed stable field IDs and preserves required false booleans", async () => {
     const app = mount([field("name", "text", { name: "<img src=x>", required: true }), field("agree", "checkbox", { required: true }), field("count", "number"), field("tags", "multi-select", { options: ["A", "B"] })]);
     await app.connect(); await app.submit(); expect(app.requests).toHaveLength(0);

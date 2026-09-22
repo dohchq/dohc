@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
-import type { DatasetRequest } from "./dataset";
+import { DatasetRequest } from "./dataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:"equipment/schema.sql",operationsPath:"equipment/actions.ts",
@@ -29,6 +29,16 @@ const requests: unknown[] = [
   {action:"invoke",workspaceId:"workspace",datasetId:id(1),operationId:id(4),revision:1,revisionSha256:"a".repeat(64),input:{limit:10},idempotencyKey:"read-1"},
 ];
 describe("dataset CLI", () => {
+  it("uses the dataset field envelope for forms and parses explicit relation preparation", () => {
+    const form = { action: "createForm", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64),
+      tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: Array.from({ length: 128 }, (_, index) => id(index + 10)),
+      relationChoices: [{ fieldId: id(10), operationId: id(5), labelFieldId: id(3) }] };
+    expect(DatasetRequest.parse(form)).toEqual(form);
+    expect(() => DatasetRequest.parse({ ...form, fieldIds: [...form.fieldIds, id(999)] })).toThrow();
+    const prepare = { action: "prepareRelationChoices", workspaceId: "workspace", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64), tableId: id(2), fieldId: id(3), labelFieldId: id(4) };
+    expect(DatasetRequest.parse(prepare)).toEqual(prepare);
+    expect(() => DatasetRequest.parse({ ...prepare, access: "owner" })).toThrow();
+  });
   it.each(["describe", "invoke", "helper", "export", "restore"])("rejects the retired private app %s command before transport", async action => {
     const send = vi.fn();
     const result = await executeCli({ argv: ["app", action, JSON.stringify({ workspaceId: "workspace", publicationId: "a".repeat(64) })], request: send });
