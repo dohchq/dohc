@@ -101,13 +101,15 @@ export function createChatWrites(dependencies: {
     return identity.authorUserId;
   }
 
+  // The grant check is the last await before a durable write, so a channel
+  // downgraded while identity resolves still refuses.
   async function revalidate(
     place: ChatWritePlace, target: ChatRelayIdentityTarget, authorUserId: string | undefined,
   ) {
-    await assertWritable(place, target);
     if ((await verifiedAuthorUserId(place, target)) !== authorUserId) {
       throw new Error("Your server session changed. Try again.");
     }
+    await assertWritable(place, target);
   }
 
   // Check access, then resolve one identity. A write that awaits more work
@@ -178,10 +180,12 @@ export function createChatWrites(dependencies: {
     linkedFile(): Promise<{ objectId: string; pathHint: string }>;
   }) {
     assertOwnedWorkspace(place.workspaceId);
+    const linkedFile = await input.linkedFile();
+    assertOwnedWorkspace(place.workspaceId);
     const thread = await place.store.createThread({
       workspaceId: place.workspaceId,
       title: input.title,
-      linkedFile: await input.linkedFile(),
+      linkedFile,
     });
     afterWrite(place.workspaceId, { threadId: thread.id }, false);
     return thread;
@@ -283,11 +287,13 @@ export function createChatWrites(dependencies: {
     reply?: { authorUserId?: string };
   }) {
     const target = { threadId: input.threadId };
+    // A received share refuses before identity touches the store.
+    assertOwnedWorkspace(place.workspaceId);
     if (input.reply) {
       await revalidate(place, target, input.reply.authorUserId);
     } else {
-      await assertWritable(place, target);
       await verifiedAuthorUserId(place, target);
+      await assertWritable(place, target);
     }
     const decision = await place.store.resolveChatDecision({
       workspaceId: place.workspaceId,

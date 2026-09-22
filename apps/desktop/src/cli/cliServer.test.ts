@@ -1929,6 +1929,16 @@ describe("CLI socket server", () => {
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
   });
 
+  // Provisioning General writes outside chatWrites, so only onWrite tells
+  // the desktop to notify the renderer and queue cloud sync for it.
+  it("reports the write when listing channels provisions General, and only then", async () => {
+    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
+    expect(calls.writes).toBe(1);
+    await invoke("channels", { cwd: workspaceRoot, actor: "human" });
+    await invoke("channelsFull", { cwd: workspaceRoot, actor: "agent" });
+    expect(calls.writes).toBe(1);
+  });
+
   it("does not provision an agent when listing channels", async () => {
     if (!store) throw new Error("Store is not available");
     const result = await invoke("channels", { cwd: workspaceRoot, actor: "agent" });

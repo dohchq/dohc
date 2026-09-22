@@ -66,7 +66,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn() },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -290,14 +290,16 @@ describe("desktop CLI server callbacks", () => {
     expect(context.readOnly).toBe(true);
   });
 
-  it("hands chat writes to the shared module and only notifies the renderer after a write", async () => {
+  it("hands chat writes to the shared module and notifies and cloud-syncs every write", async () => {
     const f = fixture();
     await f.create().startDesktopCliServer();
     const options = f.options(); const context = await options.openWorkspace(f.workspace);
     expect(options.chatWrites).toBe(f.chatWrites);
     expect(options.localUserDisplayName()).toBe("Local name");
+    // Covers writes outside chatWrites, such as provisioning General.
     await options.onWrite!(context);
     expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    expect(f.dependencies.activity.queueCloudSync).toHaveBeenCalledWith("workspace");
     expect(f.dependencies.syncSharedChannelsForChatTarget).not.toHaveBeenCalled();
     expect(f.dependencies.chatDispatchService.scanWorkspace).not.toHaveBeenCalled();
   });

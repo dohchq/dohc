@@ -43,6 +43,7 @@ interface DesktopCliServerDependencies<State> {
       WorkspaceEngineCapture,
       "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
     > | null;
+    queueCloudSync(workspaceId: string): void;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -263,9 +264,12 @@ export function createDesktopCliServer<State>(
       chatWrites,
       localUserDisplayName,
       // The renderer did not make this change, so its windows hear about it
-      // here. chatWrites already synced the chat writes it made.
+      // here. Some CLI writes, such as provisioning General, skip chatWrites,
+      // so this queues cloud sync too. The sync engine debounces a second
+      // queue after a chatWrites write into one pass.
       onWrite: (workspace) => {
         notifyRenderer({ workspaceId: workspace.workspaceId });
+        activity.queueCloudSync(workspace.workspaceId);
       },
       // No renderer poll runs the sync pass on the CLI's or MCP's behalf:
       // Await (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same

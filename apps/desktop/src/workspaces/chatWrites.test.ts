@@ -152,7 +152,7 @@ describe("chat writes", () => {
   });
 
   for (const grant of ["read-only", "ended"] as const) {
-    it.each(["send", "start", "react", "decide"] as const)(`refuses %s in a ${grant} joined channel before identity or any row`, async (kind) => {
+    it.each(["send", "start", "react"] as const)(`refuses %s in a ${grant} joined channel before identity or any row`, async (kind) => {
       const test = fixture();
       test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
       await expect(test.writeEach[kind]()).rejects.toThrow("This shared channel is read-only for you.");
@@ -160,7 +160,52 @@ describe("chat writes", () => {
       expect(test.attachments).not.toHaveBeenCalled();
       expectNothingWritten(test);
     });
+
+    it(`refuses a decision in a ${grant} joined channel before any row`, async () => {
+      const test = fixture();
+      test.row.sharedChannels = [grant === "read-only" ? { ...joined, access: "read-only" } : { ...joined, ended: true }];
+      await expect(test.writeEach.decide()).rejects.toThrow("This shared channel is read-only for you.");
+      expectNothingWritten(test);
+    });
   }
+
+  // The grant check must be the last await before the row: a lookup that
+  // started under read-write cannot carry that grant into the write.
+  describe("a channel downgraded while identity resolves", () => {
+    function downgradeDuringLookup(test: ReturnType<typeof fixture>, lookup: number) {
+      let calls = 0;
+      test.chatRelayIdentityFor.mockImplementation(async () => {
+        calls += 1;
+        if (calls === lookup) test.row.sharedChannels = [{ ...joined, access: "read-only" }];
+        return { joinedChannel: null, authorUserId: "user-1" };
+      });
+    }
+
+    it("refuses a decision without a reply", async () => {
+      const test = fixture();
+      downgradeDuringLookup(test, 1);
+      await expect(test.writeEach.decide()).rejects.toThrow("This shared channel is read-only for you.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses a decision that follows its reply", async () => {
+      const test = fixture();
+      downgradeDuringLookup(test, 1);
+      await expect(test.writes.resolveDecision(test.place, {
+        threadId: "thread", messageId: "question", resolvedByMessageId: "message",
+        reply: { authorUserId: "user-1" },
+      })).rejects.toThrow("This shared channel is read-only for you.");
+      expectNothingWritten(test);
+    });
+
+    it("refuses a message whose final lookup runs after attachments", async () => {
+      const test = fixture();
+      downgradeDuringLookup(test, 2);
+      await expect(test.writeEach.send()).rejects.toThrow("This shared channel is read-only for you.");
+      expect(test.events).toEqual(["attachments"]);
+      expectNothingWritten(test);
+    });
+  });
 
   it.each(["send", "start", "react", "decide", "file"] as const)("refuses %s in a received share before the store", async (kind) => {
     const test = fixture();
