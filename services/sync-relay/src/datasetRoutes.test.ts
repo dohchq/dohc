@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -205,6 +205,56 @@ it("resolves a desktop recipient's Collection grant from the named share route",
   expect((await f.http("shares/s/datasets", undefined, { ...named, "x-dohc-dataset-grant": "g" })).status).toBe(404);
   f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='desktop-helper'").run());
   expect((await invoke()).status).toBe(404);
+});
+it("binds named saved pages to grant, discovery, schema and lifecycle authority without exposing that metadata", async () => {
+  const f = await httpFixture(); await f.activate();
+  for (const user of ["helper", "stranger"]) f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES(?, 's','user',?,NULL,'view',1,'active',1,NULL,NULL)`).run(`${user}-offline`, user));
+  const named = { authorization: "Bearer helper" };
+  const grant = { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true };
+  const token = async (headers = named) => {
+    const response = await f.http("shares/s/datasets", undefined, headers);
+    expect(response.status).toBe(200);
+    const digest = response.headers.get("x-dohc-dataset-access"); expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    return digest;
+  };
+  const empty = await token();
+  await f.http(`${f.path}/grants`, { grantId: "helper-offline", grant });
+  const allowed = await token(); expect(allowed).not.toBe(empty);
+  expect(await token({ authorization: "Bearer stranger" })).not.toBe(allowed);
+  await f.http(`${f.path}/grants`, { grantId: "helper-offline", grant: { ...grant, discover: false } });
+  const hidden = await token(); expect(hidden).not.toBe(allowed);
+  await f.http(`${f.path}/grants`, { grantId: "helper-offline", grant });
+  const visible = await token();
+  expect((await f.http(`${f.path}/archive`, {})).status).toBe(200);
+  expect(await token()).not.toBe(visible);
+  const archived = await token();
+  expect((await f.http(`${f.path}/restore`, {})).status).toBe(200);
+  expect(await token()).not.toBe(archived);
+  const restored = await token();
+  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id='helper-offline'").run());
+  expect(await token()).not.toBe(restored);
+  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='helper-offline'").run());
+  const denied = await f.http("shares/s/datasets", undefined, named);
+  expect(denied.status).toBe(404); expect(denied.headers.has("x-dohc-dataset-access")).toBe(false);
+});
+
+it("discards named read bytes if access changes after dispatch instead of labeling them with the new grant", async () => {
+  const f = await httpFixture(); await f.activate();
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('race-offline','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  await f.http(`${f.path}/grants`, { grantId: "race-offline", grant: { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true } });
+  const original = f.host.list;
+  const spy = vi.spyOn(f.host, "list").mockImplementation((...args) => {
+    const result = original(...args);
+    f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id='race-offline'").run());
+    return result;
+  });
+  try {
+    const response = await f.http("shares/s/datasets", undefined, { authorization: "Bearer helper" });
+    expect(response.status).toBe(409); expect(await response.text()).not.toContain("Requests");
+    expect(response.headers.get("x-dohc-dataset-access")).toMatch(/^[a-f0-9]{64}$/);
+  } finally { spy.mockRestore(); }
 });
 it("mediates named native file uploads and downloads through explicitly granted attachment actions", async () => {
   const f = await httpFixture();

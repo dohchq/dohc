@@ -22,7 +22,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   currentCredentialGeneration?(): number;
-  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">>;
+  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
@@ -48,7 +48,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
         current();
         if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
-        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const result = data.inspect ? await data.inspect(input.datasetId) : { dataset: await data.describe(input.datasetId) }; current(); return { kind: "description" as const, ...result }; }
         if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
         if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
         if (input.action === "invoke") {
