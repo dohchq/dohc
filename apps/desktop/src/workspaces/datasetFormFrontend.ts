@@ -71,9 +71,10 @@ const status = element("p"); status.className = "status"; status.setAttribute("r
 status.setAttribute("aria-live", "polite"); status.setAttribute("aria-atomic", "true"); status.tabIndex = -1;
 const another = element("button", "Submit another response"); another.type = "button"; another.hidden = true;
 form.append(fields, submit); main.append(title, intro, form, status, another);
+fields.disabled = true; submit.disabled = true;
 (document.getElementById("root") || document.body).append(main);
 
-let port, pending, attempt, busy = false, received = false;
+let port, pending, attempt, busy = false, received = false, ready = false;
 const finish = result => {
   if (!pending) return;
   const item = pending; pending = undefined; clearTimeout(item.timer); item.resolve(result);
@@ -82,6 +83,13 @@ const send = () => {
   if (!port || !pending || pending.sent) return;
   pending.sent = true;
   try { port.postMessage(pending.message); } catch { finish({ uncertain: true }); }
+};
+const validAttempt = value => {
+  if (!record(value) || !Object.hasOwn(value, "attempt")) return false;
+  if (value.attempt === null) return true;
+  const item = value.attempt;
+  return record(item) && typeof item.token === "string" && /^[A-Za-z0-9_-]{43}$/.test(item.token) &&
+    typeof item.idempotencyKey === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(item.idempotencyKey) && record(item.input);
 };
 const receiveChannel = event => {
   if (port || event.source !== window.parent || event.source === window) return;
@@ -92,6 +100,7 @@ const receiveChannel = event => {
     if (!pending || !record(data) || data.id !== pending.message.id) return;
     const value = data.value;
     if (data.ok === true && record(value)) {
+      if (pending.message.op === "backend.attempt" && validAttempt(value)) { finish(value); return; }
       if (pending.message.op === "backend.upload" && record(value.file) && typeof value.file.fileId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value.file.fileId)) {
         finish({ fileId: value.file.fileId }); return;
       }
@@ -105,10 +114,29 @@ const receiveChannel = event => {
       const message = data.status === 409 && record(data.error) && typeof data.error.message === "string" &&
         data.error.message.length > 0 && data.error.message.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(data.error.message)
         ? data.error.message : "Check your answers and try again.";
-      finish({ refused: true, message });
+      finish({ refused: true, definitive: data.status === 409 && record(data.error) && typeof data.error.code === "string", message });
     } else finish({ uncertain: true });
   };
-  port.start(); send();
+  port.start();
+  request({ op: "backend.attempt", operation: definition.operation, request: { action: "get" } }).then(result => {
+    if (!result || result.uncertain || result.refused) { status.textContent = "This form could not load its pending response. Reload to try again."; status.focus(); return; }
+    if (result.attempt) {
+      attempt = { values: record(result.attempt.input.values) ? result.attempt.input.values : {}, key: result.attempt.idempotencyKey,
+        token: result.attempt.token, input: result.attempt.input, uncertain: true };
+      for (const { field, control } of controls) {
+        const value = attempt.values[field.fieldId];
+        if (value === undefined || value === null) continue;
+        if (field.type === "attachment") { control.disabled = true; continue; }
+        if (field.type === "checkbox") control.checked = value === true;
+        else if (field.type === "multi-select") { for (const option of control.options) option.selected = Array.isArray(value) && value.includes(option.value); }
+        else if (field.type === "select") control.value = String(value);
+        else control.value = String(value);
+      }
+      status.textContent = "A pending response is ready. Submit to try again.";
+      submit.textContent = "Try again";
+    }
+    ready = true; fields.disabled = !!attempt; submit.disabled = false;
+  });
 };
 window.addEventListener("message", receiveChannel);
 const request = message => new Promise(resolve => {
@@ -154,13 +182,29 @@ const readFile = file => new Promise(resolve => {
   reader.onerror = reader.onabort = () => resolve(null);
   try { reader.readAsDataURL(file); } catch { resolve(null); }
 });
+const saveAttempt = async () => {
+  if (attempt.token) return { saved: true };
+  const result = await request({ op: "backend.attempt", operation: definition.operation,
+    request: { action: "save", idempotencyKey: attempt.key, input: { values: attempt.values } } });
+  if (!result || result.uncertain || result.refused || !result.attempt) return result?.refused ? result : { uncertain: true };
+  if (attempt.key !== result.attempt.idempotencyKey) attempt.uncertain = true;
+  attempt.token = result.attempt.token; attempt.key = result.attempt.idempotencyKey;
+  attempt.input = result.attempt.input;
+  attempt.values = record(result.attempt.input.values) ? result.attempt.input.values : {};
+  return { saved: true };
+};
+const clearAttempt = async () => {
+  if (!attempt?.token) return true;
+  const result = await request({ op: "backend.attempt", operation: definition.operation, request: { action: "clear", token: attempt.token } });
+  return !!result && !result.uncertain && !result.refused && result.attempt === null;
+};
 form.addEventListener("submit", async event => {
-  event.preventDefault(); if (busy || received) return;
+  event.preventDefault(); if (busy || received || !ready) return;
   if (!attempt) {
     const draft = readDraft(); if (!draft) return;
     attempt = { ...draft, key: "submit:" + crypto.randomUUID(), uncertain: false };
   }
-  busy = true; fields.disabled = true; submit.disabled = true; submit.textContent = "Submitting…";
+  busy = true; fields.disabled = true; submit.disabled = true; submit.textContent = "Submitting\u2026";
   status.textContent = "Sending your response. Keep this page open until it is confirmed.";
   if (attempt.upload) {
     const upload = attempt.upload;
@@ -169,32 +213,39 @@ form.addEventListener("submit", async event => {
       name: upload.file.name, contentType: upload.file.type || "application/octet-stream", bytesBase64: upload.bytesBase64 }) : { refused: true };
     if (!result.fileId) {
       busy = false; submit.disabled = false; submit.textContent = "Try again";
-      if (result.refused) {
-        // No create request has run, so changing a refused file cannot duplicate a response.
-        attempt = undefined; fields.disabled = false; submit.textContent = "Submit";
-        status.textContent = "The file was not accepted. Choose another file and try again.";
-      } else status.textContent = "The file upload is unconfirmed. Try again with the same file. Keep this page open.";
+      if (result.refused) { attempt = undefined; fields.disabled = false; submit.textContent = "Submit"; status.textContent = "The file was not accepted. Choose another file and try again."; }
+      else status.textContent = "The file upload is unconfirmed. Try again with the same file. Keep this page open.";
       status.focus(); return;
     }
     attempt.values[upload.fieldId] = result.fileId; attempt.upload = undefined;
   }
-  const result = await request({ op: "backend.invoke", operation: definition.operation, idempotencyKey: attempt.key, input: { values: attempt.values } });
+  const saved = await saveAttempt();
+  if (!saved.saved) {
+    busy = false; submit.disabled = false; submit.textContent = "Try again";
+    status.textContent = "The pending response is unconfirmed. Try again with the same response.";
+    status.focus(); return;
+  }
+  const result = await request({ op: "backend.invoke", operation: definition.operation, idempotencyKey: attempt.key, input: attempt.input });
   busy = false; submit.disabled = false;
   if (result.saved) {
-    attempt = undefined; received = true; form.hidden = true; intro.hidden = true; another.hidden = false;
+    received = true; form.hidden = true; intro.hidden = true; another.hidden = false;
     status.textContent = "Response received."; status.focus();
-  } else if (result.refused && !attempt.uncertain) {
-    attempt = undefined; fields.disabled = false; submit.textContent = "Submit";
-    status.textContent = "Response not saved. " + result.message; status.focus();
+  } else if (result.definitive && !attempt.uncertain) {
+    busy = true; submit.disabled = true;
+    if (await clearAttempt()) { attempt = undefined; fields.disabled = false; submit.textContent = "Submit"; status.textContent = "Response not saved. " + result.message; }
+    else { attempt.uncertain = true; submit.textContent = "Try again"; status.textContent = "Your response may have been saved. Try again to confirm the same response."; }
+    busy = false; submit.disabled = false; status.focus();
   } else {
     attempt.uncertain = true; submit.textContent = "Try again";
-    status.textContent = "Your response may have been saved. Try again to confirm the same response. Keep this page open; reloading loses this retry.";
+    status.textContent = "Your response may have been saved. Try again to confirm the same response.";
     status.focus();
   }
 });
-another.addEventListener("click", () => {
-  form.reset(); fields.disabled = false; form.hidden = false; intro.hidden = false; another.hidden = true; received = false;
-  status.textContent = ""; submit.textContent = "Submit"; (controls[0]?.control || submit).focus();
+another.addEventListener("click", async () => {
+  if (busy) return;
+  busy = true; another.disabled = true;
+  if (!await clearAttempt()) { busy = false; another.disabled = false; status.textContent = "The pending response is still stored. Try again to clear it."; status.focus(); return; }
+  form.reset(); fields.disabled = false; form.hidden = false; intro.hidden = false; another.hidden = true; received = false; attempt = undefined;
+  status.textContent = ""; submit.textContent = "Submit"; another.disabled = false; busy = false; (controls[0]?.control || submit).focus();
 });
-window.addEventListener("beforeunload", event => { if (attempt) { event.preventDefault(); event.returnValue = ""; } });
 `;

@@ -140,3 +140,27 @@ it('bounds backend workflow bursts without changing collection or status admissi
   expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(503);
   expect((await app.read('/status')).status).toBe(204);
 });
+
+
+it('authenticates refresh from its cookie, rebuilds current bytes, and rotates only the parent proof', async () => {
+  const f=fixture(),app=await launch(f);
+  expect((await app.read()).status).toBe(200);
+  const refresh=(cookie=app.cookie,extra:Record<string,string>={})=>f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie,...extra}}));
+  for(const [cookie,extra]of [['',{}],[app.cookie+'; '+app.cookie,{}],[app.cookie,{origin:'null'}],[app.cookie,{'sec-fetch-site':'cross-site'}]]as [string,Record<string,string>][])expect((await refresh(cookie,extra)).status).toBe(404);
+  const response=await refresh();expect(response.status).toBe(200);
+  const html=await response.text(),proof=/const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!;
+  expect(proof).not.toBe(app.proof);expect(html).toContain("history.replaceState(null,'','/bootstrap')");
+  expect((await app.read('/document')).status).toBe(404);
+  const read=()=>app.read('/document',{'x-dohc-app-proof':proof});
+  expect((await read()).status).toBe(200);expect((await read()).status).toBe(404);
+  expect(f.requests.filter(request=>new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(2);
+  expect((await f.redeem(app.handoff)).status).toBe(404);
+});
+
+it('refresh refuses changed authority and never extends the original session deadline',async()=>{
+  for(const change of ['narrow','revoke']as const){const f=fixture(),app=await launch(f);f[change]();expect((await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}))).status).toBe(404);}
+  const f=fixture(),app=await launch(f);f.advance(590000);
+  const refresh=()=>f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}));
+  const refreshed=await refresh();expect(refreshed.status).toBe(200);expect(refreshed.headers.get('set-cookie')).toContain('Max-Age=10');
+  f.advance(10000);expect((await refresh()).status).toBe(404);
+});

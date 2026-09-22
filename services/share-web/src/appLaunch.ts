@@ -27,7 +27,7 @@ export type AppNamedBrowserMaterial =
   | { ok: false; status: 401 | 403 | 404 | 503 };
 type LaunchMaterial = Extract<LinkBrowserMaterial | AppNamedBrowserMaterial, { ok: true }>;
 const namedMaterial = (material: LaunchMaterial): material is Extract<AppNamedBrowserMaterial, { ok: true }> => "kind" in material && material.kind === "named";
-interface Launch { origin: string; publicationId: string; material: LaunchMaterial; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string; staged?: ReturnType<typeof createAppDocument>; stagedExpires?: number }
+interface Launch { origin: string; publicationId: string; material: LaunchMaterial; revision: number; expires: number; handoffHash?: string; cookieHash?: string; proofHash?: string; staged?: ReturnType<typeof createAppDocument>; stagedExpires?: number; rebuilding?: boolean }
 
 async function boundedBytes(response: Request | Response, max: number, signal: AbortSignal): Promise<Uint8Array> {
   const reader = response.body?.getReader(); if (!reader) return new Uint8Array();
@@ -118,7 +118,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const url = new URL(request.url), host = request.headers.get("host") ?? ""; prune();
       const statusRequest = url.pathname === "/status" && appHost(host);
       const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
-      if (request.method !== "POST" || url.search || request.signal.aborted) return refusal();
+      const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
+      if ((request.method !== "POST" && !(bootstrapRequest && request.method === "GET")) || url.search || request.signal.aborted) return refusal();
       if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return unavailable();
       const issue = host === viewerHost && url.pathname === "/api/apps/launch";
       if (!issue && !appHost(host)) return refusal();
@@ -145,30 +146,41 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         }
         const launch = launches.get(host); if (!launch) return refusal();
         if (url.pathname === "/bootstrap") {
-          const origin = request.headers.get("origin");
-          // The viewer's no-referrer policy makes cross-site form POSTs use Origin: null.
-          if ((origin !== config.viewerOrigin && origin !== "null") || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
-          const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
-          const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
+          let cookie: string;
+          if (request.method === "GET") {
+            const origin = request.headers.get("origin");
+            const supplied = (request.headers.get("cookie") ?? "").split(";").map(value => value.trim()).filter(value => value.startsWith(`${COOKIE}=`));
+            cookie = supplied.length === 1 ? supplied[0]!.slice(COOKIE.length + 1) : "";
+            if ((origin !== null && origin !== launch.origin) || ["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site") ?? "") || !TOKEN.test(cookie) || hash(cookie) !== launch.cookieHash) return refusal();
+          } else {
+            const origin = request.headers.get("origin");
+            // The viewer's no-referrer policy makes cross-site form POSTs use Origin: null.
+            if ((origin !== config.viewerOrigin && origin !== "null") || request.headers.get("content-type") !== "application/x-www-form-urlencoded" || !launch.handoffHash) return refusal();
+            const form = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(await boundedBytes(request, 128, signal)));
+            const handoff = form.get("handoff"); if ([...form.keys()].join() !== "handoff" || !handoff || !TOKEN.test(handoff) || hash(handoff) !== launch.handoffHash) return refusal();
+            cookie = token();
+            // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
+            delete launch.handoffHash;
+          }
+          if (launch.rebuilding || !sessionRate.allow(host, now())) return unavailable();
           if (stagedSlots.size >= 2) {
             const oldestReady = [...stagedSlots].find(value => value.staged !== undefined);
             if (!oldestReady) return unavailable();
             oldestReady.staged = undefined; stagedSlots.delete(oldestReady);
           }
-          stagedSlots.add(launch);
-          // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
-          delete launch.handoffHash;
+          launch.rebuilding = true; stagedSlots.add(launch);
           let doc: ReturnType<typeof createAppDocument>;
           try {doc = await document(launch, signal); signal.throwIfAborted();}
           catch (error) {stagedSlots.delete(launch); throw error;}
+          finally {launch.rebuilding = false;}
           launch.staged = doc; launch.stagedExpires = now() + HANDOFF_MS;
           if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
-          const cookie = token(), proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); launch.expires = now() + SESSION_MS;
-          const script = `(()=>{const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${SESSION_MS});addEventListener('pagehide',stop,{once:true});})();`;
+          const proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); if (request.method === "POST") launch.expires = now() + SESSION_MS;
+          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
           return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shared app</title></head><body style="margin:0"><p id="status" role="status" style="margin:0">Opening app</p><script>${script}</script></body></html>`,
-            { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cross-origin-opener-policy": "same-origin", "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()", "set-cookie": `${COOKIE}=${cookie}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}` } });
+            { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cross-origin-opener-policy": "same-origin", "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()", "set-cookie": `${COOKIE}=${cookie}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(1, Math.ceil((launch.expires - now()) / 1000))}` } });
         }
         const cookies = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
         const cookie = cookies.length === 1 ? cookies[0]!.slice(COOKIE.length + 1) : "", proof = request.headers.get("x-dohc-app-proof") ?? "";
