@@ -104,6 +104,71 @@ it("creates and manages one dataset through authenticated routes and the public 
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
 });
 
+it("archives and restores a dataset with its rows, app bindings, and retry receipts intact", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId = f.publish(), secondPublicationId = f.publish("a".repeat(64));
+  for (const app of [publicationId, secondPublicationId]) expect((await f.http(`${f.path}/binding`, {publicationId: app, enabled: true})).status).toBe(200);
+  const publicPath = `link/app-publications/${publicationId}/backend/invoke`;
+  const submission = {authorityRevision: 1, operation: "submit", input: {name: "Retained"}, idempotencyKey: "retained-submission"};
+  expect((await f.http(publicPath, submission, f.publicHeaders)).status).toBe(200);
+  const page = await (await f.http(`${f.path}/lifecycle?limit=1`)).json();
+  expect(page).toMatchObject({archived: false, generation: 0, apps: [{appId: [publicationId, secondPublicationId].sort()[0]}]});
+  expect(page.nextCursor).toBe(page.apps[0].appId);
+  const next = await (await f.http(`${f.path}/lifecycle?limit=1&after=${page.nextCursor}`)).json();
+  expect(next.apps.map((app: {appId: string}) => app.appId)).toEqual([[publicationId, secondPublicationId].sort()[1]]);
+  expect(next.nextCursor).toBeNull();
+
+  const archived = await f.http(`${f.path}/archive`, {}); expect(archived.status).toBe(200);
+  expect(await archived.json()).toMatchObject({archived: true, generation: 1});
+  const usage = f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!.storage_bytes;
+  expect(await (await f.http(`${f.path}/archive`, {})).json()).toMatchObject({archived: true, generation: 1});
+  expect(f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!.storage_bytes).toBe(usage);
+  expect(await (await f.http("w/datasets")).json()).toEqual({datasets: [], nextCursor: null});
+  expect(await (await f.http("w/datasets?includeArchived=true")).json()).toMatchObject({datasets: [{datasetId: id(1), archived: true}]});
+  expect((await f.http(f.path)).status).toBe(409);
+  expect(await (await f.http(`${f.path}?includeArchived=true`)).json()).toMatchObject({datasetId: id(1), archived: true, operations: []});
+  expect((await f.invoke()).status).toBe(409);
+  expect((await f.http(publicPath, {...submission, idempotencyKey: "while-archived"}, f.publicHeaders)).status).toBe(409);
+
+  expect(await (await f.http(`${f.path}/restore`, {})).json()).toEqual({archived: false, generation: 2});
+  expect(await (await f.http(`${f.path}/restore`, {})).json()).toEqual({archived: false, generation: 2});
+  expect(await (await f.http(publicPath, submission, f.publicHeaders)).json()).toMatchObject({replayed: true, revision: 1});
+  expect(await (await f.invoke()).json()).toMatchObject({result: [{name: "Retained"}]});
+  expect(await (await f.http(`${f.path}/lifecycle`)).json()).toMatchObject({archived: false, generation: 2, apps: expect.arrayContaining([{appId: publicationId, binding: expect.any(Object)}, {appId: secondPublicationId, binding: expect.any(Object)}])});
+  f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w' AND dataset_id=?").run(id(1)));
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_lifecycle").get()!.n).toBe(0);
+});
+
+it("restricts lifecycle management and archived discovery to owners and rejects malformed requests", async () => {
+  const f = await httpFixture(); await f.activate();
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const helper = {authorization: "Bearer helper", "x-dohc-dataset-grant": "helper-grant"};
+  expect((await f.http(`${f.path}/grants`, {grantId: "helper-grant", grant: {revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true}})).status).toBe(200);
+  for (const headers of [helper, {authorization: "Bearer stranger"}]) {
+    expect((await f.http(`${f.path}/lifecycle`, undefined, headers)).status).toBe(404);
+    for (const action of ["archive", "restore"]) expect((await f.http(`${f.path}/${action}`, {}, headers)).status).toBe(404);
+    expect((await f.http("w/datasets?includeArchived=true", undefined, headers)).status).toBe(404);
+    expect((await f.http(`${f.path}?includeArchived=true`, undefined, headers)).status).toBe(404);
+  }
+  for (const query of ["includeArchived=1", "includeArchived=", "includeArchived=TRUE", "includeArchived=true&includeArchived=false"]) {
+    expect((await f.http(`w/datasets?${query}`)).status).toBe(400);
+    expect((await f.http(`${f.path}?${query}`)).status).toBe(400);
+  }
+  for (const suffix of ["?limit=1", "?after=x", "/lifecycle?includeArchived=true", "/lifecycle?limit=101", "/lifecycle?after=", "/lifecycle?limit=1&limit=2"]) {
+    expect((await f.http(`${f.path}${suffix}`)).status).toBe(400);
+  }
+  for (const action of ["archive", "restore"]) {
+    expect((await f.http(`${f.path}/${action}`)).status).toBe(405);
+    expect((await f.http(`${f.path}/${action}`, {userId: "owner"})).status).toBe(400);
+    expect((await f.http(`${f.path}/${action}?includeArchived=true`, {})).status).toBe(400);
+  }
+  expect((await f.http(`${f.path}/lifecycle`, {})).status).toBe(405);
+  expect((await f.http("w/datasets?includeArchived=false", undefined, helper)).status).toBe(200);
+  await f.http(`${f.path}/archive`, {});
+  expect(await (await f.http("w/datasets", undefined, helper)).json()).toEqual({datasets: [], nextCursor: null});
+});
+
 it("uses verified named grant membership and explicit data grants without source Edit", async () => {
   const f = await httpFixture(); await f.activate();
   f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)

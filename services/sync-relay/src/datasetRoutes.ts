@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,12 +88,15 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
       } finally {release();}
     }
-    const read = ["list", "describe", "artifacts", "permissions", "history"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
-    const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"] : ["after", "limit"];
+    const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"]
+      : route.action === "list" ? ["after", "limit", "includeArchived"]
+      : route.action === "describe" ? ["includeArchived"]
+      : route.action === "permissions" || route.action === "lifecycle" ? ["after", "limit"] : [];
     if ([...query.keys()].some(key => !allowedQuery.includes(key)) || allowedQuery.some(key => query.getAll(key).length > 1) ||
-      (query.size && route.action !== "list" && route.action !== "permissions" && route.action !== "history")) throw badRequest("Invalid dataset query.");
+      (query.has("includeArchived") && !["true", "false"].includes(query.get("includeArchived")!))) throw badRequest("Invalid dataset query.");
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
     const scope = {workspaceId: route.workspaceId, datasetId: route.datasetId!};
     const release = admit({dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]), participant: auth.userId,
@@ -101,13 +104,19 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
     try {
       return await response(async () => {
         signal.throwIfAborted();
-        const page = {after: query.get("after") ?? undefined, limit: query.has("limit") ? positive(Number(query.get("limit"))) : undefined};
-        if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page});
-        if (route.action === "describe") return host.describe(auth, scope);
+        const page = {after: query.has("after") ? text(query.get("after")) : undefined, limit: query.has("limit") ? positive(Number(query.get("limit"))) : undefined};
+        const includeArchived = query.get("includeArchived") === "true";
+        if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page, includeArchived});
+        if (route.action === "describe") return host.describe(auth, {...scope, includeArchived});
+        if (route.action === "lifecycle") return host.lifecycle(auth, {...scope, ...page});
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        if (route.action === "archive" || route.action === "restore") {
+          record(raw, []);
+          return route.action === "archive" ? host.archiveDataset(auth, scope) : host.restoreDataset(auth, scope);
+        }
         if (route.action === "upload") {
           const body = record(raw, ["revision", "revisionSha256", "idempotencyKey", "name", "contentType", "bytesBase64", ...(route.named ? ["fieldId"] : [])]);
           let parsed; try {parsed = parseAppBackendUploadRequest({authorityRevision: positive(body.revision), idempotencyKey: body.idempotencyKey, name: body.name, contentType: body.contentType, bytesBase64: body.bytesBase64});} catch {throw badRequest("Invalid dataset upload.");}
