@@ -70,7 +70,7 @@ it("creates and manages one dataset through authenticated routes and the public 
   const publicationId = f.publish(), publicPath = `link/app-publications/${publicationId}/backend/invoke`;
   const listing = await (await f.http("w/app-publications")).json();
   const listed = listing.publications.find((row: { publicationId: string }) => row.publicationId === publicationId);
-  expect(listed).toMatchObject({ datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6)] }, backendCapability: null, collectionCapability: null });
+  expect(listed).toMatchObject({ datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6), id(8)] }, backendCapability: null, collectionCapability: null });
   expect(JSON.stringify(listed)).not.toContain(operationSource);
   const body = {authorityRevision: 1, operation: "submit", input: {name: "Friend"}, idempotencyKey: "submission"};
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
@@ -134,6 +134,13 @@ it("migrates through the owner route and removes retained history with dataset a
   expect(migrated.status).toBe(200);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog_history").get()?.n).toBe(1);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_checkpoint_history").get()?.n).toBe(1);
+  f.storage.tx(() => {
+    for (const [stageId, workspaceId, datasetId] of [["pending-owned", "w", id(1)], ["pending-other-dataset", "w", id(99)], ["pending-other-workspace", "other", id(1)]]) {
+      if (workspaceId === "other") f.storage.db.prepare("INSERT OR IGNORE INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES('other','owner',1)").run();
+      f.storage.db.prepare("INSERT INTO dohc_dataset_checkpoints VALUES(?,?,?,?,?,?,?,?)").run(stageId, workspaceId, datasetId, 1, "a".repeat(64), 0, 0, 1);
+      f.storage.db.prepare("INSERT INTO dohc_dataset_checkpoint_chunks VALUES(?,?,?,?)").run(stageId, 0, new Uint8Array([1]), "b".repeat(64));
+    }
+  });
   const current = f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes;
   const dataset = f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id='w'").get()!.storage_bytes;
   f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w'").run());
@@ -141,6 +148,8 @@ it("migrates through the owner route and removes retained history with dataset a
   for (const table of ["dohc_dataset_catalog_history", "dohc_dataset_checkpoint_history", "dohc_dataset_catalog", "dohc_dataset_journals"]) {
     expect(f.storage.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0);
   }
+  expect(f.storage.db.prepare("SELECT stage_id FROM dohc_dataset_checkpoints ORDER BY stage_id").all().map(row => row.stage_id)).toEqual(["pending-other-dataset", "pending-other-workspace"]);
+  expect(f.storage.db.prepare("SELECT stage_id FROM dohc_dataset_checkpoint_chunks ORDER BY stage_id").all().map(row => row.stage_id)).toEqual(["pending-other-dataset", "pending-other-workspace"]);
 });
 
 const upload = {authorityRevision: 1, idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png",

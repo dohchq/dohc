@@ -162,6 +162,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
       accountCreation(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes, true); },
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+      accountCheckpointStage(_auth, allocation) { account(allocation.scope.workspaceId, allocation.scope.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       operationResources(_auth, request) { return files.resources(request, request.authority, request.input); },
     });
@@ -176,6 +177,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_events WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_journals WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN (
+          SELECT stage_id FROM dohc_dataset_checkpoints WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
+        DELETE FROM dohc_dataset_checkpoints WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
     return {
