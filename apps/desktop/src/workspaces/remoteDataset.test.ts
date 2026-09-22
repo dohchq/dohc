@@ -42,6 +42,17 @@ describe("remote Collection authority", () => {
     await f.data.setGrant!({ action: "removeGrant", workspaceId: "workspace", datasetId: id(1), principalKey: "stored-principal" });
     expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ principalKey: "stored-principal", grant: null });
   });
+  it("validates scoped history pages and fails closed on another dataset or extra private fields", async () => {
+    const f = fixture();
+    const entry = { revision: 3, operation: "submit", callerReference: "a".repeat(64), recordedAtMs: 1, approvedRevisionHash: "b".repeat(64), changesetBytes: 10, attachmentCount: 0 };
+    const page = { datasetId: id(1), headRevision: 3, entries: [entry], nextBeforeRevision: 3 };
+    f.relay.mockResolvedValue(page);
+    expect(await f.data.history({ datasetId: id(1), beforeRevision: 4, limit: 1 })).toEqual(page);
+    expect(f.relay.mock.calls[0]![1]).toBe(`/sync/workspace/datasets/${id(1)}/history?beforeRevision=4&limit=1`);
+    f.relay.mockResolvedValue({ ...page, datasetId: id(9) }); await expect(f.data.history({ datasetId: id(1) })).rejects.toThrow("invalid");
+    f.relay.mockResolvedValue({ ...page, entries: [{ ...entry, idempotencyKey: "secret" }] }); await expect(f.data.history({ datasetId: id(1) })).rejects.toThrow();
+    f.relay.mockResolvedValue(page); await expect(f.data.history({ datasetId: id(1), beforeRevision: 3 })).rejects.toThrow("invalid");
+  });
   it("reads approved artifacts and invokes exactly the requested revision without local fallback", async () => {
     const f = fixture();
     expect(await f.data.list({ limit: 10 })).toEqual({ datasets: [description], nextCursor: null });

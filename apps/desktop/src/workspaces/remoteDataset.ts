@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -12,6 +12,7 @@ import { credentialScopedOperation } from "./credentialScopedOperation";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 
 export interface OwnerDatasetData {
+  history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
   list(input: { after?: string; limit?: number }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string): Promise<DatasetDescription>;
   approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
@@ -57,6 +58,15 @@ export function createRemoteDatasetData(input: {
       const result = await request(`${path(value.datasetId)}/grant`, value.action === "setGrant"
         ? { grantId: value.grantId, grant: value.grant } : { principalKey: value.principalKey, grant: null });
       z.object({ ok: z.literal(true) }).strict().parse(result);
+    },
+    async history(page) {
+      const query = new URLSearchParams();
+      if (page.beforeRevision !== undefined) query.set("beforeRevision", String(z.number().int().positive().parse(page.beforeRevision)));
+      if (page.limit !== undefined) query.set("limit", String(z.number().int().min(1).max(100).parse(page.limit)));
+      const result = DatasetHistoryPage.parse(await request(`${path(page.datasetId)}/history${query.size ? `?${query}` : ""}`));
+      if (result.datasetId !== page.datasetId || result.entries.some((row, index) => row.revision >= (index ? result.entries[index - 1]!.revision : page.beforeRevision ?? Number.MAX_SAFE_INTEGER)) ||
+        result.nextBeforeRevision !== null && result.nextBeforeRevision !== result.entries.at(-1)?.revision) throw new Error("The server returned an invalid Collection history page.");
+      return result;
     },
     async list(page) {
       const query = new URLSearchParams();
@@ -177,7 +187,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -191,6 +201,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
       return { datasets: remoteRows, nextCursor: localPage.nextCursor };
     },
     describe: async datasetId => (await target(datasetId)).describe(datasetId),
+    history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
     invoke: async value => (await target(value.datasetId)).invoke(value),
     upload: async value => (await target(value.datasetId)).upload(value),

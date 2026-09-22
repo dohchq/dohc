@@ -190,7 +190,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       migrate(auth: AppBackendAuth, input: Parameters<typeof host.migrate>[1]) {
         return host.migrate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
-      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, publication,
+      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },

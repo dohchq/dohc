@@ -67,6 +67,21 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   return { host, db, journal, supervisor, activate, invoke, binding };
 }
 
+it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
+  const f = await fixture(); await f.activate();
+  for (const key of ["secret-retry-1", "secret-retry-2", "secret-retry-3"]) await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "private payload" }, idempotencyKey: key });
+  const first = f.host.history("owner", { ...scope, limit: 2 });
+  expect(first.entries.map(entry => entry.revision)).toEqual([3, 2]); expect(first.nextBeforeRevision).toBe(2);
+  expect(first.entries[0]).toMatchObject({ operation: "create", attachmentCount: 0, approvedRevisionHash: prepared.revision.revisionSha256 });
+  expect(first.entries[0]!.callerReference).toMatch(/^[a-f0-9]{64}$/);
+  expect(JSON.stringify(first)).not.toMatch(/secret-retry|private payload|resultJson|payloadSha256|idempotencyKey|proposalId/);
+  const second = f.host.history("owner", { ...scope, beforeRevision: first.nextBeforeRevision!, limit: 2 });
+  expect(second.entries.map(entry => entry.revision)).toEqual([1]); expect(second.nextBeforeRevision).toBeNull();
+  for (const caller of ["helper", "friend"] as const) expect(() => f.host.history(caller, scope)).toThrow("not permitted");
+  expect(() => f.host.history("owner", { ...scope, limit: 101 })).toThrow("Invalid");
+  expect(() => f.host.history("owner", { ...scope, datasetId: id(99) })).toThrow("not permitted");
+});
+
 it("creates a dataset without an app and several views share its authoritative records", async () => {
   const f = await fixture(); await f.activate();
   expect(f.host.list("owner", { workspaceId: "workspace" }).datasets[0].name).toBe("Orders");

@@ -394,6 +394,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const current = journal.head(key, () => { owner(context, key); });
       return { revision: revision(key), ...artifacts(key), active: current.active, cursor: current.cursor };
     },
+    history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number }) {
+      const key = scope(raw), limit = raw.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || raw.beforeRevision !== undefined && (!Number.isSafeInteger(raw.beforeRevision) || raw.beforeRevision < 1)) throw new DatasetHostError("invalid", "Invalid Collection history page.");
+      return transaction(() => {
+        owner(context, key); revision(key);
+        const head = db.prepare("SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
+        if (!head) throw new DatasetHostError("conflict", "Collection history is unavailable.");
+        const before = raw.beforeRevision ?? Number.MAX_SAFE_INTEGER;
+        const rows = db.prepare(`SELECT revision,operation,caller_key,recorded_at_ms,approved_revision_hash,
+            length(changeset) AS changeset_bytes,json_array_length(attached_file_ids) AS attachment_count
+            FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision<?
+            ORDER BY revision DESC LIMIT ?`).all(key.workspaceId, key.datasetId, before, limit + 1);
+        owner(context, key);
+        const entries = rows.slice(0, limit).map(row => ({ revision: Number(row.revision), operation: String(row.operation), callerReference: String(row.caller_key),
+          recordedAtMs: Number(row.recorded_at_ms), approvedRevisionHash: String(row.approved_revision_hash), changesetBytes: Number(row.changeset_bytes), attachmentCount: Number(row.attachment_count) }));
+        return { datasetId: key.datasetId, headRevision: Number(head.revision), entries, nextBeforeRevision: rows.length > limit ? entries.at(-1)!.revision : null };
+      });
+    },
     permissions(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
       const key = scope(raw), after = raw.after === undefined ? "" : text(raw.after, 1024), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");

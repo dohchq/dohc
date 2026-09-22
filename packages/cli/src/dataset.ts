@@ -34,6 +34,7 @@ export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discrimi
 ])).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
 export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
 export const DatasetRequest = z.discriminatedUnion("action", [
+  z.object({ ...selection, action: z.literal("history"), beforeRevision: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe") }).strict(),
   z.object({ ...selection, action: z.literal("permissions"), after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
@@ -69,11 +70,17 @@ export const DatasetInvocationResult = z.object({
   }), revision: z.number().int().nonnegative(), replayed: z.boolean(),
 }).strict();
 export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
+export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
+  entries: z.array(z.object({ revision: z.number().int().positive(), operation: z.string().min(1).max(64), callerReference: sha256,
+    recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative() }).strict()).max(100),
+  nextBeforeRevision: z.number().int().positive().nullable() }).strict();
+export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {
   try { return parseDatasetDescription(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export const DatasetResult = z.discriminatedUnion("kind", [
+  DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),

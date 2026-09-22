@@ -284,6 +284,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       list(input: {after?: string; limit?: number} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
       describe(datasetId: string) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId}); },
+      history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {

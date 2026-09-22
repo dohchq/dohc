@@ -62,6 +62,20 @@ async function httpFixture() {
   return {...f, host, http, path, activate, invoke, publish, publicHeaders, advance(ms: number) {now += ms;}};
 }
 
+it("exposes bounded owner history and denies helpers, strangers, and malformed cursors", async () => {
+  const f = await httpFixture(); await f.activate();
+  const result = await f.http(`${f.path}/invoke`, { revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { name: "Private name" }, idempotencyKey: "private-retry" });
+  expect(result.status).toBe(200);
+  const response = await f.http(`${f.path}/history?limit=1`); expect(response.status).toBe(200);
+  const page = await response.json(); expect(page.entries).toHaveLength(1); expect(page.entries[0].operation).toBe("submit");
+  expect(JSON.stringify(page)).not.toMatch(/private-retry|Private name|idempotencyKey|resultJson/);
+  expect((await f.http(`${f.path}/history`, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history`, undefined, { authorization: "Bearer stranger" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
 it("creates and manages one dataset through authenticated routes and the public app broker", async () => {
   const f = await httpFixture();
   expect((await f.activate()).status).toBe(200);

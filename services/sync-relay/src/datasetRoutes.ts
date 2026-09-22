@@ -15,7 +15,7 @@ export interface DatasetRoute {
   route: "dataset";
   workspaceId: string;
   datasetId?: string;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -51,11 +51,12 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
   options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
   const admit = createAppBackendAdmission(options.limits);
   return async (request: Request, route: DatasetRoute, auth: Extract<AppBackendAuth, {kind: "named"}>): Promise<Response> => {
-    const read = ["list", "describe", "artifacts", "permissions"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
-    if ([...query.keys()].some(key => !["after", "limit"].includes(key)) || query.getAll("after").length > 1 || query.getAll("limit").length > 1 ||
-      (query.size && route.action !== "list" && route.action !== "permissions")) throw badRequest("Invalid dataset query.");
+    const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"] : ["after", "limit"];
+    if ([...query.keys()].some(key => !allowedQuery.includes(key)) || allowedQuery.some(key => query.getAll(key).length > 1) ||
+      (query.size && route.action !== "list" && route.action !== "permissions" && route.action !== "history")) throw badRequest("Invalid dataset query.");
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
     const scope = {workspaceId: route.workspaceId, datasetId: route.datasetId!};
     const release = admit({dataset: JSON.stringify([route.workspaceId, route.datasetId ?? "catalog"]), participant: auth.userId,
@@ -68,6 +69,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "describe") return host.describe(auth, scope);
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
+        if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
         if (route.action === "upload") {
           const body = record(raw, ["revision", "revisionSha256", "idempotencyKey", "name", "contentType", "bytesBase64"]);

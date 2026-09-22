@@ -30,7 +30,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "permissions", "setGrant", "removeGrant"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "permissions", "setGrant", "removeGrant", "history"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       if (input.action === "permissions") {
@@ -43,6 +43,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
       if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+      if (input.action === "history") { const result = await data.history(input); current(); return { kind: "history" as const, ...result }; }
       if (input.action === "upload") {
         const description = await data.describe(input.datasetId);
         current();

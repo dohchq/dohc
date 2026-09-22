@@ -41,6 +41,15 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   expect(f.host.list).not.toHaveBeenCalled();
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
 });
+it("routes history to shared authority and rejects stale history replies", async () => {
+  const page = { datasetId, headRevision: 0, entries: [], nextBeforeRevision: null };
+  const remote = { history: vi.fn(async () => page) } as unknown as OwnerDatasetData;
+  const f = fixture(remote);
+  expect(await f.handler("window", { workspaceId: "workspace", datasetId, action: "history", limit: 10 })).toEqual({ kind: "history", ...page });
+  expect(remote.history).toHaveBeenCalledWith({ workspaceId: "workspace", datasetId, action: "history", limit: 10 });
+  vi.mocked(remote.history).mockImplementation(async () => { f.stale(); return page; });
+  await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "history" })).rejects.toThrow("stale workspace");
+});
 it("routes owner reads and writes to shared authority without falling back locally", async () => {
   const remote = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => { throw Error("shared server offline"); }) } as unknown as OwnerDatasetData;
   const f = fixture(remote);

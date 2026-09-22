@@ -9,6 +9,7 @@ import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
 import { DatasetCsvTransferDialog } from "./DatasetCsvTransferDialog";
+import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -27,6 +28,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [transferringCsv, setTransferringCsv] = useState(false);
+  const [viewingHistory, setViewingHistory] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
@@ -63,6 +65,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
     onCreateForm={() => setCreatingForm(true)}
     onTransferCsv={() => setTransferringCsv(true)}
+    onHistory={() => setViewingHistory(true)}
     onReviewSchema={() => setReviewingSchema(true)}
     onManageAccess={() => setManagingAccess(true)}
     onCustomAction={setCustomAction}
@@ -105,6 +108,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       }), hasMore: page.nextCursor !== null };
     }}
     invoke={invoke} />
+    {viewingHistory && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+      onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "history" });
+        signal.throwIfAborted();
+        if (result.kind !== "history") throw Error("dohc could not read this Collection's history. Try again.");
+        return result;
+      }} />}
     {transferringCsv && <DatasetCsvTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
       onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
       onSave={async (file, signal) => {
