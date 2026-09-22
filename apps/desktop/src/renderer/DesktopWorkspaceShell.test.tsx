@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "./CollectionPage";
 import * as Y from "yjs";
+import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 // Collection dependencies read these observers during module evaluation.
 // Preload them before tests so an unfinished import cannot clean up a later test's globals.
@@ -764,6 +765,10 @@ function makeBridge(
         collections: [],
       }),
     ),
+    dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
+      if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
+      throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
+    }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
       status: "valid",
@@ -2345,7 +2350,8 @@ describe("collection folders", () => {
       return candidate as HTMLElement;
     });
     await user.click(row);
-    const checkboxes = await screen.findAllByRole(
+    const collectionPage = within(await screen.findByTestId("collection-page"));
+    const checkboxes = await collectionPage.findAllByRole(
       "checkbox",
       {},
       { timeout: 15_000 },
@@ -2363,7 +2369,7 @@ describe("collection folders", () => {
     );
 
     // Second edit queues behind the pending head.
-    await user.click(screen.getAllByRole("checkbox")[1]!);
+    await user.click(collectionPage.getAllByRole("checkbox")[1]!);
 
     // Ordinary navigation: open a plain file; the collection page unmounts.
     const fileRow = screen

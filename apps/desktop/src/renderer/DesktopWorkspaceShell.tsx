@@ -2293,6 +2293,18 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
+  const openDataCollection = useCallback(
+    (datasetId: string, tableId: string) => {
+      openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
+    },
+    [openVirtualTab],
+  );
+  const onMoreDataCollections = useCallback(() => {
+    void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error));
+  }, [loadMoreDatasets, reportShellError]);
+  const onRestoreCollection = useCallback(() => {
+    setRecoveryWorkspaceId(workspaceId);
+  }, [workspaceId]);
   const openGraphTab = useCallback(() => {
     openVirtualTab(GRAPH_TAB_PATH);
   }, [openVirtualTab]);
@@ -4212,9 +4224,9 @@ export function DesktopWorkspaceShell(props: {
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
         onIncludeArchivedCollections={isShareView ? undefined : setIncludeArchived}
-        onOpenDataCollection={(datasetId, tableId) => openVirtualTab(transactionalCollectionTabPath(datasetId, tableId))}
-        onMoreDataCollections={nextDataset ? () => { void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error)); } : undefined}
-        onRestoreCollection={!isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? () => setRecoveryWorkspaceId(workspaceId) : undefined}
+        onOpenDataCollection={openDataCollection}
+        onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
+        onRestoreCollection={!isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
