@@ -1,35 +1,36 @@
 {
   "entryPath": "fundraiser/frontend.ts",
-  "inputs": ["fundraiser/frontend.ts", "fundraiser/frontend.css", "fundraiser/client.ts", "fundraiser/ui-types.ts", "fundraiser/recovery.ts", "fundraiser/backend.ts", "fundraiser/schema.sql"],
+  "inputs": [
+    "fundraiser/frontend.ts",
+    "fundraiser/frontend.css",
+    "fundraiser/client.ts",
+    "fundraiser/ui-types.ts",
+    "fundraiser/recovery.ts"
+  ],
   "packageMap": {},
-  "backend": {
-    "entryPath": "fundraiser/backend.ts",
-    "schemaPath": "fundraiser/schema.sql",
-    "dataPath": "fundraiser/data.sqlite",
-    "schemaVersion": 1,
-    "operations": [
-      {"name": "listPublicSessions", "access": "link", "readOnly": true},
-      {"name": "register", "access": "link", "readOnly": false},
-      {"name": "lookupStatus", "access": "link", "readOnly": true},
-      {"name": "listRegistrations", "access": "helper", "readOnly": true},
-      {"name": "listRegistrationSessions", "access": "helper", "readOnly": true},
-      {"name": "attendees", "access": "helper", "readOnly": true},
-      {"name": "setPlayerReclub", "access": "helper", "readOnly": false},
-      {"name": "totals", "access": "helper", "readOnly": true},
-      {"name": "receiptAccess", "access": "helper", "readOnly": true},
-      {"name": "setStatus", "access": "helper", "readOnly": false},
-      {"name": "updateRegistration", "access": "helper", "readOnly": false},
-      {"name": "manualEntry", "access": "helper", "readOnly": false},
-      {"name": "tableSessions", "access": "owner", "readOnly": true},
-      {"name": "tableRegistrations", "access": "owner", "readOnly": true},
-      {"name": "tableRegistrationSessions", "access": "owner", "readOnly": true},
-      {"name": "tableAttendees", "access": "owner", "readOnly": true}
-    ],
-    "tables": [
-      {"name": "sessions", "primaryKey": "id", "readOperation": "tableSessions", "writeOperation": null},
-      {"name": "registrations", "primaryKey": "id", "readOperation": "tableRegistrations", "writeOperation": "updateRegistration"},
-      {"name": "registration_sessions", "primaryKey": "id", "readOperation": "tableRegistrationSessions", "writeOperation": null},
-      {"name": "attendees", "primaryKey": "id", "readOperation": "tableAttendees", "writeOperation": null}
+  "dataset": {
+    "kind": "dataset",
+    "datasetId": "f0010000-0000-4000-8000-000000000001",
+    "revision": 1,
+    "revisionSha256": "e6de617349213a4d86a5924dc1cfb2682a1ae2a08d77172fce8256d1784371c5",
+    "operationIds": [
+      "f0010000-0000-4000-8000-000000000033",
+      "f0010000-0000-4000-8000-000000000034",
+      "f0010000-0000-4000-8000-000000000035",
+      "f0010000-0000-4000-8000-000000000036",
+      "f0010000-0000-4000-8000-000000000037",
+      "f0010000-0000-4000-8000-000000000038",
+      "f0010000-0000-4000-8000-000000000039",
+      "f0010000-0000-4000-8000-000000000040",
+      "f0010000-0000-4000-8000-000000000041",
+      "f0010000-0000-4000-8000-000000000042",
+      "f0010000-0000-4000-8000-000000000043",
+      "f0010000-0000-4000-8000-000000000044",
+      "f0010000-0000-4000-8000-000000000045",
+      "f0010000-0000-4000-8000-000000000046",
+      "f0010000-0000-4000-8000-000000000047",
+      "f0010000-0000-4000-8000-000000000048",
+      "f0010000-0000-4000-8000-000000000049"
     ]
   }
 }

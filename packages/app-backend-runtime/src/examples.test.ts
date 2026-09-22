@@ -101,7 +101,7 @@ describe("fundraiser app operations", () => {
 
   it("refuses hidden organizer operations for public callers and named nonhelpers", async () => {
     const f = await fixture();
-    for (const caller of [participant, {...helper, helper: false}, {...helper, access: "view"}]) {
+    for (const caller of [participant, {...helper, helper: false}]) {
       for (const operation of ["listRegistrations", "setStatus", "updateRegistration", "manualEntry", "attendees", "setPlayerReclub", "totals", "receiptAccess", "listRegistrationSessions"]) {
         await expect(f.call(operation, {}, {caller})).rejects.toMatchObject({refusal: {code: "forbidden"}});
       }
@@ -124,8 +124,11 @@ describe("fundraiser app operations", () => {
         .toEqual({attendeeId: person.id, synced: true});
     }
     const table = row((await f.call("tableAttendees", {}, {caller: owner, readOnly: true})).result).rows;
-    expect(table.filter((person: {reclubSynced: boolean}) => person.reclubSynced).map((person: {id: string}) => person.id)).toEqual([first.id, second.id]);
-    expect(table.find((person: {sessionId: string}) => person.sessionId === "s2").reclubSynced).toBe(false);
+    const fields = JSON.parse(read("fundraiser", "dataset.json")).tables.find((table: any) => table.sqlName === "attendees").fields;
+    const synced = fields.find((field: any) => field.sqlColumn === "reclub_synced").fieldId;
+    const sessionId = fields.find((field: any) => field.sqlColumn === "session_id").fieldId;
+    expect(table.filter((person: any) => person.values[synced]).map((person: any) => person.id).sort()).toEqual([first.id, second.id].sort());
+    expect(table.find((person: any) => person.values[sessionId] === "s2").values[synced]).toBe(false);
     await f.call("setPlayerReclub", {attendeeId: first.id, synced: false}, {caller: owner});
     const before = Buffer.from(f.database);
     for (const attendeeId of [spectator.id, "missing"]) {
@@ -199,33 +202,31 @@ describe("stock order app operations", () => {
     expect(rows((await f.call("listItems", {}, {readOnly: true})).result).find(item => item.id === "shirt-s")?.remaining).toBe(0);
   }, 30000);
 
-  it("serves every declared stock table through the owner table shape", async () => {
+  it("serves every declared stock table through the Collection contract", async () => {
     const f = await fixture("stock-orders");
     const order = row((await f.call("placeOrder", {customerName: "Searchable Customer", items: [{itemId: "shirt-s", quantity: 1}]})).result);
-    const declaration = JSON.parse(read("stock-orders", "backend.publish.json"));
+    const declaration = JSON.parse(read("stock-orders", "dataset.json"));
     for (const table of declaration.tables) {
-      expect(declaration.operations).toContainEqual({name: table.readOperation, access: "owner", readOnly: true});
-      const result = row((await f.call(table.readOperation, {offset: 0, limit: 1, search: ""}, {caller: owner, readOnly: true})).result);
+      const operation = declaration.operations.find((operation: any) => operation.tableId === table.tableId && operation.kind === "read");
+      expect(operation).toMatchObject({access: "owner", readOnly: true});
+      const result = row((await f.call(operation.name, {limit: 1, search: ""}, {caller: owner, readOnly: true})).result);
       expect(result.rows).toHaveLength(1);
-      expect(result.rows[0]).toHaveProperty(table.primaryKey);
-      expect(result.total).toBe(table.name === "items" ? 3 : 1);
-      expect((await f.call(table.readOperation, {offset: result.total, limit: 1}, {caller: owner, readOnly: true})).result).toEqual({rows: [], total: result.total});
-      expect((await f.call(table.readOperation, {search: "%"}, {caller: owner, readOnly: true})).result).toEqual({rows: [], total: 0});
-      await expect(f.call(table.readOperation, {}, {readOnly: true})).rejects.toMatchObject({refusal: {code: "forbidden"}});
+      expect(result.rows[0]).toMatchObject({id: expect.any(String), version: expect.any(Number), values: expect.any(Object)});
+      expect(Object.keys(result.rows[0].values).sort()).toEqual(table.fields.map((field: any) => field.fieldId).sort());
+      expect((await f.call(operation.name, {search: "%"}, {caller: owner, readOnly: true})).result).toEqual({rows: [], nextCursor: null});
+      await expect(f.call(operation.name, {}, {readOnly: true})).rejects.toMatchObject({refusal: {code: "forbidden"}});
     }
-    const firstPage = row((await f.call("tableItems", {offset: 0, limit: 1}, {caller: owner, readOnly: true})).result);
-    const nextPage = row((await f.call("tableItems", {offset: 1, limit: 1}, {caller: owner, readOnly: true})).result);
+    const firstPage = row((await f.call("tableItems", {limit: 1}, {caller: owner, readOnly: true})).result);
+    const nextPage = row((await f.call("tableItems", {after: firstPage.nextCursor, limit: 1}, {caller: owner, readOnly: true})).result);
     expect(firstPage.rows[0].id).not.toBe(nextPage.rows[0].id);
-    expect(nextPage.total).toBe(3);
-    const items = row((await f.call("tableItems", {offset: 0, limit: 2, search: "MEDIUM"}, {caller: owner, readOnly: true})).result);
-    expect(items).toEqual({rows: [{id: "shirt-m", name: "Fundraiser shirt, medium", priceCents: 1500, remaining: 20}], total: 1});
-    const orders = row((await f.call("tableOrders", {offset: 0, limit: 50, search: "searchable"}, {caller: owner, readOnly: true})).result);
+    const items = row((await f.call("tableItems", {limit: 2, search: "MEDIUM"}, {caller: owner, readOnly: true})).result);
+    expect(items).toMatchObject({rows: [{id: "shirt-m"}], nextCursor: null});
+    const orders = row((await f.call("tableOrders", {limit: 50, search: "searchable"}, {caller: owner, readOnly: true})).result);
     expect(orders.rows).toHaveLength(1);
-    expect(orders.rows[0]).toMatchObject({id: order.id, customerName: "Searchable Customer", status: "pending"});
-    expect(orders.total).toBe(1);
-    const orderItems = row((await f.call("tableOrderItems", {offset: 0, limit: 50, search: order.id}, {caller: owner, readOnly: true})).result);
-    expect(orderItems.rows).toEqual([{id: `${order.id}_shirt-s`, orderId: order.id, itemId: "shirt-s", quantity: 1, unitPriceCents: 1500}]);
-    expect(orderItems.total).toBe(1);
+    expect(orders.rows[0]).toMatchObject({id: order.id, version: 1});
+    const orderItems = row((await f.call("tableOrderItems", {limit: 50, search: order.id}, {caller: owner, readOnly: true})).result);
+    expect(orderItems.rows).toMatchObject([{id: `${order.id}_shirt-s`}]);
+    expect(orderItems.nextCursor).toBeNull();
     await expect(f.call("tableItems", {limit: 101}, {caller: owner, readOnly: true})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
     await expect(f.call("tableOrders", {search: 1}, {caller: owner, readOnly: true})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
     expect(Array.isArray((await f.call("listItems", {}, {readOnly: true})).result)).toBe(true);

@@ -1,0 +1,292 @@
+{
+  "formatVersion": 1,
+  "datasetId": "f0020000-0000-4000-8000-000000000001",
+  "name": "Stock orders",
+  "schemaPath": "stock-orders/schema.sql",
+  "operationsPath": "stock-orders/backend.ts",
+  "tables": [
+    {
+      "tableId": "f0020000-0000-4000-8000-000000000002",
+      "name": "Items",
+      "sqlName": "items",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000003",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000004",
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000005",
+          "name": "Price cents",
+          "sqlColumn": "price_cents",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000006",
+          "name": "Remaining",
+          "sqlColumn": "remaining",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "name": "Orders",
+      "sqlName": "orders",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000008",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000009",
+          "name": "Customer",
+          "sqlColumn": "customer_name",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000010",
+          "name": "Status",
+          "sqlColumn": "status",
+          "type": "select",
+          "required": true,
+          "unique": false,
+          "options": [
+            "pending",
+            "confirmed",
+            "cancelled"
+          ]
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000011",
+          "name": "Total cents",
+          "sqlColumn": "total_cents",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000012",
+          "name": "Version",
+          "sqlColumn": "version",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000013",
+          "name": "Created at",
+          "sqlColumn": "created_at_ms",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "tableId": "f0020000-0000-4000-8000-000000000014",
+      "name": "Order items",
+      "sqlName": "order_items",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000015",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000016",
+          "name": "Order",
+          "sqlColumn": "order_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0020000-0000-4000-8000-000000000001",
+            "tableId": "f0020000-0000-4000-8000-000000000007",
+            "fieldId": "f0020000-0000-4000-8000-000000000008",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000017",
+          "name": "Item",
+          "sqlColumn": "item_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0020000-0000-4000-8000-000000000001",
+            "tableId": "f0020000-0000-4000-8000-000000000002",
+            "fieldId": "f0020000-0000-4000-8000-000000000003",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000018",
+          "name": "Quantity",
+          "sqlColumn": "quantity",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000019",
+          "name": "Unit price cents",
+          "sqlColumn": "unit_price_cents",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000020",
+      "name": "tableItems",
+      "label": "Read items",
+      "tableId": "f0020000-0000-4000-8000-000000000002",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0020000-0000-4000-8000-000000000003",
+        "f0020000-0000-4000-8000-000000000004",
+        "f0020000-0000-4000-8000-000000000005",
+        "f0020000-0000-4000-8000-000000000006"
+      ]
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000021",
+      "name": "tableOrders",
+      "label": "Read orders",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0020000-0000-4000-8000-000000000008",
+        "f0020000-0000-4000-8000-000000000009",
+        "f0020000-0000-4000-8000-000000000010",
+        "f0020000-0000-4000-8000-000000000011",
+        "f0020000-0000-4000-8000-000000000012",
+        "f0020000-0000-4000-8000-000000000013"
+      ]
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000022",
+      "name": "tableOrderItems",
+      "label": "Read order items",
+      "tableId": "f0020000-0000-4000-8000-000000000014",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0020000-0000-4000-8000-000000000015",
+        "f0020000-0000-4000-8000-000000000016",
+        "f0020000-0000-4000-8000-000000000017",
+        "f0020000-0000-4000-8000-000000000018",
+        "f0020000-0000-4000-8000-000000000019"
+      ]
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000023",
+      "name": "listItems",
+      "label": "list Items",
+      "tableId": "f0020000-0000-4000-8000-000000000002",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000024",
+      "name": "placeOrder",
+      "label": "place Order",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000025",
+      "name": "listOrders",
+      "label": "list Orders",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000026",
+      "name": "listOrderItems",
+      "label": "list Order Items",
+      "tableId": "f0020000-0000-4000-8000-000000000014",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000027",
+      "name": "setStatus",
+      "label": "set Status",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000028",
+      "name": "updateOrder",
+      "label": "update Order",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0020000-0000-4000-8000-000000000029",
+      "name": "editOrderStatus",
+      "label": "Change status",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "edit",
+      "access": "owner",
+      "readOnly": false,
+      "fieldIds": [
+        "f0020000-0000-4000-8000-000000000010"
+      ]
+    }
+  ]
+}

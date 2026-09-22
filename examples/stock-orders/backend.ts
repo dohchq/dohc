@@ -2,7 +2,7 @@
 (function () {
   function invalid(ctx, message) { ctx.refuse("invalid_input", message); }
   function organizer(ctx) {
-    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper && ctx.caller.access === "edit")) ctx.refuse("forbidden", "Organizer access is required.");
+    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper)) ctx.refuse("forbidden", "Organizer access is required.");
   }
   function object(ctx, input) {
     if (!input || typeof input !== "object" || Array.isArray(input)) invalid(ctx, "Enter the order details.");
@@ -17,17 +17,6 @@
     const value = input.search === undefined ? "" : input.search;
     if (typeof value !== "string" || value.length > 100) invalid(ctx, "The search is invalid.");
     return value;
-  }
-  function tablePage(ctx, input, table, columns, searchColumns, order) {
-    organizer(ctx); object(ctx, input);
-    const {limit, offset} = page(ctx, input);
-    const term = search(ctx, input);
-    const where = term ? " WHERE " + searchColumns.map(column => "instr(lower(" + column + "), lower(?)) > 0").join(" OR ") : "";
-    const params = term ? searchColumns.map(() => term) : [];
-    return {
-      rows: ctx.db.query("SELECT " + columns + " FROM " + table + where + " ORDER BY " + order + " LIMIT ? OFFSET ?", [...params, limit, offset]),
-      total: ctx.db.query("SELECT COUNT(*) AS total FROM " + table + where, params)[0].total,
-    };
   }
   function listItems(ctx) {
     return ctx.db.query("SELECT id,name,price_cents AS priceCents,remaining FROM items ORDER BY id LIMIT 100");
@@ -91,16 +80,66 @@
     if (input.field !== "status") invalid(ctx, "Use the status action to update an order.");
     return setStatus(ctx, {id: input.rowId, status: input.value, expectedVersion: input.expectedVersion});
   }
-  function tableItems(ctx, input) {
-    return tablePage(ctx, input, "items", "id,name,price_cents AS priceCents,remaining", ["id", "name"], "id");
+  const collectionTables = {"tableItems":{"sqlName":"items","version":false,"fields":[{"fieldId":"f0020000-0000-4000-8000-000000000003","sqlColumn":"id","type":"text"},{"fieldId":"f0020000-0000-4000-8000-000000000004","sqlColumn":"name","type":"text"},{"fieldId":"f0020000-0000-4000-8000-000000000005","sqlColumn":"price_cents","type":"number"},{"fieldId":"f0020000-0000-4000-8000-000000000006","sqlColumn":"remaining","type":"number"}]},"tableOrders":{"sqlName":"orders","version":true,"fields":[{"fieldId":"f0020000-0000-4000-8000-000000000008","sqlColumn":"id","type":"text"},{"fieldId":"f0020000-0000-4000-8000-000000000009","sqlColumn":"customer_name","type":"text"},{"fieldId":"f0020000-0000-4000-8000-000000000010","sqlColumn":"status","type":"select"},{"fieldId":"f0020000-0000-4000-8000-000000000011","sqlColumn":"total_cents","type":"number"},{"fieldId":"f0020000-0000-4000-8000-000000000012","sqlColumn":"version","type":"number"},{"fieldId":"f0020000-0000-4000-8000-000000000013","sqlColumn":"created_at_ms","type":"number"}]},"tableOrderItems":{"sqlName":"order_items","version":false,"fields":[{"fieldId":"f0020000-0000-4000-8000-000000000015","sqlColumn":"id","type":"text"},{"fieldId":"f0020000-0000-4000-8000-000000000016","sqlColumn":"order_id","type":"relation"},{"fieldId":"f0020000-0000-4000-8000-000000000017","sqlColumn":"item_id","type":"relation"},{"fieldId":"f0020000-0000-4000-8000-000000000018","sqlColumn":"quantity","type":"number"},{"fieldId":"f0020000-0000-4000-8000-000000000019","sqlColumn":"unit_price_cents","type":"number"}]}};
+
+  // Collection reads project stable field IDs; edits below call the same domain rules as the app.
+  function collectionRead(ctx, input, table) {
+    organizer(ctx); object(ctx, input);
+    const limit = input.limit === undefined ? 50 : input.limit;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid(ctx, "Choose a page size from 1 to 100.");
+    const fields = table.fields;
+    let sort = fields[0], direction = "asc";
+    if (input.sort !== undefined) {
+      sort = fields.find(field => field.fieldId === input.sort.fieldId);
+      direction = input.sort.direction;
+      if (!sort || sort.type === "attachment" || !["asc", "desc"].includes(direction)) invalid(ctx, "Choose a sortable field.");
+    }
+    const encode = value => typeof value === "boolean" ? Number(value) : value;
+    const decode = (field, value) => field.type === "checkbox" ? value === 1 : value;
+    const q = value => '"' + value + '"';
+    const terms = [], params = [];
+    if (input.search !== undefined && input.search !== "") {
+      if (typeof input.search !== "string" || input.search.length > 200) invalid(ctx, "Keep the search under 200 characters.");
+      const searchable = fields.filter(field => ["text", "select"].includes(field.type));
+      terms.push("(" + searchable.map(field => "instr(lower(" + q(field.sqlColumn) + "),lower(?))>0").join(" OR ") + ")");
+      params.push(...searchable.map(() => input.search));
+    }
+    if (input.filters !== undefined) {
+      if (!Array.isArray(input.filters) || input.filters.length > 20) invalid(ctx, "Choose up to 20 filters.");
+      for (const filter of input.filters) {
+        const field = fields.find(field => field.fieldId === filter.fieldId);
+        if (!field || (filter.value !== null && !["string", "number", "boolean"].includes(typeof filter.value))) invalid(ctx, "Choose a valid filter.");
+        terms.push(q(field.sqlColumn) + " IS ?"); params.push(encode(filter.value));
+      }
+    }
+    if (input.after !== undefined && input.after !== null) {
+      const after = input.after;
+      if (typeof after.id !== "string" || !["string", "number", "boolean"].includes(typeof after.value)) invalid(ctx, "The page reference is invalid.");
+      const compare = direction === "asc" ? ">" : "<";
+      terms.push("(" + q(sort.sqlColumn) + compare + "? OR (" + q(sort.sqlColumn) + "=? AND id" + compare + "?))");
+      params.push(encode(after.value), encode(after.value), after.id);
+    }
+    const columns = fields.map(field => q(field.sqlColumn));
+    if (table.version && !columns.includes(q("version"))) columns.push(q("version"));
+    const rows = ctx.db.query("SELECT " + columns.join(",") + " FROM " + q(table.sqlName) + (terms.length ? " WHERE " + terms.join(" AND ") : "") +
+      " ORDER BY " + q(sort.sqlColumn) + " " + direction + ",id " + direction + " LIMIT ?", [...params, limit + 1]);
+    const more = rows.length > limit;
+    if (more) rows.pop();
+    const last = rows[rows.length - 1];
+    return {rows: rows.map(row => ({id: row.id, version: table.version ? row.version : 1,
+      values: Object.fromEntries(fields.map(field => [field.fieldId, decode(field, row[field.sqlColumn])]))})),
+      nextCursor: more ? {id: last.id, value: decode(sort, last[sort.sqlColumn])} : null};
   }
-  function tableOrders(ctx, input) {
-    return tablePage(ctx, input, "orders", "id,customer_name AS customerName,status,total_cents AS totalCents,version,created_at_ms AS createdAtMs",
-      ["id", "customer_name", "status"], "created_at_ms DESC,id DESC");
+  function tableItems(ctx, input) { return collectionRead(ctx, input, collectionTables.tableItems); }
+  function tableOrders(ctx, input) { return collectionRead(ctx, input, collectionTables.tableOrders); }
+  function tableOrderItems(ctx, input) { return collectionRead(ctx, input, collectionTables.tableOrderItems); }
+  function editOrderStatus(ctx, input) {
+    organizer(ctx); object(ctx, input);
+    const fieldId = "f0020000-0000-4000-8000-000000000010";
+    if (!input.values || Object.keys(input.values).length !== 1 || !Object.hasOwn(input.values, fieldId)) invalid(ctx, "Use the status field to update this record.");
+    const before = ctx.db.query("SELECT status FROM orders WHERE id=?", [input.id])[0];
+    const changed = setStatus(ctx, {id: input.id, expectedVersion: input.expectedVersion, status: input.values[fieldId]});
+    return {id: changed.id, version: changed.version, priorValues: {[fieldId]: before.status}};
   }
-  function tableOrderItems(ctx, input) {
-    return tablePage(ctx, input, "order_items", "id,order_id AS orderId,item_id AS itemId,quantity,unit_price_cents AS unitPriceCents",
-      ["id", "order_id", "item_id"], "id");
-  }
-  globalThis.operations = {listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder, tableItems, tableOrders, tableOrderItems};
+  globalThis.operations = {editOrderStatus, listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder, tableItems, tableOrders, tableOrderItems};
 }());

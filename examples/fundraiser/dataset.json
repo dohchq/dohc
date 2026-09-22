@@ -1,0 +1,508 @@
+{
+  "formatVersion": 1,
+  "datasetId": "f0010000-0000-4000-8000-000000000001",
+  "name": "Pickleball fundraiser",
+  "schemaPath": "fundraiser/schema.sql",
+  "operationsPath": "fundraiser/backend.ts",
+  "tables": [
+    {
+      "tableId": "f0010000-0000-4000-8000-000000000002",
+      "name": "Sessions",
+      "sqlName": "sessions",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000003",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000004",
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000005",
+          "name": "Starts at",
+          "sqlColumn": "starts_at",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000006",
+          "name": "Player capacity",
+          "sqlColumn": "player_capacity",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000007",
+          "name": "Reserved players",
+          "sqlColumn": "reserved_players",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "name": "Registrations",
+      "sqlName": "registrations",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000009",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000010",
+          "name": "Contact name",
+          "sqlColumn": "full_name",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000011",
+          "name": "Mobile",
+          "sqlColumn": "mobile",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000012",
+          "name": "Source",
+          "sqlColumn": "source",
+          "type": "select",
+          "required": true,
+          "unique": false,
+          "options": [
+            "website",
+            "reclub",
+            "manual"
+          ]
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000013",
+          "name": "Status",
+          "sqlColumn": "status",
+          "type": "select",
+          "required": true,
+          "unique": false,
+          "options": [
+            "pending_verification",
+            "verified",
+            "rejected",
+            "pay_at_venue"
+          ]
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000014",
+          "name": "Payment method",
+          "sqlColumn": "payment_method",
+          "type": "select",
+          "required": true,
+          "unique": false,
+          "options": [
+            "gcash",
+            "bdo",
+            "unionbank",
+            "bpi",
+            "cash"
+          ]
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000015",
+          "name": "Total PHP",
+          "sqlColumn": "total_php",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000016",
+          "name": "Receipt",
+          "sqlColumn": "receipt_file_id",
+          "type": "attachment",
+          "required": false,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000017",
+          "name": "Version",
+          "sqlColumn": "version",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000018",
+          "name": "Created at",
+          "sqlColumn": "created_at_ms",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000019",
+          "name": "Updated at",
+          "sqlColumn": "updated_at_ms",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "tableId": "f0010000-0000-4000-8000-000000000020",
+      "name": "Registration sessions",
+      "sqlName": "registration_sessions",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000021",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000022",
+          "name": "Registration",
+          "sqlColumn": "registration_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0010000-0000-4000-8000-000000000001",
+            "tableId": "f0010000-0000-4000-8000-000000000008",
+            "fieldId": "f0010000-0000-4000-8000-000000000009",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000023",
+          "name": "Session",
+          "sqlColumn": "session_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0010000-0000-4000-8000-000000000001",
+            "tableId": "f0010000-0000-4000-8000-000000000002",
+            "fieldId": "f0010000-0000-4000-8000-000000000003",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000024",
+          "name": "Players",
+          "sqlColumn": "player_count",
+          "type": "number",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000025",
+          "name": "Spectators",
+          "sqlColumn": "spectator_count",
+          "type": "number",
+          "required": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "tableId": "f0010000-0000-4000-8000-000000000026",
+      "name": "Attendees",
+      "sqlName": "attendees",
+      "primaryKey": "id",
+      "fields": [
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000027",
+          "name": "ID",
+          "sqlColumn": "id",
+          "type": "text",
+          "required": true,
+          "unique": true
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000028",
+          "name": "Registration",
+          "sqlColumn": "registration_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0010000-0000-4000-8000-000000000001",
+            "tableId": "f0010000-0000-4000-8000-000000000008",
+            "fieldId": "f0010000-0000-4000-8000-000000000009",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000029",
+          "name": "Session",
+          "sqlColumn": "session_id",
+          "type": "relation",
+          "required": true,
+          "unique": false,
+          "relation": {
+            "datasetId": "f0010000-0000-4000-8000-000000000001",
+            "tableId": "f0010000-0000-4000-8000-000000000002",
+            "fieldId": "f0010000-0000-4000-8000-000000000003",
+            "many": false
+          }
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000030",
+          "name": "Role",
+          "sqlColumn": "role",
+          "type": "select",
+          "required": true,
+          "unique": false,
+          "options": [
+            "player",
+            "spectator"
+          ]
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000031",
+          "name": "Name",
+          "sqlColumn": "name",
+          "type": "text",
+          "required": true,
+          "unique": false
+        },
+        {
+          "fieldId": "f0010000-0000-4000-8000-000000000032",
+          "name": "Added to ReClub",
+          "sqlColumn": "reclub_synced",
+          "type": "checkbox",
+          "required": true,
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000033",
+      "name": "tableSessions",
+      "label": "Read sessions",
+      "tableId": "f0010000-0000-4000-8000-000000000002",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0010000-0000-4000-8000-000000000003",
+        "f0010000-0000-4000-8000-000000000004",
+        "f0010000-0000-4000-8000-000000000005",
+        "f0010000-0000-4000-8000-000000000006",
+        "f0010000-0000-4000-8000-000000000007"
+      ]
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000034",
+      "name": "tableRegistrations",
+      "label": "Read registrations",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0010000-0000-4000-8000-000000000009",
+        "f0010000-0000-4000-8000-000000000010",
+        "f0010000-0000-4000-8000-000000000011",
+        "f0010000-0000-4000-8000-000000000012",
+        "f0010000-0000-4000-8000-000000000013",
+        "f0010000-0000-4000-8000-000000000014",
+        "f0010000-0000-4000-8000-000000000015",
+        "f0010000-0000-4000-8000-000000000016",
+        "f0010000-0000-4000-8000-000000000017",
+        "f0010000-0000-4000-8000-000000000018",
+        "f0010000-0000-4000-8000-000000000019"
+      ]
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000035",
+      "name": "tableRegistrationSessions",
+      "label": "Read registration sessions",
+      "tableId": "f0010000-0000-4000-8000-000000000020",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0010000-0000-4000-8000-000000000021",
+        "f0010000-0000-4000-8000-000000000022",
+        "f0010000-0000-4000-8000-000000000023",
+        "f0010000-0000-4000-8000-000000000024",
+        "f0010000-0000-4000-8000-000000000025"
+      ]
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000036",
+      "name": "tableAttendees",
+      "label": "Read attendees",
+      "tableId": "f0010000-0000-4000-8000-000000000026",
+      "kind": "read",
+      "access": "owner",
+      "readOnly": true,
+      "fieldIds": [
+        "f0010000-0000-4000-8000-000000000027",
+        "f0010000-0000-4000-8000-000000000028",
+        "f0010000-0000-4000-8000-000000000029",
+        "f0010000-0000-4000-8000-000000000030",
+        "f0010000-0000-4000-8000-000000000031",
+        "f0010000-0000-4000-8000-000000000032"
+      ]
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000037",
+      "name": "listPublicSessions",
+      "label": "list Public Sessions",
+      "tableId": "f0010000-0000-4000-8000-000000000002",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000038",
+      "name": "register",
+      "label": "register",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "link",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000039",
+      "name": "lookupStatus",
+      "label": "lookup Status",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "link",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000040",
+      "name": "listRegistrations",
+      "label": "list Registrations",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000041",
+      "name": "listRegistrationSessions",
+      "label": "list Registration Sessions",
+      "tableId": "f0010000-0000-4000-8000-000000000020",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000042",
+      "name": "attendees",
+      "label": "attendees",
+      "tableId": "f0010000-0000-4000-8000-000000000026",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000043",
+      "name": "setPlayerReclub",
+      "label": "set Player Reclub",
+      "tableId": "f0010000-0000-4000-8000-000000000026",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000044",
+      "name": "totals",
+      "label": "totals",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000045",
+      "name": "receiptAccess",
+      "label": "receipt Access",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000046",
+      "name": "setStatus",
+      "label": "set Status",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000047",
+      "name": "updateRegistration",
+      "label": "update Registration",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000048",
+      "name": "manualEntry",
+      "label": "manual Entry",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": false,
+      "fieldIds": []
+    },
+    {
+      "operationId": "f0010000-0000-4000-8000-000000000049",
+      "name": "editRegistrationStatus",
+      "label": "Change status",
+      "tableId": "f0010000-0000-4000-8000-000000000008",
+      "kind": "edit",
+      "access": "owner",
+      "readOnly": false,
+      "fieldIds": [
+        "f0010000-0000-4000-8000-000000000013"
+      ]
+    }
+  ]
+}

@@ -4,7 +4,9 @@ This example is for an owner and their agent preparing a fundraiser on a configu
 It uses synthetic event details. It contains no real payment account, participant record, or receipt.
 
 Copy this folder into a workspace as `fundraiser`. The declaration uses workspace-relative paths under that name.
-The frontend and backend publish together. The owner approves the backend operations and data access through dohc's publication flow.
+Approve `dataset.json` and its captured schema and operations through dohc's dataset flow first.
+Then publish the frontend using `app.publish.json`, which references that approved revision.
+The app and Collection use the same records and rules. Publishing the app cannot replace those rules.
 An online transaction host is required for shared registrations.
 
 ## Registration and management
@@ -44,7 +46,8 @@ An organizer must select the actual payment method when marking those entries ve
 Pending, verified, and pay-at-venue registrations reserve capacity. Rejected registrations release it.
 Restoring a rejected registration requires enough capacity in every requested session.
 A stale status update refuses until the organizer reloads the registration.
-Owner table edits invoke `updateRegistration`; they cannot write raw fields around these rules.
+Collection status edits invoke `editRegistrationStatus`, which calls the same status rule and returns an undo receipt.
+Undo also checks capacity and the current record version. It cannot bypass those rules.
 
 ## Operation contract
 
@@ -56,7 +59,11 @@ Request input cannot provide those capabilities.
 [backend.ts](backend.ts) contains ordinary JavaScript in a TypeScript source file.
 The host supplies `ctx.db.query`, `ctx.db.execute`, `ctx.files.attach`, and `ctx.refuse` inside one bounded transaction.
 The app needs no backend imports, external database account, or storage bucket configuration.
-[schema.sql](schema.sql) declares the app tables. [app.publish.json](app.publish.json) declares the allowed operations and table actions.
+[schema.sql](schema.sql) declares the tables. [dataset.json](dataset.json) names their stable fields, relations, and approved operations.
+[app.publish.json](app.publish.json) binds the frontend to a specific approved revision. Its inputs contain only frontend source.
+Changing the descriptor, schema, or backend requires a new approval and an updated binding hash.
+Collection reads return `{ rows: [{ id, version, values }], nextCursor }`, with values keyed by field ID.
+They support bounded SQL pagination, search, sorting, and field filters. Recovery secrets are absent from these reads and field metadata.
 
 ## Verification
 
@@ -67,18 +74,9 @@ manual entries, organizer checks, server-calculated totals, the ReClub checklist
 From the repository root, run:
 
 ```sh
-pnpm --filter @dohc/app-backend-runtime test src/examples.test.ts
+pnpm --filter @dohc/app-backend-runtime test src/examples.test.ts src/dataset-examples.test.ts
 ```
 
-These runtime tests do not prove browser publication, durable retry receipts, host commit ordering, or access revocation.
-Those require the host and browser integration tests. A successful runtime operation is only a candidate until the host commits it.
-
-The [fundraiser browser test](../../services/share-web/e2e/app-backend-fundraiser.spec.ts) passed in Chromium on Windows with the actual compiler, isolated runtime, and relay SQLite storage.
-It covers public registration, receipt upload, private status lookup, organizer sign-in, receipt download, rejection, restoration, payment verification, manual entries, attendees, and owner table reads.
-The test uses synthetic data and requires PowerShell 7 for its temporary TLS certificate.
-
-The [local Electron test](../../apps/desktop/e2e/app-backend-local.spec.ts) verifies approval without an account, native backend operations, browser administration, restart persistence, retry replay, and agent CLI reads of the same records.
-
-```sh
-pnpm qa:e2e -- --grep @app-backend-local
-```
+The dataset-host acceptance suite uses the actual compiled source, worker, SQLite journal, app bindings, and data grants.
+It proves shared Collection/app records, durable request replay, transactional receipt references, rule-preserving status edits, helper permissions, and revocation.
+The fixture supplies receipt metadata; browser upload transport and desktop publication require their own integration tests.

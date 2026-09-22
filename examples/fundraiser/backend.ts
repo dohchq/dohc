@@ -8,7 +8,7 @@
 
   function invalid(ctx, message) { return ctx.refuse("invalid_input", message); }
   function organizer(ctx) {
-    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper && ctx.caller.access === "edit")) {
+    if (ctx.caller.kind !== "owner" && !(ctx.caller.kind === "named" && ctx.caller.helper)) {
       ctx.refuse("forbidden", "Organizer access is required.");
     }
   }
@@ -241,16 +241,68 @@
     if (typeof search !== "string" || search.length > 150) invalid(ctx, "Keep the search under 150 characters.");
     return search;
   }
-  function tableSessions(ctx, input) {
+  const collectionTables = {"tableSessions":{"sqlName":"sessions","version":false,"fields":[{"fieldId":"f0010000-0000-4000-8000-000000000003","sqlColumn":"id","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000004","sqlColumn":"name","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000005","sqlColumn":"starts_at","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000006","sqlColumn":"player_capacity","type":"number"},{"fieldId":"f0010000-0000-4000-8000-000000000007","sqlColumn":"reserved_players","type":"number"}]},"tableRegistrations":{"sqlName":"registrations","version":true,"fields":[{"fieldId":"f0010000-0000-4000-8000-000000000009","sqlColumn":"id","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000010","sqlColumn":"full_name","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000011","sqlColumn":"mobile","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000012","sqlColumn":"source","type":"select"},{"fieldId":"f0010000-0000-4000-8000-000000000013","sqlColumn":"status","type":"select"},{"fieldId":"f0010000-0000-4000-8000-000000000014","sqlColumn":"payment_method","type":"select"},{"fieldId":"f0010000-0000-4000-8000-000000000015","sqlColumn":"total_php","type":"number"},{"fieldId":"f0010000-0000-4000-8000-000000000016","sqlColumn":"receipt_file_id","type":"attachment"},{"fieldId":"f0010000-0000-4000-8000-000000000017","sqlColumn":"version","type":"number"},{"fieldId":"f0010000-0000-4000-8000-000000000018","sqlColumn":"created_at_ms","type":"number"},{"fieldId":"f0010000-0000-4000-8000-000000000019","sqlColumn":"updated_at_ms","type":"number"}]},"tableRegistrationSessions":{"sqlName":"registration_sessions","version":false,"fields":[{"fieldId":"f0010000-0000-4000-8000-000000000021","sqlColumn":"id","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000022","sqlColumn":"registration_id","type":"relation"},{"fieldId":"f0010000-0000-4000-8000-000000000023","sqlColumn":"session_id","type":"relation"},{"fieldId":"f0010000-0000-4000-8000-000000000024","sqlColumn":"player_count","type":"number"},{"fieldId":"f0010000-0000-4000-8000-000000000025","sqlColumn":"spectator_count","type":"number"}]},"tableAttendees":{"sqlName":"attendees","version":false,"fields":[{"fieldId":"f0010000-0000-4000-8000-000000000027","sqlColumn":"id","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000028","sqlColumn":"registration_id","type":"relation"},{"fieldId":"f0010000-0000-4000-8000-000000000029","sqlColumn":"session_id","type":"relation"},{"fieldId":"f0010000-0000-4000-8000-000000000030","sqlColumn":"role","type":"select"},{"fieldId":"f0010000-0000-4000-8000-000000000031","sqlColumn":"name","type":"text"},{"fieldId":"f0010000-0000-4000-8000-000000000032","sqlColumn":"reclub_synced","type":"checkbox"}]}};
+
+  // Collection reads project stable field IDs; edits below call the same domain rules as the app.
+  function collectionRead(ctx, input, table) {
     organizer(ctx); object(ctx, input);
-    const {limit, offset} = pageInput(ctx, input, 100);
-    const search = tableSearch(ctx, input).toLowerCase();
-    const rows = listPublicSessions(ctx).filter(row => row.name.toLowerCase().includes(search));
-    return {rows: rows.slice(offset, offset + limit), total: rows.length};
+    const limit = input.limit === undefined ? 50 : input.limit;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid(ctx, "Choose a page size from 1 to 100.");
+    const fields = table.fields;
+    let sort = fields[0], direction = "asc";
+    if (input.sort !== undefined) {
+      sort = fields.find(field => field.fieldId === input.sort.fieldId);
+      direction = input.sort.direction;
+      if (!sort || sort.type === "attachment" || !["asc", "desc"].includes(direction)) invalid(ctx, "Choose a sortable field.");
+    }
+    const encode = value => typeof value === "boolean" ? Number(value) : value;
+    const decode = (field, value) => field.type === "checkbox" ? value === 1 : value;
+    const q = value => '"' + value + '"';
+    const terms = [], params = [];
+    if (input.search !== undefined && input.search !== "") {
+      if (typeof input.search !== "string" || input.search.length > 200) invalid(ctx, "Keep the search under 200 characters.");
+      const searchable = fields.filter(field => ["text", "select"].includes(field.type));
+      terms.push("(" + searchable.map(field => "instr(lower(" + q(field.sqlColumn) + "),lower(?))>0").join(" OR ") + ")");
+      params.push(...searchable.map(() => input.search));
+    }
+    if (input.filters !== undefined) {
+      if (!Array.isArray(input.filters) || input.filters.length > 20) invalid(ctx, "Choose up to 20 filters.");
+      for (const filter of input.filters) {
+        const field = fields.find(field => field.fieldId === filter.fieldId);
+        if (!field || (filter.value !== null && !["string", "number", "boolean"].includes(typeof filter.value))) invalid(ctx, "Choose a valid filter.");
+        terms.push(q(field.sqlColumn) + " IS ?"); params.push(encode(filter.value));
+      }
+    }
+    if (input.after !== undefined && input.after !== null) {
+      const after = input.after;
+      if (typeof after.id !== "string" || !["string", "number", "boolean"].includes(typeof after.value)) invalid(ctx, "The page reference is invalid.");
+      const compare = direction === "asc" ? ">" : "<";
+      terms.push("(" + q(sort.sqlColumn) + compare + "? OR (" + q(sort.sqlColumn) + "=? AND id" + compare + "?))");
+      params.push(encode(after.value), encode(after.value), after.id);
+    }
+    const columns = fields.map(field => q(field.sqlColumn));
+    if (table.version && !columns.includes(q("version"))) columns.push(q("version"));
+    const rows = ctx.db.query("SELECT " + columns.join(",") + " FROM " + q(table.sqlName) + (terms.length ? " WHERE " + terms.join(" AND ") : "") +
+      " ORDER BY " + q(sort.sqlColumn) + " " + direction + ",id " + direction + " LIMIT ?", [...params, limit + 1]);
+    const more = rows.length > limit;
+    if (more) rows.pop();
+    const last = rows[rows.length - 1];
+    return {rows: rows.map(row => ({id: row.id, version: table.version ? row.version : 1,
+      values: Object.fromEntries(fields.map(field => [field.fieldId, decode(field, row[field.sqlColumn])]))})),
+      nextCursor: more ? {id: last.id, value: decode(sort, last[sort.sqlColumn])} : null};
   }
-  function tableRegistrations(ctx, input) { return {rows: listRegistrations(ctx, input).records}; }
-  function tableRegistrationSessions(ctx, input) { return {rows: listRegistrationSessions(ctx, input).records}; }
-  function tableAttendees(ctx, input) { return {rows: attendees(ctx, input).records}; }
-  globalThis.operations = {listPublicSessions, register, lookupStatus, listRegistrations, attendees, setPlayerReclub, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions,
+  function tableSessions(ctx, input) { return collectionRead(ctx, input, collectionTables.tableSessions); }
+  function tableRegistrations(ctx, input) { return collectionRead(ctx, input, collectionTables.tableRegistrations); }
+  function tableRegistrationSessions(ctx, input) { return collectionRead(ctx, input, collectionTables.tableRegistrationSessions); }
+  function tableAttendees(ctx, input) { return collectionRead(ctx, input, collectionTables.tableAttendees); }
+  function editRegistrationStatus(ctx, input) {
+    organizer(ctx); object(ctx, input);
+    const fieldId = "f0010000-0000-4000-8000-000000000013";
+    if (!input.values || Object.keys(input.values).length !== 1 || !Object.hasOwn(input.values, fieldId)) invalid(ctx, "Use the status field to update this record.");
+    const before = ctx.db.query("SELECT status FROM registrations WHERE id=?", [input.id])[0];
+    const changed = setStatus(ctx, {id: input.id, expectedVersion: input.expectedVersion, status: input.values[fieldId]});
+    return {id: changed.id, version: changed.version, priorValues: {[fieldId]: before.status}};
+  }
+  globalThis.operations = {editRegistrationStatus, listPublicSessions, register, lookupStatus, listRegistrations, attendees, setPlayerReclub, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions,
     tableSessions, tableRegistrations, tableRegistrationSessions, tableAttendees};
 }());
