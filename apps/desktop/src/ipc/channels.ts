@@ -243,6 +243,7 @@ export const CHANNELS = {
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
   appBackend: "desktop:app-backend",
+  dataset: "desktop:dataset",
   retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",

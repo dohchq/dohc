@@ -3,6 +3,7 @@ import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
 import { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
+import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import type {
   CreateLocalWorkspacePayload,
@@ -417,6 +418,7 @@ const bridge: DohcDesktopBridge = {
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
   appBackend: async (payload: OwnerAppBackendRequest) => OwnerAppBackendResult.parse(await ipcRenderer.invoke(CHANNELS.appBackend, OwnerAppBackendRequest.parse(payload))),
+  dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
