@@ -203,8 +203,11 @@ An invalid cache falls back to the authoritative checkpoint and history. Authori
 
 Maintenance reserves the temporary snapshot's dataset capacity before creating it, then accounts the staged checkpoint's actual bytes.
 Peak storage includes the old cache, temporary snapshot reservation, and new staged checkpoint until replacement and cleanup finish.
-File reads and chunk staging use 1 MiB buffers. Checkpoint sealing verifies the complete staged hash before installation.
+File reads and chunk staging use 1 MiB buffers. Materialization checkpoint sealing hashes one chunk per transaction, then yields to host I/O.
+Each chunk rechecks authority and the pending stage. The final transaction verifies the complete hash before sealing; installation still checks the current cursor.
 Maintenance failures do not change an accepted operation's result. Insufficient quota can prevent caching, so replay length is not guaranteed under storage pressure.
+Local and relay hosts log `dataset_materialization_deferred` with workspace and dataset IDs, without raw error text or record contents.
+The supervisor reports one warning per dataset until a successful cache clears it. No operator action is required to resume authoritative replay.
 Recovery exports retain the authoritative history and retry records; they do not include this replaceable cache.
 
 The host retains committed events, schema checkpoints, and retry receipts within its storage quota. It does not delete committed history or expire accepted retry keys.
