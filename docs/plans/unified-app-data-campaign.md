@@ -43,9 +43,9 @@ The benchmark supports SQLite and persistent execution. On a roughly 15 MiB data
 
 ### One identity and one authority for each record
 
-Use Collection as the human-facing entry point for structured data. Extend its contract deliberately because `CONTEXT.md` currently defines Collections as folders of Markdown records.
+Use Collection as the human-facing entry point for structured data. `CONTEXT.md` defines a Collection as a workspace view of transactional records or editable documents.
 
-Internally, a transactional dataset identifies one workspace-owned transaction domain. This is a proposed implementation term, not another product users must choose or configure. A dataset can contain related tables, each exposed through a Collection view. Several approved apps can use the same dataset through explicitly granted operations.
+Internally, a transactional dataset identifies one workspace-owned transaction domain, as defined in `CONTEXT.md`. Users do not choose or configure a separate backend product. A dataset can contain related tables, each exposed through a Collection view. Several approved apps can use the same dataset through explicitly granted operations.
 
 Dataset, table, field, and record identities survive display-name changes. App publications bind those identities and an approved operation version. Renaming a field must not create a new field or detach a form. Deleting or withdrawing an app does not delete its dataset.
 

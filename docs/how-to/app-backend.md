@@ -10,6 +10,9 @@ Create a transactional Collection in the Data section, then choose **Create form
 Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
 
+Creating and compiling Collection actions currently requires the Windows x64 desktop build.
+The relay's Node runtime portability does not establish desktop creation support on other platforms.
+
 For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
 Review its synthetic event details and payment instructions before using it.
 The dataset descriptor names stable tables, fields, operations, schema source, and operation source.
@@ -113,6 +116,49 @@ Manage explicit data grants through **Access** or `dataset setGrant` and `datase
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
 Run `dohc dataset --help` for the supported command fields.
 
+## Change fields and rules
+
+Use **Fields and names** to add fields or rename fields, tables, and the Collection.
+For custom schema or rule changes, prepare the new dataset descriptor and a migration SQL file:
+
+```sh
+dohc dataset prepareMigration '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","descriptorPath":"fundraiser/dataset.json","migrationPath":"fundraiser/migration.sql"}'
+```
+
+Preparation runs the migration against a saved copy and validates its schema and constraints.
+Review the captured source, migration SQL, and each changed record's before and after values.
+The returned `candidate.preview.firstPage` contains the first page. Use its `nextCursor` to read subsequent pages:
+
+```sh
+dohc dataset migrationPreviewPage '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","after":"NEXT_CURSOR","limit":100}'
+```
+
+Approve the reviewed result using the returned hashes, or discard it:
+
+```sh
+dohc dataset approveMigration '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID","revisionSha256":"REVISION_SHA256","approvalDigest":"APPROVAL_DIGEST"}'
+dohc dataset discardMigration '{"workspaceId":"WORKSPACE_ID","preparationId":"PREPARATION_ID"}'
+```
+
+Approval applies the exact reviewed checkpoint; it does not rerun the SQL.
+Prepare a new review if the data changes, access changes, or the review expires.
+Reviews expire after ten minutes. Each dataset can retain one review, with at most four reviews per host.
+Rows above 128 KiB or encoded changes above 256 KiB refuse preparation without truncation.
+Checkpoint and report storage must each fit the dataset capacity. See the [migration limits](../../packages/app-backend-runtime/README.md#approved-schema-transitions).
+
+App bindings and data grants remain tied to their approved revision.
+Review and approve access to the new revision before using those apps or grants again.
+
+## Archive or delete a Collection
+
+Archive a Collection to stop its operations while retaining its records. Restore it to resume under its existing rules.
+Withdrawing an app leaves its dataset intact.
+
+Before permanent deletion, export a private recovery archive and review every affected app in the deletion preview.
+Permanent deletion removes the dataset's private data and cannot be undone on that host.
+The host retains a deletion record that prevents restoring the same dataset identity there.
+An archive can preserve a separate copy for recovery on clean host storage, subject to the recovery requirements below.
+
 ## Export and recover
 
 Use **Import or export CSV** for tabular interchange. CSV import invokes the approved create operation for each row.
@@ -127,9 +173,12 @@ dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","sav
 
 The destination directory must exist. Existing files require explicit `overwrite:true`.
 Protect the archive as private data. Its integrity checks detect corruption; they do not encrypt it.
+The host retains committed history, schema checkpoints, and retry receipts within its quota; automatic history compaction is not implemented.
+Quota exhaustion refuses further writes. Exporting an archive does not release storage.
 Do not replace an authority that has accepted newer writes with an older archive.
-Restore to a local workspace with the same identity and no existing copy of that Collection.
+Restore to clean local host storage with the same workspace identity and no existing copy of that Collection.
 Do not create an empty Collection first. Recovery refuses every existing dataset, including an inactive or transferred copy.
+The target must also have no permanent-deletion record for this dataset. Removing those records is not a supported recovery procedure.
 
 Choose **Restore a Collection**, or prepare a private archive through the CLI:
 
@@ -154,7 +203,7 @@ Before claiming, cancel with `dataset discardRecovery` and the returned `transfe
 
 To recover onto a clean shared host, first restore locally, then publish the app through the normal sharing flow.
 That transfer stops local writes before the server accepts the dataset. It preserves attachments and retry receipts.
-The shared target must also have no existing copy of this dataset.
+The shared target must have neither an existing copy nor a permanent-deletion record for this dataset.
 Recovery never promotes a downloaded replica or replaces a running shared authority.
 
 See [server recovery](self-host-recovery.md) for whole-service restoration.
