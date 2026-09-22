@@ -13,6 +13,7 @@ import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatas
 
 export interface OwnerDatasetData {
   inspect?(datasetId: string, options?: { includeArchived?: boolean }): Promise<{ dataset: DatasetDescription; copy?: import("@dohc/cli/dataset").DatasetCopyStatus }>;
+  migrate?(input: import("@dohc/app-backend-runtime/dataset-host").MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
   history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
   list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
@@ -112,6 +113,22 @@ export function createRemoteDatasetData(input: {
       if (result.revision.datasetId !== datasetId || result.cursor.datasetId !== datasetId || result.cursor.workspaceId !== input.workspaceId ||
         result.cursor.approvedRevisionHash !== result.revision.revisionSha256) throw new Error("The server returned different Collection rules.");
       return result;
+    },
+    async migrate(value) {
+      if (input.shareId !== undefined) throw new Error("Only the Collection owner can change its rules.");
+      if (value.workspaceId !== input.workspaceId || value.expected.workspaceId !== input.workspaceId || value.expected.datasetId !== value.revision.datasetId) throw new Error("This change belongs to another Collection.");
+      verifyDatasetArtifacts(value);
+      const signal = value.signal ? AbortSignal.any([input.signal, value.signal]) : input.signal;
+      const raw = await request(`${path(value.revision.datasetId)}/migrate`, {
+        revision: value.revision, schemaSql: value.schemaSql, operationSource: value.operationSource,
+        expected: value.expected, migrationSql: value.migrationSql,
+      }, signal);
+      const result = DatasetResult.parse({ ...(raw as object), kind: "migrated" });
+      if (result.kind !== "migrated" || result.revision.revisionSha256 !== value.revision.revisionSha256 || result.revision.datasetId !== value.revision.datasetId ||
+          result.cursor.workspaceId !== input.workspaceId || result.cursor.datasetId !== value.revision.datasetId ||
+          result.cursor.hostEpoch !== value.expected.hostEpoch || result.cursor.approvedRevisionHash !== value.revision.revisionSha256 ||
+          result.cursor.revision !== value.expected.revision + 1) throw new Error("The server did not confirm this Collection change. Refresh the Collection before reviewing it again.");
+      return { revision: result.revision, cursor: result.cursor };
     },
     async invoke(invocation) {
       const { datasetId, revision, revisionSha256, operationId, idempotencyKey } = invocation;
@@ -213,7 +230,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "pendingAttempts" | "reconcileAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "migrate" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "pendingAttempts" | "reconcileAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -253,6 +270,11 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     },
     history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
+    migrate: async value => {
+      const authority = await target(value.revision.datasetId);
+      if (!authority.migrate) throw new Error("Collection rule changes are unavailable on this host.");
+      return authority.migrate(value);
+    },
     invoke: async value => (await target(value.datasetId)).invoke(value),
     upload: async value => (await target(value.datasetId)).upload(value),
     file: async value => (await target(value.datasetId)).file(value),

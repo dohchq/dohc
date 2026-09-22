@@ -59,8 +59,12 @@ async function fixture(initial: DatasetDefinition = definition) {
 }
 const call = (revision: DatasetRevision, operationId: string, input = {}, key = "read") => ({ datasetId: id(1), revision: revision.revision,
   revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: key });
-const approve = (host: LocalDatasetHost, review: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["prepare"]>>) => host.approveMigration({ preparationId: review.preparationId,
-  revisionSha256: review.revision.revisionSha256, approvalDigest: review.approvalDigest });
+const approve = async (fixture: Awaited<ReturnType<typeof fixture>>, review: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["prepare"]>>) => {
+  const result = await fixture.handler("owner", { action: "approveMigration", workspaceId: "w", preparationId: review.preparationId,
+    revisionSha256: review.revision.revisionSha256, approvalDigest: review.approvalDigest });
+  if (result.kind !== "migrated") throw new Error("Expected migration");
+  return result;
+};
 
 it("adds a required defaulted field through captured approval and keeps row IDs, values and stable operation IDs", async () => {
   const f = await fixture();
@@ -69,7 +73,7 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   expect(f.host.describe(id(1)).revision).toBe(1);
   const field = review.revision.definition.tables[0]!.fields.at(-1)!;
   expect(review.revision.definition.operations.find(op => op.operationId === id(8))!.fieldIds).toEqual([id(4),field.fieldId]);
-  const next = await approve(f.host, review);
+  const next = await approve(f, review);
   const rows = (await f.host.query(call(next.revision, id(5)))).result as { rows: Array<{ id: string; version: number; values: Record<string, unknown> }> };
   expect(rows.rows[0]!.id).toBe((added.result as { id: string }).id);
   expect(rows.rows[0]!.values).toMatchObject({ [id(4)]: "Camera", [field.fieldId]: "New" });
@@ -81,12 +85,12 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
 it("keeps stable field/table IDs across consecutive add and label changes", async () => {
   const f = await fixture();
   await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "first"));
-  const first = await approve(f.host, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Note", type: "text", required: false, unique: false } }));
-  const second = await approve(f.host, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Amount", type: "number", required: false, unique: false, default: 3 } }));
+  const first = await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Note", type: "text", required: false, unique: false } }));
+  const second = await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Amount", type: "number", required: false, unique: false, default: 3 } }));
   const noteId = first.revision.definition.tables[0]!.fields.at(-1)!.fieldId;
-  const renamed = await approve(f.host, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: noteId, name: "Notes" }));
+  const renamed = await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: noteId, name: "Notes" }));
   expect(renamed.revision.definition.tables[0]!.fields.find(f => f.fieldId === noteId)!.name).toBe("Notes");
-  const renamedTable = await approve(f.host, await f.prepare({ kind: "renameTable", tableId: id(2), name: "Guests" }));
+  const renamedTable = await approve(f, await f.prepare({ kind: "renameTable", tableId: id(2), name: "Guests" }));
   expect(renamedTable.revision.definition.tables[0]!).toMatchObject({ tableId: id(2), sqlName: "people", name: "Guests" });
   expect(second.revision.definition.tables[0]!.fields.map(f => f.fieldId)).toEqual(renamedTable.revision.definition.tables[0]!.fields.map(f => f.fieldId));
   const result = (await f.host.query(call(renamedTable.revision, id(5)))).result as { rows: Array<{ values: Record<string, unknown> }> };
@@ -95,7 +99,7 @@ it("keeps stable field/table IDs across consecutive add and label changes", asyn
 });
 
 it("adds a unique field as an index and rejects duplicate values through existing operations", async () => {
-  const f = await fixture(), next = await approve(f.host, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: true } }));
+  const f = await fixture(), next = await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: true } }));
   const field = next.revision.definition.tables[0]!.fields.at(-1)!;
   await f.host.action(call(next.revision, id(6), { values: { [id(4)]: "One", [field.fieldId]: "one@example.com" } }, "one"));
   await expect(f.host.action(call(next.revision, id(6), { values: { [id(4)]: "Two", [field.fieldId]: "one@example.com" } }, "two"))).rejects.toThrow(/already uses/);
@@ -115,7 +119,7 @@ it("refuses changed capture, stale revision, missing required defaults and autho
 it("updates the default no-agent Collection actions so new fields are visible and editable", async () => {
   const initial = datasetDefinitionFromDrafts({ datasetId:id(1),tableId:id(2),name:"People",schemaPath:"people/schema.sql",operationsPath:"people/operations.js",
     fields:[{name:"Name",type:"text",required:false,unique:false}] });
-  const f=await fixture(initial), next=await approve(f.host,await f.prepare({kind:"addField",tableId:id(2),field:{name:"Note",type:"text",required:false,unique:false}}));
+  const f=await fixture(initial), next=await approve(f,await f.prepare({kind:"addField",tableId:id(2),field:{name:"Note",type:"text",required:false,unique:false}}));
   const field=next.revision.definition.tables[0]!.fields.at(-1)!;
   expect(f.host.describe(id(1)).tables[0]!.fields.some(candidate=>candidate.fieldId===field.fieldId)).toBe(true);
   const create=next.revision.definition.operations.find(operation=>operation.kind==="create")!;

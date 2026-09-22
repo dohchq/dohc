@@ -7,11 +7,12 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { createLocalDatasetMigrations } from "../workspaces/localDatasetMigration";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
-type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; assertCurrent(): void };
+type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
 
 /** The desktop and owner CLI enter the same workspace authority before using data. */
 export function createDatasetHandler<Caller, W extends Workspace, O extends Operation<W>>(dependencies: {
@@ -26,6 +27,9 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
 }) {
+  type MigrationReview = ReturnType<typeof createLocalDatasetMigrations>;
+  const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; review: MigrationReview; clear(): void }>();
+  let preparingMigrations = 0;
   return async (caller: Caller, raw: unknown) => {
     const input = DatasetRequest.parse(raw);
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
@@ -68,9 +72,42 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt", "prepareSchemaChange", "prepareMigration"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
+      if (input.action === "approveMigration" || input.action === "discardMigration") {
+        const pending = migrations.get(input.preparationId);
+        if (!pending || pending.caller !== caller || pending.workspaceId !== input.workspaceId || pending.signal !== operation.signal || pending.scope !== operation.scope) {
+          throw new Error("This Collection review expired. Prepare the change again.");
+        }
+        // Consume before any authority read or SQL, including an uncertain remote reply.
+        pending.clear();
+        if (input.action === "discardMigration") { pending.review.clear(); return { kind: "migration-discarded" as const }; }
+        const result = await pending.review.approveMigration({ ...input, signal: operation.signal }); current();
+        return { kind: "migrated" as const, ...result };
+      }
+      const prepareMigration = async (selection: { datasetId: string; descriptorPath: string; migrationPath: string }) => {
+        if (migrations.size + preparingMigrations >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
+        preparingMigrations++;
+        const review = createLocalDatasetMigrations({ workspaceId: input.workspaceId, assertCurrent: current,
+          approvedArtifacts: datasetId => data.approvedArtifacts(datasetId),
+          migrate: value => {
+            current();
+            if (!data.migrate) throw new Error("Collection rule changes are unavailable on this host.");
+            return data.migrate(value);
+          },
+        });
+        try {
+          const prepared = await dependencies.withAdapter(operation.workspace, adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
+          current();
+          const clear = () => { migrations.delete(prepared.preparationId); operation.signal.removeEventListener("abort", expire); clearTimeout(timer); };
+          const expire = () => { clear(); review.clear(); };
+          const timer = setTimeout(expire, Math.max(0, prepared.expiresAtMs - Date.now())); timer.unref();
+          migrations.set(prepared.preparationId, { caller, workspaceId: input.workspaceId, signal: operation.signal, scope: operation.scope, review, clear });
+          operation.signal.addEventListener("abort", expire, { once: true });
+          return prepared;
+        } finally { preparingMigrations--; }
+      };
       if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
       if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
       if(input.action === "pendingAttempts") { if(!data.pendingAttempts)throw new Error("Pending submission review is unavailable."); const result=await data.pendingAttempts(input);current();return {kind:"pending-attempts" as const,...result}; }
@@ -124,34 +161,28 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
-      if (input.action === "discardMigration") { host.discardMigration(input.preparationId); return { kind: "migration-discarded" as const }; }
       if (input.action === "prepareSchemaChange") {
-        const approved = host.approvedArtifacts(input.datasetId);
-        if (!approved.active) throw new Error("This Collection is hosted elsewhere. Review schema changes on its active host.");
+        const approved = await data.approvedArtifacts(input.datasetId);
+        current();
+        if (!approved.active) throw new Error("This Collection is unavailable. Reconnect to its host and try again.");
         if (approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("Collection rules changed. Refresh the Collection before changing fields.");
         const generated = generateDatasetSchemaChange({ ...approved, change: input.change });
         const expected = describeDatasetRevision({ definition: generated.definition, revision: input.revision + 1,
           schemaSql: generated.schemaSql, operationSource: generated.operationSource });
         await dependencies.createSources(operation.workspace, generated.files, operation.signal);
         current();
-        const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepareMigration({ datasetId: input.datasetId,
-          descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath, adapter, signal: operation.signal }));
+        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath });
         current();
         if (prepared.previousRevision.revisionSha256 !== input.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
-          host.discardMigration(prepared.preparationId);
+          const pending = migrations.get(prepared.preparationId); pending?.clear(); pending?.review.clear();
           throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
         }
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
       }
       if (input.action === "prepareMigration") {
-        const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepareMigration({ ...input, adapter, signal: operation.signal }));
+        const prepared = await prepareMigration(input);
         current();
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
-      }
-      if (input.action === "approveMigration") {
-        const result = await host.approveMigration({ ...input, signal: operation.signal });
-        current();
-        return { kind: "migrated" as const, ...result };
       }
       if (input.action === "invoke") {
         try {

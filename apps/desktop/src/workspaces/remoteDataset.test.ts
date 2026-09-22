@@ -31,6 +31,21 @@ function fixture() {
 }
 
 describe("remote Collection authority", () => {
+  it("sends captured migration bytes and validates the confirmed cursor", async () => {
+    const f = fixture();
+    const next = describeDatasetRevision({ definition: { ...definition, name: "Renamed" }, revision: 2, schemaSql: "SQL", operationSource: "RULES" });
+    const value = { workspaceId: "workspace", revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor };
+    const committed = { revision: next, cursor: { ...approved.cursor, approvedRevisionHash: next.revisionSha256, revision: 1, digest: "a".repeat(64) } };
+    f.relay.mockResolvedValue(committed);
+    expect(await f.data.migrate!(value)).toEqual(committed);
+    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/migrate`);
+    expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor });
+    for (const patch of [{ hostEpoch: "other" }, { datasetId: id(9) }, { revision: 7 }, { approvedRevisionHash: revision.revisionSha256 }]) {
+      f.relay.mockResolvedValue({ ...committed, cursor: { ...committed.cursor, ...patch } });
+      await expect(f.data.migrate!(value)).rejects.toThrow(/did not confirm/);
+    }
+  });
+
   it("pins explicit data grants and can remove a stored principal after its source share ends", async () => {
     const f = fixture(), grant = { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(4)], discover: true };
     f.relay.mockResolvedValueOnce({ ok: true });

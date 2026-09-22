@@ -38,14 +38,15 @@ const sameCursor = (a: DatasetCursor, b: DatasetCursor) => a.workspaceId === b.w
 export function createLocalDatasetMigrations(dependencies: {
   workspaceId: string;
   assertCurrent(): void;
-  approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean };
+  approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
   migrate(input: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
 }) {
   const pending = new Map<string, LocalDatasetMigrationPreparation>();
   let preparing = 0;
-  function current(expected: DatasetCursor) {
+  async function current(expected: DatasetCursor) {
     dependencies.assertCurrent();
-    const head = dependencies.approvedArtifacts(expected.datasetId);
+    const head = await dependencies.approvedArtifacts(expected.datasetId);
+    dependencies.assertCurrent();
     if (!head.active || !sameCursor(expected, head.cursor)) throw new Error("This Collection changed after review started. Prepare the change again.");
   }
   return {
@@ -56,16 +57,16 @@ export function createLocalDatasetMigrations(dependencies: {
       if (pending.size + preparing >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
       if (!allowed(input.descriptorPath) || !allowed(input.migrationPath)
         || (input.descriptorPath !== "dataset.json" && !input.descriptorPath.endsWith("/dataset.json"))) throw new Error("Choose Collection sources in this workspace.");
-      const previous = dependencies.approvedArtifacts(input.datasetId);
-      current(previous.cursor);
       preparing++;
       try {
+        const previous = await dependencies.approvedArtifacts(input.datasetId);
+        await current(previous.cursor);
         const capture = async (paths: string[]) => {
-          current(previous.cursor); input.signal?.throwIfAborted();
+          await current(previous.cursor); input.signal?.throwIfAborted();
           const metadata = await input.adapter.captureSourceMetadata({ workspaceId: dependencies.workspaceId, versionId: "main", paths,
             bounds: { maxInputFiles: 4, maxInputBytes: maximumBytes * 4 }, signal: abort });
           const files = await input.adapter.hydrateCapturedSources(metadata, abort);
-          current(previous.cursor); input.signal?.throwIfAborted();
+          await current(previous.cursor); input.signal?.throwIfAborted();
           if (metadata.workspaceId !== dependencies.workspaceId || files.length !== paths.length || new Set(files.map(file => file.path)).size !== paths.length
             || files.some(file => !paths.includes(file.path) || file.bytes.byteLength > maximumBytes || digest(file.bytes) !== file.sha256)) throw new Error("Collection source capture failed. Prepare the change again.");
           return { metadata, files };
@@ -96,7 +97,7 @@ export function createLocalDatasetMigrations(dependencies: {
       }
       // Consume before the first await: a failed or uncertain outcome requires fresh capture, never repeated SQL.
       pending.delete(input.preparationId);
-      current(review.expected);
+      await current(review.expected);
       return dependencies.migrate({ workspaceId: dependencies.workspaceId, revision: review.revision, expected: review.expected,
         schemaSql: review.schemaSql, operationSource: review.operationSource, migrationSql: review.migrationSql, signal: input.signal });
     },

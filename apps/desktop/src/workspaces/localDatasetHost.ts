@@ -321,6 +321,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)); },
       discardRecovery(transferId: string) { return tracked(() => recovery.discard(transferId)); },
+      migrate(input: import("@dohc/app-backend-runtime/dataset-host").MigrateDatasetInput) { assertCurrent(); if (input.workspaceId !== workspaceId) throw new Error("This Collection belongs to another workspace."); return tracked(() => host.migrate(owner, { ...input, signal: signal(input.signal) })); },
       prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {
         return tracked(async () => {
           const archive = await host.exportRecovery(owner, { workspaceId, datasetId, signal: signal(input.signal) });
