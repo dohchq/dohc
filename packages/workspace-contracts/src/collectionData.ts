@@ -1,21 +1,11 @@
 import type { CollectionValue } from "./collection";
 
-export type DocumentCollectionRef = { kind: "document"; path: string };
-export type TransactionalCollectionRef = { kind: "transactional"; datasetId: string; tableId: string };
+type DocumentCollectionRef = { kind: "document"; path: string };
+type TransactionalCollectionRef = { kind: "transactional"; datasetId: string; tableId: string };
 export type CollectionRef = DocumentCollectionRef | TransactionalCollectionRef;
 export type CollectionRecordRef =
   | { collection: DocumentCollectionRef; recordId: string }
   | { collection: TransactionalCollectionRef; recordId: string | number };
-
-/** Host-filtered discovery. Neither a reference nor an action grants authority. */
-export interface CollectionDataDescriptor {
-  ref: CollectionRef;
-  name: string;
-  actions: CollectionDataActionDescriptor[];
-}
-export type CollectionDataActionDescriptor =
-  | { kind: "document"; action: "create" | "setFields" | "read" }
-  | { kind: "transactional"; operationId: string; label: string; readOnly: boolean };
 
 /** Field keys are document property names or transactional field UUIDs. */
 export interface CollectionDataQuery {
@@ -25,16 +15,6 @@ export interface CollectionDataQuery {
   sort?: { fieldId: string; direction: "asc" | "desc" };
   search?: string;
   filters?: Array<{ fieldId: string; value: CollectionValue }>;
-}
-export interface CollectionDataRecord {
-  ref: CollectionRecordRef;
-  values: Record<string, CollectionValue>;
-  version?: number;
-}
-export interface CollectionDataReadResult {
-  collection: CollectionDataDescriptor;
-  records: CollectionDataRecord[];
-  nextAfter: NonNullable<CollectionDataQuery["after"]> | null;
 }
 /** An edit payload remains input to an approved operation, never a generic write grant. */
 export interface CollectionDataEditInput {

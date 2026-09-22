@@ -28,7 +28,7 @@ export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(
   revision: z.number().int().nonnegative(), digest: sha256 }).strict();
 export const DatasetRecoveryPreparation = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, revision }).strict();
 export type DatasetRecoveryPreparation = z.infer<typeof DatasetRecoveryPreparation>;
-export const DatasetDataGrant = z.object({ revision: z.number().int().positive(), revisionSha256: sha256,
+const DatasetDataGrant = z.object({ revision: z.number().int().positive(), revisionSha256: sha256,
   operationIds: z.array(identity).min(1).max(128), discover: z.boolean() }).strict();
 export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("data"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: DatasetDataGrant }).strict(),
@@ -120,7 +120,7 @@ export const DatasetInvocationResult = z.object({
   }), revision: z.number().int().nonnegative(), replayed: z.boolean(), copy: DatasetCopyStatus.optional(),
 }).strict();
 export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
-export const DatasetHistoryUndo = z.object({ operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
+const DatasetHistoryUndo = z.object({ operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
   recordId: z.union([z.string().min(1).max(512), z.number().int().safe()]), expectedVersion: z.number().int().positive().safe(),
   fields: z.array(z.object({ fieldId: identity, name: z.string().min(1).max(128), value: json }).strict()).min(1).max(128) }).strict();
 export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
