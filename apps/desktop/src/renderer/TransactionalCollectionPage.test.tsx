@@ -31,6 +31,14 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("keeps saved filters when sorting and resets paging when switching views",async()=>{
+    const activeView={viewId:id(30),name:"Pending",kind:"table" as const,search:"Alice",filters:[{fieldId:status,value:"New"}],sort:{fieldId:name,direction:"asc" as const}};
+    const result=setup({activeView});await screen.findByText("Alice");
+    expect(result.invoke.mock.calls[0]![0].input).toMatchObject({search:"Alice",filters:[{fieldId:status,value:"New"}],sort:{fieldId:name,direction:"asc"}});
+    fireEvent.click(screen.getByRole("button",{name:"Amount"}));await waitFor(()=>expect(result.invoke.mock.calls.at(-1)![0].input).toMatchObject({filters:activeView.filters,sort:{fieldId:amount,direction:"asc"}}));
+    result.rerender(<TransactionalCollectionPage {...result.props} activeView={{...activeView,viewId:id(31),search:"Bob"}}/>);
+    await waitFor(()=>expect(result.invoke.mock.calls.at(-1)![0].input).toMatchObject({search:"Bob",sort:activeView.sort}));expect(result.invoke.mock.calls.at(-1)![0].input).not.toHaveProperty("after");
+  });
   it("clears previously displayed records when a read loses access", async () => {
     const result = setup(); await screen.findByText("Alice");
     result.invoke.mockRejectedValueOnce(Error("Access revoked"));

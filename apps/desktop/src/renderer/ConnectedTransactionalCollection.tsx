@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
+import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
+import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
 import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { CollectionActionDialog } from "./CollectionActionDialog";
@@ -32,6 +34,7 @@ export function ConnectedTransactionalCollection(props: ConnectedTransactionalCo
 }
 function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
+  const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
@@ -93,6 +96,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   }
   if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}{owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}<SecondaryButton disabled={loading} onClick={() => void refresh()}>Refresh</SecondaryButton></div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
+    activeView={owner ? activeView : null}
+    viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
     copy={copy}
     onRefresh={() => { void refresh(); }}
     onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}

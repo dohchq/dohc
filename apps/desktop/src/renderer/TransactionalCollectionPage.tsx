@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
+import type { CollectionTableView } from "./collectionTableViews";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
@@ -22,6 +23,8 @@ export interface TransactionalInvoke {
   idempotencyKey: string;
 }
 export interface TransactionalCollectionPageProps extends CollectionResources {
+  activeView?: CollectionTableView | null;
+  viewControls?(disabled: boolean): ReactNode;
   copy?: DatasetCopyStatus;
   onRefresh?(): void;
   workspaceId: string;
@@ -42,7 +45,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onExportRecovery?(): void;
   onArchive?(): void;
 }
-type Query = { after: TransactionalCursor | null; search: string; sort?: { fieldId: string; direction: "asc" | "desc" } };
+type Query = { after: TransactionalCursor | null; search: string; filters?: Array<{ fieldId: string; value: AppBackendJson }>; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
 type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean };
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
@@ -117,6 +120,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const input: Record<string, AppBackendJson> = { limit: 50 };
       if (next.after) input.after = { id: next.after.id, value: next.after.value };
       if (next.search) input.search = next.search;
+      if (next.filters?.length) input.filters = next.filters;
       if (next.sort) input.sort = { ...next.sort };
       const response = await invoke(request(read, input, crypto.randomUUID()), abort.signal);
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
@@ -130,7 +134,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (alive.current && sequence.current === mine) { locked.current = false; setBusy(false); }
     }
   }
-  useEffect(() => { void load({ after: null, search: "" }, []); }, []);
+  const activeViewKey = JSON.stringify(props.activeView ?? null);
+  useEffect(() => {
+    const view = props.activeView;
+    setPage(null);
+    setSearch(view?.search ?? "");
+    void load({ after: null, search: view?.search ?? "", filters: view?.filters, sort: view?.sort ?? undefined }, []);
+  }, [activeViewKey]);
 
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
   async function execute(change: Mutation): Promise<void> {
@@ -189,6 +199,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold text-ink">{table.name}</h2><div className="flex flex-wrap gap-2">
+      {props.viewControls?.(disabled || editor !== null)}
       {props.onReviewSchema ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onReviewSchema}>Fields and names</SecondaryButton> : null}
       {props.onManageAccess ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onManageAccess}>Manage access</SecondaryButton> : null}
       {props.onExportRecovery ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onExportRecovery}>Export recovery</SecondaryButton> : null}
@@ -211,7 +222,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
     {page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
-        {supportsSort(field) ? <button type="button" disabled={disabled || editor !== null} className="text-left" onClick={() => void load({ after: null, search: query.search, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
+        {supportsSort(field) ? <button type="button" disabled={disabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
       </th>)}{remove && confirmDelete ? <th scope="col"><span className="sr-only">Actions</span></th> : null}</tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
