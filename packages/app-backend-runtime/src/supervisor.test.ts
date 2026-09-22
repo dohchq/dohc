@@ -489,3 +489,18 @@ it("refuses cache installation after authority transfers during the snapshot",as
   expect(errors.length).toBeGreaterThan(0);
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
 });
+
+
+it("stages and restores a large materialization through bounded chunks",async()=>{
+  const staged:number[]=[],restored:number[]=[];
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},
+    schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1500) INSERT INTO items SELECT CAST(i AS TEXT),printf('%01024d',i) FROM n;",
+    source:"globalThis.operations={run(ctx,input){if(input.id)ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,'saved']);return ctx.db.query('SELECT count(*) AS count FROM items')}}",
+    transform:journal=>({...journal,appendCheckpointChunk(input){staged.push(input.bytes.byteLength);return journal.appendCheckpointChunk(input);}})});
+  await f.invoke({id:"new"});await f.invoke({}, {readOnly:true});await f.supervisor.close();
+  const journal={...f.journal,materializationBlob(input:Parameters<DatasetJournal["materializationBlob"]>[0]){const bytes=f.journal.materializationBlob(input);if(bytes)restored.push(bytes.byteLength);return bytes;}};
+  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,"workers")});cleanups.push(()=>reopened.close());
+  expect((await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize})).result).toEqual([{count:1501}]);
+  expect(staged.length).toBeGreaterThan(1);expect(restored.length).toBeGreaterThan(1);
+  expect(Math.max(...staged,...restored)).toBeLessThanOrEqual(1024*1024);
+});
