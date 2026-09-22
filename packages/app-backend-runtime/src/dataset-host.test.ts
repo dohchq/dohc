@@ -252,3 +252,16 @@ it("refuses a non-replayable schema before committing dataset approval",async()=
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
 });
+
+it("rechecks grants and data revision when a protected resource is read",async()=>{
+  const f=await fixture();await f.activate();
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
+  const request={...scope,revision:1,revisionSha256:prepared.revision.revisionSha256,operationId:id(7),input:{},idempotencyKey:"file"};
+  let read=false;
+  const pending=f.host.readOperation("helper",request,()=>{read=true;return Buffer.from("file");});
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:null});
+  await expect(pending).rejects.toThrow("not permitted");expect(read).toBe(false);
+  await expect(f.host.readOperation("owner",request,()=>Buffer.from("file"))).resolves.toEqual(Buffer.from("file"));
+  await expect(f.host.readOperation("owner",request,async()=>{read=true;})).rejects.toThrow("synchronous");expect(read).toBe(false);
+  await expect(f.host.readOperation("owner",{...request,operationId:id(6)},()=>"file")).rejects.toThrow("read-only");
+});

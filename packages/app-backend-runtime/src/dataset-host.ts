@@ -88,6 +88,9 @@ function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.operationResources]) {
+    if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
+  }
   const { db, journal } = options;
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => db.exec(`
@@ -190,7 +193,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           return description;
         }) })), operations };
   }
-  return {
+  const host = {
     async activate(context: Context, raw: ActivateDatasetInput): Promise<DatasetRevision> {
       const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
       if (approved.revision !== 1) throw new Error("Initial dataset revision must be 1. Schema changes require a revision transition.");
@@ -363,5 +366,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([permitted.revision.revisionSha256, operationId, input])), readOnly: operation.readOnly,
         files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize });
     },
+    /** Resolve a protected resource only while the operation's data revision and grants still hold. */
+    async readOperation<T>(context: Context, raw: InvokeDatasetInput, read: (result: JsonValue, revision: number) => T): Promise<T> {
+      if(read.constructor.name==="AsyncFunction")throw new DatasetHostError("invalid","Protected file reads must be synchronous.");
+      const key=scope(raw),through=access(raw.access),permitted=permissions(context,key,through);
+      const operation=permitted.operations.find(operation=>operation.operationId===raw.operationId);
+      if(!operation?.readOnly)throw new DatasetHostError("invalid","A protected file read requires a read-only dataset operation.");
+      const result=await host.invoke(context,raw);
+      return transaction(()=>{
+        const check=()=>{
+          raw.signal?.throwIfAborted();
+          const current=permissions(context,key,through);
+          if(current.token!==permitted.token)denied();
+          const head=db.prepare("SELECT revision,approved_revision_hash,active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+          if(!head||head.active!==1||head.revision!==result.revision||head.approved_revision_hash!==permitted.revision.revisionSha256)throw new DatasetHostError("conflict","Dataset changed before the protected file was read. Retry it.");
+        };
+        check();const value=synchronous(()=>read(result.result,result.revision));check();return value;
+      });
+    },
   };
+  return host;
 }
