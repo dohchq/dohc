@@ -31,6 +31,7 @@ export async function spawnSyncRelay(input: {
   // desktop app already has in its credential file.
   port?: number;
   linkBoundary?: SyncRelayLinkBoundary;
+  appPublications?: boolean;
 }): Promise<SyncRelayHandle> {
   const child: ChildProcess = spawn(
     process.execPath,
@@ -46,6 +47,7 @@ export async function spawnSyncRelay(input: {
         SYNC_RELAY_TEST_AUTH: "1",
         SYNC_RELAY_PORT: String(input.port ?? 0),
         SYNC_RELAY_DB_PATH: input.dbPath,
+        ...(input.appPublications ? { DOHC_RELAY_APP_PUBLICATIONS: "1" } : {}),
         ...(input.linkBoundary
           ? {
               DOHC_RELAY_LINK_KEY: input.linkBoundary.linkKey,
