@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCookies } from "better-auth/cookies";
-import { transform } from "esbuild";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
@@ -14,6 +13,7 @@ import { openSyncRelayStorage } from "../../sync-relay/src/storage";
 import type { StorageContext } from "../../sync-relay/src/storage/context";
 import { createSyncRelayHandler } from "../../sync-relay/src/server";
 import { hashLinkBearer } from "../../sync-relay/src/linkSecurity";
+import { compileDatasetOperations } from "../../sync-relay/src/datasetCompiler";
 import { createShareWebApplication } from "../src/server";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
@@ -48,7 +48,7 @@ export async function actualFundraiserFixture() {
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;
   const datasetHost=await storage.createDatasetHost({directory:join(directory,"workers"),limits:APP_PUBLICATION_LIMITS,
-    compileOperations:async source=>(await transform(source,{loader:"ts",target:"es2022"})).code,
+    compileOperations:compileDatasetOperations,
     onShutdownError(error){throw error;}});
   const linkKey="fundraiser-browser-link-key-with-thirty-two-bytes",exchangeKey="fundraiser-browser-relay-exchange-key-with-thirty-two-bytes";
   const secret="S".repeat(43),profile="P".repeat(43);
