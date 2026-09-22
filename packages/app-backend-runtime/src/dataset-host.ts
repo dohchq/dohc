@@ -231,7 +231,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         } });
       return { revision: approved, cursor };
     },
-    setBinding(context: Context, raw: DatasetScope & { appId: string; binding: AppDatasetBinding | null }): void {
+    setBinding(context: Context, raw: DatasetScope & { appId: string; binding: AppDatasetBinding | null }, commitPublication?: () => void): void {
       const key = scope(raw), appId = text(raw.appId);
       transaction(() => {
         owner(context, key);
@@ -249,6 +249,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("INSERT INTO dohc_dataset_bindings VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,app_id) DO UPDATE SET binding_json=excluded.binding_json,token=excluded.token")
             .run(key.workspaceId, key.datasetId, appId, json, randomUUID());
         }
+        if (commitPublication) synchronous(commitPublication);
         owner(context, key);
       });
     },
