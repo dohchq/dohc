@@ -23,15 +23,21 @@ const definition: DatasetDefinition = { formatVersion:1,datasetId:id(1),name:"It
 const limits = { maxTotalBytes: 16*1024*1024 };
 const cleanups: Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
-async function fixture(){
+async function fixture(large = false){
   const directory=await mkdtemp(join(tmpdir(),"dohc-recovery-import-test-")), db=new DatabaseSync(join(directory,"host.sqlite")), seedPath=join(directory,"seed.sqlite"), seed=new DatabaseSync(seedPath);
   seed.exec(schemaSql);
+  if (large) {
+    seed.exec("BEGIN");
+    const value = "x".repeat(1024 * 1024);
+    for (let index = 0; index < 101; index++) seed.prepare("INSERT INTO items(value) VALUES(?)").run(value);
+    seed.exec("COMMIT");
+  }
   const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
   const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:source});
   db.exec("CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   const authorize=()=>{}, checkpoint=await readFile(seedPath);
-  let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize});
+  let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize, ...(large ? { capacityBytes:128*1024*1024 } : {})});
   cleanups.push(async()=>{seed.close();db.close();if(!resolve(directory).startsWith(`${resolve(tmpdir())}${sep}dohc-recovery-import-test-`))throw Error("unsafe temp path");await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
   function add(value: string, attached: string[] = []) {
     const session=seed.createSession({table:"items"}); seed.prepare("INSERT INTO items(value) VALUES(?)").run(value); const changeset=session.changeset(); session.close();
@@ -46,9 +52,10 @@ async function fixture(){
     }}); return head;
   }
   async function stage(attachment?: {fileId:string; bytes:Uint8Array; revision:number}) {
-    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory:join(directory,"exports"),limits,
+    const exportLimits = large ? { maxTotalBytes: 512 * 1024 * 1024 } : limits;
+    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory:join(directory,"exports"),limits:exportLimits,
       ...(attachment?{attachments:{capture:()=>[{fileId:attachment.fileId,name:"receipt.png",contentType:"image/png",byteLength:attachment.bytes.byteLength,sha256:hash(attachment.bytes),revision:attachment.revision}],open:async function*(){yield attachment.bytes;}}}:{})});
-    const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,limits)});
+    const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits:exportLimits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,exportLimits)});
     await prepared.dispose(); return staged;
   }
   return {directory,db,seed,journal,scope,revision,authorize,add,migrate,stage,head:()=>head};
@@ -64,7 +71,7 @@ function target(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Paramet
   db.exec("CREATE TABLE usage(bytes INTEGER); INSERT INTO usage VALUES(0)");
   const installer = createRecoveryInstaller({ db, transaction, journal, account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); }, ...options });
   cleanups.push(async () => { db.close(); });
-  return { db, journal, installer };
+  return { db, journal, installer, transaction };
 }
 
 it("installs validated histories and retry receipts inactive with a durable import receipt", async () => {
@@ -109,10 +116,24 @@ it("claims a fenced import once with a fresh epoch and preserves retries across 
     expect(claimed.targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
     expect(t.journal.head(f.scope, f.authorize).active).toBe(true);
     expect(t.journal.receipt({ scope: f.scope, callerKey: "owner", idempotencyKey: "first", payloadSha256: hash("first"), authorize: f.authorize })).toMatchObject({ revision: 1 });
-    expect(t.installer.claim({}, claim)).toEqual(claimed);
+    const restarted = createRecoveryInstaller({ db: t.db, journal: t.journal, transaction: t.transaction });
+    expect(restarted.claim({}, claim)).toEqual(claimed);
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_import_checkpoints").get()!.n).toBe(0);
   } finally { await valid.dispose(); }
 });
+
+it("restores a 100 MiB checkpoint in bounded durable chunks", async () => {
+  const f = await fixture(true); f.journal.fence({ expected: f.head(), authorize: f.authorize });
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
+  try {
+    expect(valid.headCheckpoint.byteLength).toBeGreaterThan(100 * 1024 * 1024);
+    const manifestSha256 = recoveryManifestSha256(valid.manifest, { maxTotalBytes: 512 * 1024 * 1024 });
+    await t.installer.install({}, { transferId: "large-import", manifestSha256, recovery: valid, authorize: f.authorize });
+    t.installer.claim({}, { ...f.scope, transferId: "large-import", manifestSha256, sourceCursor: f.head(), authorize: f.authorize });
+    expect(t.db.prepare("SELECT MAX(length(bytes)) n FROM dohc_dataset_checkpoint_chunks").get()!.n).toBe(1024 * 1024);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+  } finally { await valid.dispose(); }
+}, 120_000);
 function changeHistory(bytes:Buffer,change:(record:any)=>void){
   const result:Buffer[]=[bytes.subarray(0,8)];let offset=8;
   while(offset<bytes.length){const size=bytes.readUInt32BE(offset);offset+=4;const record=JSON.parse(bytes.subarray(offset,offset+size).toString());offset+=size;

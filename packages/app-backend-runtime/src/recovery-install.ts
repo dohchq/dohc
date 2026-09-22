@@ -157,6 +157,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
             for await (const bytes of readValidatedBlob(item.blob)) { authorize(); blob.set(bytes, offset); offset += bytes.byteLength; }
           }
           const storageBytes = Buffer.byteLength(body) * 2 + (blob?.byteLength ?? 0) + 2048;
+          if (record.kind === "event" && storageBytes > 16 * 1024 * 1024) throw new Error("Recovery event metadata exceeds its limit.");
           tx(() => { authorize(); retain(storageBytes);
             db.prepare("INSERT INTO dohc_dataset_import_records VALUES(?,?,?,?,?,?,?)").run(importId, record.cursor.revision, record.kind, body, blob, stage ? JSON.stringify(stage) : null, storageBytes);
           });
