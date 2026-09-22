@@ -15,7 +15,7 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { datasetHistoryUndo } from "./dataset-history-undo.js";
+import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
@@ -606,24 +606,17 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         const head = db.prepare("SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
         if (!head) throw new DatasetHostError("conflict", "Collection history is unavailable.");
         const before = raw.beforeRevision ?? Number.MAX_SAFE_INTEGER;
-        const rows = db.prepare(`SELECT revision,operation,caller_key,recorded_at_ms,approved_revision_hash,
-            length(changeset) AS changeset_bytes,json_array_length(attached_file_ids) AS attachment_count,
-            CASE WHEN length(CAST(result_json AS BLOB)) <= 16384 THEN result_json END AS undo_receipt
-            FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision<?
-            ORDER BY revision DESC LIMIT ?`).all(key.workspaceId, key.datasetId, before, limit + 1);
+        const page = readDatasetHistory(db, key, approved, before, limit);
         owner(context, key);
-        let undoBytes = 0;
-        const entries = [];
-        for (const row of rows.slice(0, limit)) {
-          const undo = datasetHistoryUndo(approved, String(row.operation), String(row.approved_revision_hash), row.undo_receipt);
-          const bytes = undo ? Buffer.byteLength(JSON.stringify(undo)) : 0;
-          if (entries.length && undoBytes + bytes > 64 * 1024) break;
-          undoBytes += bytes;
-          entries.push({ revision: Number(row.revision), operation: String(row.operation), callerReference: String(row.caller_key),
-          recordedAtMs: Number(row.recorded_at_ms), approvedRevisionHash: String(row.approved_revision_hash), changesetBytes: Number(row.changeset_bytes), attachmentCount: Number(row.attachment_count),
-          ...(undo ? { undo } : {}) });
-        }
-        return { datasetId: key.datasetId, headRevision: Number(head.revision), entries, nextBeforeRevision: rows.length > entries.length ? entries.at(-1)!.revision : null };
+        return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page };
+      });
+    },
+    historyRevision(context: Context, raw: DatasetScope & { revisionSha256: string }) {
+      const key = scope(raw);
+      return transaction(() => {
+        owner(context, key); revision(key);
+        const result = readDatasetHistoryRevision(db, key, raw.revisionSha256);
+        owner(context, key); return result;
       });
     },
     pendingAttempts(context: Context, raw: DatasetScope & {after?: number; limit?: number}) {

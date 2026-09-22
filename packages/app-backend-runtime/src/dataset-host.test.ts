@@ -570,3 +570,36 @@ it("rolls cancellation and its storage delta back together when accounting fails
   expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
   expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
 });
+
+it("connects schema history to immutable source and reverses rules forward without losing newer records or restoring grants", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  await f.invoke("owner", id(6), { value: "before" });
+  const source2 = operationSource.replace("return {accepted:true};", "return {accepted:true,updated:true};");
+  const revision2 = describeDatasetRevision({ definition, revision: 2, schemaSql, operationSource: source2 });
+  const expected = f.host.approvedArtifacts("owner", scope).cursor;
+  const change = await f.host.prepareMigration("owner", { workspaceId: scope.workspaceId, revision: revision2, schemaSql, operationSource: source2, expected, migrationSql: "SELECT 1;" });
+  await f.host.approveMigration("owner", { ...scope, candidateId: change.candidateId, checkpointSha256: change.checkpointSha256 });
+  await f.host.invoke("owner", { ...scope, revision: 2, revisionSha256: revision2.revisionSha256, operationId: id(6), input: { value: "later registration" }, idempotencyKey: "later" });
+  const saved = f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 });
+  expect(saved).toEqual(prepared);
+  for (const caller of ["helper", "friend"] as const) expect(() => f.host.historyRevision(caller, { ...scope, revisionSha256: prepared.revision.revisionSha256 })).toThrow("not permitted");
+  expect(() => f.host.historyRevision("owner", { ...scope, datasetId: id(99), revisionSha256: prepared.revision.revisionSha256 })).toThrow();
+  const grants = f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all();
+  const revision3 = describeDatasetRevision({ ...saved, definition: saved.revision.definition, revision: 3 });
+  const reverse = await f.host.prepareMigration("owner", { workspaceId: scope.workspaceId, ...saved, revision: revision3, expected: f.host.approvedArtifacts("owner", scope).cursor, migrationSql: "SELECT 1;" });
+  await f.host.approveMigration("owner", { ...scope, candidateId: reverse.candidateId, checkpointSha256: reverse.checkpointSha256 });
+  const rows = await f.host.invoke("owner", { ...scope, revision: 3, revisionSha256: revision3.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-current" });
+  expect(rows.result).toEqual(expect.arrayContaining([expect.objectContaining({ value: "before" }), expect.objectContaining({ value: "later registration" })]));
+  expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
+  const page = f.host.history("owner", { ...scope, limit: 2 });
+  expect(page.entries.map(row => row.revision)).toEqual([4, 3]);
+  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: null,
+    schema: { previousRevisionHash: revision2.revisionSha256, revisionHash: revision3.revisionSha256 } });
+  const older = f.host.history("owner", { ...scope, beforeRevision: page.nextBeforeRevision!, limit: 2 });
+  expect(older.entries.map(row => row.revision)).toEqual([2, 1]);
+  expect(older.entries[0]!.schema).toMatchObject({ previousRevisionHash: prepared.revision.revisionSha256, revisionHash: revision2.revisionSha256 });
+  expect(JSON.stringify(page)).not.toContain("later registration");
+  f.db.prepare("UPDATE dohc_dataset_catalog_history SET artifacts_json=? WHERE revision=1").run(JSON.stringify({ schemaSql, operationSource: "tampered" }));
+  expect(() => f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 })).toThrow();
+});

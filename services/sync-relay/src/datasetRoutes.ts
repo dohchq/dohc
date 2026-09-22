@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "prepare-migration" | "approve-migration" | "discard-migration" | "migration-preview-page" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "prepare-migration" | "approve-migration" | "discard-migration" | "migration-preview-page" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "history-revision" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete" | "deletion-status";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,10 +88,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
       } finally {release();}
     }
-    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts", "delete-preview", "deletion-status"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history", "history-revision", "lifecycle", "pending-attempts", "delete-preview", "deletion-status"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
     const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"]
+      : route.action === "history-revision" ? ["revisionSha256"]
       : route.action === "list" ? ["after", "limit", "includeArchived"]
       : route.action === "describe" ? ["includeArchived"]
       : route.action === "permissions" || route.action === "lifecycle" || route.action === "pending-attempts" || route.action === "delete-preview" ? ["after", "limit"] : [];
@@ -125,6 +126,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "lifecycle") return host.lifecycle(auth, {...scope, ...page});
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
+        if (route.action === "history-revision") return host.historyRevision(auth, { ...scope, revisionSha256: digest(query.get("revisionSha256")) });
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "prepare-migration" ? 1024 * 1024 : 128 * 1024);
         if (route.action === "approve-migration" || route.action === "discard-migration" || route.action === "migration-preview-page") {

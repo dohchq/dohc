@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetCopyStatus } from "@dohc/cli/dataset";
+import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
@@ -29,19 +29,21 @@ export interface ConnectedTransactionalCollectionProps {
   tableId: string;
   onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
   onFormCreated(appRoot: string): void;
+  onOpenSource?(path: string): void;
   onLifecycleChanged?(): void;
   onNotice?(message: string): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, onNotice, onOpenSource, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [activeView, setActiveView] = useState<CollectionTableView | null>(null);
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
+  const [historyRestore, setHistoryRestore] = useState<DatasetMigrationPreparation | undefined>();
   const [transferringCsv, setTransferringCsv] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
   const [viewingPending, setViewingPending] = useState(false);
@@ -218,6 +220,24 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+      onOpenSource={onOpenSource ? path => { setViewingHistory(false); onOpenSource(path); } : undefined}
+      onEditFields={() => { setViewingHistory(false); setEditingFields(true); }}
+      onReviewSource={() => { setViewingHistory(false); setHistoryRestore(undefined); setReviewingSchema(true); }}
+      onLoadRevision={async (revisionSha256, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetId, revisionSha256 });
+        signal.throwIfAborted();
+        if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
+        return result;
+      }}
+      onRestoreRevision={async (targetRevisionSha256, changedRevisionSha256, signal) => {
+        signal.throwIfAborted(); const sequence = request.current;
+        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetId,
+          revision: dataset.revision, revisionSha256: dataset.revisionSha256, targetRevisionSha256, changedRevisionSha256 });
+        signal.throwIfAborted(); if (sequence !== request.current) return;
+        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this reversal. Refresh History.");
+        setHistoryRestore(result); setViewingHistory(false); setReviewingSchema(true);
+      }}
       onUndo={input => { void historyUndo.run(input); }} pendingUndo={historyUndo.pending} undoBusy={historyUndo.busy} refreshVersion={recordsVersion}
       onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
@@ -271,9 +291,9 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         signal.throwIfAborted();
         if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
       }} />}
-    {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
+    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} onError={onError}
       onLoadPreview={loadMigrationPreview}
-      onClose={() => setReviewingSchema(false)}
+      onClose={() => { setReviewingSchema(false); setHistoryRestore(undefined); }}
       onPrepare={async (input, signal) => {
         signal.throwIfAborted();
         const result = await bridge().dataset({ ...input, action: "prepareMigration" });

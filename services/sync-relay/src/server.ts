@@ -939,7 +939,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
     if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
-    if (parts.length === 5 && ["activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && ["activate","artifacts","invoke","prepare-migration","approve-migration","discard-migration","migration-preview-page","permissions","upload","file","history","history-revision","export","lifecycle","archive","restore","pending-attempts","reconcile-attempt","cancel-attempt","delete-preview","delete","deletion-status"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();

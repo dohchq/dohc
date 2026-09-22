@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
+import { CollectionHistoryRevisionDetails, type HistoryRevisionControls } from "./CollectionHistoryRevisionDetails";
 import { Overlay } from "./Overlay";
 import { SecondaryButton } from "./ui/controls";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
 
-export interface CollectionHistoryDialogProps {
+export interface CollectionHistoryDialogProps extends HistoryRevisionControls {
   workspaceId: string;
   datasetId: string;
   name: string;
@@ -36,12 +37,14 @@ function History(props: CollectionHistoryDialogProps) {
   useEffect(() => { void load(); }, [props.refreshVersion]);
   return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Collection history", className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(720px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
     <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold">History · {props.name}</h2><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
-    <p className="m-0 text-[12px] text-muted">Saved operations, newest first. Reads, refused requests, and schema changes do not appear here.</p>
+    <p className="m-0 text-[12px] text-muted">Saved changes, newest first. Reads and refused requests do not appear here.</p>
     <p className="m-0 text-[12px] text-muted">Undo restores the shown values only if the record has not changed since that edit.</p>
     {props.pendingUndo && <div className="flex items-center gap-2 text-[12px] text-muted"><span>{props.undoBusy ? "Reversing edit…" : "Undo not confirmed"}</span>{!props.undoBusy && <SecondaryButton onClick={() => props.onUndo?.(props.pendingUndo!)}>Try again</SecondaryButton>}</div>}
     {busy && <p role="status" className="m-0 text-[12px] text-muted">Loading history…</p>}
     {page && !page.entries.length && <p className="m-0 text-[13px] text-muted">No saved operations on this page. Refresh to check for changes.</p>}
-    <div className="min-h-0 overflow-auto">{page?.entries.map(entry => <details key={entry.revision} className="border-b border-line py-3"><summary className="flex cursor-pointer flex-wrap items-baseline gap-3 text-[13px]"><span className="font-mono text-[12px] text-muted">{entry.revision}</span><span>{entry.operation}</span><time className="ml-auto text-[12px] text-muted" dateTime={new Date(entry.recordedAtMs).toISOString()}>{new Date(entry.recordedAtMs).toLocaleString()}</time></summary><dl className="mb-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[12px]"><dt className="text-muted">Caller reference</dt><dd className="m-0 break-all font-mono">{entry.callerReference}</dd><dt className="text-muted">Approved rules</dt><dd className="m-0 break-all font-mono">{entry.approvedRevisionHash}</dd><dt className="text-muted">Change size</dt><dd className="m-0">{entry.changesetBytes.toLocaleString()} bytes</dd><dt className="text-muted">Attached files</dt><dd className="m-0">{entry.attachmentCount}</dd></dl>
+    <div className="min-h-0 overflow-auto">{page?.entries.map(entry => <details key={entry.revision} className="border-b border-line py-3"><summary className="flex cursor-pointer flex-wrap items-baseline gap-3 text-[13px]"><span className="font-mono text-[12px] text-muted">{entry.revision}</span><span>{entry.operation}</span>{entry.recordedAtMs !== null && <time className="ml-auto text-[12px] text-muted" dateTime={new Date(entry.recordedAtMs).toISOString()}>{new Date(entry.recordedAtMs).toLocaleString()}</time>}</summary><dl className="mb-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[12px]"><dt className="text-muted">Caller reference</dt><dd className="m-0 break-all font-mono">{entry.callerReference ?? "Not recorded"}</dd><dt className="text-muted">Approved rules</dt><dd className="m-0 break-all font-mono">{entry.approvedRevisionHash}</dd><dt className="text-muted">Change size</dt><dd className="m-0">{entry.changesetBytes.toLocaleString()} bytes</dd><dt className="text-muted">Attached files</dt><dd className="m-0">{entry.attachmentCount}</dd></dl>
+      {entry.schema && <CollectionHistoryRevisionDetails beforeHash={entry.schema.previousRevisionHash} afterHash={entry.schema.revisionHash}
+        onEditFields={props.onEditFields} onLoadRevision={props.onLoadRevision} onRestoreRevision={props.onRestoreRevision} onReviewSource={props.onReviewSource} onOpenSource={props.onOpenSource} onError={props.onError} />}
       {entry.undo && props.onUndo && <div className="mt-3 space-y-2 text-[12px]"><p className="m-0 text-muted">Previous values · Record {entry.undo.recordId}</p><dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">{entry.undo.fields.map(field => <div key={field.fieldId} className="contents"><dt>{field.name}</dt><dd className="m-0 whitespace-pre-wrap break-all font-mono">{JSON.stringify(field.value)}</dd></div>)}</dl><SecondaryButton disabled={busy || props.undoBusy || props.pendingUndo != null} onClick={() => {
         const reverse = entry.undo!;
         props.onUndo?.({ workspaceId: props.workspaceId, datasetId: props.datasetId, revision: reverse.revision, revisionSha256: reverse.revisionSha256,
