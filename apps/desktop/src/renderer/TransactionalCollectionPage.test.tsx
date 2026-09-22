@@ -30,6 +30,28 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 }
 afterEach(cleanup);
 
+it.each([false,true])("labels saved-page coverage without implying the entire Collection is downloaded (offline: %s)", async offline => {
+  const copy = {offline,savedAtMs:1,coverage:"saved-pages" as const};
+  setup({copy}); await screen.findByText("Alice");
+  const label = offline ? "Offline · Saved pages only" : "Saved pages on this device";
+  expect(screen.getByText(`${label} · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
+  expect(screen.queryByText(/Offline copy · Read-only|^Saved on this device/)).toBeNull();
+});
+
+it("shows offline attachments as unavailable and never asks the host for file bytes", async () => {
+  const fileId = "private-file-12345678", attachment = id(40), description = dataset();
+  description.tables[0]!.fields.push({fieldId:attachment,name:"Receipt",type:"attachment",required:false,unique:false});
+  description.operations.find(operation=>operation.operationId===read)!.fieldIds.push(attachment);
+  const readFile=vi.fn();
+  const invoke=vi.fn(async()=>({result:{rows:[{id:1,version:2,values:{[name]:"Alice",[attachment]:fileId}}],nextCursor:null}}));
+  setup({dataset:description,invoke,readFile,copy:{offline:true,savedAtMs:1}});
+  await screen.findByText("File available when online");
+  expect(screen.queryByText(fileId)).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Open record 1"}));
+  expect(within(screen.getByRole("dialog",{name:"Record details"})).getByText("File available when online")).toBeTruthy();
+  expect(readFile).not.toHaveBeenCalled();
+});
+
 describe("transactional Collection page", () => {
   it("retries from the original Notice with current copy metadata and the exact request", async () => {
     let writes = 0;
