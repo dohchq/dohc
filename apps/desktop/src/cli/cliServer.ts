@@ -174,7 +174,6 @@ export interface CliCollectionsPort {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  appForm?(request: import("@dohc/cli/protocol").OwnerAppFormRequest): Promise<import("@dohc/cli/protocol").OwnerAppFormResult>;
   appBackend?(request: import("@dohc/cli/app-backend").OwnerAppBackendRequest): Promise<import("@dohc/cli/app-backend").OwnerAppBackendResult>;
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
@@ -1607,10 +1606,6 @@ async function dispatch(
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
       return context.appPublication(request.args.request);
-    }
-    case "appForm": {
-      if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appForm) throw new CliCommandError("Create the form in its owning workspace.");
-      return context.appForm(request.args.request);
     }
     case "appBackend": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appBackend) throw new CliCommandError("App data requires the owning workspace.");

@@ -4,62 +4,15 @@ This guide is for app authors and self-host operators. An owner can delegate the
 
 For a complete source example, copy [examples/fundraiser](../../examples/fundraiser/README.md) into a workspace as `fundraiser`. Its event details are synthetic. Set the event and payment instructions before accepting real registrations.
 
-## Generate a form from Collection fields
+## Generate a form connected to a Collection
 
-Use `createForm` to reuse a Collection's field definitions for a new form and private response database.
-The command works for a person or an agent through the CLI. There is no native form builder yet.
+Create a transactional Collection in the Data section, then choose **Create form**.
+The form uses the existing dataset and approved operations. Submissions appear in the same Collection.
+Choose the public fields before publishing. Private fields remain outside the form's grant.
 
-For example, a Collection at `Participants` can define these fields in `collection.yaml`:
-
-```yaml
-name: Registration
-fields:
-  Name:
-    type: text
-  Session:
-    type: select
-    options: [Morning, Evening]
-  Organizer notes:
-    type: text
-```
-
-Choose which fields visitors can submit. Choose an app folder that does not exist:
-
-Use workspace-relative paths. App folder names support ASCII letters, numbers, underscores, hyphens, dots, and `@`, with `/` between folders.
-
-```sh
-dohc app createForm '{"workspaceId":"WORKSPACE_ID","collectionPath":"Participants","appRoot":"registration","publicFields":["Name","Session"]}'
-```
-
-The command creates the form source, SQL schema, backend operations, and `app.publish.json` in `registration`.
-It also creates `dohc.json` so the form appears in Apps.
-It reads the Collection schema through the workspace engine. Fix any schema errors before generating.
-It does not copy existing records, change the Collection, approve execution, or share the app.
-The result reports the schema source, created paths, and `recordsCopied: 0`.
-
-Follow [Approve local data](#approve-local-data) with `appRoot` set to `registration`.
-Open the approved form to submit a response.
-In Apps, open the form and select Publish app, then App data, to read or edit that same response.
-Agents use `listResponses` and `editResponse` through `dohc app invoke`.
-Designated helpers can use these organizer operations. Public callers can only use `submit`.
-Public submissions cannot set `Organizer notes`; it starts empty and stays out of the form source.
-Approved backend operations validate every edit and reject edits based on an outdated record version.
-
-The generated app has one response store. The original Collection remains separate.
-Later Collection changes do not update the app. Generation refuses existing app folders and does not migrate an existing database.
-Generated files remain editable source. Add custom rules there before approving the app.
-
-The first generator supports text, number, checkbox, date, select, and URL fields. All form fields are optional.
-It rejects person, relation, and multi-select fields, including private fields of those types.
-It supports at most 24 fields. Names share a 512-character budget; each name can contain at most 64 characters.
-Select fields allow up to 100 distinct options. The generated backend accepts finite numbers within JavaScript's safe integer magnitude.
-Dates use `YYYY-MM-DD`; URLs use HTTP or HTTPS. Text values can contain at most 2,000 characters.
-Each complete response has a 3,500-byte JSON limit so a page fits within the backend's response limit.
-Empty number and checkbox fields accept typed values from agents or numeric text and `true` or `false` through App data.
-The form retains the same request key while retrying an uncertain submission. Keep it open until confirmation; reloading loses that retry.
-
-Required fields, uploads, capacity limits, payment rules, and notifications are not inferred from a Collection schema.
-Use authored operations, such as the fundraiser example, for those workflows.
+Agents use `dohc dataset createForm` with the approved dataset revision, table, operation, and field IDs.
+The command creates frontend source and a pinned dataset binding. It creates no separate response database.
+See [the fundraiser example](../../examples/fundraiser/README.md) for custom rules shared by an app and Collection.
 
 ## Define the app
 

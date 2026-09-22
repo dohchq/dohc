@@ -494,16 +494,6 @@ describe("CLI socket server", () => {
     expect(accepted).toBeUndefined();
   });
 
-  it("routes form generation only through the authenticated owning workspace", async () => {
-    const request = { workspaceId: WORKSPACE_ID, collectionPath: "Participants", appRoot: "registration", publicFields: ["name"] };
-    const result = { appRoot: "registration", schemaSource: "Participants/collection.yaml", files: ["registration/app.publish.json"], recordsCopied: 0 as const };
-    context.appForm = vi.fn(async () => result);
-    expect(await invoke("appForm", { cwd: workspaceRoot, actor: "human", request })).toEqual(result);
-    await expect(invoke("appForm", { cwd: workspaceRoot, actor: "agent", request: { ...request, workspaceId: "elsewhere" } })).rejects.toThrow("owning workspace");
-    context.readOnly = true;
-    await expect(invoke("appForm", { cwd: workspaceRoot, actor: "agent", request })).rejects.toThrow("owning workspace");
-    expect(context.appForm).toHaveBeenCalledOnce();
-  });
 
   it("routes response listing and undo through authenticated owner attachment", async () => {
     const calls:unknown[]=[];

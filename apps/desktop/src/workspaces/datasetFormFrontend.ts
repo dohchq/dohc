@@ -1,5 +1,5 @@
 import { APP_BACKEND_INPUT_BYTES, APP_BACKEND_UPLOAD_BYTES, type AppBackendJson } from "@dohc/security-contract/app-backend";
-import { FORM_CSS } from "./appFormFrontend";
+import { FORM_CSS } from "./datasetFormStyles";
 
 export interface DatasetFormField {
   fieldId: string;
