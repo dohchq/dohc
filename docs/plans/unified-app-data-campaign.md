@@ -35,7 +35,7 @@ These are source-inspection findings, not fresh runtime verification. Stage 0 re
 | Same feature branch | Forms generated from Collection field definitions | Generation copies definitions once; the original Collection and response store remain separate; no native form builder |
 | `prototype/app-backend-performance` at `39d365ba0046aafe6b70ffc7473007608bccea16` | Persistent-worker experiment and benchmark | No production adoption; authority, file lifecycle, recovery, resource management, and real host integration require production design |
 
-The older local `app-backend.md` and `fundraiser-app.md` proposals predate this state. Preserve them during planning. Stage 0 archives their exact contents outside the integration worktree before introducing the branch's tracked copies. This campaign supersedes both versions after their useful requirements are reconciled; remove the obsolete plans from the implementation branch and update their references.
+This campaign supersedes the former app-owned backend and fundraiser plans. Git preserves their prior contents. The supported model and operator workflow are documented in the [dataset guide](../how-to/app-backend.md); the fundraiser example retains its acceptance requirements.
 
 The benchmark supports SQLite and persistent execution. On a roughly 15 MiB dataset, pooled warm-write p95 fell from 331 ms to 6 ms. Burst writes succeeded 420/420 times versus 127/420. The machine was a Ryzen 9 desktop. The comparison changed execution and storage together, and omitted production obligations. It does not establish Supabase-equivalent capacity or latency.
 
