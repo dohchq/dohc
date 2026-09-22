@@ -42,6 +42,15 @@ it("manages the authoritative relay Collection through the desktop owner adapter
     expect((await data.list({})).datasets.map(row => row.name)).toEqual(["Registrations"]);
     expect((await data.describe(id(1))).datasetId).toBe(id(1));
     expect((await data.approvedArtifacts(id(1))).revision).toEqual(revision);
+    f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES('helper-grant','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+    await data.setGrant!({ action: "setGrant", workspaceId: "w", datasetId: id(1), grantId: "helper-grant",
+      grant: { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true } });
+    const access = await data.permissions!({ action: "permissions", workspaceId: "w", datasetId: id(1) });
+    expect(access.permissions).toHaveLength(1);
+    expect(access.permissions[0]).toMatchObject({ kind: "data", current: true, metadata: { operationIds: [id(6)] } });
+    await data.setGrant!({ action: "removeGrant", workspaceId: "w", datasetId: id(1), principalKey: access.permissions[0]!.principal });
+    expect((await data.permissions!({ action: "permissions", workspaceId: "w", datasetId: id(1) })).permissions).toHaveLength(0);
     const pinned = { workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256 };
     const bytesBase64 = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]).toString("base64");
     const upload = { ...pinned, action: "upload" as const, fieldId: id(5), name: "receipt.png", contentType: "image/png", bytesBase64, idempotencyKey: "receipt" };

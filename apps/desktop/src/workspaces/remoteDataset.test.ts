@@ -35,6 +35,7 @@ describe("remote Collection authority", () => {
     const f = fixture(), grant = { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(4)], discover: true };
     f.relay.mockResolvedValueOnce({ ok: true });
     await f.data.setGrant!({ action: "setGrant", workspaceId: "workspace", datasetId: id(1), grantId: "accepted-share", grant });
+    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/grants`);
     expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ grantId: "accepted-share", grant });
     f.relay.mockResolvedValueOnce({ permissions: [{ kind: "data", principal: "stored-principal", current: false, metadata: grant }], nextCursor: null });
     expect((await f.data.permissions!({ action: "permissions", workspaceId: "workspace", datasetId: id(1) })).permissions[0]?.current).toBe(false);

@@ -57,7 +57,7 @@ export function createRemoteDatasetData(input: {
       return DatasetPermissionsPage.parse(await request(`${path(value.datasetId)}/permissions${query.size ? `?${query}` : ""}`));
     },
     async setGrant(value) {
-      const result = await request(`${path(value.datasetId)}/grant`, value.action === "setGrant"
+      const result = await request(`${path(value.datasetId)}/grants`, value.action === "setGrant"
         ? { grantId: value.grantId, grant: value.grant } : { principalKey: value.principalKey, grant: null });
       z.object({ ok: z.literal(true) }).strict().parse(result);
     },
