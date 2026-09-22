@@ -30,7 +30,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The Phase 4 automations gate (docs/plans/collections.md): a record change
+// The Phase 4 automations gate: a record change
 // fires a subscribed automation on its ORIGIN device exactly once, the
 // automation's own writes never re-trigger it, a chain of automations stops
 // at the depth cap with an owner-visible failure, and record history on both

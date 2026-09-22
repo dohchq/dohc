@@ -6,7 +6,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 
 const workspace: Workspace = {
   workspaceId: "ws-1",
-  rootPath: "/home/ice/dohc",
+  rootPath: "/home/sam/dohc",
   kind: "personal",
   mode: "local-first",
 };
@@ -18,7 +18,7 @@ afterEach(() => {
 
 describe("workspaceName", () => {
   it("uses the final path segment and ignores trailing separators", () => {
-    expect(workspaceName({ ...workspace, rootPath: "/home/ice/dohc/" })).toBe("dohc");
+    expect(workspaceName({ ...workspace, rootPath: "/home/sam/dohc/" })).toBe("dohc");
     expect(workspaceName({ ...workspace, rootPath: "C:\\Users\\ice\\dohc\\" })).toBe("dohc");
     expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
   });
@@ -100,7 +100,7 @@ describe("Titlebar", () => {
   it("shortens the workspace name rather than the status beside it", () => {
     render(
       <Titlebar
-        workspace={{ ...workspace, rootPath: "/home/ice/launch-readiness-and-self-hosting" }}
+        workspace={{ ...workspace, rootPath: "/home/sam/launch-readiness-and-self-hosting" }}
         workspaces={[workspace]}
         onSwitchWorkspace={() => undefined}
       />,

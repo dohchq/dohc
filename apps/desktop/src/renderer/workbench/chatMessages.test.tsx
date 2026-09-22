@@ -91,7 +91,7 @@ describe("chat authorship display", () => {
     { name: "different days", gap: 120_000, start: new Date(2026, 8, 17, 23, 59).getTime(), continues: false },
   ])("groups messages by identity: $name", (test) => {
     const first: ChatMessageRecord = {
-      id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Ice",
+      id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Sam",
       authorUserId: test.firstId, body: "First", createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
     };
     render(
@@ -113,11 +113,11 @@ describe("chat authorship display", () => {
 
   it("renders agent messages as \"their stored name\" and humans by name", () => {
     expect(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice" }),
-    ).toBe("Ice");
+      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam" }),
+    ).toBe("Sam");
     expect(
-      chatAuthorLabel({ authorKind: "human", authorDisplayName: "Ice" }),
-    ).toBe("Ice");
+      chatAuthorLabel({ authorKind: "human", authorDisplayName: "Sam" }),
+    ).toBe("Sam");
     render(
       <ChatMessageList
         testIdPrefix="test-chat"
@@ -126,7 +126,7 @@ describe("chat authorship display", () => {
             id: "message-1",
             threadId: "thread-1",
             authorKind: "agent",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Report ready.",
             createdAtMs: 1_700_000_000_000,
           },
@@ -137,7 +137,7 @@ describe("chat authorship display", () => {
       />,
     );
     expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
-      "Ice",
+      "Sam",
     );
   });
 
@@ -150,7 +150,7 @@ describe("chat authorship display", () => {
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Read @[docs/plan.md#scope] and `@[docs/code.md]`.",
             createdAtMs: 1_700_000_000_000,
           },
@@ -181,7 +181,7 @@ describe("chat authorship display", () => {
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Read @[docs/plan.md#scope].",
             createdAtMs: 1_700_000_000_000,
           },
@@ -212,7 +212,7 @@ describe("chat authorship display", () => {
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Read @[ docs/plan.md #scope].",
             createdAtMs: 1_700_000_000_000,
             attachments: [
@@ -250,7 +250,7 @@ describe("chat authorship display", () => {
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Compare @[ docs/plan.md] and @[docs/plan.md].",
             createdAtMs: 1_700_000_000_000,
             attachments: [
@@ -299,7 +299,7 @@ describe("chat authorship display", () => {
             id: "message-file",
             threadId: "thread-1",
             authorKind: "agent",
-            authorDisplayName: "Ice",
+            authorDisplayName: "Sam",
             body: "Compare @[docs/literal.md#scope] and @[docs/unheaded.md].",
             createdAtMs: 1_700_000_000_000,
             attachments: [
@@ -351,7 +351,7 @@ describe("chat authorship display", () => {
             "@[docs/inert.md]",
             "@ice remains code in this unclosed fence",
           ].join("\n")}
-          candidates={[{ id: "ice", kind: "user", handle: "ice", label: "Ice" }]}
+          candidates={[{ id: "ice", kind: "user", handle: "ice", label: "Sam" }]}
           testId="whole-message"
         />
       </div>,
@@ -406,7 +406,7 @@ describe("ChatMessageList memo boundary", () => {
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
-        authorDisplayName: "Ice",
+        authorDisplayName: "Sam",
         body: "Read @[docs/plan.md] before Friday.",
         createdAtMs: 1_700_000_000_000,
       },
@@ -440,7 +440,7 @@ describe("message reactions (WS-MU-C2)", () => {
     id: "message-1",
     threadId: "thread-1",
     authorKind: "agent",
-    authorDisplayName: "Ice",
+    authorDisplayName: "Sam",
     body: "Deploy is green.",
     createdAtMs: 1_700_000_000_000,
   };
@@ -606,6 +606,22 @@ describe("message reactions (WS-MU-C2)", () => {
     });
   });
 
+  it("toggles a quick reaction from the row toolbar and marks the viewer's own", () => {
+    const { onToggle } = renderList([reaction({ emoji: "🙌", authorId: "you@x", authorDisplayName: "You" })], "you@x");
+    const toolbar = screen.getByTestId("test-chat-message-toolbar");
+    const quick = within(toolbar).getAllByTestId("test-chat-quick-reaction");
+    expect(quick.map((button) => button.dataset.emoji)).toEqual(["👍", "🙌"]);
+    expect(quick[0]!.getAttribute("aria-pressed")).toBe("false");
+    expect(quick[1]!.getAttribute("aria-pressed")).toBe("true");
+    // The toolbar holds the one add-reaction trigger; the pill row keeps none.
+    expect(within(toolbar).getByTestId("test-chat-add-reaction")).toBeTruthy();
+    expect(screen.getAllByTestId("test-chat-add-reaction")).toHaveLength(1);
+    fireEvent.click(quick[0]!);
+    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "👍", nextState: "added" });
+    fireEvent.click(quick[1]!);
+    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "🙌", nextState: "removed" });
+  });
+
   it("keeps the add-reaction trigger visible but disabled when read-only", () => {
     const { onToggle } = renderList([reaction()], "you@x", vi.fn(), true);
     const trigger = screen.getByTestId("test-chat-add-reaction") as HTMLButtonElement;
@@ -616,6 +632,10 @@ describe("message reactions (WS-MU-C2)", () => {
     const pill = screen.getByTestId("test-chat-reaction-pill") as HTMLButtonElement;
     expect(pill.disabled).toBe(true);
     fireEvent.click(pill);
+    for (const quick of screen.getAllByTestId("test-chat-quick-reaction")) {
+      expect((quick as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(quick);
+    }
     expect(onToggle).not.toHaveBeenCalled();
   });
 

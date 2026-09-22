@@ -361,7 +361,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       linkedObjectId: firstRoadmap.objectId,
       linkedPathHint: "notes/roadmap.md",
       title: "Roadmap sync",
-      authorDisplayName: "Ice",
+      authorDisplayName: "Sam",
       authorUserId: "e2e-user",
       body: "Let's settle the quasar sync cadence this week.",
     });

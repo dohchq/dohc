@@ -149,7 +149,7 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 - `pnpm dev:site` starts the marketing site.
 - `pnpm dev:workspace-api` starts the workspace API.
 - `pnpm dev:postgres` starts development Postgres; `pnpm migrate` applies migrations; `pnpm reset:postgres` clears development data. The desktop app does not need Postgres.
-- For task completion, merge, abandonment, or disk cleanup, follow the [cleanup skill](.agents/skills/workspace-cleanup/SKILL.md).
+- When a task ends, remove its worktree, build targets, and stale verification evidence.
 
 ## Verification
 

@@ -63,7 +63,7 @@ async function harness() {
   };
   const message: ChatMessage = {
     id: "message", workspaceId: "workspace", threadId: "thread", body: "Hello",
-    author: { kind: "human", displayName: "Ice" }, authorUserId: "owner", createdAtMs: 2, attachments: [],
+    author: { kind: "human", displayName: "Sam" }, authorUserId: "owner", createdAtMs: 2, attachments: [],
   };
   let channels: ChatChannelSummary[] = [];
   let threads: ChannelThreadSummary[] = [];
@@ -147,7 +147,7 @@ async function harness() {
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
     normalizeServerUrl: url => url, listWorkspaces: () => [workspace], stateDir: () => stateDirectory,
     peekedReceivedGrantKinds: kinds, syncRendererSharedChannelsForChatTarget: sync,
-    ...sharedCommands, chatScope, localUserDisplayName: () => "Ice", activity, chatDispatchService: dispatch,
+    ...sharedCommands, chatScope, localUserDisplayName: () => "Sam", activity, chatDispatchService: dispatch,
   });
   const invoke = async (channel: string, payload: unknown, trusted = true) => {
     const handler = handlers.get(channel);
@@ -319,8 +319,8 @@ describe("registered direct message boundaries", () => {
 
   it("grants before writing, ignores renderer identity, then queues sync and dispatch", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, authorUserId: "forged", author: { kind: "agent" } })).resolves.toMatchObject({ dm: { role: "owner" }, message: { authorKind: "human", authorDisplayName: "Ice" } });
-    expect(h.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Ice" }, authorUserId: "owner", body: "Hello" });
+    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, authorUserId: "forged", author: { kind: "agent" } })).resolves.toMatchObject({ dm: { role: "owner" }, message: { authorKind: "human", authorDisplayName: "Sam" } });
+    expect(h.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, authorUserId: "owner", body: "Hello" });
     expect(h.events).toEqual(["list-grants", "create", "grant", "start-thread", "cloud", "dispatch"]);
   });
 
@@ -336,7 +336,7 @@ describe("registered direct message boundaries", () => {
     expect(h.storeMethods.createChannel).not.toHaveBeenCalled();
     expect(h.storeMethods.startChannelThread).not.toHaveBeenCalled();
     expect(h.storeMethods.sendMessage).toHaveBeenCalledWith({
-      workspaceId: "workspace", threadId: "thread", author: { kind: "human", displayName: "Ice" },
+      workspaceId: "workspace", threadId: "thread", author: { kind: "human", displayName: "Sam" },
       authorUserId: "owner", body: "Hello",
     });
   });

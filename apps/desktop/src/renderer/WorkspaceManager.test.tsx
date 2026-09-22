@@ -7,17 +7,17 @@ import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
 
 const bridge = {
-  getDefaultWorkspaceRoot: vi.fn(async () => "/home/ice/dohc"),
-  pickWorkspaceRoot: vi.fn(async (): Promise<string | null> => "/home/ice/projects/research"),
+  getDefaultWorkspaceRoot: vi.fn(async () => "/home/sam/dohc"),
+  pickWorkspaceRoot: vi.fn(async (): Promise<string | null> => "/home/sam/projects/research"),
   createLocalWorkspace: vi.fn(async () => ({
     workspaceId: "ws-1",
-    rootPath: "/home/ice/dohc/personal",
+    rootPath: "/home/sam/dohc/personal",
     kind: "personal" as const,
     mode: "local-first" as const,
   })),
   attachWorkspaceFolder: vi.fn(async () => ({
     workspaceId: "ws-attached",
-    rootPath: "/home/ice/projects/research",
+    rootPath: "/home/sam/projects/research",
     kind: "personal" as const,
     mode: "local-first" as const,
   })),
@@ -44,8 +44,8 @@ const bridge = {
 };
 
 const KNOWN = [
-  { workspaceId: "ws-a", rootPath: "/home/ice/dohc/personal", kind: "personal" as const, mode: "local-first" as const },
-  { workspaceId: "ws-b", rootPath: "/home/ice/dohc/team", kind: "personal" as const, mode: "local-first" as const },
+  { workspaceId: "ws-a", rootPath: "/home/sam/dohc/personal", kind: "personal" as const, mode: "local-first" as const },
+  { workspaceId: "ws-b", rootPath: "/home/sam/dohc/team", kind: "personal" as const, mode: "local-first" as const },
 ];
 
 beforeEach(() => {
@@ -116,7 +116,7 @@ describe("workspace manager", () => {
 
   it("suggests ~/dohc as the workspace location", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    expect(await screen.findByText("/home/ice/dohc/")).toBeTruthy();
+    expect(await screen.findByText("/home/sam/dohc/")).toBeTruthy();
     expect(screen.getByLabelText("Folder name")).toHaveProperty("value", "personal");
   });
 
@@ -127,7 +127,7 @@ describe("workspace manager", () => {
     await user.clear(name);
     await user.type(name, "research{Enter}");
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
-      expect.objectContaining({ rootPath: "/home/ice/dohc/research" }),
+      expect.objectContaining({ rootPath: "/home/sam/dohc/research" }),
     );
   });
 
@@ -149,7 +149,7 @@ describe("workspace manager", () => {
       await screen.findByRole("button", { name: "Change location" }),
     );
     expect(bridge.pickWorkspaceRoot).toHaveBeenCalledOnce();
-    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
+    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
   });
 
   it("creates a personal workspace and hands it to the shell", async () => {
@@ -162,7 +162,7 @@ describe("workspace manager", () => {
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "personal",
-        rootPath: "/home/ice/dohc/personal",
+        rootPath: "/home/sam/dohc/personal",
       }),
     );
     expect(onReady).toHaveBeenCalledWith(
@@ -182,7 +182,7 @@ describe("workspace manager", () => {
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", true);
 
     await user.click(change);
-    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
+    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
     expect(screen.queryByText("No home dir")).toBeNull();
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
@@ -199,10 +199,10 @@ describe("workspace manager", () => {
     expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
 
     await user.click(change);
-    expect(await screen.findByText("/home/ice/projects/research/")).toBeTruthy();
-    await act(async () => slowDefault.resolve("/home/ice/dohc"));
-    expect(screen.getByText("/home/ice/projects/research/")).toBeTruthy();
-    expect(screen.queryByText("/home/ice/dohc/")).toBeNull();
+    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
+    await act(async () => slowDefault.resolve("/home/sam/dohc"));
+    expect(screen.getByText("/home/sam/projects/research/")).toBeTruthy();
+    expect(screen.queryByText("/home/sam/dohc/")).toBeNull();
   });
 
   it("asks for the default again when the picker is cancelled before any default arrived", async () => {
@@ -217,9 +217,9 @@ describe("workspace manager", () => {
     expect(bridge.getDefaultWorkspaceRoot).toHaveBeenCalledTimes(2);
     // The retired first answer lands and changes nothing; the second fills
     // the card.
-    await act(async () => slowDefault.resolve("/home/ice/stale"));
-    expect(screen.queryByText("/home/ice/stale/")).toBeNull();
-    expect(await screen.findByText("/home/ice/dohc/")).toBeTruthy();
+    await act(async () => slowDefault.resolve("/home/sam/stale"));
+    expect(screen.queryByText("/home/sam/stale/")).toBeNull();
+    expect(await screen.findByText("/home/sam/dohc/")).toBeTruthy();
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
@@ -231,7 +231,7 @@ describe("workspace manager", () => {
       await screen.findByRole("button", { name: /open an existing folder/i }),
     );
     expect(bridge.attachWorkspaceFolder).toHaveBeenCalledWith({
-      rootPath: "/home/ice/projects/research",
+      rootPath: "/home/sam/projects/research",
     });
     expect(onReady).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "ws-attached" }),
@@ -240,7 +240,7 @@ describe("workspace manager", () => {
 
   it("never requires login and never renders auth fields", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/ice/dohc/");
+    await screen.findByText("/home/sam/dohc/");
     expect(screen.queryByLabelText(/email|password/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /sign in|log in|sign up/i }))
       .toBeNull();
@@ -249,7 +249,7 @@ describe("workspace manager", () => {
   it("offers joining a synced workspace, gated on sign-in", async () => {
     const user = userEvent.setup();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/ice/dohc/");
+    await screen.findByText("/home/sam/dohc/");
     await user.click(
       screen.getByTestId("first-run-join-synced"),
     );
@@ -273,7 +273,7 @@ describe("workspace manager", () => {
       new Error("dohc found no dohc server at https://dohc.example.test."),
     );
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/ice/dohc/");
+    await screen.findByText("/home/sam/dohc/");
     await user.click(screen.getByTestId("first-run-join-synced"));
 
     fireEvent.change(await screen.findByTestId("cloud-server-url"), {
@@ -304,7 +304,7 @@ describe("workspace manager", () => {
 
   it("reads like a desktop app, not a marketing page", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/ice/dohc/");
+    await screen.findByText("/home/sam/dohc/");
     // No marketing tropes: pricing, testimonials, feature grids, sign-up CTAs.
     expect(
       screen.queryByText(/get started free|pricing|testimonial|trusted by/i),
@@ -325,7 +325,7 @@ describe("workspace manager with registered workspaces", () => {
     );
     const rows = await screen.findAllByTestId("workspace-manager-row");
     expect(rows).toHaveLength(2);
-    expect(screen.getByText("/home/ice/dohc/team")).toBeTruthy();
+    expect(screen.getByText("/home/sam/dohc/team")).toBeTruthy();
     await user.click(screen.getByText("team"));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-b" }));
   });
@@ -335,7 +335,7 @@ describe("workspace manager with registered workspaces", () => {
     const stamped = [
       { ...KNOWN[0], lastOpenedAt: now - 3 * 24 * 60 * 60_000 },
       { ...KNOWN[1], lastOpenedAt: now - 5 * 60_000 },
-      { workspaceId: "ws-c", rootPath: "/home/ice/dohc/never", kind: "personal" as const, mode: "local-first" as const },
+      { workspaceId: "ws-c", rootPath: "/home/sam/dohc/never", kind: "personal" as const, mode: "local-first" as const },
     ];
     render(
       <WorkspaceManager workspaces={stamped} current={null} onForgot={async () => stamped} onOpenWorkspace={() => {}} />,
@@ -471,7 +471,7 @@ describe("workspace manager with registered workspaces", () => {
 
   it("shows no list on first run", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/ice/dohc/");
+    await screen.findByText("/home/sam/dohc/");
     expect(screen.queryByTestId("workspace-manager-row")).toBeNull();
   });
 });

@@ -16,7 +16,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The Phase 2 two-instance gate (docs/plans/collections.md): a board drag on
+// The Phase 2 two-instance gate: a board drag on
 // one device updates the other device's open board. Device B is the real
 // Electron app with the collection's board on screen. Device A is a real
 // daemon-backed workspace over the same relay — the serial single-display

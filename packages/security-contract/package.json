@@ -1,5 +1,6 @@
 {
   "name": "@dohc/security-contract",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

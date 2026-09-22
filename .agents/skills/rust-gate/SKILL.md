@@ -1,7 +1,7 @@
 ---
 name: rust-gate
 description: >-
-  Run the canonical Rust engine gate with the machine's build budget: disk
+  Run the canonical Rust engine gate within the host's build budget: disk
   preflight, build-slot queueing, capped cargo parallelism, and a verdict read
   from the summary block. Use for local Rust PR verification,
   whenever a task says to run the Rust gate or cargo checks for
@@ -37,12 +37,14 @@ design, and that row is what proves the workspace's doctests still ran.
 
 ## What the gate does for you
 
-On a host with a build-slot root (the shared Windows dev machine), the gate
-enforces the machine's build budget itself. A host with no slot root, such
-as a CI runner, runs uncapped.
+On a host with a build-slot root, the gate enforces a shared build budget so
+several worktrees can build at once without exhausting the machine. The root
+comes from `DOHC_BUILD_SLOT_ROOT`; on Windows outside CI it defaults to
+`C:\w\_locks`. A host with no slot root, such as a CI runner, runs uncapped.
 You do not set these up:
 
-- It refuses to start below 40 GB free disk. The error names the floor.
+- It refuses to start below 40 GB free disk. The error names the floor;
+  `DOHC_GATE_DISK_FLOOR_GB` overrides it.
 - It takes one of 4 build slots before any cargo runs. If all slots are
   held, it waits and prints who holds them.
 - It caps cargo's build and test parallelism to its share of the cores,
@@ -55,16 +57,16 @@ Read the `== summary ==` block. Do not trust the exit code alone: the gate
 can exit 0 while its own summary says FAIL. The evidence line under
 `EVIDENCE` is what you paste into the PR body.
 
-Each summary row now carries its wall-clock seconds. If you change the gate
+Each summary row carries its wall-clock seconds. If you change the gate
 or the build configuration, compare the step times before and after, and put
 the numbers in the PR.
 
 ## When the gate waits or refuses
 
-- `waiting for a build slot` means other lanes are building. Let it queue.
-  Do not delete another lane's slot directory while its owner is alive.
-- A disk-floor refusal names the free space it saw. Prune stale target dirs
-  under `C:\w\_targets` and stale worktree `target/` dirs, then rerun.
+- `waiting for a build slot` means other worktrees are building. Let it queue.
+  Do not delete another worktree's slot directory while its owner is alive.
+- A disk-floor refusal names the free space it saw. Prune stale out-of-repo
+  cargo target directories and stale worktree `target/` directories, then rerun.
 - If the gate's output goes quiet for more than 30 minutes inside one step,
   the step may be deadlocked. Investigate the step; do not kill unrelated
   processes.
@@ -73,5 +75,5 @@ the numbers in the PR.
 
 A long cargo build outside the gate must respect the same budget. Cap it
 with `CARGO_BUILD_JOBS` (the gate's share is `cores / 4`), or run the gate
-instead of ad-hoc steps. Never start parallel uncapped cargo builds across
-lanes: that configuration has OOM-crashed this machine.
+instead of ad-hoc steps. Parallel uncapped cargo builds across worktrees can
+exhaust memory on a shared host.

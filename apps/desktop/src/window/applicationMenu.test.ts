@@ -14,7 +14,7 @@ function build(
   const recentWorkspaces = [
     {
       workspaceId: "recent-1",
-      rootPath: "/Users/ice/work/personal",
+      rootPath: "/Users/sam/work/personal",
       kind: "personal" as const,
       mode: "local-first" as const,
     },
@@ -81,7 +81,7 @@ describe("application menu template", () => {
     const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
     const recentItems = openRecent?.submenu as MenuItemConstructorOptions[];
     expect(recentItems?.[0]?.label).toBe("personal");
-    expect(recentItems?.[0]?.sublabel).toBe("/Users/ice/work/personal");
+    expect(recentItems?.[0]?.sublabel).toBe("/Users/sam/work/personal");
 
     const fakeWindow = { id: 2 };
     (recentItems[0]?.click as (a: unknown, b: unknown) => void)(

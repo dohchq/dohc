@@ -401,7 +401,7 @@ describe("CLI socket server", () => {
       async identity() {
         calls.identity += 1;
         return {
-          displayName: "Ice",
+          displayName: "Sam",
           authorUserId: "verified-user-id",
           agentName: "Nova",
           reactionAuthorId: "verified-user-id",
@@ -596,7 +596,7 @@ describe("CLI socket server", () => {
     const linkedMessage = await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: linkedThread.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Read this linked chat",
     });
     context.filePathForObjectId = async (objectId) =>
@@ -660,7 +660,7 @@ describe("CLI socket server", () => {
         id: linkedMessage.id,
         threadId: linkedThread.id,
         authorKind: "human",
-        authorDisplayName: "Ice",
+        authorDisplayName: "Sam",
       }],
       projection: {
         readOnly: true,
@@ -716,7 +716,7 @@ describe("CLI socket server", () => {
       threadId: startedThread.id,
       authorKind: "agent",
       authorDisplayName: "Nova",
-      authorOwnerDisplayName: "Ice",
+      authorOwnerDisplayName: "Sam",
       body: "Opening through the engine channel id",
     }]);
     const openingMessageId = opening.messages[0]!.id;
@@ -748,7 +748,7 @@ describe("CLI socket server", () => {
     expect(reread.messages[1]).toMatchObject({
       threadId: startedThread.id,
       authorKind: "human",
-      authorDisplayName: "Ice",
+      authorDisplayName: "Sam",
       body: "Reply through the engine thread id",
     });
     // post provisions the default channels like the terminal CLI does, so
@@ -792,7 +792,7 @@ describe("CLI socket server", () => {
       },
       {
         kind: "human",
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -964,7 +964,7 @@ describe("CLI socket server", () => {
     const existing = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Existing message",
     });
     context.assertWritable = async () => {
@@ -1004,7 +1004,7 @@ describe("CLI socket server", () => {
     const existing = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Existing message",
     });
     const reason = "Sign in to your server to send a message in this shared channel.";
@@ -1056,7 +1056,7 @@ describe("CLI socket server", () => {
     const existing = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Existing message",
     });
     let identityCalls = 0;
@@ -1065,7 +1065,7 @@ describe("CLI socket server", () => {
       identityCalls += 1;
       const userId = identityCalls % 2 === 1 ? "user-1" : "user-2";
       return {
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: userId,
         agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
@@ -1154,7 +1154,7 @@ describe("CLI socket server", () => {
       identityCalls += 1;
       const userId = identityCalls === 1 ? "user-1" : "user-2";
       return {
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: userId,
         agentName: "Nova",
         reactionAuthorId: userId,
@@ -1183,7 +1183,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       title: "Readable shared chat",
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Shared channel message",
     });
     const fileThread = await store.createThread({
@@ -1197,7 +1197,7 @@ describe("CLI socket server", () => {
     await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Shared file message",
     });
     registryWorkspace = { ...registryWorkspace, readOnly: true };
@@ -1497,7 +1497,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "parked" },
-          author: { kind: "local", label: "Ice" },
+          author: { kind: "local", label: "Sam" },
         },
       },
     ]);
@@ -1722,7 +1722,7 @@ describe("CLI socket server", () => {
     const { thread } = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Local message",
     });
     onReadEffect = async () => {
@@ -1753,7 +1753,7 @@ describe("CLI socket server", () => {
     const { thread } = await store!.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Read-coverage message",
     });
     const chatReads: Array<[CliVerb, unknown]> = [
@@ -1810,7 +1810,7 @@ describe("CLI socket server", () => {
     const { thread } = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Local-only message",
     });
     onReadEffect = () => {
@@ -1839,7 +1839,7 @@ describe("CLI socket server", () => {
     const { thread } = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Local-only message",
     });
     // Never resolves within the test — a permanently hung pass is the exact
@@ -1879,7 +1879,7 @@ describe("CLI socket server", () => {
     const { thread } = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Local-only message",
     });
     // Never resolves within the test — the worst case for unbounded queueing.
@@ -1904,7 +1904,7 @@ describe("CLI socket server", () => {
     const { thread } = await store.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Local-only message",
     });
     const release: { firstPass: (() => void) | null } = { firstPass: null };
@@ -1945,7 +1945,7 @@ describe("CLI socket server", () => {
     const { thread } = await store!.startChannelThread({
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Priority-target message",
     });
 
@@ -2029,7 +2029,7 @@ describe("CLI socket server", () => {
       {
         id: opened.messageId,
         kind: "human",
-        displayName: "Ice",
+        displayName: "Sam",
         body: "Opening from the terminal",
         parentMessageId: undefined,
         decisionState: "resolved",
@@ -2062,7 +2062,7 @@ describe("CLI socket server", () => {
     }))).toEqual([
       {
         kind: "human",
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -2090,7 +2090,7 @@ describe("CLI socket server", () => {
     expect(listed.threads).toHaveLength(1);
     const both = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Mixed group", kind: "channel", type: "both" });
     for (const lane of ["posts", "chat"] as const) {
-      await store.startChannelThread({ workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Ice" }, body: lane });
+      await store.startChannelThread({ workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Sam" }, body: lane });
     }
     const mixed = await invoke("threads", { cwd: workspaceRoot, actor: "human", channel: both.slug });
     expect(mixed.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
@@ -3238,7 +3238,7 @@ describe("CLI socket server", () => {
     await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       body: "This file-linked thread is unread too",
     });
     const fileThreadId = cliThreadId(fileThread.id);
@@ -3324,7 +3324,7 @@ describe("CLI socket server", () => {
     serverOptions.identity = async () => {
       calls.identity += 1;
       return {
-        displayName: "Ice",
+        displayName: "Sam",
         agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
       };
@@ -3345,7 +3345,7 @@ describe("CLI socket server", () => {
     serverOptions.identity = async () => {
       calls.identity += 1;
       return {
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: "verified-user-id",
         agentName: "Nova",
         reactionAuthorId: "install-local-user-id",
@@ -3385,7 +3385,7 @@ describe("CLI socket server", () => {
       identityCalls += 1;
       const userId = identityCalls === 1 ? "user-1" : "user-2";
       return {
-        displayName: "Ice",
+        displayName: "Sam",
         authorUserId: userId,
         agentName: "Nova",
         reactionAuthorId: userId,
@@ -3572,7 +3572,7 @@ describe("CLI socket server", () => {
     await store.sendMessage({
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
-      author: { kind: "agent", displayName: "Ice" },
+      author: { kind: "agent", displayName: "Sam" },
       body: "Unread through the daemon aggregate",
     });
     let unread = true;

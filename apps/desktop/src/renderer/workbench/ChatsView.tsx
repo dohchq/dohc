@@ -297,6 +297,9 @@ function NavRow(props: {
   onClick: () => void;
   active?: boolean;
   muted?: boolean;
+  // Unread activity the user was not addressed in: the name carries the
+  // weight, not a pill.
+  unread?: boolean;
   labelTestId?: string;
   trailing?: React.ReactNode;
   data?: Record<`data-${string}`, string>;
@@ -318,12 +321,40 @@ function NavRow(props: {
       <span
         data-testid={props.labelTestId}
         className={`min-w-0 flex-1 truncate text-[13px] ${
-          props.active ? "font-medium text-ink" : props.muted ? "text-muted" : "text-ink"
+          props.active || props.unread
+            ? "font-medium text-ink"
+            : props.muted
+              ? "text-muted"
+              : "text-ink"
         }`}
       >
         {props.label}
       </span>
       {props.trailing}
+    </button>
+  );
+}
+
+// The action a section label offers on the right, always visible like the
+// explorer's section actions so a new user can find it.
+function SectionActionButton(props: {
+  testId?: string;
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      aria-label={props.label}
+      title={props.label}
+      disabled={props.disabled}
+      onClick={props.onClick}
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-line/50 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-40"
+    >
+      {props.children}
     </button>
   );
 }
@@ -3404,6 +3435,7 @@ export function ChatsView(props: {
           testId="chats-feed"
           onBack={variant === "panel" ? goBack : undefined}
           icon={<House size={12} aria-hidden className="shrink-0 text-subtle" />}
+          description="Posts and comments from your groups and files, newest first"
         />
         <PostFeedList
           key={`${workspaceId}:home`}
@@ -3413,7 +3445,7 @@ export function ChatsView(props: {
           header={<>
             {personalFeed.length === 0 && !personalFeedLoading ? (
               <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
-                <p className="m-0">Nothing new yet</p>
+                <p className="m-0">No posts in your groups yet.</p>
                 <button
                   type="button"
                   data-testid="chats-feed-empty-groups"
@@ -4054,6 +4086,44 @@ export function ChatsView(props: {
       channelShares !== null &&
       channelJoined === null &&
       !!nav.channel.wireId;
+    // The wide page carries the lane switch in the header. The panel can be
+    // 240px, where the header's fixed controls already fill the row, so the
+    // switch keeps its own row there.
+    const laneTabs =
+      groupType === "both" ? (
+        <div
+          role="tablist"
+          aria-label="Group lanes"
+          className={
+            variant === "page"
+              ? "flex shrink-0 gap-1"
+              : "flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
+          }
+        >
+          {(
+            [
+              ["posts", "Posts"],
+              ["chat", "Chat"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={groupLane === value}
+              data-testid={`chats-group-lane-${value}`}
+              onClick={() => setGroupLane(value)}
+              className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
+                groupLane === value
+                  ? "bg-panel-2 text-ink"
+                  : "text-muted hover:bg-panel-2 hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null;
     return (
       <div
         data-testid="chats-channel-view"
@@ -4075,6 +4145,11 @@ export function ChatsView(props: {
               <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
             )
           }
+          description={
+            nav.channel.purpose?.trim() ? (
+              <span data-testid="chats-channel-purpose">{nav.channel.purpose}</span>
+            ) : undefined
+          }
           trailing={
             <>
               {nav.channel.kind === "agent" ? (
@@ -4083,46 +4158,43 @@ export function ChatsView(props: {
                   testId="chats-channel-agent-presence"
                 />
               ) : null}
+              {variant === "page" ? laneTabs : null}
+              {/* Presence is a live status region, so it stays beside the
+                  members control rather than inside the button. */}
               <PresenceFaces
                 others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
               />
+              {canShare ? (
+                <button
+                  type="button"
+                  data-testid="chats-share-channel"
+                  title={channelGrants.length > 0 ? "Members" : "Add members"}
+                  aria-expanded={sharePanelOpen}
+                  onClick={() => setSharePanelOpen((open) => !open)}
+                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
+                >
+                  {channelGrants.length > 0 ? (
+                    <span className="flex items-center -space-x-1.5">
+                      {channelGrants.slice(0, 3).map((grant) => (
+                        <ChatAvatar
+                          key={grant.shareId}
+                          name={grant.recipientEmail ?? "?"}
+                          kind="human"
+                          size="strip"
+                          className="ring-2 ring-panel"
+                        />
+                      ))}
+                    </span>
+                  ) : (
+                    <Users size={13} aria-hidden />
+                  )}
+                  {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
+                </button>
+              ) : null}
             </>
           }
-          action={
-            canShare ? (
-              <button
-                type="button"
-                data-testid="chats-share-channel"
-                title={channelGrants.length > 0 ? "Members" : "Add members"}
-                aria-expanded={sharePanelOpen}
-                onClick={() => setSharePanelOpen((open) => !open)}
-                className="flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink dohc-focus-visible"
-              >
-                {channelGrants.length > 0 ? (
-                  <span className="flex items-center -space-x-1.5">
-                    {channelGrants.slice(0, 3).map((grant) => (
-                      <ChatAvatar
-                        key={grant.shareId}
-                        name={grant.recipientEmail ?? "?"}
-                        kind="human"
-                        size="strip"
-                        className="ring-2 ring-panel"
-                      />
-                    ))}
-                  </span>
-                ) : (
-                  <Users size={13} aria-hidden />
-                )}
-                {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
-              </button>
-            ) : undefined
-          }
         />
-        {nav.channel.purpose?.trim() ? (
-          <p data-testid="chats-channel-purpose" className="m-0 truncate px-3 pb-2 text-[12px] text-muted">
-            {nav.channel.purpose}
-          </p>
-        ) : null}
+        {variant === "panel" ? laneTabs : null}
         {nav.channel.kind === "agent" && props.agentSetup ? (
           <div
             data-testid="chats-agent-screen"
@@ -4271,36 +4343,6 @@ export function ChatsView(props: {
             </form>
           </div>
         ) : null}
-        {groupType === "both" ? (
-          <div
-            role="tablist"
-            aria-label="Group lanes"
-            className="flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
-          >
-            {(
-              [
-                ["posts", "Posts"],
-                ["chat", "Chat"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={groupLane === value}
-                data-testid={`chats-group-lane-${value}`}
-                onClick={() => setGroupLane(value)}
-                className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                  groupLane === value
-                    ? "bg-panel-2 text-ink"
-                    : "text-muted hover:bg-panel-2 hover:text-ink"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        ) : null}
         {showLane ? (
           <ChatLane
             workspaceId={workspaceId}
@@ -4356,7 +4398,12 @@ export function ChatsView(props: {
                 className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
               >
                 <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-[13px] text-subtle">No posts yet</span>
+                <span className="text-[13px] text-subtle">
+                  {nav.channel.kind === "agent"
+                    ? "No posts yet."
+                    : `No posts in #${nav.channel.name} yet.`}
+                  {channelLocked ? "" : " Start one above."}
+                </span>
               </div>
             )}
           renderItem={(thread) => {
@@ -4434,6 +4481,21 @@ export function ChatsView(props: {
   const selectedDmId =
     props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
   const agentLabel = props.agentSetup?.agentName ?? "Your agent";
+  const beginNewDm = () => {
+    // Always start compose from a clean slate — never inherit a
+    // recipient/draft left over from a previous compose.
+    setDmRecipients("");
+    setDmDraft("");
+    if (variant === "panel" && props.onOpenInTab) {
+      props.onOpenInTab({ level: "dm-new" });
+      return;
+    }
+    // A command like any conversation click (see openConversation): report
+    // it synchronously, or a DM answer queued in this tick remounts over the
+    // compose.
+    props.onNavCommand?.({ level: "dm-new" });
+    setNav({ level: "dm-new" });
+  };
 
   return (
     <div
@@ -4453,9 +4515,19 @@ export function ChatsView(props: {
             label="Home"
             className="mt-2"
           />
-          <SectionLabel as="p" data-testid="chats-channels-heading" className="mb-1 mt-4 px-4">
-            Groups
-          </SectionLabel>
+          <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+            <SectionLabel as="p" data-testid="chats-channels-heading" className="min-w-0 flex-1">
+              Groups
+            </SectionLabel>
+            <SectionActionButton
+              testId="chats-new-channel"
+              label="New group"
+              disabled={creatingChannel !== null}
+              onClick={() => setCreatingChannel("")}
+            >
+              <Plus size={12} aria-hidden />
+            </SectionActionButton>
+          </div>
           <ul className="m-0 list-none p-0">
             {overview.channels
               .filter((channel) => channel.kind === "channel")
@@ -4477,6 +4549,7 @@ export function ChatsView(props: {
                         "data-thread-count": String(channel.threadCount),
                       }}
                       active={selectedChannelId === channel.id}
+                      unread={channel.unreadCount > 0}
                       onClick={() => openConversation({ level: "channel", channel })}
                       icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
                       label={channel.name}
@@ -4493,7 +4566,7 @@ export function ChatsView(props: {
                               <span className="sr-only">{sharedLabel}</span>
                             </span>
                           ) : null}
-                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
+                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" tone="quiet" />
                         </>
                       }
                     />
@@ -4544,9 +4617,16 @@ export function ChatsView(props: {
           ) : null}
           {dmAvailable || dms.length > 0 ? (
             <div data-testid="chats-dms-section">
-              <SectionLabel as="p" className="mb-1 mt-4 px-4">
-                People
-              </SectionLabel>
+              <div className="group mb-1 mt-4 flex h-6 items-center pl-4 pr-2">
+                <SectionLabel as="p" className="min-w-0 flex-1">
+                  People
+                </SectionLabel>
+                {dmAvailable ? (
+                  <SectionActionButton label="New message" onClick={beginNewDm}>
+                    <Plus size={12} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
+              </div>
               <ul className="m-0 list-none p-0">
                 {dms.map((dm) => (
                   <li key={dm.channelId}>
@@ -4574,21 +4654,7 @@ export function ChatsView(props: {
               {dmAvailable ? (
                 <NavRow
                   testId="chats-new-dm"
-                  onClick={() => {
-                    // Always start compose from a clean slate — never inherit a
-                    // recipient/draft left over from a previous compose.
-                    setDmRecipients("");
-                    setDmDraft("");
-                    if (variant === "panel" && props.onOpenInTab) {
-                      props.onOpenInTab({ level: "dm-new" });
-                      return;
-                    }
-                    // A command like any conversation click (see
-                    // openConversation): report it synchronously, or a DM
-                    // answer queued in this tick remounts over the compose.
-                    props.onNavCommand?.({ level: "dm-new" });
-                    setNav({ level: "dm-new" });
-                  }}
+                  onClick={beginNewDm}
                   icon={<Plus size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
                   label="New message"
                   muted
@@ -4682,6 +4748,11 @@ export function ChatsView(props: {
                       )}
                       <AgentPresenceHint
                         activity={agentSummaryActivity}
+                        program={
+                          agentReady && props.userSettings
+                            ? runnerProgram(configuredRunnerCommand(props.userSettings.runner))
+                            : null
+                        }
                         testId="chats-my-agent-presence"
                       />
                       <UnreadPill count={agentChannel.unreadCount} testId="chats-my-agent-unread" />
@@ -4749,18 +4820,8 @@ export function ChatsView(props: {
           ) : null}
         </nav>
       </div>
-      <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
-        {creatingChannel === null ? (
-          <button
-            type="button"
-            data-testid="chats-new-channel"
-            onClick={() => setCreatingChannel("")}
-            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-          >
-            <Plus size={12} aria-hidden />
-            New group
-          </button>
-        ) : (
+      {creatingChannel !== null ? (
+        <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -4842,8 +4903,8 @@ export function ChatsView(props: {
               Create group
             </button>
           </form>
-        )}
-      </div>
+        </div>
+      ) : null}
       {acceptingDmRequest ? (
         <AcceptDmDialog
           key={acceptingDmRequest.shareId}

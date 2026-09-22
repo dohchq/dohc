@@ -1032,8 +1032,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (!isFolder) {
         onOpenFile(path);
       } else if (collectionFoldersRef.current.has(path)) {
-        // A collection folder opens its views (docs/plans/collections.md
-        // Phase 2). The chevron and arrow keys still expand it in place.
+        // A collection folder opens its views. The chevron and arrow keys still expand it in place.
         onOpenCollection(path);
       } else {
         onToggleFolder(path);

@@ -144,7 +144,7 @@ describe("the ladder, longest name first", () => {
     const name = `${"a".repeat(226)}.txt`;
     const plan = trashEntryPlan(name, PREFIX, {
       unit: "utf8",
-      maxEntryChars: entryCharBudget("/home/ice/ws/.dohc/trash", "linux"),
+      maxEntryChars: entryCharBudget("/home/sam/ws/.dohc/trash", "linux"),
     });
     expect(plan.candidates).toHaveLength(2);
     expect(plan.exhausted).toBe(false);
@@ -308,7 +308,7 @@ describe("collision variants ride the same ladder", () => {
     const name = `${"中".repeat(84)}.md`;
     const plan = collisionVariantPlan(name, 2, {
       unit: "utf8",
-      maxEntryChars: entryCharBudget("/home/ice/inbox", "linux"),
+      maxEntryChars: entryCharBudget("/home/sam/inbox", "linux"),
     });
     expect(plan).toHaveLength(1);
   });

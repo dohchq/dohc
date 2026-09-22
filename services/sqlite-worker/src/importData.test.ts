@@ -133,7 +133,7 @@ describe('sqlite worker data imports', () => {
         name: 'people.json',
         mediaType: 'application/json',
         body: JSON.stringify([
-          { id: 'p1', name: 'Ice', score: 10 },
+          { id: 'p1', name: 'Sam', score: 10 },
           { id: 'p2', name: 'Ada', score: 12 },
         ]),
         tableName: 'people',

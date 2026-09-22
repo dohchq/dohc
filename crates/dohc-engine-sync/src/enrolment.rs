@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known cross-shard first-pull Y.Doc origination race; item 5 is repro-only"]
+    #[ignore = "known cross-shard first-pull Y.Doc origination race, tracked in dohc-ai/dohc#1194"]
     fn first_remote_base_claim_prevents_local_ydoc_origination() {
         let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);

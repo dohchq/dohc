@@ -55,7 +55,7 @@ async function seedRunnerSettings(
   const command = runnerCommand(mode);
   const settings = {
     ...DEFAULT_USER_SETTINGS,
-    profile: { agentName: "Nova", preferredName: "Ice" },
+    profile: { agentName: "Nova", preferredName: "Sam" },
     runner: {
       command,
       enabled: true,

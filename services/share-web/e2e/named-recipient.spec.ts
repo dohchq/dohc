@@ -9,10 +9,11 @@ import * as Y from "yjs";
 import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc/live-session-contract/live-frame";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
+import {ensureLocalhostTls} from "../src/testing/device-control/localhostTls.js";
 
 // Real browser, HTTPS/WSS, editor and wire codec. This host fixture does not prove native durability or account authentication.
 test("named invitation signs in, edits the current Y.Doc, and preserves a stopped draft for review", async ({browser}, testInfo) => {
-  const service = fileURLToPath(new URL("..", import.meta.url)), fixture = join(service, "src/testing/device-control");
+  const service = fileURLToPath(new URL("..", import.meta.url)), tls = await ensureLocalhostTls();
   const frames = {receive: {maxFrameBytes: 2048, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
     maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384};
   const limits = {provider: {frames, maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
@@ -22,7 +23,7 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     currentPath: "docs/shared.md", selectorPaths: ["docs"], restoreFenceGeneration: 1};
   let origin = "", accept = true, cursor = 0, refuseSession: (() => void) | undefined;
   const failures: string[] = [], sockets = new WebSocketServer({noServer: true, perMessageDeflate: false, handleProtocols: protocols => protocols.has("dohc-live-v1") ? "dohc-live-v1" : false});
-  const server = createServer({key: await readFile(join(fixture, "localhost-key.pem")), cert: await readFile(join(fixture, "localhost-cert.pem"))}, async (request, response) => {
+  const server = createServer({key: await readFile(tls.key), cert: await readFile(tls.certificate)}, async (request, response) => {
     try {
       const url = new URL(request.url!, origin), authenticated = request.headers.cookie === "fixture-account=alice";
       response.setHeader("cache-control", "private, no-store");

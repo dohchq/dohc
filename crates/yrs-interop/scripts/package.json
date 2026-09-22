@@ -1,0 +1,23 @@
+{
+  "name": "@dohc/yrs-interop-scripts",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "type": "module",
+  "description": "Node driver for the yrs/Yjs interoperability spike (R11 abort criterion). Runs the fidelity corpus + harvested fixtures through the Rust yrs harness and the seeded alternating-driver fuzz.",
+  "scripts": {
+    "harvest": "node harvest.mjs",
+    "fidelity": "tsx fidelity.ts",
+    "fuzz": "tsx fuzz.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/ydoc-projection": "workspace:*",
+    "js-yaml": "^5.2.3",
+    "yjs": "13.6.30"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.23.11",
+    "typescript": "^7.0.2"
+  }
+}

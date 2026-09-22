@@ -8,7 +8,7 @@ import { git, pnpm, repoRoot, run } from "./process.mjs";
 
 const usage = "pnpm verify:configured-hosts --binary ABSOLUTE_ENGINE_PATH --build-receipt ABSOLUTE_BUILD_JSON";
 const hash = path => createHash("sha256").update(readFileSync(path)).digest("hex");
-const nativeInputs = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crates", "vendor", "fuzz", "fixtures"];
+const nativeInputs = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crates", "vendor"];
 
 export async function verifyConfiguredHosts(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: { binary: { type: "string" },

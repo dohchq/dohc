@@ -1,5 +1,6 @@
 {
   "name": "@dohc/workspace-fs",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

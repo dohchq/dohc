@@ -474,7 +474,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dohc-fuzz-targets"
+name = "dohc-proptest-targets"
 version = "0.1.0"
 dependencies = [
  "dohc-engine-collab",
@@ -523,7 +523,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dohc-yrs-spike"
+name = "dohc-yrs-interop"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",

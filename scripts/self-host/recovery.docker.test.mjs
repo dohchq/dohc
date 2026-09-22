@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { archiveDeployment } from "./archive.mjs";
 
+// Not in the root test list: it needs Docker and the image named by DOHC_RECOVERY_TEST_IMAGE.
+// See docs/how-to/self-host-recovery.md.
 // Use the built self-host image so the bundled command resolves its real runtime dependencies.
 test("Docker cold repair and private deployment archive", { skip: !process.env.DOHC_RECOVERY_TEST_IMAGE, timeout: 120_000 }, async () => {
   const image = process.env.DOHC_RECOVERY_TEST_IMAGE;

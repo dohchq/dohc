@@ -1,7 +1,7 @@
 //! The wire-facing yrs `Doc` wrapper and the shared dohc root schema.
 //!
-//! Every method here enforces the yrs spike's four caveats
-//! (`crates/yrs-spike/SPIKE_REPORT.md`) plus the shared root schema:
+//! Every method here enforces the yrs interop harness's four caveats
+//! (`crates/yrs-interop/README.md`) plus the shared root schema:
 //!
 //! 1. **`OffsetKind::Utf16` everywhere.** [`Ydoc::wire`] is the only constructor
 //!    a durable/replicated doc may use; it hard-codes `OffsetKind::Utf16`. The

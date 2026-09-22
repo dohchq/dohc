@@ -231,7 +231,7 @@ describe("executeCli", () => {
       messages: [
         {
           id: "msg_one",
-          author: { kind: "human" as const, displayName: "Ice" },
+          author: { kind: "human" as const, displayName: "Sam" },
           body: "Hello",
           createdAtMs: 1,
           attachments: [],

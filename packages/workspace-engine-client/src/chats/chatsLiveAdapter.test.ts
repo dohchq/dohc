@@ -40,7 +40,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
       threadId: "t",
       messageId: "m",
       authorKind: "human",
-      authorDisplayName: "Ice",
+      authorDisplayName: "Sam",
       body: "hello",
     },
   },
@@ -81,7 +81,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
       threadId: "t",
       messageId: "m",
       emoji: "👍",
-      author: { authorId: "u", kind: "human", displayName: "Ice" },
+      author: { authorId: "u", kind: "human", displayName: "Sam" },
       state: "added",
     },
   },
@@ -205,7 +205,7 @@ const message = {
   id: "message",
   workspaceId: "workspace",
   threadId: "thread",
-  author: { kind: "human", displayName: "Ice" },
+  author: { kind: "human", displayName: "Sam" },
   body: "hello",
   createdAtMs: 2,
   attachments: [],
@@ -359,7 +359,7 @@ const STRICT_NEGATIVE_CASES: Array<{
         threadId: "thread",
         messageId: "message",
         emoji: "👍",
-        author: { authorId: "owner", kind: "human", displayName: "Ice" },
+        author: { authorId: "owner", kind: "human", displayName: "Sam" },
         state: "added",
         atMs: 3,
       },
@@ -371,7 +371,7 @@ const STRICT_NEGATIVE_CASES: Array<{
       threadId: "thread",
       messageId: "message",
       emoji: "👍",
-      author: { authorId: "owner", kind: "human", displayName: "Ice" },
+      author: { authorId: "owner", kind: "human", displayName: "Sam" },
       state: "Added",
       atMs: 3,
     },
@@ -940,11 +940,11 @@ describe("ChatsLiveAdapter", () => {
     );
     const started = await adapter.startChannelThread({
       workspaceId: "workspace", channelId: "channel",
-      author: { kind: "human", displayName: "Ice" }, body: "React here",
+      author: { kind: "human", displayName: "Sam" }, body: "React here",
     });
     const reaction = {
       workspaceId: "workspace", threadId: started.thread.id, messageId: started.message.id,
-      author: { authorId: "ice", kind: "human" as const, displayName: "Ice" },
+      author: { authorId: "ice", kind: "human" as const, displayName: "Sam" },
       replicationAuthorId: "ice", state: "added" as const,
     };
     for (const emoji of ["😀‍😀", "1\u20E3", "1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
@@ -981,7 +981,7 @@ describe("ChatsLiveAdapter", () => {
     const started = await adapter.startChannelThread({
       workspaceId: "workspace",
       channelId: "channel",
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "React here",
     });
     const reaction = {
@@ -992,7 +992,7 @@ describe("ChatsLiveAdapter", () => {
       author: {
         authorId: "ice",
         kind: "human" as const,
-        displayName: "Ice",
+        displayName: "Sam",
       },
       replicationAuthorId: "ice",
     };
@@ -1030,7 +1030,7 @@ describe("ChatsLiveAdapter", () => {
     const started = await adapter.startChannelThread({
       workspaceId: "workspace",
       channelId: "channel",
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Displayed",
     });
     await adapter.setFollow({
@@ -1049,7 +1049,7 @@ describe("ChatsLiveAdapter", () => {
     const arrivedLater = await adapter.sendMessage({
       workspaceId: "workspace",
       threadId: started.thread.id,
-      author: { kind: "human", displayName: "Ice" },
+      author: { kind: "human", displayName: "Sam" },
       body: "Arrived later",
     });
     const seen = await adapter.markPersonalFeedSeen({
@@ -1330,9 +1330,9 @@ describe("loopback poll validation", () => {
   ])("rejects %s options before writing a message", async (_name, options) => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
-    const started = await adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Ice" }, body: "Hello" });
+    const started = await adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
     await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
-      threadId: started.thread.id, messageId: "bad-poll", authorKind: "human", authorDisplayName: "Ice", body: "Choose", options,
+      threadId: started.thread.id, messageId: "bad-poll", authorKind: "human", authorDisplayName: "Sam", body: "Choose", options,
     } })).rejects.toThrow("invalid-poll-options");
     expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
   });

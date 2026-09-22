@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { palette, type ThemeTokens } from "./tokens";
+import {
+  CSS_TOKEN_NAMES,
+  IDENTITY_HUES,
+  identityHues,
+  palette,
+  type ThemeTokens,
+} from "./tokens";
 
 // WCAG contrast (relative-luminance math per WCAG 2.x, no dependency).
 function luminance(hex: string): number {
@@ -17,6 +24,15 @@ function luminance(hex: string): number {
 function contrast(fg: string, bg: string): number {
   const [hi, lo] = [luminance(fg), luminance(bg)].sort((a, b) => b - a);
   return (hi + 0.05) / (lo + 0.05);
+}
+
+// An sRGB mix, the fill an avatar draws with `bg-hue-*/15` over its card.
+function mix(fg: string, bg: string, amount: number): string {
+  const channel = (hex: string, i: number) => parseInt(hex.slice(1 + i, 3 + i), 16);
+  return `#${[0, 2, 4]
+    .map((i) => Math.round(channel(fg, i) * amount + channel(bg, i) * (1 - amount)))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 describe("WCAG AA contrast, both modes", () => {
@@ -58,6 +74,50 @@ describe("WCAG AA contrast, both modes", () => {
           ratio,
           `${pair.fg} on ${pair.bg} (${mode}) = ${ratio.toFixed(2)}:1`,
         ).toBeGreaterThanOrEqual(pair.min);
+      }
+    });
+
+    // Avatar initials are text: AA on every surface an avatar sits on, and
+    // on the avatar's own tinted fill, which is the tightest of the four.
+    it(`${mode} identity hues read as text on paper and on their tint`, () => {
+      for (const hue of IDENTITY_HUES) {
+        const fg = identityHues[mode][hue];
+        const surfaces = ["bg", "panel", "panel2"] as const;
+        for (const surface of surfaces) {
+          const bg = palette[mode][surface];
+          for (const [label, on] of [
+            [surface, bg],
+            [`${surface} tint`, mix(fg, bg, 0.15)],
+          ] as const) {
+            const ratio = contrast(fg, on);
+            expect(ratio, `${hue} on ${label} (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+          }
+        }
+      }
+    });
+  }
+});
+
+// styles.css carries the same values as a static stylesheet so first paint
+// never waits on JS. This is the guard that keeps the two files identical.
+describe("styles.css mirrors tokens.ts", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const block = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+  const blocks = { light: block(":root"), dark: block("[data-theme='dark']") };
+
+  for (const mode of ["light", "dark"] as const) {
+    it(`${mode} values match`, () => {
+      const expected = [
+        ...Object.entries(CSS_TOKEN_NAMES).map(
+          ([key, name]) => [name, palette[mode][key as keyof ThemeTokens]] as const,
+        ),
+        ...IDENTITY_HUES.map((hue) => [`--dohc-hue-${hue}`, identityHues[mode][hue]] as const),
+      ];
+      for (const [name, value] of expected) {
+        expect(blocks[mode], name).toContain(`${name}: ${value};`);
       }
     });
   }

@@ -4,7 +4,6 @@ WORKDIR /source
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-COPY fuzz/ fuzz/
 RUN cargo build --locked --release -p dohc-workspace-engine --bin dohc-workspace-engine
 
 FROM node:24.14.0-bookworm-slim AS build

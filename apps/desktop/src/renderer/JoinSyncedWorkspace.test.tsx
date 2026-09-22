@@ -20,7 +20,7 @@ vi.mock("./bridge", () => ({
 
 const JOINED = {
   workspaceId: "ws-joined",
-  rootPath: "/home/ice/dohc/notes",
+  rootPath: "/home/sam/dohc/notes",
   kind: "personal" as const,
   mode: "local-first" as const,
 };
@@ -31,7 +31,7 @@ beforeEach(() => {
     connected: true,
     email: "ice@dohc.dev",
   });
-  bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/notes");
+  bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/notes");
   bridgeMock.cloudJoinWorkspace.mockResolvedValue({ workspace: JOINED });
 });
 
@@ -45,7 +45,7 @@ async function fillJoinForm(user: ReturnType<typeof userEvent.setup>) {
     "dohc-sync:ws-joined:http://localhost:1788",
   );
   await user.click(screen.getByTestId("join-choose-folder"));
-  await screen.findByText("/home/ice/dohc/notes");
+  await screen.findByText("/home/sam/dohc/notes");
 }
 
 describe("JoinSyncedWorkspace", () => {
@@ -59,7 +59,7 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledWith({
         syncCode: "dohc-sync:ws-joined:http://localhost:1788",
-        rootPath: "/home/ice/dohc/notes",
+        rootPath: "/home/sam/dohc/notes",
       }),
     );
     await waitFor(() =>
@@ -97,7 +97,7 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
         syncCode: "dohc-sync:ws-joined:http://localhost:1788",
-        rootPath: "/home/ice/dohc/notes",
+        rootPath: "/home/sam/dohc/notes",
         passphrase: "shared protected-files passphrase",
       }),
     );
@@ -129,7 +129,7 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
         syncCode: "dohc-sync:ws-other:http://localhost:1788",
-        rootPath: "/home/ice/dohc/notes",
+        rootPath: "/home/sam/dohc/notes",
       }),
     );
   });

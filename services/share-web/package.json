@@ -1,5 +1,6 @@
 {
   "name": "@dohc/share-web",
+  "license": "AGPL-3.0-only",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -44,6 +45,7 @@
     "@dohc/sync-relay": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
+    "@peculiar/x509": "^2.1.0",
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
     "@types/pg": "^8.20.4",
@@ -54,6 +56,7 @@
     "esbuild": "0.28.1",
     "jsdom": "^30.0.1",
     "pg": "^8.22.0",
+    "reflect-metadata": "^0.2.2",
     "tsx": "^4.23.11",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",

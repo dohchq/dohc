@@ -1,6 +1,6 @@
 //! Extension → media-type mapping, ported byte-for-byte from the retired
 //! reference accelerator's `media_type_for_path` so a CAL-3 scan listing is
-//! comparable to the accelerator's documented output (`fixtures/workspace-kernel/`)
+//! comparable to the accelerator's documented output (`tests/fixtures/workspace-kernel/`)
 //! in the differential harness. The mapping is deliberately small and
 //! extension-driven; unknown extensions are `application/octet-stream`.
 

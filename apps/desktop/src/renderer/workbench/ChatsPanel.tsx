@@ -106,7 +106,7 @@ export function ChatsPanel(props: {
               data-testid={`chats-panel-tab-${tab}`}
               aria-pressed={props.tab === tab}
               onClick={() => props.onTabChange(tab)}
-              className={`h-6 rounded px-2 text-[11px] font-semibold uppercase tracking-wide ${
+              className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
                 props.tab === tab
                   ? "bg-line/60 text-ink"
                   : "text-muted hover:bg-line/40 hover:text-ink"

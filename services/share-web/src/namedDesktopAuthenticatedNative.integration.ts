@@ -30,6 +30,7 @@ import { initializeRelayDeployment, openRelayDeployment } from "../../sync-relay
 import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js";
+import { ensureLocalhostTls } from "./testing/device-control/localhostTls.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Explicit proof inputs, not product limits or release defaults.
@@ -56,9 +57,9 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
   const admin = new Client({ connectionString, connectionTimeoutMillis: 5000 });
   const pool = new Pool({ connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 5000 });
   let schemaCreated = false;
-  const certificate = new URL("./testing/device-control/localhost-cert.pem", import.meta.url);
-  if (resolve(process.env.NODE_EXTRA_CA_CERTS ?? "") !== fileURLToPath(certificate)) throw new Error("Launch the proof child with its fixture CA in NODE_EXTRA_CA_CERTS.");
-  const publicHttps = createHttpsServer({key: readFileSync(new URL("./testing/device-control/localhost-key.pem", import.meta.url)), cert: readFileSync(certificate)});
+  const tls = await ensureLocalhostTls();
+  if (resolve(process.env.NODE_EXTRA_CA_CERTS ?? "") !== tls.certificate) throw new Error("Launch the proof child with its fixture CA in NODE_EXTRA_CA_CERTS.");
+  const publicHttps = createHttpsServer({key: readFileSync(tls.key), cert: readFileSync(tls.certificate)});
   publicHttps.listen(0, "127.0.0.1"); await once(publicHttps, "listening");
   const audience = `https://127.0.0.1:${(publicHttps.address() as {port: number}).port}`;
   try {

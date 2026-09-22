@@ -3,13 +3,13 @@
 // Produces real yjs 13.6.30 update lineages + yjs-computed expectations that the
 // Rust durable pipeline must converge on. This is the non-tautological
 // cross-engine oracle (fixtures from real yjs, not Rust round-tripped) — the
-// same pattern the yrs spike and R08 used. Regenerate with:
+// same pattern the yrs interop harness uses. Regenerate with:
 //
 //   node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
 //   DOHC_FIXTURE_OUT=<directory> node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
 //
 // yjs is resolved from the workspace node_modules (pnpm; version pinned by
-// crates/yrs-spike/scripts/package.json → yjs 13.6.30, the audited interop
+// crates/yrs-interop/scripts/package.json → yjs 13.6.30, the audited interop
 // pair). Fixtures are committed so the Rust test is self-contained.
 
 import { createRequire } from "node:module";
@@ -29,9 +29,9 @@ mkdirSync(outputDir, { recursive: true });
 const bases = [
   process.env.DOHC_YJS_BASE,
   repoRoot,
-  join(repoRoot, "crates/yrs-spike/scripts"),
+  join(repoRoot, "crates/yrs-interop/scripts"),
   join(repoRoot, "../../.."),
-  join(repoRoot, "../../../crates/yrs-spike/scripts"),
+  join(repoRoot, "../../../crates/yrs-interop/scripts"),
 ].filter(Boolean);
 const require = createRequire(join(repoRoot, "package.json"));
 let yjsPath = null;
@@ -47,7 +47,7 @@ for (const base of bases) {
 }
 if (!yjsPath) {
   throw new Error(
-    `could not resolve yjs from any base:\n${bases.join("\n")}\nrun 'pnpm install --filter @dohc/yrs-spike-scripts...' or set DOHC_YJS_BASE`,
+    `could not resolve yjs from any base:\n${bases.join("\n")}\nrun 'pnpm install --filter @dohc/yrs-interop-scripts...' or set DOHC_YJS_BASE`,
   );
 }
 

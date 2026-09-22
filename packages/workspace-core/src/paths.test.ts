@@ -16,17 +16,17 @@ import {
 
 describe("workspace roots", () => {
   it("suggests ~/dohc as the default root", () => {
-    expect(defaultWorkspaceRoot("/home/ice")).toBe("/home/ice/dohc");
+    expect(defaultWorkspaceRoot("/home/sam")).toBe("/home/sam/dohc");
   });
 
   it("allows attaching arbitrary absolute folders", () => {
-    expect(validateAttachedFolder("/home/ice/projects/notes").ok).toBe(true);
+    expect(validateAttachedFolder("/home/sam/projects/notes").ok).toBe(true);
     expect(validateAttachedFolder("/mnt/data/research").ok).toBe(true);
   });
 
   it("allows Windows absolute folders (drive and UNC)", () => {
     expect(validateAttachedFolder("C:\\Users\\ice\\dohc").ok).toBe(true);
-    expect(validateAttachedFolder("C:/Users/ice/dohc").ok).toBe(true);
+    expect(validateAttachedFolder("C:/Users/sam/dohc").ok).toBe(true);
     expect(validateAttachedFolder("\\\\server\\share\\dohc").ok).toBe(true);
   });
 
@@ -138,7 +138,7 @@ describe("path traversal", () => {
   it("rejects Windows drive-qualified and UNC write paths", () => {
     for (const candidate of [
       "C:\\Users\\ice\\secret.md",
-      "C:/Users/ice/secret.md",
+      "C:/Users/sam/secret.md",
       "\\\\server\\share\\secret.md",
     ]) {
       const result = validateUserWritePath(candidate);
@@ -345,16 +345,16 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
 describe("workspace root choice", () => {
   it("accepts ordinary folders, including outside the default root", () => {
     expect(
-      validateWorkspaceRootChoice("/home/ice/dohc/personal", "/home/ice").ok,
+      validateWorkspaceRootChoice("/home/sam/dohc/personal", "/home/sam").ok,
     ).toBe(true);
     expect(
-      validateWorkspaceRootChoice("/mnt/data/research", "/home/ice").ok,
+      validateWorkspaceRootChoice("/mnt/data/research", "/home/sam").ok,
     ).toBe(true);
   });
 
   it("rejects the filesystem root and the home directory itself", () => {
-    for (const dangerous of ["/", "/home/ice", "/home/ice/", "C:\\", "C:/"]) {
-      const result = validateWorkspaceRootChoice(dangerous, "/home/ice");
+    for (const dangerous of ["/", "/home/sam", "/home/sam/", "C:\\", "C:/"]) {
+      const result = validateWorkspaceRootChoice(dangerous, "/home/sam");
       expect(result.ok).toBe(false);
     }
   });
@@ -363,36 +363,36 @@ describe("workspace root choice", () => {
     for (const disguised of [
       "/.",
       "/..",
-      "/home/ice/.",
-      "/home/ice/x/..",
-      "/home/./ice",
+      "/home/sam/.",
+      "/home/sam/x/..",
+      "/home/./sam",
     ]) {
-      const result = validateWorkspaceRootChoice(disguised, "/home/ice");
+      const result = validateWorkspaceRootChoice(disguised, "/home/sam");
       expect(result.ok).toBe(false);
     }
   });
 
   it("rejects leading-double-slash and UNC disguises of root and home", () => {
-    expect(validateWorkspaceRootChoice("//home/ice", "/home/ice").ok).toBe(false);
-    expect(validateWorkspaceRootChoice("///", "/home/ice").ok).toBe(false);
-    expect(validateWorkspaceRootChoice("//server", "/home/ice").ok).toBe(false);
-    expect(validateWorkspaceRootChoice("//server/share", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("//home/sam", "/home/sam").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("///", "/home/sam").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("//server", "/home/sam").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("//server/share", "/home/sam").ok).toBe(false);
   });
 
   it("rejects case variants of the home directory (case-insensitive filesystems)", () => {
-    expect(validateWorkspaceRootChoice("/Home/Ice", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("/Home/Sam", "/home/sam").ok).toBe(false);
   });
 
   it("returns the normalized root so equality checks are canonical", () => {
     const result = validateWorkspaceRootChoice(
-      "/home/ice/dohc//personal/.",
-      "/home/ice",
+      "/home/sam/dohc//personal/.",
+      "/home/sam",
     );
-    expect(result).toEqual({ ok: true, normalized: "/home/ice/dohc/personal" });
+    expect(result).toEqual({ ok: true, normalized: "/home/sam/dohc/personal" });
   });
 
   it("rejects relative paths", () => {
-    expect(validateWorkspaceRootChoice("notes", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("notes", "/home/sam").ok).toBe(false);
   });
 });
 

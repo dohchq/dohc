@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../../../..");
 const require = createRequire(join(repo, "package.json"));
-const bases = [process.env.DOHC_YJS_BASE, join(repo, "crates/yrs-spike/scripts"), repo].filter(Boolean);
+const bases = [process.env.DOHC_YJS_BASE, join(repo, "crates/yrs-interop/scripts"), repo].filter(Boolean);
 let path;
 for (const base of bases) {
   try { path = require.resolve("yjs", { paths: [base] }); break; } catch { /* next base */ }

@@ -3418,7 +3418,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     // Match acceptAppCollection's JSON frontmatter. The relay has assigned an
     // acceptance and public principal; the owner has not assigned a record id.
     let text = format!(
-        "---\n{{\"destination\":\"Tokyo\",\"name\":\"Ice\",\"created_at\":20,\"created_by\":\"{PRINCIPAL}\",\"grant_id\":\"{GRANT}\",\"idempotency_key\":\"vote-1\",\"acceptance_id\":\"{ACCEPTANCE}\"}}\n---\n"
+        "---\n{{\"destination\":\"Tokyo\",\"name\":\"Sam\",\"created_at\":20,\"created_by\":\"{PRINCIPAL}\",\"grant_id\":\"{GRANT}\",\"idempotency_key\":\"vote-1\",\"acceptance_id\":\"{ACCEPTANCE}\"}}\n---\n"
     );
     let sha = hex_sha256(text.as_bytes());
     let author = json!({ "kind": "public", "principalId": PRINCIPAL, "grantId": GRANT });
@@ -3619,7 +3619,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     assert_eq!(query["records"][0]["id"], record_id);
     for (field, expected) in [
         ("destination", json!("Tokyo")),
-        ("name", json!("Ice")),
+        ("name", json!("Sam")),
         ("created_at", json!(20)),
         ("created_by", json!(PRINCIPAL)),
         ("grant_id", json!(GRANT)),

@@ -40,13 +40,13 @@ describe("live agent dispatch store real daemon", () => {
               workspaceId,
               channelId: agentChannel.channelId,
               title: "Real daemon dispatch",
-              author: { kind: "human", displayName: "Ice" },
+              author: { kind: "human", displayName: "Sam" },
               body: "Run the real daemon dispatch flow.",
             });
             const secondTrigger = await chat.sendMessage({
               workspaceId,
               threadId: started.thread.id,
-              author: { kind: "human", displayName: "Ice" },
+              author: { kind: "human", displayName: "Sam" },
               body: "Exercise failed-run requeue.",
             });
             return { agentChannel, started, secondTrigger };

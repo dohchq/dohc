@@ -50,7 +50,7 @@ $cert.Dispose();$rsa.Dispose()`;
       return{context,page,child};
     };
     const first=await open('light',1000);await expect(first.child.getByText('No responses yet. Send yours above.')).toBeVisible();
-    await first.child.getByLabel('Name (optional)').fill('Ice');await first.child.getByLabel('Destination',{exact:true}).selectOption('Manila');
+    await first.child.getByLabel('Name (optional)').fill('Sam');await first.child.getByLabel('Destination',{exact:true}).selectOption('Manila');
     await first.child.getByRole('button',{name:'Send response',exact:true}).click();await expect(first.child.getByText('Response saved.',{exact:true})).toBeVisible();
     await expect(first.child.getByRole('listitem')).toHaveCount(1);await expect(first.child.getByRole('listitem')).toHaveText('IceManila');
     await first.page.screenshot({path:evidence+'/p5-trip-product-light.png'});
