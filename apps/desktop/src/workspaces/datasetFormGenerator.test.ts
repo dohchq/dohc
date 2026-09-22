@@ -23,7 +23,7 @@ describe("dataset form generation", () => {
     expect(generate().files).toEqual(files);
     expect(Object.keys(files).sort()).toEqual(["app.publish.json", "dohc.json", "frontend.css", "frontend.js"]);
     const manifest = JSON.parse(files["app.publish.json"]!);
-    expect(manifest.dataset).toEqual({ kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)] });
+    expect(manifest.dataset).toEqual({ kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });
     expect(manifest.inputs).toEqual(["apps/register/frontend.js", "apps/register/frontend.css"]);
     const built = await compileClosedApp({ entryPath: manifest.entryPath, packageMap: {}, inputs: manifest.inputs.map((path: string) => {
       const bytes = new TextEncoder().encode(files[path.split("/").at(-1)!]!);

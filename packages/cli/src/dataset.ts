@@ -21,6 +21,9 @@ const revision = z.unknown().transform((value, context) => {
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe") }).strict(),
+  z.object({ ...selection, action: z.literal("createForm"), revision: z.number().int().positive(), revisionSha256: sha256,
+    tableId: identity, createOperationId: identity, appRoot: z.string().min(1).max(900), title: z.string().min(1).max(200).optional(),
+    fieldIds: z.array(identity).min(1).max(24) }).strict(),
   z.object({ ...workspace, action: z.literal("create"), definition }).strict(),
   z.object({ ...workspace, action: z.literal("prepare"), descriptorPath: z.string().min(1).max(1024) }).strict(),
   z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
@@ -45,6 +48,7 @@ const description = z.unknown().transform((value, context) => {
 export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description }).strict(),
+  z.object({ kind: z.literal("form-created"), appRoot: z.string().min(1).max(900), paths: z.array(z.string().min(1).max(1024)).min(1).max(4) }).strict(),
   DatasetPreparation.extend({ kind: z.literal("prepared") }).strict(),
   z.object({ kind: z.literal("approved"), revision }).strict(),
   DatasetInvocationResult.extend({ kind: z.literal("invoked") }).strict(),

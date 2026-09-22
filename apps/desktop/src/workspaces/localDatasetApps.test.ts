@@ -51,10 +51,11 @@ async function fixture() {
   const adapter = sourceAdapter(files);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
-  async function prepareApp(appRoot: string, operationIds = [id(6)]) {
-    const generated = generateDatasetFormSources({ approvedRevision: revision, tableId: id(2), createOperationId: id(6), appRoot, fieldIds: [id(4), id(5)] });
+  async function prepareApp(appRoot: string, operationIds = [id(6)], fieldIds = [id(4), id(5)]) {
+    const generated = generateDatasetFormSources({ approvedRevision: revision, tableId: id(2), createOperationId: id(6), appRoot, fieldIds });
     for (const [path, source] of Object.entries(generated.files)) files.set(`${appRoot}/${path}`, source);
     const manifest = JSON.parse(files.get(`${appRoot}/app.publish.json`)!); manifest.dataset.operationIds = operationIds;
+    if (!operationIds.includes(id(6))) delete manifest.dataset.createFields;
     files.set(`${appRoot}/app.publish.json`, JSON.stringify(manifest));
     return prepareLocalAppPublication({ workspaceId: "w", appRoot }, { adapter, compile: compileClosedApp, signal: new AbortController().signal,
       assertCurrent() {}, async resolveDatasetRevision(binding) { return host.approvedArtifacts(binding.datasetId).revision; } });
@@ -140,5 +141,14 @@ describe("local approved dataset apps", () => {
     expect(own.file.fileId).not.toBe(first.file.fileId);
     const input = f.invocation(); input.authorityRevision = other.authorityRevision; input.input.values[id(5)] = first.file.fileId;
     await expect(f.host.apps.request(other.publicationId, "invoke", input)).rejects.toThrow();
+  });
+
+  it("enforces the generated form's field subset even when a client forges the request", async () => {
+    const f = await fixture();
+    const restricted = await f.host.apps.activate(await f.prepareApp("restricted", [id(6)], [id(4)]), new AbortController().signal);
+    const input = f.invocation(); input.authorityRevision = restricted.authorityRevision; input.input.values[id(5)] = "not-allowed";
+    await expect(f.host.apps.request(restricted.publicationId, "invoke", input)).rejects.toThrow(/cannot submit those fields/);
+    delete input.input.values[id(5)];
+    expect(await f.host.apps.request(restricted.publicationId, "invoke", input)).toMatchObject({ replayed: false });
   });
 });

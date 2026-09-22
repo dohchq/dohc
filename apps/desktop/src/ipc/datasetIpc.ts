@@ -3,6 +3,7 @@ import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -27,6 +28,21 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       current();
       if (input.action === "list") return { kind: "list" as const, ...host.list({ after: input.after, limit: input.limit }) };
       if (input.action === "describe") return { kind: "description" as const, dataset: host.describe(input.datasetId) };
+      if (input.action === "createForm") {
+        const approved = host.approvedArtifacts(input.datasetId);
+        if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) {
+          throw new Error("Collection rules changed. Reload the Collection before creating a form.");
+        }
+        const generated = generateDatasetFormSources({ ...input, approvedRevision: approved.revision });
+        const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
+        await dependencies.createSources(operation.workspace, files, operation.signal);
+        current();
+        const latest = host.approvedArtifacts(input.datasetId);
+        if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
+          throw new Error("Collection rules changed. The form source was saved. Reload the Collection before approving the form.");
+        }
+        return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
+      }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
       if (input.action === "invoke") {
         const result = await host.invoke({ ...input, signal: operation.signal });

@@ -41,7 +41,7 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   const title = input.title ?? revision.definition.name;
   if (typeof title !== "string" || !title.trim() || title.length > 200 || /[\u0000-\u001f\u007f]/u.test(title)) throw new Error("Use a form title with 1 to 200 characters.");
   const capability = resolveAppDatasetCapability({ kind: "dataset", datasetId: revision.datasetId, revision: revision.revision,
-    revisionSha256: revision.revisionSha256, operationIds: [operation.operationId] }, revision);
+    revisionSha256: revision.revisionSha256, operationIds: [operation.operationId], createFields: [{ operationId: operation.operationId, fieldIds: input.fieldIds }] }, revision);
   const { operations: _, ...binding } = capability;
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return { files: {
