@@ -63,6 +63,10 @@ async function blobHash(blob: RecoveryBlob, authorize: () => void, output?: stri
 
 /** Validates retained history and replays committed bytes in an isolated worker; authored operations are never rerun. */
 export async function validateDatasetRecovery(options: RecoveryValidationOptions): Promise<ValidatedDatasetRecovery> {
+  try { return await validateRecovery(options); }
+  catch (error) { await options.staged.dispose(); throw error; }
+}
+async function validateRecovery(options: RecoveryValidationOptions): Promise<ValidatedDatasetRecovery> {
   const authorize = () => { options.signal?.throwIfAborted(); const result: unknown = options.authorize(); if (result && typeof result === "object" && "then" in result) fail("authorization must be synchronous."); options.signal?.throwIfAborted(); };
   authorize();
   const staged = options.staged, root = await realpath(staged.directory);
@@ -77,14 +81,17 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
     CREATE TABLE records(revision INTEGER PRIMARY KEY,metadata TEXT NOT NULL,path TEXT NOT NULL,offset INTEGER NOT NULL,length INTEGER NOT NULL);
     CREATE TABLE metadata(seq INTEGER PRIMARY KEY,body TEXT NOT NULL);
     CREATE TABLE catalogs(hash TEXT PRIMARY KEY,revision INTEGER UNIQUE,body TEXT NOT NULL,compiled TEXT NOT NULL);
+    CREATE TABLE used_catalogs(hash TEXT PRIMARY KEY);
     CREATE TABLE receipts(caller TEXT,key TEXT,PRIMARY KEY(caller,key));
     CREATE TABLE references_(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE permissions(kind TEXT,id TEXT,PRIMARY KEY(kind,id));`);
-  let closed = false, worker: PersistentAppBackend | undefined;
-  const dispose = async () => { if (closed) return; closed = true; await worker?.close(); index.close(); await rm(work, { recursive: true, force: true }); await staged.dispose(); };
+  let closed = false, worker: PersistentAppBackend | undefined, workerDirectory: string | undefined;
+  const abort = () => { void worker?.abort("Recovery validation cancelled.").catch(() => {}); };
+  options.signal?.addEventListener("abort", abort);
+  const dispose = async () => { if (closed) return; closed = true; options.signal?.removeEventListener("abort", abort); await worker?.close(); index.close(); await rm(work, { recursive: true, force: true }); await staged.dispose(); };
   const maxRecords = recoveryInteger(options.maxRecords ?? 1_000_000, 1), maxEvent = recoveryInteger(options.maxEventBytes ?? 16 * CHUNK, 1, 128 * CHUNK);
-  let count = 0, catalog: RecoveryCatalog | undefined, currentCheckpoint: JournalExportRecord | undefined, previous: DatasetCursor | null = null;
+  let count = 0, frameCount = 0, catalog: RecoveryCatalog | undefined, currentCheckpoint: JournalExportRecord | undefined, previous: DatasetCursor | null = null;
   const rawMetadata = (body: RecoveryMetadata) => index.prepare("INSERT INTO metadata(body) VALUES(?)").run(JSON.stringify(body));
   const getCatalog = (hash: string) => {
     const row = index.prepare("SELECT body,compiled FROM catalogs WHERE hash=?").get(hash);
@@ -94,7 +101,7 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
   };
   async function addCatalog(value: unknown, current: boolean) {
     const r = recoveryObject(value, ["kind", "revisionJson", "artifactsJson"]);
-    const revisionJson = recoveryText(r.revisionJson, 256 * CHUNK), artifactsJson = recoveryText(r.artifactsJson, 768 * CHUNK);
+    const revisionJson = recoveryText(r.revisionJson, 256 * 1024), artifactsJson = recoveryText(r.artifactsJson, 768 * 1024);
     const artifacts = recoveryObject(JSON.parse(artifactsJson), ["schemaSql", "operationSource"]);
     const revision = verifyDatasetArtifacts({ revision: parseDatasetRevision(JSON.parse(revisionJson)), schemaSql: recoveryText(artifacts.schemaSql, 256 * 1024), operationSource: recoveryText(artifacts.operationSource, 256 * 1024) });
     if (revision.datasetId !== staged.manifest.cursor.datasetId || current && revision.revisionSha256 !== staged.manifest.cursor.approvedRevisionHash) fail("catalog scope differs.");
@@ -111,6 +118,7 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
     const approval = getCatalog(c.approvedRevisionHash);
     if (record.byteLength !== blob.byteLength || await blobHash(blob, authorize) !== (record.kind === "checkpoint" ? record.sha256 : record.changesetSha256)) fail("journal blob hash differs.");
     if (record.kind === "checkpoint") {
+      index.prepare("INSERT OR IGNORE INTO used_catalogs VALUES(?)").run(c.approvedRevisionHash);
       if (record.previous ? !previous || !equalRecoveryCursor(record.previous, previous) : previous !== null) fail("checkpoint previous cursor differs.");
       if (record.source !== approval.compiled || record.schemaSql !== approval.artifacts.schemaSql ||
           JSON.stringify(parseDatasetRevision(JSON.parse(record.definitionJson))) !== JSON.stringify(approval.revision)) fail("checkpoint artifacts differ from original approval.");
@@ -126,6 +134,7 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
     try {
       if (history && Buffer.from(await readRange({ path, offset: 0, byteLength: 8 }, 8)).toString() !== "DOHCDH01") fail("history magic differs.");
       while (offset < size) {
+        if (++frameCount > maxRecords) fail("recovery record count exceeds its limit.");
         authorize(); const prefix = await readRange({ path, offset, byteLength: 4 }, 4), length = new DataView(prefix.buffer, prefix.byteOffset, 4).getUint32(0); offset += 4;
         recoveryInteger(length, 1, MAX_META);
         const raw = json(await readRange({ path, offset, byteLength: length }, MAX_META)) as Record<string, unknown>; offset += length;
@@ -170,6 +179,7 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
     await addJournal(currentCheckpoint, { path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength });
     for (const file of staged.files.filter(f => f.entry.kind === "events")) await parseFile(file.path, false);
     if (!previous || !equalRecoveryCursor(previous, staged.manifest.cursor)) fail("history does not reach the pinned head.");
+    if (index.prepare("SELECT hash FROM catalogs EXCEPT SELECT hash FROM used_catalogs").get()) fail("unreferenced approved artifact revision.");
     const original = getCatalog(staged.manifest.cursor.approvedRevisionHash);
     for (const [role, expected] of [["source", original.artifacts.operationSource], ["schema", original.artifacts.schemaSql], ["definition", original.revisionJson]]) {
       const file = staged.files.find(f => f.entry.kind === "artifact" && f.entry.role === role);
@@ -197,10 +207,14 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
       authorize(); const r = item.record;
       if (r.kind === "checkpoint") {
         await worker?.close(); worker = undefined;
+        if (workerDirectory) await rm(workerDirectory, { recursive: true, force: true });
         const sandbox = await mkdtemp(join(work, "checkpoint-")), path = join(sandbox, "checkpoint.sqlite");
+        workerDirectory = sandbox;
         await blobHash(item.blob, authorize, path);
         worker = await openPersistentAppBackend({ directory: sandbox, checkpointPath: path, schemaSql: r.schemaSql,
           tables: getCatalog(r.cursor.approvedRevisionHash).revision.definition.tables.map(t => t.sqlName), scope: r.cursor, cursor: r.cursor, databaseBytes: r.capacityBytes }, options.runtime);
+        if (options.signal?.aborted) await worker.abort("Recovery validation cancelled.");
+        authorize();
       } else {
         if (!worker) fail("event precedes checkpoint.");
         await worker.apply({ revision: r.cursor.revision, digest: r.cursor.digest, previousDigest: r.previousDigest, changesetSha256: r.changesetSha256,
@@ -208,6 +222,7 @@ export async function validateDatasetRecovery(options: RecoveryValidationOptions
       }
     }
     await worker?.close(); worker = undefined; authorize();
+    if (workerDirectory) { await rm(workerDirectory, { recursive: true, force: true }); workerDirectory = undefined; }
     return { manifest: staged.manifest, catalog, checkpoint: { record: currentCheckpoint, blob: { path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength } }, records,
       metadata: function* () { for (const row of index.prepare("SELECT body FROM metadata ORDER BY seq").iterate()) { authorize(); yield JSON.parse(String(row.body)) as RecoveryMetadata; } }, dispose };
   } catch (error) { await dispose(); throw error; }

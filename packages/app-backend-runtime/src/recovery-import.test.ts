@@ -1,0 +1,101 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, writeFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, expect, it } from "vitest";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { createDatasetJournal, type DatasetCursor } from "./journal";
+import { prepareDatasetRecoveryExport } from "./recovery-export";
+import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecovery } from "./recovery";
+import { validateDatasetRecovery } from "./recovery-import";
+import { parseRecoveryJournalRecord } from "./recovery-record";
+
+const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
+const schemaSql = "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL);";
+const source = "globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items')}};";
+const definition: DatasetDefinition = { formatVersion:1,datasetId:id(1),name:"Items",schemaPath:"schema.sql",operationsPath:"operations.js",
+  tables:[{tableId:id(2),name:"Items",sqlName:"items",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true},{fieldId:id(4),name:"Value",sqlColumn:"value",type:"text",required:true,unique:false}]}],
+  operations:[{operationId:id(5),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3),id(4)]}] };
+const limits = { maxTotalBytes: 16*1024*1024 };
+const cleanups: Array<()=>Promise<void>>=[];
+afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
+async function fixture(){
+  const directory=await mkdtemp(join(tmpdir(),"dohc-recovery-import-test-")), db=new DatabaseSync(join(directory,"host.sqlite")), seedPath=join(directory,"seed.sqlite"), seed=new DatabaseSync(seedPath);
+  seed.exec(schemaSql);
+  const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
+  const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:source});
+  db.exec("CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
+  db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
+  const authorize=()=>{}, checkpoint=await readFile(seedPath);
+  let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize});
+  cleanups.push(async()=>{seed.close();db.close();if(!resolve(directory).startsWith(`${resolve(tmpdir())}${sep}dohc-recovery-import-test-`))throw Error("unsafe temp path");await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
+  function add(value: string, attached: string[] = []) {
+    const session=seed.createSession({table:"items"}); seed.prepare("INSERT INTO items(value) VALUES(?)").run(value); const changeset=session.changeset(); session.close();
+    const result=journal.commitOperation({expected:head,proposalId:value,operation:"read",callerKey:"owner",idempotencyKey:value,payloadSha256:hash(value),resultJson:JSON.stringify({value}),changeset,changesetSha256:hash(changeset),attachedFileIds:attached,authorize,accountAndAttach(){}});
+    if(result.kind!=="committed")throw Error("unexpected replay");head=result.event.cursor;return result.event;
+  }
+  async function migrate(){
+    const operationSource=source+"\n// revision two", next=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+    head=journal.transitionCheckpoint({expected:head,hostEpoch:"host",approvedRevisionHash:next.revisionSha256,source:operationSource,schemaSql,definitionJson:JSON.stringify(next),checkpoint:await readFile(seedPath),authorize,account(){
+      db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(scope.workspaceId,scope.datasetId,1,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
+      db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=?").run(JSON.stringify(next),JSON.stringify({schemaSql,operationSource}));
+    }}); return head;
+  }
+  async function stage(attachment?: {fileId:string; bytes:Uint8Array; revision:number}) {
+    const prepared=await prepareDatasetRecoveryExport({db,journal,scope,authorize,directory:join(directory,"exports"),limits,
+      ...(attachment?{attachments:{capture:()=>[{fileId:attachment.fileId,name:"receipt.png",contentType:"image/png",byteLength:attachment.bytes.byteLength,sha256:hash(attachment.bytes),revision:attachment.revision}],open:async function*(){yield attachment.bytes;}}}:{})});
+    const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,limits)});
+    await prepared.dispose(); return staged;
+  }
+  return {directory,db,seed,journal,scope,revision,authorize,add,migrate,stage,head:()=>head};
+}
+async function alter(staged:StagedDatasetRecovery,id:string,change:(bytes:Buffer)=>Buffer){
+  const file=staged.files.find(f=>f.entry.id===id)!;const bytes=change(await readFile(file.path));await writeFile(file.path,bytes);file.entry.byteLength=bytes.length;file.entry.sha256=hash(bytes);
+}
+function changeHistory(bytes:Buffer,change:(record:any)=>void){
+  const result:Buffer[]=[bytes.subarray(0,8)];let offset=8;
+  while(offset<bytes.length){const size=bytes.readUInt32BE(offset);offset+=4;const record=JSON.parse(bytes.subarray(offset,offset+size).toString());offset+=size;
+    const blobLength=record.kind==="event"||record.kind==="checkpoint"?record.byteLength:0;change(record);const encoded=Buffer.from(JSON.stringify(record)),prefix=Buffer.alloc(4);prefix.writeUInt32BE(encoded.length);result.push(prefix,encoded,bytes.subarray(offset,offset+blobLength));offset+=blobLength;}
+  return Buffer.concat(result);
+}
+
+it("validates empty history and an actual checkpoint without inventing events",async()=>{
+  const f=await fixture(),staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
+  expect([...valid.records()].map(item=>[item.record.kind,item.record.cursor.revision])).toEqual([["checkpoint",0]]);
+  expect([...valid.metadata()]).toEqual([]);expect(valid.manifest.cursor).toEqual(f.head());await valid.dispose();
+});
+it("replays actual changesets across a same-schema revision and preserves old receipts and files",async()=>{
+  const f=await fixture(),fileId="receipt_file_0001",first=f.add("first",[fileId]);await f.migrate();f.add("tail");
+  const staged=await f.stage({fileId,bytes:Uint8Array.of(137,80,78,71),revision:first.cursor.revision}),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
+  expect([...valid.records()].map(item=>[item.record.kind,item.record.cursor.revision])).toEqual([["checkpoint",0],["event",1],["checkpoint",2],["event",3]]);
+  expect([...valid.records()].filter(item=>item.record.kind==="event").map(item=>item.record.kind==="event"&&item.record.idempotencyKey)).toEqual(["first","tail"]);
+  expect([...valid.metadata()].filter(item=>item.kind==="attachment")).toMatchObject([{file:{fileId,revision:1}}]);await valid.dispose();
+});
+it("rejects source tampering even after the transport hash is replaced",async()=>{
+  const f=await fixture(),staged=await f.stage();await alter(staged,"artifact:source",()=>Buffer.from("globalThis.operations={};"));
+  await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("source artifact");
+  await expect(readdir(staged.directory)).rejects.toThrow();
+});
+it("rejects malformed original artifacts, truncated history, and a changed chain",async()=>{
+  const f=await fixture();f.add("first");await f.migrate();
+  for(const mutation of [
+    (bytes:Buffer)=>changeHistory(bytes,record=>{if(record.kind==="catalog")record.artifactsJson="{broken";}),
+    (bytes:Buffer)=>bytes.subarray(0,bytes.length-3),
+    (bytes:Buffer)=>changeHistory(bytes,record=>{if(record.kind==="event")record.previousDigest="0".repeat(64);}),
+  ]){
+    const staged=await f.stage();await alter(staged,"history",mutation);await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow();
+    await expect(readdir(staged.directory)).rejects.toThrow();
+  }
+});
+it("rejects attached bytes whose metadata differs from the original association",async()=>{
+  const f=await fixture(),fileId="receipt_file_0001",event=f.add("first",[fileId]);const staged=await f.stage({fileId,bytes:Uint8Array.of(1,2,3),revision:event.cursor.revision});
+  await alter(staged,`attachment:${fileId}`,()=>Uint8Array.of(9,9,9) as Buffer);
+  await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("attachment metadata");
+});
+it("checks exported metadata digest formulas against real journal records",async()=>{
+  const f=await fixture();f.add("first");await f.migrate();f.add("last");
+  for(const r of f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize}))expect(parseRecoveryJournalRecord(r)).toEqual(r);
+});
