@@ -128,4 +128,33 @@ dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","sav
 The destination directory must exist. Existing files require explicit `overwrite:true`.
 Protect the archive as private data. Its integrity checks detect corruption; they do not encrypt it.
 Do not replace an authority that has accepted newer writes with an older archive.
+Restore to a local workspace with the same identity and no existing copy of that Collection.
+Do not create an empty Collection first. Recovery refuses every existing dataset, including an inactive or transferred copy.
+
+Choose **Restore a Collection**, or prepare a private archive through the CLI:
+
+```sh
+dohc dataset prepareRecovery '{"workspaceId":"WORKSPACE_ID","sourcePath":"C:/Backups/fundraiser.dohc-recovery"}'
+```
+
+Preparation validates the archive, rules, history, files, and workspace identity. It does not create an active Collection.
+Review the returned `recovery`, then stop the old host for this dataset.
+Do not restart that old host after recovery.
+
+Submit the returned identity fields without changing them:
+
+```sh
+dohc dataset claimRecovery '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","transferId":"TRANSFER_ID","manifestSha256":"MANIFEST_SHA256","sourceCursor":{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","hostEpoch":"SOURCE_EPOCH","approvedRevisionHash":"REVISION_SHA256","revision":42,"digest":"SOURCE_DIGEST"},"oldHostStopped":true}'
+```
+
+The restored Collection retains records, attachments, approved rules, history, and retry receipts.
+It receives a new host epoch. Saved sharing grants remain inactive; review and approve access again.
+A failed claim can retry with the same identity fields, including after restarting dohc.
+Before claiming, cancel with `dataset discardRecovery` and the returned `transferId`.
+
+To recover onto a clean shared host, first restore locally, then publish the app through the normal sharing flow.
+That transfer stops local writes before the server accepts the dataset. It preserves attachments and retry receipts.
+The shared target must also have no existing copy of this dataset.
+Recovery never promotes a downloaded replica or replaces a running shared authority.
+
 See [server recovery](self-host-recovery.md) for whole-service restoration.
