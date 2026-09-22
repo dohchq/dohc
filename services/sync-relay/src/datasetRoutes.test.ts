@@ -124,6 +124,50 @@ it("uses verified named grant membership and explicit data grants without source
   expect((await f.http(`${f.path}/grants`, {principalKey, grant: null})).status).toBe(200);
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_data_grants").get()?.n).toBe(0);
 });
+it("resolves a desktop recipient's Collection grant from the named share route", async () => {
+  const f = await httpFixture(); await f.activate();
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('desktop-helper','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const named = { authorization: "Bearer helper" }, path = `shares/s/datasets/${id(1)}`;
+  const invoke = () => f.http(`${path}/invoke`, { revision: 1, revisionSha256: revision.revisionSha256, operationId: id(6), input: {}, idempotencyKey: "desktop-read" }, named);
+  expect((await (await f.http("shares/s/datasets", undefined, named)).json()).datasets).toEqual([]);
+  expect((await invoke()).status).toBe(404);
+  await f.http(`${f.path}/grants`, { grantId: "desktop-helper", grant: { revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(6)], discover: true } });
+  expect((await (await f.http("shares/s/datasets", undefined, named)).json()).datasets).toMatchObject([{ datasetId: id(1), operations: [{ operationId: id(6) }] }]);
+  expect((await f.http(path, undefined, named)).status).toBe(200);
+  expect((await invoke()).status).toBe(200);
+  expect((await f.http(`${path}/artifacts`, undefined, named)).status).toBe(404);
+  expect((await f.http("shares/s/datasets", undefined, { ...named, "x-dohc-dataset-grant": "g" })).status).toBe(404);
+  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=10 WHERE grant_id='desktop-helper'").run());
+  expect((await invoke()).status).toBe(404);
+});
+it("mediates named native file uploads and downloads through explicitly granted attachment actions", async () => {
+  const f = await httpFixture();
+  const nativeDefinition = structuredClone(definition); nativeDefinition.datasetId = id(20);
+  nativeDefinition.operations[0]!.fieldIds.push(id(7));
+  nativeDefinition.operations[1]!.fieldIds.push(id(7));
+  const nativeSource = operationSource.replace("return ctx.db.query('SELECT * FROM requests ORDER BY id');", `return {rows:ctx.db.query('SELECT * FROM requests ORDER BY id').map(row=>({id:row.id,values:{'${id(7)}':row.receipt}}))};`);
+  const nativeRevision = describeDatasetRevision({definition: nativeDefinition, revision: 1, schemaSql, operationSource: nativeSource});
+  const ownerPath = `w/datasets/${id(20)}`, namedPath = `shares/s/datasets/${id(20)}`, headers = {authorization: "Bearer helper"};
+  expect((await f.http(`${ownerPath}/activate`, {revision: nativeRevision, schemaSql, operationSource: nativeSource})).status).toBe(200);
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('native-files','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const pinned = {revision: 1, revisionSha256: nativeRevision.revisionSha256};
+  const bytesBase64 = Buffer.from([137,80,78,71,13,10,26,10,0]).toString("base64");
+  const upload = {...pinned, fieldId: id(7), name: "receipt.png", contentType: "image/png", bytesBase64, idempotencyKey: "native-upload"};
+  expect((await f.http(`${namedPath}/upload`, upload, headers)).status).toBe(404);
+  await f.http(`${ownerPath}/grants`, {grantId: "native-files", grant: {...pinned, operationIds: [id(5),id(6)], discover: true}});
+  const response = await f.http(`${namedPath}/upload`, upload, headers); expect(response.status).toBe(200);
+  const {file} = await response.json();
+  const read = {...pinned, fileId: file.fileId, read: {operationId: id(6), fieldId: id(7), input: {}}};
+  expect((await f.http(`${namedPath}/file`, read, headers)).status).toBe(404);
+  expect((await f.http(`${namedPath}/invoke`, {...pinned, operationId: id(5), input: {name: "Helper", fileId: file.fileId}, idempotencyKey: "native-submit"}, headers)).status).toBe(200);
+  expect(await (await f.http(`${namedPath}/file`, read, headers)).json()).toEqual({file, bytesBase64});
+  expect((await f.http(`${namedPath}/file`, {...read, read: {...read.read, fieldId: id(4)}}, headers)).status).toBe(404);
+  expect((await f.http(`${namedPath}/upload`, {...upload, fieldId: id(4)}, headers)).status).toBe(404);
+  await f.http(`${ownerPath}/grants`, {grantId: "native-files", grant: null});
+  expect((await f.http(`${namedPath}/file`, read, headers)).status).toBe(404);
+});
 
 it("rejects ambient credentials and forged request authority before changing data", async () => {
   const f = await httpFixture(); await f.activate();

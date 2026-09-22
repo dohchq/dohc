@@ -135,7 +135,7 @@ export interface CreateSyncRelayHandlerOptions {
 type SyncRelayRoute =
   | AppBackendRoute
   | DatasetRoute
-  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" }
+  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" }
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -626,7 +626,7 @@ export function createSyncRelayHandler({
         const actor = await resolveActor(new Request(request.url, { headers: { authorization: authorization! }, signal: request.signal }), "");
         const granted = requireShareAction(route.shareId, actor.userId, "read");
         if (granted.grant.principalKind !== "user" || granted.grant.principalUserId !== actor.userId) throw notFound();
-        return await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action },
+        return await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action, named: true },
           { kind: "named", workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId });
       }
       if (route.route === "dataset") {
@@ -854,7 +854,7 @@ function parseRoute(request: Request): SyncRelayRoute {
       const datasetId = parts[4];
       if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
       if (parts.length === 5) return { route: "named-dataset", shareId, datasetId, action: "describe" };
-      if (parts.length === 6 && parts[5] === "invoke") return { route: "named-dataset", shareId, datasetId, action: "invoke" };
+      if (parts.length === 6 && ["invoke", "upload", "file"].includes(parts[5]!)) return { route: "named-dataset", shareId, datasetId, action: parts[5] as "invoke" | "upload" | "file" };
       throw notFound();
     }
     if (parts.length === 3) return { route: "share", shareId };

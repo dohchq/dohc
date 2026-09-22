@@ -17,6 +17,7 @@ export interface DatasetRoute {
   workspaceId: string;
   datasetId?: string;
   transferId?: string;
+  named?: boolean;
   action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
@@ -108,13 +109,19 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
         if (route.action === "upload") {
-          const body = record(raw, ["revision", "revisionSha256", "idempotencyKey", "name", "contentType", "bytesBase64"]);
+          const body = record(raw, ["revision", "revisionSha256", "idempotencyKey", "name", "contentType", "bytesBase64", ...(route.named ? ["fieldId"] : [])]);
           let parsed; try {parsed = parseAppBackendUploadRequest({authorityRevision: positive(body.revision), idempotencyKey: body.idempotencyKey, name: body.name, contentType: body.contentType, bytesBase64: body.bytesBase64});} catch {throw badRequest("Invalid dataset upload.");}
           const {authorityRevision: revision, ...file} = parsed;
-          return host.ownerUpload(auth, {...scope, ...file, revision, revisionSha256: digest(body.revisionSha256)}, signal);
+          return route.named ? host.dataUpload(auth, {...scope, ...file, revision, revisionSha256: digest(body.revisionSha256), fieldId: datasetId(text(body.fieldId))}, signal)
+            : host.ownerUpload(auth, {...scope, ...file, revision, revisionSha256: digest(body.revisionSha256)}, signal);
         }
         if (route.action === "file") {
-          const body = record(raw, ["revision", "revisionSha256", "fileId"]);
+          const body = record(raw, ["revision", "revisionSha256", "fileId", ...(route.named ? ["read"] : [])]);
+          if (route.named) {
+            const read = record(body.read, ["operationId", "fieldId", "input"]);
+            return host.dataReadFile(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), fileId: text(body.fileId, 128),
+              operationId: datasetId(text(read.operationId)), fieldId: datasetId(text(read.fieldId)), input: input(read.input)}, signal);
+          }
           return host.ownerReadFile(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), fileId: text(body.fileId, 128)}, signal);
         }
         if (route.action === "activate" || route.action === "migrate") {

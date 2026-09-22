@@ -18,7 +18,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
-  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke">>;
+  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">>;
   exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
@@ -37,11 +37,13 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "exported" as const, savedPath };
       }
       if (shareViewIsPresent(operation.workspace.shareView)) {
-        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
+        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
         const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
         current();
         if (input.action === "list") { const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
         if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+        if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
+        if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
         if (input.action === "invoke") {
           try { const result = await data.invoke({ ...input, signal: operation.signal }); current(); return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) }; }
           catch (error) { current(); if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal }; throw error; }

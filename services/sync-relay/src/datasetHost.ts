@@ -308,6 +308,33 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         };
         return files.upload(scope, authorize(), {authorityRevision: input.revision, idempotencyKey: input.idempotencyKey, name: input.name, contentType: input.contentType, bytesBase64: input.bytesBase64}, authorize);
       },
+      dataUpload(auth: AppBackendAuth, input: Omit<AppBackendUploadRequest, "authorityRevision"> & {workspaceId: string; datasetId: string; revision: number; revisionSha256: string; fieldId: string}, signal?: AbortSignal) {
+        const scope = {workspaceId: input.workspaceId, datasetId: input.datasetId};
+        const description = host.describe(auth, scope);
+        const operation = description.operations.find(operation => !operation.readOnly && operation.fieldIds.includes(input.fieldId));
+        const field = description.tables.find(table => table.tableId === operation?.tableId)?.fields.find(field => field.fieldId === input.fieldId);
+        if (!operation || field?.type !== "attachment") throw notFound();
+        const request = {...scope, revision: input.revision, revisionSha256: input.revisionSha256, operationId: operation.operationId};
+        const admitted = host.authorize(auth, request);
+        return files.upload(scope, admitted.authority, {authorityRevision: input.revision, idempotencyKey: input.idempotencyKey, name: input.name, contentType: input.contentType, bytesBase64: input.bytesBase64}, () => {
+          signal?.throwIfAborted(); current();
+          if (JSON.stringify(host.authorize(auth, request).authority) !== JSON.stringify(admitted.authority)) throw notFound();
+          const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId);
+          if (!head || head.active !== 1 || head.approved_revision_hash !== input.revisionSha256) throw notFound();
+        });
+      },
+      dataReadFile(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; revision: number; revisionSha256: string; fileId: string; fieldId: string; operationId: string; input: AppBackendJson}, signal?: AbortSignal) {
+        const admitted = host.authorize(auth, input), operation = admitted.operation;
+        const field = admitted.revision.definition.tables.find(table => table.tableId === operation.tableId)?.fields.find(field => field.fieldId === input.fieldId);
+        if (!operation.readOnly || !operation.fieldIds.includes(input.fieldId) || field?.type !== "attachment") throw notFound();
+        return host.readOperation(auth, {...input, idempotencyKey: randomUUID(), signal: AbortSignal.any([storage.unavailable, ...(signal ? [signal] : [])])}, result => {
+          if (!result || typeof result !== "object" || Array.isArray(result) || !Array.isArray(result.rows) || !result.rows.some(row => {
+            if (!row || typeof row !== "object" || Array.isArray(row) || !row.values || typeof row.values !== "object" || Array.isArray(row.values)) return false;
+            return row.values[input.fieldId] === input.fileId;
+          })) throw notFound();
+          return files.readAttached(input, input.fileId, {fileId: input.fileId});
+        });
+      },
       ownerReadFile(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; revision: number; revisionSha256: string; fileId: string}, signal?: AbortSignal) {
         return storage.tx(() => {
           owner(auth, input.workspaceId); signal?.throwIfAborted();

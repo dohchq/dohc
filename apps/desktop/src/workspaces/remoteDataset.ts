@@ -100,11 +100,11 @@ export function createRemoteDatasetData(input: {
         { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey }, signal));
     },
     async upload(upload) {
-      if (input.shareId !== undefined) throw new Error("Use the shared app to upload a file.");
       const signal = upload.signal ? AbortSignal.any([input.signal, upload.signal]) : input.signal;
       const result = DatasetResult.parse({ ...(await request(`${path(upload.datasetId)}/upload`, {
         revision: upload.revision, revisionSha256: upload.revisionSha256, idempotencyKey: upload.idempotencyKey,
         name: upload.name, contentType: upload.contentType, bytesBase64: upload.bytesBase64,
+        ...(input.shareId !== undefined ? { fieldId: upload.fieldId } : {}),
       }, signal) as object), kind: "uploaded" });
       if (result.kind !== "uploaded") throw new Error("Invalid Collection upload result.");
       const bytes = Buffer.from(upload.bytesBase64, "base64");
@@ -113,10 +113,11 @@ export function createRemoteDatasetData(input: {
       return { file: result.file, replayed: result.replayed };
     },
     async file(file) {
-      if (input.shareId !== undefined) throw new Error("Use the shared app's approved file action to open this file.");
+      if (input.shareId !== undefined && !file.read) throw new Error("Choose an approved Collection read action to open this file.");
       const signal = file.signal ? AbortSignal.any([input.signal, file.signal]) : input.signal;
       const result = DatasetResult.parse({ ...(await request(`${path(file.datasetId)}/file`, {
         revision: file.revision, revisionSha256: file.revisionSha256, fileId: file.fileId,
+        ...(input.shareId !== undefined ? { read: file.read } : {}),
       }, signal) as object), kind: "file" });
       if (result.kind !== "file") throw new Error("Invalid Collection file result.");
       const bytes = Buffer.from(result.bytesBase64, "base64");

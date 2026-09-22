@@ -7,7 +7,7 @@ import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
-function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke">) {
+function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -52,7 +52,7 @@ it("routes history to shared authority and rejects stale history replies", async
   await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "history" })).rejects.toThrow("stale workspace");
 });
 it("allows named Collection data actions without opening a local owner store or source controls", async () => {
-  const named = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), describe: vi.fn(), invoke: vi.fn() };
+  const named = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), describe: vi.fn(), invoke: vi.fn(), upload: vi.fn(), file: vi.fn() };
   const f = fixture(undefined, named); f.workspace.shareView = { shareId: "shared" };
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toMatchObject({ kind: "list" });
   expect(named.list).toHaveBeenCalled(); expect(f.host.list).not.toHaveBeenCalled();

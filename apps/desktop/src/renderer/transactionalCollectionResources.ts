@@ -11,7 +11,7 @@ export interface CollectionUploadRequest extends CollectionResourceScope {
   idempotencyKey: string;
   file: File;
 }
-export interface CollectionFileRequest extends CollectionResourceScope { fileId: string }
+export interface CollectionFileRequest extends CollectionResourceScope { fileId: string; read?: { operationId: string; fieldId: string; input: import("@dohc/security-contract/app-backend").AppBackendJson } }
 export interface CollectionRelationRequest extends CollectionResourceScope { fieldId: string; search: string; limit: 20 }
 export interface CollectionRelationOption { value: string | number; label: string }
 export interface CollectionResources {
