@@ -63,7 +63,7 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
           relayResponse: (credentials, path, init) => namedDatasetFetch(signal => fetch(`${origin}${path}`, { ...init, signal, headers: { ...init.headers, authorization: `Bearer ${credentials.token}` } }), init.signal),
         } });
       const workspace = { workspaceId: "local", shareView };
-      const ipc = createDatasetHandler({
+      const ipc = createDatasetHandler({ flushSourceCapture: async () => {},
         async withWorkspaceOperation(_caller: string, workspaceId, work) { if (workspaceId !== "local") throw Error("Wrong workspace"); return work({ workspace, signal: new AbortController().signal, assertCurrent() {} }); },
         namedDataForWorkspace: async () => data(), hostForWorkspace: vi.fn(), withAdapter: vi.fn(), createSources: vi.fn(),
       });
