@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
-import { parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, parseDatasetDefinition, parseDatasetRevision, parseDatasetDescription, parseDatasetBindingReference } from "@dohc/security-contract/dataset";
 
 const identity = z.string().uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -91,7 +91,9 @@ export const DatasetRequest = z.discriminatedUnion("action", [
     read: z.object({ operationId: identity, fieldId: identity, input: json }).strict().optional() }).strict(),
   z.object({ ...selection, action: z.literal("createForm"), revision: z.number().int().positive(), revisionSha256: sha256,
     tableId: identity, createOperationId: identity, appRoot: z.string().min(1).max(900), title: z.string().min(1).max(200).optional(),
-    fieldIds: z.array(identity).min(1).max(24) }).strict(),
+    fieldIds: z.array(identity).min(1).max(DATASET_MAX_FIELDS),
+    relationChoices: z.array(z.object({ fieldId: identity, operationId: identity, labelFieldId: identity }).strict()).max(DATASET_MAX_FIELDS).optional() }).strict(),
+  z.object({ ...pinned, action: z.literal("prepareRelationChoices"), tableId: identity, fieldId: identity, labelFieldId: identity }).strict(),
   z.object({ ...workspace, action: z.literal("create"), definition }).strict(),
   z.object({ ...workspace, action: z.literal("prepare"), descriptorPath: z.string().min(1).max(1024) }).strict(),
   z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
