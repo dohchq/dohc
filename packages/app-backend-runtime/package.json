@@ -13,7 +13,8 @@
     "./dataset-attempts": { "types": "./src/dataset-attempts.ts", "default": "./dist/dataset-attempts.mjs" },
     "./recovery": { "types": "./src/recovery.ts", "default": "./dist/recovery.mjs" },
     "./recovery-export": { "types": "./src/recovery-export.ts", "default": "./dist/recovery-export.mjs" },
-    "./recovery-import": { "types": "./src/recovery-import.ts", "default": "./dist/recovery-import.mjs" }
+    "./recovery-import": { "types": "./src/recovery-import.ts", "default": "./dist/recovery-import.mjs" },
+    "./recovery-install": { "types": "./src/recovery-install.ts", "default": "./dist/recovery-install.mjs" }
   },
   "files": ["dist", "src", "README.md"],
   "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },
