@@ -10,7 +10,13 @@ import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
 /** An owner-bound copy retains committed reads only. It never becomes a second writer. */
 export async function createOwnerDatasetCopy(options: Parameters<typeof createDatasetReplica>[0]) {
   const replica = await createDatasetReplica(options);
-  let denied = false;
+  let denied = false, closing = false;
+  const confirmations = new Set<Promise<unknown>>();
+  const trackConfirmation = <T>(work: () => Promise<T>): Promise<T> => {
+    const result = work(); confirmations.add(result);
+    void result.then(() => confirmations.delete(result), () => confirmations.delete(result));
+    return result;
+  };
   const markerPath = join(options.directory, "archived.json");
   const binding = createHash("sha256").update(JSON.stringify([options.scope,options.ownerKey,new URL(options.origin).origin])).digest("hex");
   const markerSchema = z.object({ binding: z.literal(binding), dataset: z.unknown().transform(value => parseDatasetDescription(value)), savedAtMs: z.number().int().nonnegative() }).strict();
@@ -33,11 +39,11 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
     // Called inside source requests. Revoke after catchUp settles, avoiding its serialized work queue.
     accessLost() { denied = true; },
     revoke,
-    close: async () => { await metadataPending; await replica.close(); },
+    close: async () => { closing=true; await Promise.allSettled([...confirmations]); await metadataPending; await replica.close(); },
     data(remote: OwnerDatasetData, source: DatasetReplicaSource, signal: AbortSignal): OwnerDatasetData {
       const authorize = () => {
         options.assertOwner(); signal.throwIfAborted();
-        if (denied) throw Error("This Collection copy is unavailable. Restore access, then reopen the workspace.");
+        if (denied || closing) throw Error("This Collection copy is unavailable. Restore access, then reopen the workspace.");
       };
       const selected = (datasetId: string) => { authorize(); if (datasetId !== options.scope.datasetId) throw Error("This copy belongs to another Collection."); };
       const remoteDescribe: (datasetId: string, options?: { includeArchived?: boolean }) => ReturnType<OwnerDatasetData["describe"]> = remote.describe;
@@ -81,18 +87,23 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         ...remote,
         ...(remote.deleteDataset ? { async deleteDataset(input: Parameters<NonNullable<OwnerDatasetData["deleteDataset"]>>[0]) {
           selected(input.datasetId);
-          const result = await remote.deleteDataset!(input);
-          // A confirmed deletion invalidates local data even if its caller was cancelled meanwhile.
-          if (result.deleted && result.datasetId === options.scope.datasetId) await revoke();
-          return result;
+          return trackConfirmation(async () => {
+            const result = await remote.deleteDataset!(input);
+            // A confirmed deletion invalidates local data even if its caller was cancelled meanwhile.
+            if (result.deleted && result.datasetId === options.scope.datasetId) await revoke();
+            return result;
+          });
         } } : {}),
         ...(remote.deletionStatus ? { async deletionStatus(input: Parameters<NonNullable<OwnerDatasetData["deletionStatus"]>>[0]) {
           options.assertOwner(); signal.throwIfAborted();
+          if (closing) throw Error("This Collection copy is unavailable. Reopen the workspace.");
           if (input.datasetId !== options.scope.datasetId) throw Error("This copy belongs to another Collection.");
-          const result = await remote.deletionStatus!(input);
-          if (result.deleted) await revoke();
-          else authorize();
-          return result;
+          return trackConfirmation(async () => {
+            const result = await remote.deletionStatus!(input);
+            if (result.deleted) await revoke();
+            else authorize();
+            return result;
+          });
         } } : {}),
         async inspect(datasetId, metadata?: { includeArchived?: boolean }) {
           selected(datasetId);

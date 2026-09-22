@@ -52,7 +52,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 }, 15_000);
 
-it.each(["delete", "status"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
+it.each(["delete", "status", "closing"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
   const f=fixture(), directory=await mkdtemp(join(tmpdir(),"desktop-deleted-copy-"));
   const host=await f.storage.createDatasetHost({directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
   const actor={kind:"named" as const,workspaceId:"w",userId:"owner"}, scope={workspaceId:"w",datasetId:id(1)};
@@ -66,11 +66,13 @@ it.each(["delete", "status"])("erases a cached Collection after confirmed %s and
   let copy=await createOwnerDatasetCopy(options),offline=false,holdMutation=false;
   let mutationStarted!:()=>void,releaseMutation!:()=>void;
   const started=new Promise<void>(resolve=>{mutationStarted=resolve;}),release=new Promise<void>(resolve=>{releaseMutation=resolve;});
+  let deletionStarted!:()=>void,releaseDeletion!:()=>void;
+  const deleting=new Promise<void>(resolve=>{deletionStarted=resolve;}),releaseDelete=new Promise<void>(resolve=>{releaseDeletion=resolve;});
   const source:DatasetReplicaSource={async capture(){if(offline)throw new DatasetCopyOfflineError("offline");return host.replicaCapture(actor,scope);},async page(input){return host.replicaPage(actor,{...scope,...input});},async blob(input){return host.replicaBlob(actor,{...scope,...input});}};
   const remote={
     async describe(){if(offline)throw new TypeError("fetch failed");return host.describe(actor,scope);},
     async invoke(input:Parameters<OwnerDatasetData["invoke"]>[0]){if(holdMutation){mutationStarted();await release;return {result:null,revision:2,replayed:false};}return host.invoke(actor,{...input,workspaceId:"w",access:{kind:"data"}});},
-    async deleteDataset(input:Parameters<NonNullable<OwnerDatasetData["deleteDataset"]>>[0]){return host.deleteDataset(actor,{...input,workspaceId:"w"});},
+    async deleteDataset(input:Parameters<NonNullable<OwnerDatasetData["deleteDataset"]>>[0]){if(mode==="closing"){deletionStarted();await releaseDelete;}return host.deleteDataset(actor,{...input,workspaceId:"w"});},
     async deletionStatus(){return host.deletionStatus(actor,scope);},
   } as unknown as OwnerDatasetData;
   const signal=new AbortController().signal,pinned={...scope,revision:1,revisionSha256:revision.revisionSha256};
@@ -84,7 +86,10 @@ it.each(["delete", "status"])("erases a cached Collection after confirmed %s and
     const pendingMutation=copy.data(remote,source,signal).invoke({...read,operationId:id(5),idempotencyKey:"pending"}).then(value=>({value}),error=>({error}));
     await started;
     const preview=host.deletePreview(actor,scope),deletion={datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
-    if(mode==="delete") await copy.data(remote,source,signal).deleteDataset!(deletion);
+    if(mode==="closing") {
+      const deletionRequest=copy.data(remote,source,signal).deleteDataset!(deletion);await deleting;
+      const closeRequest=copy.close();releaseDeletion();await Promise.all([deletionRequest,closeRequest]);
+    } else if(mode==="delete") await copy.data(remote,source,signal).deleteDataset!(deletion);
     else {await remote.deleteDataset!(deletion);expect(await copy.data(remote,source,signal).deletionStatus!({datasetId:id(1)})).toEqual({deleted:true});}
     releaseMutation();
     expect(await pendingMutation).toMatchObject({error:expect.objectContaining({message:expect.stringContaining("unavailable")})});
