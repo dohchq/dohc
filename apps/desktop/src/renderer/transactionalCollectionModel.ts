@@ -53,11 +53,16 @@ export function supportsSort(field: TransactionalField): boolean {
   return field.type !== "attachment" && field.type !== "multi-select" && !field.relation?.many;
 }
 export function initialValue(field: TransactionalField): AppBackendJson {
-  return field.default ?? (field.type === "checkbox" ? false : field.type === "multi-select" ? [] : null);
+  return field.default ?? (field.type === "checkbox" ? false : field.type === "multi-select" || field.relation?.many ? [] : null);
 }
 export function inputProblem(field: TransactionalField, value: AppBackendJson): string | null {
   if (value === null || value === "") return field.required ? `Enter ${field.name}.` : null;
   if (field.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) return "Enter a number.";
+  if (field.type === "attachment" && (typeof value !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(value))) return `Choose a file for ${field.name}.`;
+  if (field.type === "relation") {
+    const validKey = (key: AppBackendJson) => (typeof key === "string" && key.length > 0 && key.length <= 1024) || (typeof key === "number" && Number.isSafeInteger(key));
+    if (field.relation?.many ? !Array.isArray(value) || value.length > 100 || !value.every(validKey) || new Set(value.map(key => JSON.stringify(key))).size !== value.length : !validKey(value)) return `Choose a related record for ${field.name}.`;
+  }
   if (field.type === "url") {
     try { if (typeof value !== "string" || !["https:", "http:"].includes(new URL(value).protocol)) return "Enter a web address."; }
     catch { return "Enter a web address."; }

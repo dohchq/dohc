@@ -31,6 +31,29 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("creates records with a staged attachment and locks saving until upload completes", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
+    const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
+    const result = setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "New record" })); fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt", { type: "text/plain" })] } });
+    expect((screen.getByRole("button", { name: "Create record" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => pendingUpload.resolve({ fileId: "1234567890abcdef", name: "receipt.txt", byteLength: 3, contentType: "text/plain", sha256: "a".repeat(64) }));
+    expect(screen.getByText("receipt.txt · 3 bytes · Save to attach")).toBeTruthy(); fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
+    expect(result.invoke.mock.calls.find(([request]) => request.operationId === create)![0].input).toEqual({ values: { [name]: "Bob", [amount]: "1234567890abcdef", [status]: "New" } });
+  });
+  it("aborts pending attachment writes before switching workspaces", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
+    const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
+    const result = setup({ dataset: description, uploadFile }); await screen.findByText("Alice"); fireEvent.click(screen.getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt")] } });
+    result.rerender(<TransactionalCollectionPage {...result.props} workspaceId="workspace-b" />);
+    expect(uploadFile.mock.calls[0]![1].aborted).toBe(true); await act(async () => pendingUpload.reject(new Error("Old workspace"))); expect(result.onError).not.toHaveBeenCalled();
+    await screen.findByText("Alice"); expect(screen.queryByText("Uploading…")).toBeNull();
+  });
   it("offers form creation only with a public create action and a connected handler", async () => {
     const onCreateForm = vi.fn(); const result = setup({ onCreateForm }); await screen.findByText("Alice");
     expect(screen.queryByRole("button", { name: "Create form" })).toBeNull();

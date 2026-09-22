@@ -3,6 +3,8 @@ import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contrac
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
+import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
+import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
   display, initialValue, inputProblem, object, parsePage, supportsInput, supportsSort,
   type TransactionalCursor, type TransactionalDatasetDescription, type TransactionalField, type TransactionalPage, type TransactionalRow,
@@ -18,7 +20,7 @@ export interface TransactionalInvoke {
   input: AppBackendJson;
   idempotencyKey: string;
 }
-export interface TransactionalCollectionPageProps {
+export interface TransactionalCollectionPageProps extends CollectionResources {
   workspaceId: string;
   dataset: TransactionalDatasetDescription;
   tableId: string;
@@ -70,7 +72,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
   const fields = table?.fields.filter(field => read?.fieldIds.includes(field.fieldId)) ?? [];
   const createFields = table?.fields.filter(field => create?.fieldIds.includes(field.fieldId)) ?? [];
-  const canCreate = create && createFields.every(supportsInput);
+  const canInput = (field: TransactionalField) => supportsInput(field) || (field.type === "attachment" && !!props.uploadFile) || (field.type === "relation" && !!field.relation && !!props.resolveRelation);
+  const canCreate = create && createFields.every(canInput);
+  const scope: CollectionResourceScope = { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256 };
   const [page, setPage] = useState<TransactionalPage | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState("");
@@ -81,6 +85,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [invalid, setInvalid] = useState<string | null>(null);
   const [pending, setPending] = useState<Mutation | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
+  const [resourceBusy, setResourceBusy] = useState(false);
+  const resourceLock = useRef(false);
   const alive = useRef(true), sequence = useRef(0), active = useRef<AbortController | null>(null);
   const mutation = useRef<Mutation | null>(null), locked = useRef(false);
   const trigger = useRef<HTMLElement | null>(null);
@@ -142,7 +148,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
   function submitEditor(): void {
-    if (!editor || locked.current || mutation.current) return;
+    if (!editor || locked.current || resourceLock.current || mutation.current) return;
     const editable = editor.kind === "edit" ? [editor.field] : createFields;
     for (const field of editable) {
       const problem = inputProblem(field, draft[field.fieldId] ?? null);
@@ -163,7 +169,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
-  const disabled = busy || pending !== null;
+  const disabled = busy || pending !== null || resourceBusy;
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
@@ -186,14 +192,18 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       </th>)}{remove && confirmDelete ? <th scope="col"><span className="sr-only">Actions</span></th> : null}</tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
-        return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{edit && supportsInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
+        const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile;
+        return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={props.readFile!} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
+        }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
       })}{remove && confirmDelete ? <td className="px-3 py-2"><SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton></td> : null}</tr>)}</tbody>
     </table></div> : null}
     {page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
     {editor ? <form aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
-      <div className="flex flex-wrap gap-3">{editorFields.map(field => <label key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted">{field.name}<ValueInput field={field} value={draft[field.fieldId] ?? null} disabled={disabled} onChange={value => { setDraft(current => ({ ...current, [field.fieldId]: value })); setInvalid(null); }} /></label>)}</div>
+      <div className="flex flex-wrap gap-3">{editorFields.map(field => {
+        const input = { field, value: draft[field.fieldId] ?? null, disabled, onChange: (value: AppBackendJson) => { setDraft(current => ({ ...current, [field.fieldId]: value })); setInvalid(null); } };
+        return <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => { resourceLock.current = value; setResourceBusy(value); }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />}</div>;
+      })}</div>
       {invalid ? <p role="alert" className="text-[12px] text-danger">{invalid}</p> : null}<div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}
   </section>;

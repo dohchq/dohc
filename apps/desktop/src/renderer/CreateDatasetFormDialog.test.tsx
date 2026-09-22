@@ -23,7 +23,7 @@ describe("CreateDatasetFormDialog", () => {
     expect((screen.getByLabelText("Name") as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText("Name") as HTMLInputElement).disabled).toBe(true);
     expect(screen.queryByLabelText("Record ID")).toBeNull();
-    expect(screen.getByText("Fields not shown remain accepted by the approved create action.")).toBeTruthy();
+    expect(screen.getByText("This form can submit only these fields.")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Note")); fireEvent.change(screen.getByLabelText("App folder"), { target: { value: "apps/fundraiser-form" } }); submit();
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
     expect(onCreate.mock.calls[0]![0]).toMatchObject({ datasetId: id(1), revision: 3, tableId: id(2), createOperationId: id(7), appRoot: "apps/fundraiser-form", fieldIds: [id(4), id(6)] });

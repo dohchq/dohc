@@ -77,7 +77,7 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
       setOperationId(next.operationId); setSelected(table.fields.filter(field => next.fieldIds.includes(field.fieldId) && (field.type !== "relation" || (field.required && !Object.hasOwn(field, "default")))).map(field => field.fieldId)); setInvalid(null);
     }}>{operations.map(operation => <option key={operation.operationId} value={operation.operationId}>{operation.label}</option>)}</select></label> : null}
     <fieldset disabled={pending} className="m-0 flex flex-col gap-2 border-0 p-0"><legend className="text-[12px] font-medium text-ink">Fields shown on form</legend>
-      <p className="m-0 text-[11px] text-muted">Fields not shown remain accepted by the approved create action.</p>
+      <p className="m-0 text-[11px] text-muted">This form can submit only these fields.</p>
       {allowed.map(field => <label key={field.fieldId} className="flex items-center gap-2 text-[13px] text-ink"><input aria-label={field.name} type="checkbox" checked={selected.includes(field.fieldId)} disabled={required.includes(field) || field.type === "relation"} onChange={event => setSelected(current => event.target.checked ? [...current, field.fieldId] : current.filter(id => id !== field.fieldId))} />{field.name}{field.type === "attachment" ? " (file)" : ""}{required.includes(field) ? <span className="text-[11px] text-subtle">Required</span> : null}{field.type === "relation" ? <span className="text-[11px] text-muted">Needs a custom app</span> : null}</label>)}
     </fieldset>
     {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}
