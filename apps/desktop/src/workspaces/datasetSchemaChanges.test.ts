@@ -157,7 +157,7 @@ it("previews text to number changes and preserves record identities and later ed
   await f.host.action(call(next.revision,id(7),{id:result.rows[0]!.id,expectedVersion:1,values:{[id(4)]:15}},"later"));
   const reverse = await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
   const restored=(await f.host.query(call(reverse.revision,id(5)))).result as typeof result;
-  expect(restored.rows[0]).toMatchObject({version:2,values:{[id(4)]:"15.0"}});
+  expect(restored.rows[0]).toMatchObject({version:2,values:{[id(4)]:"15"}});
 });
 
 it("refuses invalid numeric values with the affected record ID and leaves live data intact", async () => {
@@ -222,8 +222,24 @@ it("preserves convertible defaults and refuses incompatible defaults", async () 
   bad.tables[0]!.fields[1]!.default="pay later";
   const generated=generateDatasetSources(bad), schemaSql=generated.files[bad.schemaPath]!,operationSource=generated.files[bad.operationsPath]!;
   const revision=describeDatasetRevision({definition:bad,revision:1,schemaSql,operationSource});
-  expect(()=>generateDatasetSchemaChange({revision,schemaSql,operationSource,change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true}})).toThrow(/default that is not a number/);
+  expect(()=>generateDatasetSchemaChange({revision,schemaSql,operationSource,change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true}})).toThrow(/without losing information/);
   expect(()=>generateDatasetSchemaChange({...artifacts,schemaSql:artifacts.schemaSql+"\nATTACH DATABASE ':memory:' AS other;",change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:false}})).toThrow(/custom SQL constraints/);
+});
+
+it.each(["9007199254740993","1e-999","0.10000000000000001"])("refuses a conversion that would lose numeric information: %s",async value=>{
+  const f=await fixture();
+  const created=await f.host.action(call(f.revision,id(6),{values:{[id(4)]:value}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true})).rejects.toThrow(`Fix record ${(created.result as {id:string}).id}`);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
+it("keeps all significant numeric digits when converting a stored number to text",async()=>{
+  const initial=structuredClone(definition); initial.tables[0]!.fields[1]!.type="number";
+  const f=await fixture(initial), value=1.2345678901234567;
+  await f.host.action(call(f.revision,id(6),{values:{[id(4)]:value}},"first"));
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
+  const result=(await f.host.query(call(next.revision,id(5)))).result as {rows:Array<{values:Record<string,unknown>}>};
+  expect(result.rows[0]!.values[id(4)]).toBe("1.2345678901234567");
 });
 
 it("captures remote schema changes without opening the fenced local store and binds approval to the caller", async () => {

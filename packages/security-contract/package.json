@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./dataset-conversion": "./src/datasetConversion.ts",
     "./dataset-attempts": "./src/datasetAttempts.ts",
     "./dataset-artifacts": "./src/datasetArtifacts.ts",
     "./app-backend": "./src/appBackend.ts",
