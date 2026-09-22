@@ -77,12 +77,14 @@ function target(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Paramet
 
 it("installs validated histories and retry receipts inactive with a durable import receipt", async () => {
   const f = await fixture(); f.add("first"); await f.migrate(); f.add("tail");
+  f.db.prepare("INSERT INTO dohc_dataset_lifecycle VALUES(?,?,?,?,?,?)").run(f.scope.workspaceId, f.scope.datasetId, 1, 3, "season complete", 1000);
   const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
   try {
     const input = { transferId: "transfer-1", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize };
     const installed = await t.installer.install({}, input);
     expect(installed.sourceCursor).toEqual(f.head()); expect(installed.targetCursor).toBeUndefined();
     expect(t.journal.head(f.scope, f.authorize)).toMatchObject({ active: false, cursor: f.head() });
+    expect(t.db.prepare("SELECT archived,generation,reason,archived_at_ms FROM dohc_dataset_lifecycle").get()).toMatchObject({ archived: 1, generation: 3, reason: "season complete", archived_at_ms: 1000 });
     expect(t.db.prepare("SELECT revision,result_json FROM dohc_dataset_receipts WHERE idempotency_key='first'").get()).toMatchObject({ revision: 1, result_json: JSON.stringify({ value: "first" }) });
     expect(t.journal.exportPage({ scope: f.scope, through: f.head(), afterRevision: -1, authorize: f.authorize }).map(item => [item.kind, item.cursor.revision])).toEqual([["checkpoint", 0], ["event", 1], ["checkpoint", 2], ["event", 3]]);
     const usage = t.db.prepare("SELECT bytes FROM usage").get()!.bytes;
