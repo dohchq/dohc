@@ -69,10 +69,10 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
   };
   function chunk(value: StageRow, index: number): Uint8Array {
     const expected = Math.min(CHECKPOINT_CHUNK_BYTES, value.byte_length - index * CHECKPOINT_CHUNK_BYTES);
-    const size = db.prepare("SELECT length(bytes) AS byte_length,sha256 FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
+    const size = db.prepare("SELECT length(bytes) AS byte_length FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
     if (!size || size.byte_length !== expected || expected <= 0 || expected > CHECKPOINT_CHUNK_BYTES) throw new Error("Checkpoint chunk integrity check failed.");
-    const item = db.prepare("SELECT bytes FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
-    if (!item || !(item.bytes instanceof Uint8Array) || item.bytes.byteLength !== expected || digest(item.bytes) !== size.sha256) throw new Error("Checkpoint chunk integrity check failed.");
+    const item = db.prepare("SELECT bytes,sha256 FROM dohc_dataset_checkpoint_chunks WHERE stage_id=? AND chunk_index=?").get(value.stage_id, index);
+    if (!item || !(item.bytes instanceof Uint8Array) || item.bytes.byteLength !== expected || digest(item.bytes) !== item.sha256) throw new Error("Checkpoint chunk integrity check failed.");
     return item.bytes;
   }
   function stageCheckpoint(input: { scope: DatasetScope; expectedBytes: number; sha256: string; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): CheckpointStage {

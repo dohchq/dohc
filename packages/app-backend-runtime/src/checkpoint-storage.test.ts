@@ -169,6 +169,20 @@ it("rechecks authorization on each chunk and detects persisted chunk corruption"
   expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("integrity");
 });
 
+it.each(["digest", "oversized"])("refuses a checkpoint chunk with %s corruption before returning bytes", damage => {
+  const f = fixture(), sealed = stage(f, new Uint8Array(100).fill(5), false);
+  f.journal.initialize({ ...initialization, checkpoint: sealed });
+  const record = f.journal.captureExport({ scope, authorize, capture() {} }).checkpoint;
+  if (damage === "digest") f.db.exec("UPDATE dohc_dataset_checkpoint_chunks SET sha256=lower(hex(zeroblob(32)))");
+  else {
+    f.db.exec("PRAGMA ignore_check_constraints=ON");
+    f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(?)").run(chunkBytes + 1);
+  }
+  const largestRead = f.largestRead;
+  expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("integrity");
+  expect(f.largestRead).toBe(largestRead);
+});
+
 it("does not run asynchronous staging accounting or retain thenable side effects", () => {
   const f = fixture(); let ran = false;
   const input = { scope, expectedBytes: 100, sha256: hash(new Uint8Array(100)), authorize };
