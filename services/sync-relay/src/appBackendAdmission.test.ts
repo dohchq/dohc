@@ -19,5 +19,3 @@ it("bounds datasets, global work, large bodies and participant-map churn", () =>
   expect(() => createAppBackendAdmission({maxPending: NaN})).toThrow();
   expect(() => createAppBackendAdmission({participant: {capacity: 1, refillPerSecond: Infinity}})).toThrow();
 });
-
-
