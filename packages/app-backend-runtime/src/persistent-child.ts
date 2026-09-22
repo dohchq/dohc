@@ -7,6 +7,7 @@ import { AppBackendRuntimeError } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import { replayThroughShadow } from "./replay.js";
+import { acquireWorkerLease } from "./worker-ownership.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -15,6 +16,7 @@ let cursor:DatasetCursor;
 let pending:{id:string;changesetSha256:string} | undefined;
 let transaction=false;
 let busy=false;
+let lease:{close():void}|undefined;
 const marker="dohc_applied";
 const markerSchema=`CREATE TABLE ${marker}(id INTEGER PRIMARY KEY CHECK(id=1), scope TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL)`;
 const databaseOptions={allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false};
@@ -53,6 +55,7 @@ function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
   config=openRequest({...input,databaseBytes:input.limits.databaseBytes,limits:Object.fromEntries(Object.entries(input.limits).filter(([key])=>key!=="databaseBytes"))});
   assertReplayableSchema(config.schemaSql);
+  if(config.ownership) lease=acquireWorkerLease(config.directory,config.ownership);
   noLinks(config.directory);
   if (!statSync(config.directory).isDirectory()) reject("invalid_input","Dataset directory is unavailable.");
   const path=join(config.directory,"app.sqlite");
@@ -88,7 +91,7 @@ function initialize(input:OpenRequest):DatasetCursor {
 async function handle(command:PersistentCommand):Promise<PersistentResult> {
   if (command.kind==="open") return initialize(command.input);
   if (!db) reject("invalid_state","The worker is not open.");
-  if (command.kind==="close") { rollback();db.close();db=undefined;return null; }
+  if (command.kind==="close") { rollback();db.close();db=undefined;lease?.close();lease=undefined;return null; }
   if (command.kind==="discard") {
     if (!pending || pending.id!==command.proposalId) reject("invalid_state","Unknown prepared operation.");
     rollback();return null;
@@ -193,10 +196,11 @@ async function receive(message:{id:number;command:PersistentCommand}):Promise<vo
   } catch (error) {
     // An invalid command must not silently discard an already prepared operation.
     if (transaction && !pending) rollback();
+    if(message.command.kind==="open") {db?.setAuthorizer(null);db?.close();db=undefined;lease?.close();lease=undefined;}
     send({id:message.id,ok:false,error:error instanceof Error ? error.message.slice(0,1024) : "Dataset operation failed.",
       code:error instanceof PersistentRuntimeError ? error.code : "operation_failed",
       ...(error instanceof AppBackendRuntimeError ? {refusal:error.refusal} : {})});
   } finally { busy=false; }
 }
 if (parentPort) parentPort.on("message",({data})=>void receive(data));
-else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();} finally {process.exit(0);} }); }
+else { process.on("message",message=>void receive(message as {id:number;command:PersistentCommand}));process.on("disconnect",()=>{try {rollback();db?.close();lease?.close();} finally {process.exit(0);} }); }

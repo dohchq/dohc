@@ -6,6 +6,7 @@ import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
 import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
 export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
+export type { WorkerOwnership } from "./worker-ownership.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string }

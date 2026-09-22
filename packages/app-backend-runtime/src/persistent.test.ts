@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
+import { acquireSupervisorOwnership } from "./worker-ownership.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 // These tests start real processes; process deadlines remain enforced independently.
@@ -42,6 +43,21 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
 }
 
 describe("persistent dataset worker",()=>{
+  it("holds its owned-directory lease until worker close and refuses expired ownership",async()=>{
+    await fixture(async({root,open})=>{
+      const owner=await acquireSupervisorOwnership(root);
+      try {
+        const directory=await owner.createDirectory();
+        const worker=await open({directory,ownership:{root:owner.root,session:owner.session}});
+        await expect(owner.removeDirectory(directory)).rejects.toThrow("ownership is busy");
+        await worker.close();
+        await owner.removeDirectory(directory);
+        const next=await owner.createDirectory();
+        await expect(open({directory:next,ownership:{root:owner.root,session:"00000000-0000-0000-0000-000000000000"}})).rejects.toThrow("expired host session");
+        await owner.removeDirectory(next);
+      }finally{owner.close();}
+    });
+  });
   it("refuses AUTOINCREMENT state that SQLite changesets cannot replay",async()=>{
     await fixture(async({open})=>{
       await expect(open({schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL);"})).rejects.toMatchObject({code:"invalid_schema",message:expect.stringContaining("AUTOINCREMENT")});

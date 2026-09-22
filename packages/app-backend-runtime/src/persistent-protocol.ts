@@ -3,11 +3,13 @@ import { isAbsolute } from "node:path";
 import { approvedTables, boundedText, runtimeLimits } from "./protocol.js";
 import type { AppOperationFile, AppOperationRefusal, JsonValue, RuntimeLimits } from "./protocol.js";
 import type { GuestRequest } from "./guest.js";
+import type { WorkerOwnership } from "./worker-ownership.js";
 
 export interface DatasetScope { workspaceId: string; datasetId: string; hostEpoch: string; approvedRevisionHash: string }
 export interface DatasetCursor { revision: number; digest: string }
 export interface PersistentOpenInput {
   directory: string;
+  ownership?: WorkerOwnership;
   checkpointPath?: string;
   schemaSql: string;
   tables: string[];
@@ -77,6 +79,10 @@ export function trustedPath(path:string):string {
 }
 export function openRequest(input:PersistentOpenInput):OpenRequest {
   trustedPath(input.directory);
+  if(input.ownership) {
+    trustedPath(input.ownership.root);
+    if(typeof input.ownership.session!=="string" || !/^[a-f0-9-]{36}$/.test(input.ownership.session)) reject("invalid_input","Invalid worker ownership session.");
+  }
   if (input.checkpointPath) trustedPath(input.checkpointPath);
   checkCursor(input.cursor);
   if (input.cursor.revision>0 && !input.checkpointPath) reject("invalid_input","A committed dataset requires a checkpoint.");
@@ -88,6 +94,7 @@ export function openRequest(input:PersistentOpenInput):OpenRequest {
   if (!Number.isSafeInteger(databaseBytes) || databaseBytes<4096 || databaseBytes>128*1024*1024) reject("invalid_input","Invalid dataset storage reservation.");
   const limits={...runtimeLimits(input.limits),databaseBytes};
   return {directory:input.directory,checkpointPath:input.checkpointPath,
+    ...(input.ownership ? {ownership:{root:input.ownership.root,session:input.ownership.session}} : {}),
     tables:approvedTables(input.tables),schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema"),
     scope:{workspaceId:input.scope.workspaceId,datasetId:input.scope.datasetId,hostEpoch:input.scope.hostEpoch,approvedRevisionHash:input.scope.approvedRevisionHash},
     cursor:{revision:input.cursor.revision,digest:input.cursor.digest},limits};
