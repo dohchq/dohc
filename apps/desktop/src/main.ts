@@ -183,12 +183,13 @@ import {
   RELAY_FETCH_TIMEOUT_MS,
 } from "./workspaces/sharedChannels";
 import {
-  assertSharedChannelMessageIdentity,
   resolveChatRelayIdentity,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
+  type ChatRelayIdentityStore,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
+import { createChatWrites } from "./workspaces/chatWrites";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
@@ -1513,7 +1514,7 @@ const desktopChatBookmarks = createDesktopChatBookmarks({
     engineCaptureFor: (workspaceId, rootPath) => activity.engineCaptureFor(workspaceId, rootPath),
   },
 });
-const { queueChatBookmarkProjection, projectPendingChatBookmarksAfterPull } = desktopChatBookmarks;
+const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChatBookmarks;
 
 const {
   syncWorkspaceSharedChannels,
@@ -1535,7 +1536,7 @@ const {
   },
   setWorkspaceSharedChannels,
   notifyRenderer,
-  projectPendingChatBookmarksAfterPull,
+  projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
 });
 
@@ -1694,7 +1695,7 @@ function engineForWorkspace(
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: () =>
       withWorkspaceAttachmentAsync(workspace, () =>
-        projectPendingChatBookmarksAfterPull(workspace.workspaceId),
+        projectPendingChatBookmarks(workspace.workspaceId),
       ),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
@@ -2293,7 +2294,7 @@ function localUserId(): string {
 async function chatRelayIdentityFor(
   workspaceId: string,
   target: ChatRelayIdentityTarget,
-  store: DesktopLinkedChatStore,
+  store: ChatRelayIdentityStore,
 ) {
   await warmCredentialCache();
   const workspace = requireWorkspace(workspaceId);
@@ -2310,43 +2311,6 @@ async function chatRelayIdentityFor(
         target,
       }),
   });
-}
-
-async function verifiedChatAuthorUserIdFor(
-  workspaceId: string,
-  target: ChatRelayIdentityTarget,
-  store: DesktopLinkedChatStore,
-): Promise<string | undefined> {
-  const identity = await chatRelayIdentityFor(workspaceId, target, store);
-  assertSharedChannelMessageIdentity({
-    joinedChannel: identity.joinedChannel,
-    credentials: cachedCredentials,
-    authorUserId: identity.authorUserId,
-    resolvedAuthorUserId: identity.authorUserId,
-  });
-  return identity.authorUserId;
-}
-
-async function revalidateChatWrite(
-  workspace: { workspaceId: string; rootPath: string },
-  target: ChatRelayIdentityTarget,
-  authorUserId: string | undefined,
-  store: DesktopLinkedChatStore,
-): Promise<void> {
-  await assertSharedChannelWritable({
-    workspaceId: workspace.workspaceId,
-    sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-    store,
-    target,
-  });
-  const currentAuthorUserId = await verifiedChatAuthorUserIdFor(
-    workspace.workspaceId,
-    target,
-    store,
-  );
-  if (currentAuthorUserId !== authorUserId) {
-    throw new Error("Your server session changed. Try again.");
-  }
 }
 
 function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null {
@@ -3039,6 +3003,20 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
+const chatWrites = createChatWrites({
+  findWorkspace,
+  chatRelayIdentityFor,
+  currentCredentials: () => cachedCredentials,
+  localUserDisplayName,
+  agentDisplayName: async () =>
+    (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
+  localReactorFallbackId,
+  projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
+  queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+  syncSharedChannelsForChatTarget,
+  scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
+});
+
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
@@ -3061,16 +3039,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
   withEngineAdapter,
-  assertWritableWorkspace,
-  chatRelayIdentityFor,
-  currentCredentials: () => cachedCredentials,
+  chatWrites,
   startCliServer,
   stateDir,
-  warmCredentialCache,
   localUserDisplayName,
-  localReactorFallbackId,
   notifyRenderer,
-  queueChatBookmarkProjection,
   syncSharedChannelsForChatTarget,
   chatDispatchService,
   rememberPendingCliRunMessageLink,
@@ -4137,7 +4110,7 @@ function registerIpcHandlers(): void {
     listWorkspaces,
     setWorkspaceSharedChannels,
     relayClientForWorkspace,
-    projectPendingChatBookmarksAfterPull,
+    projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
     normalizeServerUrl,
     peekedReceivedGrantKinds,
     peekReceivedGrantKindForShare,
@@ -4323,8 +4296,7 @@ function registerIpcHandlers(): void {
 
   const chatScope = createChatScopeCapability({
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, syncSharedChannelsForChatTarget, activity,
-    activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
   });
 
   registerWorkspaceVersionsIpcHandlers<IpcMainInvokeEvent>({
@@ -4337,13 +4309,12 @@ function registerIpcHandlers(): void {
 
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, findWorkspace,
-    assertWritableWorkspace, warmCredentialCache, localUserId, localUserDisplayName,
-    localReactorFallbackId, currentCredentials: () => cachedCredentials,
-    verifiedChatAuthorUserIdFor, revalidateChatWrite, chatRelayIdentityFor,
+    assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
+    assertWritableWorkspace, warmCredentialCache, localUserId,
+    localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
-    activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
+    activity, desktopChatBookmarks, notifyRenderer,
     ensureGroupFolder: async (workspace, folderPath) => {
       await createFolder(workspace.rootPath, folderPath);
     },

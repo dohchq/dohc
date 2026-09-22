@@ -164,7 +164,7 @@ describe("desktop chat bookmarks", () => {
     const test = fixture();
     const credentials = deferred();
     test.warmCredentialCache.mockReturnValueOnce(credentials.promise);
-    const pull = test.owner.projectPendingChatBookmarksAfterPull("workspace");
+    const pull = test.owner.projectPendingChatBookmarks("workspace");
     expect(test.store.listPendingBookmarks).not.toHaveBeenCalled();
     credentials.resolve();
     await pull;
@@ -227,7 +227,7 @@ describe("desktop chat bookmarks", () => {
   it("retries a failed relay pending-list read on the timer", async () => {
     const test = fixture();
     test.store.listPendingBookmarks.mockRejectedValueOnce(new Error("store unavailable"));
-    await test.owner.projectPendingChatBookmarksAfterPull("workspace");
+    await test.owner.projectPendingChatBookmarks("workspace");
     expect(test.state().bookmarkProjectionPending).toBe(true);
     test.owner.start();
     await vi.advanceTimersByTimeAsync(30_000);
@@ -246,7 +246,7 @@ describe("desktop chat bookmarks", () => {
     });
     test.store.markBookmarkFailed.mockRejectedValueOnce(new Error("retired store"));
     const oldState = test.state();
-    const projection = test.owner.materializePendingChatBookmarks(test.workspace, test.capture);
+    const projection = test.owner.projectPendingChatBookmarks("workspace");
     await entered.promise;
     const queued = test.owner.materializeChatBookmark(test.workspace, test.capture, test.bookmark);
     const queuedResult = expect(queued).rejects.toThrow("retired workspace authority");
@@ -273,7 +273,7 @@ describe("desktop chat bookmarks", () => {
     const test = fixture();
     const credentials = deferred();
     test.warmCredentialCache.mockReturnValueOnce(credentials.promise);
-    const pull = test.owner.projectPendingChatBookmarksAfterPull("workspace");
+    const pull = test.owner.projectPendingChatBookmarks("workspace");
     const retired = test.authorities.invalidate("workspace");
     credentials.resolve();
     await Promise.all([pull, retired]);
@@ -281,13 +281,12 @@ describe("desktop chat bookmarks", () => {
     expect(test.state().bookmarkProjectionPending).toBe(false);
   });
 
-  it("excludes shared views from relay, direct pending, and timer projections", async () => {
+  it("excludes shared views from direct and timer projections", async () => {
     const test = fixture();
     test.sharedViewOf.mockReturnValue(true);
     test.owner.start();
     test.owner.queueChatBookmarkProjection("workspace");
-    await test.owner.projectPendingChatBookmarksAfterPull("workspace");
-    await test.owner.materializePendingChatBookmarks(test.workspace, test.capture);
+    await test.owner.projectPendingChatBookmarks("workspace");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(test.store.listPendingBookmarks).not.toHaveBeenCalled();
     expect(test.capture.writeGeneratedTextFile).not.toHaveBeenCalled();
@@ -314,7 +313,7 @@ describe("desktop chat bookmarks", () => {
     expect(vi.getTimerCount()).toBe(0);
     const closed = test.authorities.close();
     expect(test.disposed).not.toHaveBeenCalled();
-    await test.owner.projectPendingChatBookmarksAfterPull("workspace");
+    await test.owner.projectPendingChatBookmarks("workspace");
     test.owner.queueChatBookmarkProjection("workspace");
     write.resolve({ path: test.bookmark.destinationPath, objectId: "projection-object", changed: true });
     await closed;

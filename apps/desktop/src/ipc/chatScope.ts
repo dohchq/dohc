@@ -5,7 +5,6 @@ import type {
 } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { readableShareLevel, shareViewIsPresent } from "../workspaces/shareViewMarker";
-import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
@@ -55,17 +54,12 @@ export function createChatScopeCapability<State>(dependencies: {
       engineWorkspaceId: string; rootPath: string; attachmentId: symbol;
     }): EngineWorkspace;
   };
-  syncSharedChannelsForChatTarget(
-    workspaceId: string, target: ChatRelayIdentityTarget,
-  ): Promise<unknown>;
-  activity: { queueCloudSync(workspaceId: string): void };
   activeEngineFileIndex(workspace: EngineWorkspace): Promise<{ objectIdByPath: Map<string, string> }>;
   readOwnedWorkspaceText(workspace: RegistryEntry, path: string): Promise<{ text: string }>;
 }) {
   const {
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, syncSharedChannelsForChatTarget, activity,
-    activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
   } = dependencies;
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
     return await workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
@@ -110,17 +104,6 @@ export function createChatScopeCapability<State>(dependencies: {
         ended: workspace.shareView?.ended === true,
       };
     });
-  }
-
-  // Only a workspace this machine owns can reach this after a successful
-  // generic chat write. The share branch is unreachable because the gate
-  // above refuses every received share before the store.
-  function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
-    if (scope.kind === "share") return;
-    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target).catch((error) => {
-      console.error("[desktop] shared channel sync:", error);
-    });
-    activity.queueCloudSync(scope.workspace.workspaceId);
   }
 
   // The file a chat is about, resolved for either scope. A share view has no
@@ -188,5 +171,5 @@ export function createChatScopeCapability<State>(dependencies: {
     return resolved;
   }
 
-  return { requireChatScope, syncChatWriteFor, chatFileObjectId, resolveChatFileReferences };
+  return { requireChatScope, chatFileObjectId, resolveChatFileReferences };
 }

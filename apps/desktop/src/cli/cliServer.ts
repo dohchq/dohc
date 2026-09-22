@@ -76,6 +76,7 @@ import {
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { isInside } from "../security/pathContainment";
+import type { ChatWrites } from "../workspaces/chatWrites";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
@@ -183,11 +184,6 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   filePathForObjectId(objectId: string): Promise<string | null>;
   listMoments(input: { limit: number }): Promise<VersionedTextMomentSummary[]>;
   readMoment(momentId: string): Promise<VersionedTextMoment | null>;
-  assertWritable(target: { channelId: string } | { threadId: string }): Promise<void>;
-  assertMessageWritable(
-    target: { channelId: string } | { threadId: string },
-    authorUserId: string | undefined,
-  ): Promise<void>;
   daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
@@ -202,13 +198,6 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
 }
 
-interface CliMainIdentity {
-  agentName: string;
-  displayName: string;
-  authorUserId?: string;
-  reactionAuthorId: string;
-}
-
 export interface CliRunMessageLink {
   workspaceId: string;
   runId: string;
@@ -219,16 +208,12 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
-  identity(
-    workspaceId: string,
-    target?: { channelId: string } | { threadId: string },
-  ): Promise<CliMainIdentity>;
-  // A message-bearing write names its chat target, so the shared-channel push
-  // it triggers covers that channel instead of waiting for the sync rotation.
-  onWrite?(
-    workspace: CliWorkspaceContext,
-    target?: { channelId: string } | { threadId: string },
-  ): void | Promise<void>;
+  // Messages, reactions, and decisions go through the same module renderer
+  // chat uses, so a CLI or MCP write gets the same checks and effects.
+  chatWrites: ChatWrites;
+  localUserDisplayName(): string;
+  // Runs once a command has made its last durable change.
+  onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
   // else ever runs a sync pass for it. Awaited (up to a bound — see
   // CHAT_READ_SYNC_BUDGET_MS) before the verb reads the store, the same
@@ -371,31 +356,6 @@ function authorForCli(message: ChatMessage): CliAuthor {
   };
 }
 
-function authorForActor(identity: CliMainIdentity, actor: CliActor): CliAuthor {
-  return actor === "agent"
-    ? { kind: "agent", displayName: identity.agentName }
-    : { kind: "human", displayName: identity.displayName };
-}
-
-async function revalidateCliWrite(
-  context: CliWorkspaceContext,
-  options: CliServerOptions,
-  target: { channelId: string } | { threadId: string },
-  identity: CliMainIdentity,
-  compareReactionAuthor = false,
-): Promise<void> {
-  await context.assertWritable(target);
-  const currentIdentity = await options.identity(context.workspaceId, target);
-  await context.assertMessageWritable(target, currentIdentity.authorUserId);
-  if (
-    currentIdentity.authorUserId !== identity.authorUserId ||
-    (compareReactionAuthor &&
-      currentIdentity.reactionAuthorId !== identity.reactionAuthorId)
-  ) {
-    throw new CliCommandError("Your server session changed. Try again.");
-  }
-}
-
 function rawChatThread(thread: ChatThread) {
   return {
     id: thread.id,
@@ -524,14 +484,12 @@ const CLI_AGENT_AUTHOR: ChangeAuthor = {
   onBehalfOf: "local",
 };
 
-async function collectionWriteAuthor(
+function collectionWriteAuthor(
   actor: CliActor,
-  context: CliWorkspaceContext,
   options: CliServerOptions,
-): Promise<ChangeAuthor> {
+): ChangeAuthor {
   if (actor === "agent") return CLI_AGENT_AUTHOR;
-  const identity = await options.identity(context.workspaceId);
-  return createLocalChangeAuthor(identity.displayName);
+  return createLocalChangeAuthor(options.localUserDisplayName());
 }
 
 async function loadChannels(
@@ -1042,10 +1000,9 @@ function safePathSegment(value: string): string {
 async function notifyWrite(
   options: CliServerOptions,
   context: CliWorkspaceContext,
-  target?: { channelId: string } | { threadId: string },
 ): Promise<void> {
   try {
-    await options.onWrite?.(context, target);
+    await options.onWrite?.(context);
   } catch (error) {
     options.onError?.(error);
   }
@@ -1883,7 +1840,7 @@ async function dispatch(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: await collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, options),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -1922,7 +1879,7 @@ async function dispatch(
           collectionPath: collectionValidated.normalized,
           name: request.args.name,
           fields: request.args.fields,
-          author: await collectionWriteAuthor(request.args.actor, context, options),
+          author: collectionWriteAuthor(request.args.actor, options),
         });
         return {
           ok: true as const,
@@ -2122,36 +2079,23 @@ async function dispatch(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
-      const target = { channelId: channel.engine.id };
-      await context.assertWritable(target);
-      const identity = await options.identity(context.workspaceId, target);
-      await context.assertMessageWritable(target, identity.authorUserId);
-      const attachments = await resolveAttachments(
-        context,
-        request.args.cwd,
-        request.args.attachments,
-      );
-      await revalidateCliWrite(context, options, target, identity);
-      const started = await context.store.startChannelThread({
-        workspaceId: context.workspaceId,
+      const started = await options.chatWrites.startThread(context, {
+        writer: { via: "cli", actor: request.args.actor },
         channelId: channel.engine.id,
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
-        author: authorForActor(identity, request.args.actor),
-        ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
-        ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),
-        origin: "cli",
         body: request.args.body,
         needsDecision: request.args.needsDecision,
-        ...(request.args.options && request.args.options.length > 0 ? { options: request.args.options } : {}),
-        attachments,
+        ...(request.args.options ? { options: request.args.options } : {}),
+        resolveAttachments: () =>
+          resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: started.message.id,
       }, options);
-      await notifyWrite(options, context, { channelId: channel.engine.id });
+      await notifyWrite(options, context);
       return {
         channel: channel.cli,
         threadId: cliThreadId(started.thread.id),
@@ -2190,28 +2134,15 @@ async function dispatch(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
-      const target = { threadId };
-      await context.assertWritable(target);
-      const identity = await options.identity(context.workspaceId, target);
-      await context.assertMessageWritable(target, identity.authorUserId);
-      const attachments = await resolveAttachments(
-        context,
-        request.args.cwd,
-        request.args.attachments,
-      );
-      await revalidateCliWrite(context, options, target, identity);
-      const message = await context.store.sendMessage({
-        workspaceId: context.workspaceId,
+      const message = await options.chatWrites.sendMessage(context, {
+        writer: { via: "cli", actor: request.args.actor },
         threadId,
-        author: authorForActor(identity, request.args.actor),
-        ...(request.args.actor === "agent" ? { authorOwnerDisplayName: identity.displayName } : {}),
-        ...(identity.authorUserId ? { authorUserId: identity.authorUserId } : {}),
         ...(parent ? { parentMessageId: parent.id } : {}),
-        origin: "cli",
         body: request.args.body,
         needsDecision: request.args.needsDecision,
-        ...(request.args.options && request.args.options.length > 0 ? { options: request.args.options } : {}),
-        attachments,
+        ...(request.args.options ? { options: request.args.options } : {}),
+        resolveAttachments: () =>
+          resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
       const linkWarning = await linkRunMessage(context, {
         actor: request.args.actor,
@@ -2222,13 +2153,12 @@ async function dispatch(
       let resolutionFailure: string | null = null;
       if (decisionMessage) {
         try {
-          await revalidateCliWrite(context, options, target, identity);
-          const resolution = await context.store.resolveChatDecision({
-            workspaceId: context.workspaceId,
+          const resolution = await options.chatWrites.resolveDecision(context, {
             threadId,
             messageId: decisionMessage.id,
             resolvedByMessageId: message.id,
             ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
+            reply: message,
           });
           resolvedByReply = resolution.resolvedByMessageId === message.id;
         } catch (error) {
@@ -2249,7 +2179,7 @@ async function dispatch(
           options.onError?.(error);
         }
       }
-      await notifyWrite(options, context, target);
+      await notifyWrite(options, context);
       const resolutionWarning = decisionMessage && !resolvedByReply
         ? `reply ${cliMessageId(message.id)} was posted, but decision ${cliMessageId(decisionMessage.id)} ` +
           (resolutionFailure
@@ -2279,92 +2209,19 @@ async function dispatch(
       if (!target.rootMessage) {
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
-      const writeTarget = { threadId: target.thread.thread.id };
-      await context.assertWritable(writeTarget);
-      const identity = await options.identity(context.workspaceId, writeTarget);
-      await context.assertMessageWritable(writeTarget, identity.authorUserId);
-      const existing = await context.store.listReactions({
-        workspaceId: context.workspaceId,
+      const reaction = await options.chatWrites.setReaction(context, {
+        writer: { via: "cli", actor: request.args.actor },
         threadId: target.thread.thread.id,
+        messageId: target.rootMessage.id,
+        emoji: request.args.emoji,
+        state: "toggle",
       });
-      await revalidateCliWrite(
-        context,
-        options,
-        writeTarget,
-        identity,
-        true,
-      );
-      const matchesCell = (reaction: (typeof existing)[number]) =>
-        reaction.messageId === target.rootMessage?.id &&
-        reaction.emoji === request.args.emoji;
-      const hasLocalAlias = existing.some(
-        (reaction) =>
-          matchesCell(reaction) &&
-          reaction.author.authorId === identity.reactionAuthorId,
-      );
-      const hasCurrentIdentity =
-        identity.authorUserId !== undefined &&
-        existing.some(
-          (reaction) =>
-            matchesCell(reaction) &&
-            reaction.author.authorId === identity.authorUserId,
-        );
-      const active = hasLocalAlias || hasCurrentIdentity;
-      const state = active ? "removed" : "added";
-      if (
-        state === "removed" &&
-        identity.authorUserId &&
-        identity.authorUserId !== identity.reactionAuthorId &&
-        hasLocalAlias
-      ) {
-        await context.store.setReaction({
-          workspaceId: context.workspaceId,
-          threadId: target.thread.thread.id,
-          messageId: target.rootMessage.id,
-          emoji: request.args.emoji,
-          author: {
-            authorId: identity.reactionAuthorId,
-            ...authorForActor(identity, request.args.actor),
-          },
-          state: "removed",
-        });
-        await revalidateCliWrite(
-          context,
-          options,
-          writeTarget,
-          identity,
-          true,
-        );
-      }
-      if (
-        state === "added" ||
-        !identity.authorUserId ||
-        !hasLocalAlias ||
-        hasCurrentIdentity
-      ) {
-        const reactionAuthorId =
-          identity.authorUserId ?? identity.reactionAuthorId;
-        await context.store.setReaction({
-          workspaceId: context.workspaceId,
-          threadId: target.thread.thread.id,
-          messageId: target.rootMessage.id,
-          emoji: request.args.emoji,
-          author: {
-            authorId: reactionAuthorId,
-            ...authorForActor(identity, request.args.actor),
-          },
-          ...(identity.authorUserId
-            ? { replicationAuthorId: identity.authorUserId }
-            : {}),
-          state,
-        });
-      }
       await notifyWrite(options, context);
       return {
         threadId: cliThreadId(target.thread.thread.id),
         messageId: cliMessageId(target.rootMessage.id),
         emoji: request.args.emoji,
-        state,
+        state: reaction.state,
       };
     }
 

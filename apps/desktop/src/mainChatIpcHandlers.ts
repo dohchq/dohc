@@ -2,7 +2,6 @@
 // the real parsers, workspace lookup, policy checks, and operations; tests can
 // register and invoke these same callbacks without booting Electron's entire
 // app lifecycle.
-import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   ChatChannelShareGrantRow,
   ChatChannelShareReceivedRow,
@@ -14,15 +13,6 @@ import {
 
 interface WorkspacePayload {
   workspaceId: string;
-}
-
-// The chat write gate runs before every durable row. A local workspace is
-// writable by definition. Every received file share stays read-only for
-// generic desktop chat, whatever its cached relay capability: there is no
-// durable per-row relay receipt yet, so no grant level admits a write.
-export function assertChatWritable(scope: { kind: "workspace" | "share" }): void {
-  if (scope.kind !== "share") return;
-  throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
 }
 
 interface WorkspaceContext {
@@ -144,119 +134,6 @@ export function createChatChannelIpcHandler<
   });
 }
 
-export function createSetChatReactionIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  assertTrustedSender: (event: Event) => void;
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritable: ((context: Context) => void) | null;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-  syncJoinedChannels: (workspaceId: string) => void;
-  queueCloudSync: (workspaceId: string) => void;
-}): MainChatIpcHandler<Event, Result> {
-  return createWritableChatIpcHandler({
-    ...input,
-    afterWrite: [
-      ({ workspace }) => input.syncJoinedChannels(workspace.workspaceId),
-      ({ workspace }) => input.queueCloudSync(workspace.workspaceId),
-    ],
-  });
-}
-
-export async function setChatReactionFromMain<Result>(input: {
-  workspaceId: string;
-  threadId: string;
-  messageId: string;
-  emoji: string;
-  state: "added" | "removed";
-  localFallbackAuthorId: string;
-  localAuthorDisplayName: string;
-  resolveReplicationAuthorId: () => Promise<string | undefined>;
-  revalidateReplicationAuthorId: (
-    replicationAuthorId: string | undefined,
-  ) => Promise<void>;
-  listReactions?: () => Promise<
-    readonly {
-      messageId: string;
-      emoji: string;
-      author: { authorId: string };
-    }[]
-  >;
-  setReaction: (mutation: {
-    workspaceId: string;
-    threadId: string;
-    messageId: string;
-    emoji: string;
-    author: {
-      authorId: string;
-      kind: "human";
-      displayName: string;
-    };
-    replicationAuthorId?: string;
-    state: "added" | "removed";
-  }) => Promise<Result>;
-}): Promise<Result> {
-  const replicationAuthorId = await input.resolveReplicationAuthorId();
-  await input.revalidateReplicationAuthorId(replicationAuthorId);
-  if (
-    input.state === "removed" &&
-    replicationAuthorId &&
-    replicationAuthorId !== input.localFallbackAuthorId &&
-    input.listReactions
-  ) {
-    const reactions = await input.listReactions();
-    await input.revalidateReplicationAuthorId(replicationAuthorId);
-    const matchesCell = (reaction: (typeof reactions)[number]) =>
-      reaction.messageId === input.messageId && reaction.emoji === input.emoji;
-    const hasLocalAlias = reactions.some(
-      (reaction) =>
-        matchesCell(reaction) &&
-        reaction.author.authorId === input.localFallbackAuthorId,
-    );
-    const hasCurrentIdentity = reactions.some(
-      (reaction) =>
-        matchesCell(reaction) && reaction.author.authorId === replicationAuthorId,
-    );
-    let localRemoval: { result: Result } | undefined;
-    if (hasLocalAlias) {
-      localRemoval = {
-        result: await input.setReaction({
-          workspaceId: input.workspaceId,
-          threadId: input.threadId,
-          messageId: input.messageId,
-          emoji: input.emoji,
-          author: {
-            authorId: input.localFallbackAuthorId,
-            kind: "human",
-            displayName: input.localAuthorDisplayName,
-          },
-          state: "removed",
-        }),
-      };
-      await input.revalidateReplicationAuthorId(replicationAuthorId);
-    }
-    if (localRemoval && !hasCurrentIdentity) return localRemoval.result;
-  }
-  const authorId = replicationAuthorId ?? input.localFallbackAuthorId;
-  return input.setReaction({
-    workspaceId: input.workspaceId,
-    threadId: input.threadId,
-    messageId: input.messageId,
-    emoji: input.emoji,
-    author: {
-      authorId,
-      kind: "human",
-      displayName: input.localAuthorDisplayName,
-    },
-    ...(replicationAuthorId ? { replicationAuthorId } : {}),
-    state: input.state,
-  });
-}
-
 export async function chatViewerAuthorId(input: {
   localFallbackAuthorId: string;
   resolveReplicationAuthorId: () => Promise<string | undefined>;
@@ -311,24 +188,6 @@ export function reactionsForViewer<
     }
   }
   return [...byCell.values()].map(({ reaction }) => reaction);
-}
-
-export async function writeChatMessageFromMain<Attachment, Result>(input: {
-  resolveAuthorUserId: () => Promise<string | undefined>;
-  resolveAttachments: () => Promise<Attachment[]>;
-  revalidateAuthorUserId: (authorUserId: string | undefined) => Promise<void>;
-  write: (resolved: {
-    authorUserId?: string;
-    attachments: Attachment[];
-  }) => Promise<Result>;
-}): Promise<Result> {
-  const authorUserId = await input.resolveAuthorUserId();
-  const attachments = await input.resolveAttachments();
-  await input.revalidateAuthorUserId(authorUserId);
-  return input.write({
-    ...(authorUserId ? { authorUserId } : {}),
-    attachments,
-  });
 }
 
 // A relay-share call that failed because its session was invalid. Whether
