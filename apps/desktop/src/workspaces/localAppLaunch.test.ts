@@ -45,6 +45,32 @@ it("serves only an approved snapshot after a one-use fragment handoff", async ()
   expect((await f.post("/session", { handoff: f.handoff })).status).toBe(404);
   expect((await fetch(f.origin + "/backend.js")).status).toBe(404);
 });
+it("resumes a refreshed parent using its origin-bound proof and freshly checked approved bundle", async () => {
+  const f = await fixture();
+  expect((await f.post("/resume")).status).toBe(404);
+  const opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const response = await f.post("/resume", undefined, headers);
+  expect(response.status).toBe(200); expect(await response.json()).toEqual(opened);
+  expect(f.backend.browserPublication).toHaveBeenCalledTimes(2);
+  expect((await f.post("/resume", undefined, { ...headers, origin: "null" })).status).toBe(404);
+  f.narrow();
+  expect((await f.post("/resume", undefined, headers)).status).toBe(404);
+});
+it("keeps proof only in the trusted parent's session storage and does not close on refresh", async () => {
+  const f = await fixture(), response = await fetch(f.origin + "/bootstrap"), html = await response.text();
+  expect(html).toContain("sessionStorage.getItem(key)");
+  expect(html).toContain("sessionStorage.setItem(key,value)");
+  expect(html).toContain("addEventListener('pagehide',()=>{stopped=true;lifetime.abort();frame?.remove();}");
+  expect(html).not.toContain("addEventListener('pagehide',stop");
+  const opened = await f.open(); expect(opened.html).not.toContain("dohc-local-app-proof");
+});
+it("routes a scoped pending submission request without accepting renderer authority", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const attempt = { id: "attempt", op: "backend.attempt", operation: "submit", request: { action: "save", idempotencyKey: "retry", input: { name: "Mom" } } };
+  expect((await f.post("/backend", attempt, headers)).status).toBe(200);
+  expect(f.backend.request).toHaveBeenCalledWith(publicationId, "attempt", { authorityRevision: 1, operation: "submit", ...attempt.request }, expect.any(AbortSignal));
+  expect((await f.post("/backend", { ...attempt, request: { ...attempt.request, principal: "other" } }, headers)).status).toBe(404);
+});
 
 it("requires exact origin, host, handoff, and proof and strips caller authority", async () => {
   const f = await fixture();
@@ -128,6 +154,16 @@ it("renews a short active lease and expires a launch after its browser disappear
   now += 90_001;
   expect((await f.post("/backend", invoke, headers)).status).toBe(404);
   expect(f.backend.request).not.toHaveBeenCalled();
+});
+it("never extends the hard session lifetime through resume", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const started = Date.now(); let now = started; vi.spyOn(Date, "now").mockImplementation(() => now);
+  for (let elapsed = 80_000; elapsed < 30 * 60_000; elapsed += 80_000) {
+    now = started + elapsed;
+    expect((await f.post("/resume", undefined, headers)).status).toBe(200);
+  }
+  now = started + 30 * 60_000 + 1;
+  expect((await f.post("/resume", undefined, headers)).status).toBe(404);
 });
 
 it("returns only validated app refusals after rechecking current authority", async () => {

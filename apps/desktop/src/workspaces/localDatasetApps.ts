@@ -8,7 +8,7 @@ import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervis
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
 import type { LocalDatasetFileRequest, LocalDatasetUpload } from "./localDatasetHost";
-import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/app-backend-runtime/dataset-attempts";
+import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 
 export interface LocalDatasetAppContext { publicationId: string; authorityRevision: number }
 type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
