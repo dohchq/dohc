@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createDatasetHost, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
+import { createDatasetHost, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision, verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
@@ -176,7 +176,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       unbindPublication(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; publicationId: string}): void {
         host.setBinding(auth, {...input, appId: input.publicationId, binding: null});
       },
-      setDataGrant(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; grantId: string; grant: {operationIds: string[]; discover: boolean} | null}): void {
+      setDataGrant(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; grantId: string; grant: DatasetDataGrant | null}): void {
         owner(auth, input.workspaceId);
         const target = storage.getShareGrant(input.grantId);
         if (!target || target.principalKind !== "user" || !target.principalUserId) throw notFound();

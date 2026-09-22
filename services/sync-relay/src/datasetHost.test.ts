@@ -101,7 +101,7 @@ it("allows only explicitly granted helper operations with view-only source acces
   const publicationId = f.publish([id(5), id(6), id(7)]);
   expect(f.host.list(helper, {workspaceId: "w"}).datasets).toEqual([]);
   await expect(f.invoke(helper, id(6), {}, publicationId)).rejects.toThrow();
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true}});
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
   expect((await f.invoke(helper, id(6), {}, publicationId)).result).toEqual([]);
   await expect(f.invoke(helper, id(7), {id: "other", name: "bad"}, publicationId)).rejects.toThrow();
   expect(f.host.describe(helper, scope).operations.map(operation => operation.name)).toEqual(["read"]);
@@ -114,7 +114,7 @@ it("allows only explicitly granted helper operations with view-only source acces
 it("rejects cross-workspace grant targets and returns metadata quota on revocation", async () => {
   const f = await fixture(); await f.activate(); f.addHelper();
   const before = workspaceUsageBytes(f.storage, "w");
-  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true}});
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
   expect(workspaceUsageBytes(f.storage, "w")).toBeGreaterThan(before);
   f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: null});
   expect(workspaceUsageBytes(f.storage, "w")).toBe(before);
@@ -122,8 +122,8 @@ it("rejects cross-workspace grant targets and returns metadata quota on revocati
   f.storage.createShare({share: {shareId: "other-share", workspaceId: "other", granterUserId: "other-owner", selectorJson: JSON.stringify({paths: ["app"], versionId: null}), createdAtMs: 1},
     grant: {grantId: "other-grant", shareId: "other-share", principalKind: "user", principalUserId: "helper", principalEmail: null,
       access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
-  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "other-grant", grant: {operationIds: [id(6)], discover: true}})).toThrow();
-  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "missing", grant: {operationIds: [id(6)], discover: true}})).toThrow();
+  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "other-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}})).toThrow();
+  expect(() => f.host.setDataGrant(owner, {...scope, grantId: "missing", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}})).toThrow();
 });
 
 it("rolls quota refusal back with the event and receipt, then accepts the same retry", async () => {
