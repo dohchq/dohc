@@ -24,6 +24,8 @@ import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteData
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
+import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
+import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -745,6 +747,7 @@ type CloudSessionCredentials = NonNullable<
   Awaited<ReturnType<CloudLogin["credentials"]>>
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
+const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 let credentialCacheGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
@@ -757,6 +760,8 @@ const credentialSessionCache =
     ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
+      .catch(error => console.error("Collection copy cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
   });
 function refreshCredentialCache(): Promise<void> {
@@ -3772,6 +3777,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await workspaceAuthorities.close();
       await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
       activeDatasetHosts.clear();
+      await ownerDatasetCopies.closeAll();
     },
     disposeDatabase: () => workspaceDatabaseWorker.dispose(),
     closeRelay: closeAllRelayTransportWorkspaces,
@@ -4180,15 +4186,32 @@ function registerIpcHandlers(): void {
       const local = await datasetForWorkspace(workspace, signal);
       return createDatasetAuthorityRouter(local, {
         status: async datasetId => { signal.throwIfAborted(); return local.transferStatus(datasetId); },
-        remote: async targetOrigin => {
+        remote: async (targetOrigin, datasetId) => {
           const remote = await remoteForWorkspace(workspace);
           signal.throwIfAborted();
           if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) {
             throw new Error("Sign in to the server that hosts this Collection.");
           }
-          return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+          const data = createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
+          const ownerKey = datasetCopyOwnerKey(remote.credentials);
+          const copy = await workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+            signal.throwIfAborted(); operation.assertCurrent();
+            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath,
+              datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
+              assertOwner: () => {
+                if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
+              },
+              runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
+            });
+          });
+          const source = createRemoteDatasetReplicaSource({ workspaceId: workspace.workspaceId, datasetId, origin: targetOrigin,
+            ...remote, signal, currentCredentialGeneration: () => credentialCacheGeneration,
+            assertCurrent: () => signal.throwIfAborted(), relayResponse: relayShareResponseWithCredentials,
+            onAccessLost: () => copy.accessLost() });
+          return copy.data(data, source, signal);
         },
       });
     },

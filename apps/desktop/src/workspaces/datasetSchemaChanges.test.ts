@@ -60,8 +60,8 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
 }
 const call = (revision: DatasetRevision, operationId: string, input = {}, key = "read") => ({ datasetId: id(1), revision: revision.revision,
   revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: key });
-const approve = async (fixture: Awaited<ReturnType<typeof fixture>>, review: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["prepare"]>>) => {
-  const result = await fixture.handler("owner", { action: "approveMigration", workspaceId: "w", preparationId: review.preparationId,
+const approve = async (setup: Awaited<ReturnType<typeof fixture>>, review: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>["prepare"]>>) => {
+  const result = await setup.handler("owner", { action: "approveMigration", workspaceId: "w", preparationId: review.preparationId,
     revisionSha256: review.revision.revisionSha256, approvalDigest: review.approvalDigest });
   if (result.kind !== "migrated") throw new Error("Expected migration");
   return result;
