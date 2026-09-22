@@ -50,7 +50,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
 }
 type Query = { after: TransactionalCursor | null; search: string; filters?: Array<{ fieldId: string; value: AppBackendJson }>; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
-type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke };
+type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke; invalidated?: boolean };
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
 
 function undoFromReceipt(change: Mutation, raw: AppBackendJson): Undo | null {
@@ -165,6 +165,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (priorContract.current === contractKey) return;
     priorContract.current = contractKey;
     sequence.current++; readActive.current?.abort();
+    const change = mutation.current;
+    if (change?.request && (change.request.revision !== dataset.revision || change.request.revisionSha256 !== dataset.revisionSha256)) {
+      change.invalidated = true; active.current?.abort();
+      mutation.current = null; setPending(null); locked.current = false; setBusy(false);
+      onError("The Collection's rules changed. Check the records before making another change.", new Error("The Collection's rules changed before this change was confirmed. Check the records before making another change."), null);
+    }
     setPage(null); setUndo(null); setEditor(null); setDetails(null);
   }, [contractKey]);
   useEffect(() => {
@@ -182,7 +188,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
   async function execute(change: Mutation): Promise<void> {
     if (props.copy?.offline) return;
-    if (!alive.current || locked.current || (mutation.current && mutation.current !== change)) return;
+    if (!alive.current || priorContract.current !== contractKey || change.invalidated || locked.current || (mutation.current && mutation.current !== change)) return;
     mutation.current = change; setPending(change); locked.current = true; setBusy(true);
     const abort = new AbortController(); active.current = abort;
     try {
@@ -201,7 +207,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         else closeEditor();
         onError(refused ? "The collection refused this change." : "dohc could not confirm this change.", cause, refused ? null : () => { if (alive.current) void execute(change); });
       }
-    } finally { if (alive.current) { locked.current = false; setBusy(false); } }
+    } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
   }
   function submitEditor(): void {
     if (!editor || locked.current || resourceLock.current || mutation.current) return;

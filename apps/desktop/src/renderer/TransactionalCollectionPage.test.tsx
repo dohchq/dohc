@@ -31,6 +31,29 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it.each([false, true])("invalidates an old revision's pending edit and stale retry after rule changes (in flight: %s)", async inFlight => {
+    const pending = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page(request.revision === 1 ? "Alice" : "Current records") }) :
+      inFlight ? pending.promise : Promise.reject(Error("Lost reply")));
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    if (!inFlight) await screen.findByText("Change not confirmed");
+    const retry = result.onError.mock.calls[0]?.[2];
+    const revision = { ...dataset(), revision: 2, revisionSha256: "b".repeat(64) };
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision} />);
+    await screen.findByText("Current records");
+    expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
+    expect(result.onError.mock.calls.at(-1)![2]).toBeNull();
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
+    expect(screen.getByRole("button", { name: "New record" }).hasAttribute("disabled")).toBe(false);
+    await act(async () => { retry?.(); pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } }); });
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
+    expect(result.onNotice).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
+    expect(screen.getByText("Current records")).toBeTruthy();
+  });
   it("keeps search, sort, cursor history and undo when records refresh", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page("Alice", true) : { id: 1, version: 3, priorValues: { [name]: "Alice" } } }));
     const result = setup({ invoke, recordsVersion: 1 }); await screen.findByText("Alice");

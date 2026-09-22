@@ -11,15 +11,35 @@ const datasetId = "00000000-0000-4000-8000-000000000001";
 const entry = (revision: number) => ({ revision, operation: "submit", callerReference: "a".repeat(64), recordedAtMs: 1000, approvedRevisionHash: "b".repeat(64), changesetBytes: 80, attachmentCount: 1 });
 const reversal = { operationId: "00000000-0000-4000-8000-000000000002", revision: 1, revisionSha256: "b".repeat(64), recordId: "record", expectedVersion: 3,
   fields: [{ fieldId: "00000000-0000-4000-8000-000000000003", name: "Name", value: "Alice" }] };
-function HistoryOwner(props: Omit<CollectionHistoryDialogProps, "onUndo"> & { onUndo: Parameters<typeof useCollectionHistoryUndo>[0]["invoke"]; onChanged?(): void }) {
+function HistoryOwner(props: Omit<CollectionHistoryDialogProps, "onUndo"> & { revision?: number; revisionSha256?: string; onUndo: Parameters<typeof useCollectionHistoryUndo>[0]["invoke"]; onChanged?(): void }) {
   const [open, setOpen] = useState(true), [version, setVersion] = useState(0);
-  const undo = useCollectionHistoryUndo({ workspaceId: props.workspaceId, datasetId: props.datasetId, invoke: props.onUndo, onError: props.onError,
+  const undo = useCollectionHistoryUndo({ workspaceId: props.workspaceId, datasetId: props.datasetId, revision: props.revision ?? reversal.revision,
+    revisionSha256: props.revisionSha256 ?? reversal.revisionSha256, invoke: props.onUndo, onError: props.onError,
     onChanged: () => { setVersion(value => value + 1); props.onChanged?.(); } });
   return <><button onClick={() => setOpen(true)}>Open history</button>{open && <CollectionHistoryDialog {...props} refreshVersion={version}
     onClose={() => setOpen(false)} onUndo={input => { void undo.run(input); }} pendingUndo={undo.pending} undoBusy={undo.busy} />}</>;
 }
 afterEach(cleanup);
 describe("CollectionHistoryDialog", () => {
+  it.each([false, true])("invalidates an old revision's pending undo without replaying it (in flight: %s)", async inFlight => {
+    const pending = deferred<unknown>(), onError = vi.fn(), onChanged = vi.fn();
+    const onUndo = vi.fn(() => inFlight ? pending.promise : Promise.reject(Error("Lost reply")));
+    const onLoad = vi.fn(async () => ({ datasetId, headRevision: 3, entries: [{ ...entry(3), undo: reversal }], nextBeforeRevision: null }));
+    const props = { workspaceId: "a", datasetId, name: "Fundraiser", onLoad, onUndo, onChanged, onClose: vi.fn(), onError };
+    const view = render(<HistoryOwner {...props} />);
+    fireEvent.click(await screen.findByText("submit")); fireEvent.click(screen.getByRole("button", { name: "Undo edit" }));
+    if (!inFlight) await screen.findByText("Undo not confirmed");
+    const retry = onError.mock.calls[0]?.[2];
+    view.rerender(<HistoryOwner {...props} revision={2} revisionSha256={"c".repeat(64)} />);
+    expect(onError.mock.calls.at(-1)![0]).toContain("Check the records");
+    expect(onError.mock.calls.at(-1)![2]).toBeNull();
+    expect(screen.queryByText("Undo not confirmed")).toBeNull();
+    await act(async () => { retry?.(); pending.resolve({}); });
+    expect(onUndo).toHaveBeenCalledOnce(); expect(onChanged).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Undo edit" }));
+    expect(onUndo).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Close" })); expect(screen.queryByRole("dialog")).toBeNull();
+  });
   it("shows prior values and reverses with the saved record version through the approved operation", async () => {
     const onUndo = vi.fn(async () => {}), onChanged = vi.fn();
     const onLoad = vi.fn(async () => ({ datasetId, headRevision: 3, entries: [{ ...entry(3), undo: reversal }], nextBeforeRevision: null }));

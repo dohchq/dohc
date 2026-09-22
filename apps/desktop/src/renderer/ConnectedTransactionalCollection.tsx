@@ -91,7 +91,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     if (sequence === request.current) setCopy(result.copy);
     return result;
   };
-  const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, invoke, onError,
+  const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, revision: dataset?.revision, revisionSha256: dataset?.revisionSha256, invoke, onError,
     onChanged: () => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); } });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
