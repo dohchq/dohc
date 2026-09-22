@@ -21,18 +21,22 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   const schemaSql="CREATE TABLE entries(id INTEGER PRIMARY KEY,name TEXT NOT NULL);", operationSource="globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},read(ctx){return ctx.db.query('SELECT * FROM entries ORDER BY id');}};";
   const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource});
   const options={directory:join(directory,"copy"),scope,ownerKey:"owner",origin:"https://relay",assertOwner(){}};
-  let copy=await createOwnerDatasetCopy(options), offline=false, denied=false;
-  const source:DatasetReplicaSource={async capture(){if(denied){copy.accessLost();throw Error("revoked");}if(offline)throw new DatasetCopyOfflineError("offline");return host.replicaCapture(actor,scope);},async page(input){return host.replicaPage(actor,{...scope,...input});},async blob(input){return host.replicaBlob(actor,{...scope,...input});}};
+  let copy=await createOwnerDatasetCopy(options), offline=false, denied=false, archived=false;
+  const blob=vi.fn(async(input:Parameters<DatasetReplicaSource["blob"]>[0])=>host.replicaBlob(actor,{...scope,...input}));
+  const source:DatasetReplicaSource={async capture(){if(denied){copy.accessLost();throw Error("revoked");}if(offline)throw new DatasetCopyOfflineError("offline");return host.replicaCapture(actor,scope);},async page(input){return host.replicaPage(actor,{...scope,...input});},blob};
   const pinned={...scope,revision:1,revisionSha256:revision.revisionSha256};
   const invoke=vi.fn(async(input:Parameters<OwnerDatasetData["invoke"]>[0])=>host.invoke(actor,{...input,workspaceId:"w",access:{kind:"data"}}));
-  const remote={invoke} as unknown as OwnerDatasetData;
+  const remote={invoke,async describe(){if(offline)throw new TypeError("fetch failed"); return {...host.describe(actor,{...scope,access:{kind:"data"}}),archived};}} as unknown as OwnerDatasetData;
   const signal=new AbortController().signal;
   try {
     await host.activate(actor,{workspaceId:"w",revision,schemaSql,operationSource});
     await invoke({...pinned,operationId:id(5),input:{name:"Mom"},idempotencyKey:"first"});
+    expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries"); expect(blob).not.toHaveBeenCalled();
+    archived=true; expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true}}); expect(blob).not.toHaveBeenCalled(); archived=false;
     const inspect=await copy.data(remote,source,signal).inspect!(id(1)); expect(inspect.copy?.offline).toBe(false);
     expect(inspect.dataset.tables[0]!.fields[0]).not.toHaveProperty("sqlColumn");
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
+    expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries");
     const read={...pinned,operationId:id(6),input:{},idempotencyKey:"read"};
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"}],copy:{offline:true}});
     await expect(copy.data(remote,source,signal).invoke({...read,operationId:id(5)})).rejects.toThrow(/read-only/);

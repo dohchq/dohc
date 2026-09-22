@@ -18,6 +18,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         if (denied) throw Error("This Collection copy is no longer available.");
       };
       const selected = (datasetId: string) => { authorize(); if (datasetId !== options.scope.datasetId) throw Error("This copy belongs to another Collection."); };
+      const remoteDescribe: (datasetId: string, options?: { includeArchived?: boolean }) => ReturnType<OwnerDatasetData["describe"]> = remote.describe;
       const describe = (definitionJson: string): DatasetDescription => {
         const approved = parseDatasetRevision(JSON.parse(definitionJson));
         return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
@@ -39,16 +40,37 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       };
       return {
         ...remote,
-        async inspect(datasetId) { selected(datasetId); return capture(); },
-        async describe(datasetId) {
+        async inspect(datasetId, metadata?: { includeArchived?: boolean }) {
+          selected(datasetId);
+          try {
+            const dataset = await remoteDescribe(datasetId, metadata); authorize();
+            if ("archived" in dataset && dataset.archived === true) return { dataset };
+          } catch (error) {
+            authorize();
+            if (!(error instanceof TypeError)) {
+              try { await source.capture(signal); }
+              catch (captureError) { if (denied) { await replica.revoke(); throw captureError; } }
+              throw error;
+            }
+            // The replica source independently classifies network failure and detects revoked access.
+          }
+          return capture();
+        },
+        async describe(datasetId, metadata?: { includeArchived?: boolean }) {
           selected(datasetId);
           // Sidebar discovery reads bounded metadata, never every Collection's database bytes.
-          try { const captured = await source.capture(signal); authorize(); return describe(captured.checkpoint.definitionJson); }
+          try { const dataset = await remoteDescribe(datasetId, metadata); authorize(); return dataset; }
           catch (error) {
-            if (denied) { await replica.revoke(); throw error; }
-            authorize(); if (!(error instanceof DatasetCopyOfflineError)) throw error;
-            const saved = replica.state(); if (!saved) throw error;
-            return describe(saved.checkpoint.definitionJson);
+            authorize();
+            try { await source.capture(signal); }
+            catch (captureError) {
+              if (denied) { await replica.revoke(); throw captureError; }
+              authorize();
+              if (!(error instanceof TypeError) || !(captureError instanceof DatasetCopyOfflineError)) throw error;
+              const saved = replica.state(); if (!saved) throw captureError;
+              return describe(saved.checkpoint.definitionJson);
+            }
+            throw error;
           }
         },
         async invoke(input) {
