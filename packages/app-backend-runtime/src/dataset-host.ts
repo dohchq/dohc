@@ -264,7 +264,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           const row = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
           if (!row || parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256 !== previous.revisionSha256) throw new Error("Dataset approval changed during migration.");
           const revisionJson = JSON.stringify(approved), artifactsJson = JSON.stringify({ schemaSql, operationSource: source });
-          const delta = Buffer.byteLength(revisionJson) + Buffer.byteLength(artifactsJson) + Buffer.byteLength(String(row.revision_json)) + Buffer.byteLength(String(row.artifacts_json)) + 256;
+          const delta = Buffer.byteLength(revisionJson) + Buffer.byteLength(artifactsJson) + 256;
           if (options.accountMigration) synchronous(() => options.accountMigration!(context, { ...key, bytes: allocation.bytes + delta,
             capacityBytes: allocation.capacityBytes, capacityDeltaBytes: allocation.capacityDeltaBytes }));
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,previous.revision,row.revision_json,row.artifacts_json);
