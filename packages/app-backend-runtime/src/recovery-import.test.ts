@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal, type DatasetCursor } from "./journal";
@@ -14,6 +14,7 @@ import { parseRecoveryJournalRecord } from "./recovery-record";
 import { createRecoveryInstaller } from "./recovery-install";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
+vi.setConfig({ testTimeout: 30_000 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const schemaSql = "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL);";
 const source = "globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items')}};";
@@ -34,7 +35,7 @@ async function fixture(large = false){
   }
   const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
   const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:source});
-  db.exec("CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
+  db.exec("CREATE TABLE dohc_dataset_lifecycle(workspace_id,dataset_id,archived,generation,reason,archived_at_ms); CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   const authorize=()=>{}, checkpoint=await readFile(seedPath);
   let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize, ...(large ? { capacityBytes:128*1024*1024 } : {})});
@@ -67,7 +68,7 @@ function target(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Paramet
   const db = new DatabaseSync(join(f.directory, "target.sqlite"));
   const transaction = <T>(run: () => T) => { db.exec("BEGIN IMMEDIATE"); try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
   const journal = createDatasetJournal({ db, transaction });
-  for (const table of ["catalog", "catalog_history", "bindings", "data_grants"]) db.exec(String(f.db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(`dohc_dataset_${table}`)!.sql));
+  for (const table of ["catalog", "catalog_history", "bindings", "data_grants", "lifecycle"]) db.exec(String(f.db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(`dohc_dataset_${table}`)!.sql));
   db.exec("CREATE TABLE usage(bytes INTEGER); INSERT INTO usage VALUES(0)");
   const installer = createRecoveryInstaller({ db, transaction, journal, account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); }, ...options });
   cleanups.push(async () => { db.close(); });

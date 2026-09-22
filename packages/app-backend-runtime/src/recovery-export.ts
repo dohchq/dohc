@@ -29,6 +29,7 @@ export interface DatasetExportOptions {
   };
 }
 export type DatasetRecoveryRecord =
+  | { kind: "lifecycle"; archived: boolean; generation: number; reason: string; archivedAtMs: number | null }
   | { kind: "catalog"; revisionJson: string; artifactsJson: string }
   | { kind: "current-checkpoint"; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }> }
   | { kind: "catalog-revision"; revisionJson: string; artifactsJson: string }
@@ -76,7 +77,8 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     if(!Array.isArray(files)||files.length>4096)throw new Error("Dataset export attachment count exceeds its bound.");
     const attachments=files.map(file=>({...file}));
     const sourceState = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)?.active === 1 ? "active" as const : "fenced" as const;
-    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState };
+    const lifecycle = db.prepare("SELECT archived,generation,reason,archived_at_ms FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
+    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
   } });
   if (pinned.captured.revision.revisionSha256 !== pinned.cursor.approvedRevisionHash) throw new Error("Dataset catalog and journal approval differ.");
   const attachments = pinned.captured.attachments;
@@ -118,6 +120,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
       yield encodeDatasetRecoveryRecord({kind:"catalog",revisionJson:pinned.captured.revisionJson,artifactsJson:pinned.captured.artifactsJson});
       yield encodeDatasetRecoveryRecord({kind:"current-checkpoint",checkpoint:pinned.checkpoint});
       for(const row of [...pinned.captured.bindings,...pinned.captured.grants])yield encodeDatasetRecoveryRecord(row);
+      if(pinned.captured.lifecycle)yield encodeDatasetRecoveryRecord(pinned.captured.lifecycle);
       let after=0;
       for(;;){authorize();const row=db.prepare("SELECT revision,revision_json,artifacts_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>? AND revision<? ORDER BY revision LIMIT 1")
           .get(scope.workspaceId,scope.datasetId,after,pinned.captured.revision.revision);

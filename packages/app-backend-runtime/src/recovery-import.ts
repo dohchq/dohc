@@ -35,6 +35,7 @@ export async function* readValidatedBlob(blob: RecoveryBlob): AsyncGenerator<Uin
 export interface ValidatedRecoveryJournal { record: JournalExportRecord; blob: RecoveryBlob }
 export interface RecoveryCatalog { revisionJson: string; artifactsJson: string }
 export type RecoveryMetadata =
+  | { kind: "lifecycle"; archived: boolean; generation: number; reason: string; archivedAtMs: number | null }
   | ({ kind: "catalog-revision" } & RecoveryCatalog)
   | { kind: "binding"; appId: string; bindingJson: string; token: string }
   | { kind: "grant"; principalKey: string; grantJson: string; token: string }
@@ -183,6 +184,12 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           recoveryInteger(value.revision, 1); recoveryDigest(approvalHash);
           index.prepare("INSERT INTO permissions VALUES(?,?)").run(raw.kind, id);
           rawMetadata(binding ? { kind: "binding", appId: id, bindingJson: encoded, token } : { kind: "grant", principalKey: id, grantJson: encoded, token });
+        } else if (raw.kind === "lifecycle") {
+          recoveryObject(raw, ["kind", "archived", "generation", "reason", "archivedAtMs"]);
+          if (typeof raw.archived !== "boolean" || typeof raw.reason !== "string" || Buffer.byteLength(raw.reason) > 1024 || raw.reason.includes("\0")) fail("invalid dataset lifecycle.");
+          const generation = recoveryInteger(raw.generation), archivedAtMs = raw.archivedAtMs === null ? null : recoveryInteger(raw.archivedAtMs);
+          index.prepare("INSERT INTO permissions VALUES('lifecycle','lifecycle')").run();
+          rawMetadata({ kind: "lifecycle", archived: raw.archived, generation, reason: raw.reason, archivedAtMs });
         } else if (raw.kind === "attachment") {
           recoveryObject(raw, ["kind", "file"]); const file = recoveryObject(raw.file, ["fileId", "name", "contentType", "byteLength", "sha256", "revision"]);
           const id = recoveryText(file.fileId, 128); if (!/^[A-Za-z0-9_-]{16,128}$/.test(id)) fail("invalid file identity.");

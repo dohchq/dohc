@@ -22,7 +22,7 @@ async function fixture(){const directory=await mkdtemp(join(tmpdir(),"dohc-expor
   const data=new DatabaseSync(join(directory,"seed.sqlite"));data.exec(schemaSql);data.close();const checkpoint=await readFile(join(directory,"seed.sqlite"));
   const transaction=<T>(run:()=>T):T=>{db.exec("BEGIN IMMEDIATE");try{const result=run();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
   const journal=createDatasetJournal({db,transaction}),scope={workspaceId:"workspace",datasetId:id(1)},revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:source});
-  db.exec("CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
+  db.exec("CREATE TABLE dohc_dataset_lifecycle(workspace_id,dataset_id,archived,generation,reason,archived_at_ms); CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   let allowed=true;
   const authorize=()=>{if(!allowed)throw new Error("revoked");};

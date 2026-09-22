@@ -125,6 +125,10 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, principal_key TEXT NOT NULL,
       grant_json TEXT NOT NULL, token TEXT NOT NULL,
       PRIMARY KEY(workspace_id,dataset_id,principal_key)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_lifecycle (
+      workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, archived INTEGER NOT NULL CHECK(archived IN(0,1)),
+      generation INTEGER NOT NULL, reason TEXT NOT NULL, archived_at_ms INTEGER,
+      PRIMARY KEY(workspace_id,dataset_id)) STRICT;
   `));
   function authority(context: Context, key: { workspaceId: string; datasetId?: string }, through: DatasetAccess): DatasetAuthority {
     const result = synchronous(() => options.resolveAuthority(context, { ...key, access: through }));
@@ -144,6 +148,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (!row) denied();
     return parseDatasetRevision(JSON.parse(String(row.revision_json)));
   }
+  function lifecycle(key: DatasetScope): { archived: boolean; generation: number; reason: string } {
+    const row = db.prepare("SELECT archived,generation,reason FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+    return row ? { archived: Number(row.archived) === 1, generation: Number(row.generation), reason: String(row.reason) } : { archived: false, generation: 0, reason: "" };
+  }
+  function live(key: DatasetScope) { if (lifecycle(key).archived) throw new DatasetHostError("conflict", "Dataset is archived."); }
   function artifacts(key: DatasetScope): { schemaSql: string; operationSource: string } {
     const row = db.prepare("SELECT artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
     if (!row) denied();
@@ -162,8 +171,10 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (grant.revision !== approved.revision || grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset data grant needs approval for the current revision.");
     return grant;
   }
-  function permissions(context: Context, key: DatasetScope, through: DatasetAccess): Permission {
+  function permissions(context: Context, key: DatasetScope, through: DatasetAccess, includeArchived = false): Permission {
     const verified = authority(context, key, through), approved = revision(key);
+    const state = lifecycle(key);
+    if (state.archived && !(includeArchived && verified.caller.kind === "owner" && through.kind === "data")) throw new DatasetHostError("conflict", "Dataset is archived.");
     let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"];
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
@@ -194,7 +205,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         revisionSha256: approved.revisionSha256, operationIds: grant.operationIds }, approved, verified.caller);
       token = String(row.token); discover = grant.discover;
     }
-    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token])), discover, createFields };
+    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token, state.generation])), discover, createFields };
   }
   function describePermission(permission: Permission): DatasetDescription {
     const { revision: approved, operations } = permission;
@@ -209,6 +220,42 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }) })), operations };
   }
   const host = {
+    archiveDataset(context: Context, raw: DatasetScope & { reason?: string }) {
+      const key = scope(raw), reason = raw.reason === undefined ? "archived by owner" : text(raw.reason, 1024);
+      return transaction(() => {
+        owner(context, key); const head = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "A fenced dataset cannot be archived.");
+        const current = lifecycle(key); if (current.archived) return { archived: true, generation: current.generation, reason: current.reason };
+        const generation = current.generation + 1;
+        if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(reason) - Buffer.byteLength(current.reason) + (current.generation === 0 ? 256 : 0) }));
+        db.prepare("INSERT INTO dohc_dataset_lifecycle VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id) DO UPDATE SET archived=1,generation=excluded.generation,reason=excluded.reason,archived_at_ms=excluded.archived_at_ms")
+          .run(key.workspaceId,key.datasetId,1,generation,reason,Date.now());
+        return { archived: true, generation, reason };
+      });
+    },
+    restoreDataset(context: Context, raw: DatasetScope) {
+      const key = scope(raw);
+      return transaction(() => {
+        owner(context, key); const state = lifecycle(key), head = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+        if (!state.archived) return { archived: false, generation: state.generation };
+        if (!head || head.active !== 1) throw new DatasetHostError("conflict", "A fenced dataset cannot be restored in place.");
+        const generation = state.generation + 1;
+        if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: -Buffer.byteLength(state.reason) }));
+        db.prepare("UPDATE dohc_dataset_lifecycle SET archived=0,generation=?,reason='',archived_at_ms=NULL WHERE workspace_id=? AND dataset_id=? AND archived=1 AND generation=?")
+          .run(generation,key.workspaceId,key.datasetId,state.generation);
+        if (Number(db.prepare("SELECT changes() AS n").get()!.n) !== 1) throw new DatasetHostError("conflict", "Dataset lifecycle changed during restore.");
+        return { archived: false, generation };
+      });
+    },
+    lifecycle(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
+      const key = scope(raw); owner(context, key); const state = lifecycle(key);
+      revision(key); const limit = raw.limit ?? 50, after = raw.after ?? "";
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid lifecycle page size.");
+      const rows = db.prepare("SELECT app_id,binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id>? ORDER BY app_id LIMIT ?").all(key.workspaceId,key.datasetId,after,limit+1);
+      const apps = rows.slice(0,limit)
+        .map(row => ({ appId: String(row.app_id), binding: JSON.parse(String(row.binding_json)) }));
+      return { ...state, apps, nextCursor: rows.length > limit ? apps.at(-1)!.appId : null };
+    },
     recoveryStatus(context: Context, raw: DatasetScope & { transferId: string }) {
       const key = scope(raw), recovery = options.recovery;
       if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
@@ -291,11 +338,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (options.accountMigration && !options.accountCheckpointStage) throw new Error("Dataset migration requires checkpoint staging quota accounting.");
       const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
       const expected = { ...raw.expected }, migrationSql = text(raw.migrationSql, 256 * 1024), schemaSql = raw.schemaSql, source = raw.operationSource, signal = raw.signal;
+      live(key); const generation = lifecycle(key).generation;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured), previous = revision(key);
       if (expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId || expected.approvedRevisionHash !== previous.revisionSha256 || approved.revision !== previous.revision + 1) {
         throw new DatasetHostError("conflict", "Dataset revision transition does not match the current approval.");
       }
-      const authorize = () => { signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const authorize = () => { signal?.throwIfAborted(); live(key); if (lifecycle(key).generation !== generation || JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
       const compiledSource = await compile(source, approved.definition.operationsPath);
       authorize();
       const cursor = await options.supervisor.migrate({ scope: key, expected, tables: previous.definition.tables.map(table => table.sqlName),
@@ -318,6 +366,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const key = scope(raw), appId = text(raw.appId);
       transaction(() => {
         owner(context, key);
+        if (raw.binding !== null) live(key);
         const approved = revision(key);
         const existing = db.prepare("SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, appId);
         const previousBytes = existing ? Buffer.byteLength(String(existing.binding_json)) + Buffer.byteLength(appId) + 256 : 0;
@@ -340,6 +389,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const key = scope(raw), principalKey = text(raw.principalKey);
       transaction(() => {
         owner(context, key);
+        if (raw.grant !== null) live(key);
         const approved = revision(key);
         const existing = db.prepare("SELECT grant_json FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, principalKey);
         const previousBytes = existing ? Buffer.byteLength(String(existing.grant_json)) + Buffer.byteLength(principalKey) + 256 : 0;
@@ -366,24 +416,28 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (!permitted.discover) denied();
       return describePermission(permitted);
     },
-    list(context: Context, raw: { workspaceId: string; after?: string; limit?: number }): { datasets: DatasetDescription[]; nextCursor: string | null } {
+    list(context: Context, raw: { workspaceId: string; after?: string; limit?: number; includeArchived?: boolean }): { datasets: Array<DatasetDescription & { archived: boolean }>; nextCursor: string | null } {
       const workspaceId = text(raw.workspaceId), after = raw.after === undefined ? "" : text(raw.after), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");
       // Apply data grants in SQL so inaccessible datasets do not create page gaps or counts.
       const verified = authority(context, { workspaceId }, { kind: "data" });
+      const includeArchived = raw.includeArchived === true;
+      if (includeArchived && verified.caller.kind !== "owner") denied();
       const rows = verified.caller.kind === "owner"
-        ? db.prepare("SELECT dataset_id FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id>? ORDER BY dataset_id LIMIT ?").all(workspaceId, after, limit + 1)
+        ? db.prepare("SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND c.dataset_id>? AND (?=1 OR COALESCE(l.archived,0)=0) ORDER BY c.dataset_id LIMIT ?").all(workspaceId, after, includeArchived ? 1 : 0, limit + 1)
         : db.prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
             ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
             AND json_extract(g.grant_json,'$.discover')=1
             AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
+            AND COALESCE((SELECT archived FROM dohc_dataset_lifecycle l WHERE l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id),0)=0
             ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, verified.principalKey, after, limit + 1);
-      const selected = rows.slice(0, limit), datasets: DatasetDescription[] = [];
+      const selected = rows.slice(0, limit), datasets: Array<DatasetDescription & { archived: boolean }> = [];
       let bytes = 0;
       for (const row of selected) {
-        const permitted = permissions(context, { workspaceId, datasetId: String(row.dataset_id) }, { kind: "data" });
+        const key = { workspaceId, datasetId: String(row.dataset_id) };
+        const permitted = permissions(context, key, { kind: "data" }, includeArchived);
         if (!permitted.discover) denied();
-        const description = describePermission(permitted), size = Buffer.byteLength(JSON.stringify(description));
+        const description = { ...describePermission(permitted), archived: lifecycle(key).archived }, size = Buffer.byteLength(JSON.stringify(description));
         if (bytes + size > 1024 * 1024) break;
         datasets.push(description); bytes += size;
       }

@@ -81,6 +81,36 @@ it("pages owner-only saved-operation metadata without receipts, payloads, or pri
   expect(() => f.host.history("owner", { ...scope, limit: 101 })).toThrow("Invalid");
   expect(() => f.host.history("owner", { ...scope, datasetId: id(99) })).toThrow("not permitted");
 });
+it("archives and restores the same records without releasing storage or reactivating a transferred host", async () => {
+  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "retained" });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  const bytes = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  expect(f.host.lifecycle("owner", scope).apps).toMatchObject([{ appId: "form" }]);
+  expect(() => f.host.archiveDataset("helper", scope)).toThrow();
+  f.host.archiveDataset("owner", scope);
+  expect(f.host.list("owner", { workspaceId: scope.workspaceId }).datasets).toEqual([]);
+  expect(f.host.list("owner", { workspaceId: scope.workspaceId, includeArchived: true }).datasets).toMatchObject([{ datasetId: scope.datasetId, archived: true }]);
+  expect(() => f.host.list("helper", { workspaceId: scope.workspaceId, includeArchived: true })).toThrow();
+  await expect(f.invoke("owner", id(7))).rejects.toThrow("archived");
+  await expect(f.invoke("friend", id(6), { value: "denied" }, "form")).rejects.toThrow("archived");
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(bytes);
+  f.host.restoreDataset("owner", scope);
+  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "retained" }]);
+  f.host.archiveDataset("owner", scope);
+  f.journal.fence({ expected: f.host.approvedArtifacts("owner", scope).cursor, authorize() {} });
+  expect(() => f.host.restoreDataset("owner", scope)).toThrow("fenced");
+});
+
+it("invalidates a pending operation even if the dataset is archived and restored before commit", async () => {
+  const f = await fixture(); await f.activate();
+  const original = f.supervisor.invoke.bind(f.supervisor);
+  f.supervisor.invoke = async input => {
+    f.host.archiveDataset("owner", scope); f.host.restoreDataset("owner", scope);
+    return original(input);
+  };
+  await expect(f.invoke("owner", id(6), { value: "stale" })).rejects.toThrow();
+  expect(f.journal.head(scope, () => {}).cursor.revision).toBe(0);
+});
 
 it("creates a dataset without an app and several views share its authoritative records", async () => {
   const f = await fixture(); await f.activate();
