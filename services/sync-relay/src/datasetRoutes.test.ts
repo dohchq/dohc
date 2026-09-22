@@ -317,13 +317,20 @@ it("imports a fenced dataset and its receipt over HTTP with a durable retry rece
     const url = `https://relay/sync/w/datasets/${id(1)}/imports/${transferId}`;
     const request = () => new Request(url, {method: "POST", headers: {authorization: "Bearer owner", "content-type": "application/octet-stream",
       "x-dohc-dataset-manifest-sha256": manifestSha256, "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body});
+    expect(await (await target.handler(new Request(url, {headers: {authorization: "Bearer owner"}}))).json()).toBeNull();
     const response = await target.handler(request()); expect(response.status).toBe(200);
     const receipt = await response.json(); expect(receipt).toMatchObject({transferId, manifestSha256, sourceCursor: cursor, targetCursor: {revision: cursor.revision + 1}});
+    const usage = target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes;
     expect(await (await target.handler(new Request(url, {headers: {authorization: "Bearer owner"}}))).json()).toEqual(receipt);
     expect(await (await target.handler(request())).json()).toEqual(receipt);
+    expect(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes).toBe(usage);
     expect(await (await target.invoke()).json()).toMatchObject({result: [{name: "Restored", receipt: uploaded.file.fileId}]});
     expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: revision.revisionSha256, fileId: uploaded.file.fileId})).toEqual({file: uploaded.file, bytesBase64: upload.bytesBase64});
     expect(target.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_import_files").get()!.n).toBe(0);
     expect((await target.handler(new Request(url, {headers: {authorization: "Bearer stranger"}}))).status).toBe(404);
+    target.storage.tx(() => target.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w' AND dataset_id=?").run(id(1)));
+    for (const table of ["dohc_dataset_imports", "dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_checkpoints", "dohc_dataset_checkpoint_chunks", "sync_relay_dataset_files"]) {
+      expect(target.storage.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()!.n).toBe(0);
+    }
   } finally {await archive.dispose();}
 });
