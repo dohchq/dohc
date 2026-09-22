@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -107,29 +107,44 @@ export function createRemoteDatasetTransferTarget(input: {
 }): DatasetTransferTarget & { status(transferId: string): Promise<DatasetTransferReceipt | null> } {
   const origin = new URL(input.origin);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("Choose a configured sharing server.");
+  if (!input.credentials.relayUrl || new URL(input.credentials.relayUrl).origin !== origin.origin) throw new Error("Reconnect to this Collection's sharing server before transferring it.");
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration, currentGeneration: input.currentCredentialGeneration,
     assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
-  const path = (transferId: string) => `/sync/${encodeURIComponent(input.workspaceId)}/datasets/${encodeURIComponent(identity.parse(input.datasetId))}/imports/${encodeURIComponent(transferId)}`;
-  const receipt = (value: unknown): DatasetTransferReceipt | null => {
+  const path = (transferId: string) => `/sync/${encodeURIComponent(input.workspaceId)}/datasets/${identity.parse(input.datasetId)}/imports/${identity.parse(transferId)}`;
+  const receiptSchema = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: CursorSchema, targetCursor: CursorSchema }).strict();
+  const receipt = (value: unknown, transferId: string): DatasetTransferReceipt | null => {
     if (value === null) return null;
-    const result = value as Record<string, unknown>;
-    if (!result || typeof result !== "object" || typeof result.transferId !== "string" || typeof result.manifestSha256 !== "string" ||
-      !result.sourceCursor || !result.targetCursor) throw new Error("The sharing server returned an invalid transfer receipt.");
-    return result as DatasetTransferReceipt;
+    const result = receiptSchema.parse(value);
+    if (result.transferId !== transferId || result.sourceCursor.workspaceId !== input.workspaceId || result.targetCursor.workspaceId !== input.workspaceId ||
+      result.sourceCursor.datasetId !== input.datasetId || result.targetCursor.datasetId !== input.datasetId) throw new Error("The sharing server returned another transfer receipt.");
+    return result;
   };
+  const status = async (transferId: string, signal = input.signal) => receipt(await session.run(() => input.relayStream(input.credentials,
+    path(transferId), { method: "GET", signal })), transferId);
   return {
     async importRecovery(value) {
+      const signal = value.signal ? AbortSignal.any([input.signal, value.signal]) : input.signal;
+      signal.throwIfAborted();
+      if (value.sourceCursor.workspaceId !== input.workspaceId || value.sourceCursor.datasetId !== input.datasetId) throw new Error("This transfer belongs to another Collection.");
+      const confirmed = await status(value.transferId, signal);
+      if (confirmed) return confirmed;
       const chunks = value.stream[Symbol.asyncIterator]();
-      const body = new ReadableStream<Uint8Array>({ async pull(controller) { try { const item = await chunks.next(); if (item.done) controller.close(); else controller.enqueue(item.value); } catch (error) { controller.error(error); } }, async cancel() { await chunks.return?.(); } });
-      const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), { method: "POST", signal: value.signal ?? input.signal,
+      const body = new ReadableStream<Uint8Array>({ async pull(controller) { try { signal.throwIfAborted(); session.assertCurrent(); const item = await chunks.next(); if (item.done) controller.close(); else controller.enqueue(item.value); } catch (error) { controller.error(error); } }, async cancel() { await chunks.return?.(); } });
+      try {
+      const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), { method: "POST", signal,
         headers: { "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": value.manifestSha256,
           "x-dohc-dataset-source-cursor": JSON.stringify(value.sourceCursor) }, body }));
-      return receipt(result)!;
+      const confirmed = receipt(result, value.transferId);
+      if (!confirmed) throw new Error("The sharing server did not confirm this transfer.");
+      return confirmed;
+      } catch (error) {
+        signal.throwIfAborted(); session.assertCurrent();
+        const confirmed = await status(value.transferId, signal).catch(() => null);
+        if (confirmed) return confirmed;
+        throw error;
+      } finally { await chunks.return?.(); }
     },
-    async status(transferId) {
-      const result = await session.run(() => input.relayStream(input.credentials, path(transferId), { method: "GET", signal: input.signal }));
-      return receipt(result);
-    },
+    status,
   };
 }
 
