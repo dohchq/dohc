@@ -23,7 +23,7 @@ async function identities(root, prefix = '') {
 export async function requireAppBackendRuntime(root = join(desktopRoot, 'resources/app-backend-runtime')) {
   const manifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'));
   const files = await identities(root);
-  if (manifest.version !== 1 || !files['child.mjs'] || !files['persistent-child.mjs'] || !Object.keys(files).some(path => path.endsWith('.wasm')) ||
+  if (manifest.version !== 1 || !files['child.mjs'] || !files['persistent-child.mjs'] || !files['dataset-compiler.mjs'] || !Object.keys(files).some(path => path.endsWith('.wasm')) ||
       JSON.stringify(manifest.files) !== JSON.stringify(files)) throw new Error('App backend runtime resources changed. Stage them before packaging.');
 }
 
@@ -36,6 +36,7 @@ export async function stageAppBackendRuntime({ destination = join(desktopRoot, '
   try {
     await cp(join(runtimeRoot, 'dist/child.mjs'), join(staging, 'child.mjs'));
     await cp(join(runtimeRoot, 'dist/persistent-child.mjs'), join(staging, 'persistent-child.mjs'));
+    await cp(join(runtimeRoot, 'dist/dataset-compiler.mjs'), join(staging, 'dataset-compiler.mjs'));
     const copied = new Map();
     async function dependency(name, from) {
       const require = createRequire(join(from, 'package.json'));

@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isSharedWithMePath } from "@dohc/workspace-core";
@@ -14,7 +15,7 @@ import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
-import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
@@ -84,7 +85,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   const maxStoredBytes = options.maxStoredBytes ?? 1024 * 1024 * 1024;
   if (!Number.isSafeInteger(maxStoredBytes) || maxStoredBytes < 4096) throw new Error("Invalid Collection storage limit.");
   if (process.versions.electron && !options.compile) throw new Error("Electron must configure the installed Collection compiler.");
-  const compile = options.compile ?? ((source: string, path: string, signal: AbortSignal) => compileDatasetOperations(source, path, { signal }));
+  const compile = options.compile ?? (async (source: string, path: string, signal: AbortSignal) => {
+    const modulePath = pathToFileURL(createRequire(import.meta.url).resolve("@dohc/app-backend-runtime/dataset-compiler")).href;
+    const compiler = await import(/* @vite-ignore */ modulePath) as { compileDatasetOperations: typeof compileDatasetOperations };
+    return compiler.compileDatasetOperations(source, path, { signal });
+  });
   const root = await realpath(options.workspaceRoot);
   let directory = root;
   for (const part of [".dohc", "datasets"]) {

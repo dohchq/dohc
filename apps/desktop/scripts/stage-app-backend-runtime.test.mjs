@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { load } from 'js-yaml';
 import { stageAppBackendRuntime, requireAppBackendRuntime } from './stage-app-backend-runtime.mjs';
+import { createInstalledDatasetCompiler } from '../src/workspaces/installedDatasetCompiler.ts';
 
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
@@ -27,6 +28,19 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
   await rm(source, { recursive: true, force: true });
   const staged = join(resources, 'app-backend-runtime');
   await requireAppBackendRuntime(staged);
+  if (process.platform === 'win32' && process.arch === 'x64') {
+    const binaryDirectory = join(resources, 'app-compiler/node_modules/@esbuild/win32-x64');
+    await mkdir(binaryDirectory, { recursive: true });
+    const compilerRequire = createRequire(require.resolve('esbuild'));
+    await cp(compilerRequire.resolve('@esbuild/win32-x64/esbuild.exe'), join(binaryDirectory, 'esbuild.exe'));
+    const compile = await createInstalledDatasetCompiler(resources);
+    const source = 'type Value=number;globalThis.operations={read(){const value:Value=42;return {value};}};';
+    assert.match(await compile(source, 'data/operations.ts', new AbortController().signal), /value = 42/);
+  }
+  const compilerBytes = await readFile(join(staged, 'dataset-compiler.mjs'));
+  await rm(join(staged, 'dataset-compiler.mjs'));
+  await assert.rejects(requireAppBackendRuntime(staged), /resources changed/);
+  await writeFile(join(staged, 'dataset-compiler.mjs'), compilerBytes);
   await cp(new URL('../../../packages/app-backend-runtime/dist/index.mjs', import.meta.url), join(root, 'client.mjs'));
   const { createAppBackendRuntime } = await import(pathToFileURL(join(root, 'client.mjs')).href);
   const runtime = createAppBackendRuntime({ entryPath: join(staged, 'child.mjs') });

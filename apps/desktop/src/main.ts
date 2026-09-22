@@ -20,7 +20,7 @@ import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
-import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
@@ -4147,6 +4147,7 @@ function registerIpcHandlers(): void {
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const localDatasetHosts = new WeakMap<AbortSignal, Promise<LocalDatasetHost>>();
+  let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
   const datasetRuntimePath = join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
   const datasetForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
     workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
@@ -4159,10 +4160,9 @@ function registerIpcHandlers(): void {
           assertCurrent: () => { lifetime.throwIfAborted(); },
           runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(datasetRuntimePath, "child.mjs") },
           persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
-          compile: (source, path, signal) => {
-            if (process.platform !== "win32" || process.arch !== "x64") throw new Error("Creating Collection actions currently requires Windows x64.");
-            return compileDatasetOperations(source, path, { signal,
-              executablePath: join(pluginResourcesBasePath(), "app-compiler", "node_modules", "@esbuild", "win32-x64", "esbuild.exe") });
+          compile: async (source, path, signal) => {
+            installedDatasetCompiler ??= createInstalledDatasetCompiler(pluginResourcesBasePath());
+            return (await installedDatasetCompiler)(source, path, signal);
           },
         });
         localDatasetHosts.set(lifetime, pending);
