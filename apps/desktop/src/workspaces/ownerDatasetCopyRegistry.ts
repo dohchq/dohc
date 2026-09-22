@@ -9,14 +9,14 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 export const datasetCopyOwnerKey = (credentials: Pick<CloudCredentials, "serverUrl" | "userId">) =>
   hash([new URL(credentials.serverUrl).href.replace(/\/+$/, ""), credentials.userId]);
 type Copy = Awaited<ReturnType<typeof createOwnerDatasetCopy>>;
-type Entry = { lifetime: AbortSignal; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
+type Entry = { lifetime: AbortSignal; stop: AbortController; closed: boolean; directory?: string; opening: Promise<Copy>; closing?: Promise<void>; detach(): void };
 
 /** Owns replica locks across workspace lifetimes and removes known copies when the account changes. */
 export function createOwnerDatasetCopyRegistry() {
   const entries = new Map<string, Entry>();
   let ownerKey: string | null = null, stopped = false, barrier: Promise<void> = Promise.resolve();
   function close(entry: Entry): Promise<void> {
-    entry.closed = true; entry.detach();
+    entry.closed = true; entry.stop.abort(); entry.detach();
     return entry.closing ??= entry.opening.then(copy => copy.close(), () => undefined);
   }
   async function remove(entry: Entry) {
@@ -32,7 +32,7 @@ export function createOwnerDatasetCopyRegistry() {
       if (ownerKey === nextOwner) return barrier;
       ownerKey = nextOwner;
       const prior = [...entries.values()];
-      for (const entry of prior) { entry.closed = true; entry.detach(); }
+      for (const entry of prior) { entry.closed = true; entry.stop.abort(); entry.detach(); }
       entries.clear();
       barrier = barrier.then(async () => { await Promise.all(prior.map(remove)); });
       return barrier;
@@ -65,10 +65,12 @@ export function createOwnerDatasetCopyRegistry() {
             if (!info.isDirectory() || info.isSymbolicLink() || resolve(await realpath(directory)) !== directory) throw Error("Collection copies must remain inside this workspace.");
           }
           next.directory = directory; authorize();
-          return createOwnerDatasetCopy({ directory, scope: { workspaceId: input.workspaceId, datasetId: input.datasetId }, ownerKey: input.ownerKey,
+          const copy = await createOwnerDatasetCopy({ directory, scope: { workspaceId: input.workspaceId, datasetId: input.datasetId }, ownerKey: input.ownerKey,
             origin: origin.origin, assertOwner: authorize, runtime: input.runtime });
+          const scoped: Copy = { ...copy, data: (remote, source, signal) => copy.data(remote, source, AbortSignal.any([signal, next.stop.signal])) };
+          return scoped;
         });
-        const next: Entry = { lifetime: input.lifetime, closed: false, opening,
+        const next: Entry = { lifetime: input.lifetime, stop: new AbortController(), closed: false, opening,
           detach: () => input.lifetime.removeEventListener("abort", abort) };
         entries.set(key, next);
         input.lifetime.addEventListener("abort", abort, { once: true });

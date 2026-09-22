@@ -15,7 +15,7 @@ async function fixture() {
   await registry.credentialsChanged(ownerKey);
   mocks.open.mockImplementation(async options => {
     await writeFile(join(options.directory,"owned.sqlite"),"copy");
-    return { close: vi.fn(async () => {}), assertOwner: options.assertOwner };
+    return { close: vi.fn(async () => {}), assertOwner: options.assertOwner, data: vi.fn((_remote,_source,signal) => ({signal})) };
   });
   const input = {rootPath,lifetime:lifetime.signal,workspaceId:"w",datasetId:"00000000-0000-4000-8000-000000000001",origin:"https://relay",ownerKey,assertOwner(){}};
   return {registry,input,lifetime};
@@ -38,6 +38,12 @@ it("invalidates access before logout cleanup and removes copies from closed work
 it("changes owner identity only with the account server or user",()=>{
   expect(datasetCopyOwnerKey({serverUrl:"https://account/",userId:"a"})).toBe(datasetCopyOwnerKey({serverUrl:"https://account",userId:"a"}));
   expect(datasetCopyOwnerKey({serverUrl:"https://other",userId:"a"})).not.toBe(datasetCopyOwnerKey({serverUrl:"https://account",userId:"a"}));
+});
+it("aborts in-flight copy transport before closing its worker",async()=>{
+  const f=await fixture(), copy=await f.registry.get(f.input);
+  const captured=copy.data({} as never,{} as never,new AbortController().signal) as unknown as {signal:AbortSignal};
+  expect(captured.signal.aborted).toBe(false);
+  const close=f.registry.credentialsChanged(null);expect(captured.signal.aborted).toBe(true);await close;
 });
 it("waits for an opening copy to close before the previous account can reopen it",async()=>{
   const f=await fixture(), opening=deferred<{close:()=>Promise<void>}>(), entered=deferred<void>(), close=vi.fn(async()=>{});
