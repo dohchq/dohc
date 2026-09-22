@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -67,4 +67,10 @@ it("rejects duplicate pages, changed bytes, and another local owner without adva
 });
 it("never gives a participant the raw replica stream",async()=>{
  const f=await fixture();expect(()=>f.host.replicaCapture("participant",scope)).toThrow("revoked");
+});
+it("locks one owner copy and prunes snapshots while committing bounded pages",async()=>{
+ const f=await fixture(),replica=await f.open();await expect(f.open()).rejects.toThrow(/locked/);
+ await replica.catchUp(f.remote);for(let n=0;n<65;n++)f.add(`row-${n}`);
+ await replica.catchUp(f.remote);expect(replica.state()?.cursor.revision).toBe(65);
+ expect((await readdir(join(f.directory,"copy"))).filter(name=>/^[a-f0-9-]{36}\.sqlite$/.test(name))).toHaveLength(1);
 });
