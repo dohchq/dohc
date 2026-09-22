@@ -93,7 +93,7 @@ export type JournalExportRecord =
       definitionJson: string; capacityBytes: number; byteLength: number; sha256: string };
 export interface JournalExportCapture<T> { cursor: DatasetCursor; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }>; captured: T }
 export interface DatasetJournal {
-  captureExport<T>(input: { scope: DatasetScope; authorize: Authorize; capture(): T }): JournalExportCapture<T>;
+  captureExport<T>(input: { scope: DatasetScope; authorize: Authorize; capture(cursor: DatasetCursor): T }): JournalExportCapture<T>;
   exportPage(input: { scope: DatasetScope; through: DatasetCursor; afterRevision: number; limit?: number; authorize: Authorize }): JournalExportRecord[];
   exportBlob(input: { scope: DatasetScope; record: JournalExportRecord; offset: number; length?: number; authorize: Authorize }): Uint8Array;
   initialize(input: InitializeDatasetInput): DatasetCursor;
@@ -273,7 +273,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(input.authorize); const h=storedHead(key), checkpoint=exportRecord(key,h.checkpointCursor.revision);
         if(checkpoint.kind!=="checkpoint")return corrupt("Export checkpoint is missing.");
-        const captured=callback(input.capture);callback(input.authorize);
+        synchronous(input.capture);const captured=callback(()=>input.capture({...h.cursor}));callback(input.authorize);
         return {cursor:h.cursor,checkpoint,captured};
       });
     },
