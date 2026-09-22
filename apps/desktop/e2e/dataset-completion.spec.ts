@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
@@ -8,6 +8,18 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
+
+async function dragBoardCard(page: Page, card: Locator, column: Locator): Promise<void> {
+  const source = await card.boundingBox(), target = await column.boundingBox();
+  if (!source || !target) throw Error("The card and destination must be visible.");
+  const x = source.x + source.width / 2, y = source.y + source.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 8, y + 8, { steps: 4 });
+  await expect(card).toHaveClass(/opacity-50/);
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 20 });
+  await page.mouse.up();
+}
 
 // Auth and custom source are fixture setup. Field rename, migration review, publication,
 // and submissions use real desktop/browser controls against the real relay and engine.
@@ -305,7 +317,7 @@ test("@dataset-completion board and calendar page all records and save governed 
     await collection.getByRole("button", { name: "Next records in Todo", exact: true }).click();
     await expect(todo.getByRole("listitem", { name: "Task 051", exact: true })).toBeVisible();
     await expect(collection.getByRole("button", { name: "Next records in Todo", exact: true })).toBeDisabled();
-    await todo.getByRole("listitem", { name: "Task 051", exact: true }).dragTo(done);
+    await dragBoardCard(page, todo.getByRole("listitem", { name: "Task 051", exact: true }), done);
     await expect(done.getByRole("listitem", { name: "Task 051", exact: true })).toBeVisible();
     const readTask = async (name: string) => page.evaluate(async request => window.dohcDesktop!.dataset(request), { ...pin, action: "invoke" as const, operationId: readOperation,
       idempotencyKey: `verify-${randomUUID()}`, input: { limit: 1, filters: [{ fieldId: field("Name"), value: name }] } });
