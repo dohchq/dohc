@@ -36,9 +36,9 @@ it("recovers and removes a dead host's validated worker directory after a real p
 it("refuses startup while an orphan worker still owns its local lock",async()=>{
   const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory();
   await writeFile(join(path,"app.sqlite"),"must survive");
-  const run=await child(`import {acquireWorkerLease} from ${JSON.stringify(moduleUrl)};const lease=acquireWorkerLease(${JSON.stringify(path)},${JSON.stringify({root:owner.root,session:owner.session})});process.send('locked');process.on('message',()=>{});`);
+  const run=await child(`import {acquireWorkerLease} from ${JSON.stringify(moduleUrl)};const lease=acquireWorkerLease(${JSON.stringify(path)},${JSON.stringify({root:owner.root,session:owner.session})});process.send('locked');process.on('message',()=>lease.close());`);
   owner.close();
-  await expect(acquireSupervisorOwnership(root)).rejects.toThrow("busy or unavailable");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("must survive");
+  await expect(acquireSupervisorOwnership(root).then(owned)).rejects.toThrow("busy or unavailable");expect(await readFile(join(path,"app.sqlite"),"utf8")).toBe("must survive");
   const exit=once(run.child,"exit");run.child.kill("SIGKILL");await exit;
   owned(await acquireSupervisorOwnership(root));expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toEqual([]);
 });
@@ -62,4 +62,28 @@ it("holds child ownership until explicit close and supports Windows cleanup afte
   const root=await fixture(),owner=owned(await acquireSupervisorOwnership(root)),path=await owner.createDirectory(),lease=acquireWorkerLease(path,owner);
   await expect(owner.removeDirectory(path)).rejects.toThrow("busy or unavailable");lease.close();await owner.removeDirectory(path);
   expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toEqual([]);
+});
+it("reclaims actual supervisor materialization after host death and IPC worker exit",async()=>{
+  const directory=await fixture(),root=join(directory,"workers");
+  const supervisorUrl=new URL("../dist/supervisor.mjs",import.meta.url).href,journalUrl=new URL("../dist/journal.mjs",import.meta.url).href;
+  const childSource=JSON.stringify("globalThis.operations={run(){return 'saved';}};");
+  const run=await child(`import {createDatasetSupervisor} from ${JSON.stringify(supervisorUrl)};import {createDatasetJournal} from ${JSON.stringify(journalUrl)};
+    import {DatabaseSync} from 'node:sqlite';import {readFile} from 'node:fs/promises';import {join} from 'node:path';import {spawn} from 'node:child_process';
+    const directory=${JSON.stringify(directory)},root=${JSON.stringify(root)};const schemaSql='CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL);';
+    const seed=new DatabaseSync(join(directory,'seed.sqlite'));seed.exec(schemaSql);seed.close();const db=new DatabaseSync(join(directory,'authority.sqlite'));
+    function transaction(work){db.exec('BEGIN IMMEDIATE');try{const result=work();db.exec('COMMIT');return result;}catch(error){db.exec('ROLLBACK');throw error;}}
+    const journal=createDatasetJournal({db,transaction}),scope={workspaceId:'workspace',datasetId:'data'};
+    journal.initialize({scope,hostEpoch:'host',approvedRevisionHash:'a'.repeat(64),source:${childSource},schemaSql,definitionJson:'{}',checkpoint:await readFile(join(directory,'seed.sqlite')),authorize(){}});
+    let workerPid;
+    const supervisor=await createDatasetSupervisor({journal,directory:root,runtime:{launch(options){
+      const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:['ignore','ignore','ignore','ipc'],serialization:'advanced',windowsHide:true});workerPid=child.pid;
+      child.on('message',options.onMessage);child.on('error',options.onError);child.on('close',options.onExit);return{postMessage(message){child.send(message);},kill(){child.kill('SIGKILL');}};
+    }}});
+    await supervisor.invoke({scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:null,idempotencyKey:'retry',payloadSha256:'b'.repeat(64),readOnly:false,authorize(){}});
+    process.send({workerPid});process.on('message',()=>{});`);
+  expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toHaveLength(1);
+  const exit=once(run.child,"exit");run.child.kill("SIGKILL");await exit;
+  await vi.waitFor(()=>{try{process.kill(run.message.workerPid,0);}catch(error){if((error as NodeJS.ErrnoException).code==="ESRCH")return;throw error;}throw Error("Worker still exiting after IPC disconnect.");},{timeout:10000});
+  owned(await acquireSupervisorOwnership(root));expect((await readdir(root)).filter(name=>name.startsWith("worker-"))).toEqual([]);
+  expect((await readFile(join(directory,"authority.sqlite"))).length).toBeGreaterThan(0);
 });
