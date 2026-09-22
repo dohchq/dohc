@@ -25,7 +25,7 @@ it("uses one durable dataset route for discovery, owner operations, files and ap
   await f.data.file({ ...input, action: "file", workspaceId: "w", fileId: "f".repeat(32) });
   expect(f.remote.approvedArtifacts).toHaveBeenCalledWith(remoteId);
   expect(f.remote.upload).toHaveBeenCalled(); expect(f.remote.file).toHaveBeenCalled();
-  expect(f.connect).toHaveBeenCalledWith("https://sharing.example");
+  expect(f.connect).toHaveBeenCalledWith("https://sharing.example", remoteId);
   await f.data.invoke({ ...input, datasetId: localId });
   expect(f.local.invoke).toHaveBeenCalled();
 });
