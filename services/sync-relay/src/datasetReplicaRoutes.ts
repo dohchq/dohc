@@ -6,7 +6,7 @@ import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { SyncRelayStorage } from "./storage";
 import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
-import { badRequest, notFound, relayError } from "./errors";
+import { badRequest, notFound, relayError, RelayError } from "./errors";
 
 export interface DatasetReplicaRoute {route:"dataset-replica";workspaceId:string;datasetId:string;action:"capture"|"page"|"blob"}
 const headers={"cache-control":"private, no-store","cross-origin-resource-policy":"same-origin","x-content-type-options":"nosniff"};
@@ -32,6 +32,7 @@ export function createDatasetReplicaRoutes(host:RelayDatasetHost,storage:SyncRel
    const bytes=host.replicaBlob(auth,{...scope,record:row.record as JournalExportRecord,offset:row.offset as number,length:row.length as number});
    return new Response(Buffer.from(bytes),{headers:{...headers,"content-type":"application/octet-stream","content-length":String(bytes.byteLength)}});
   }catch(error){
+   if(error instanceof RelayError)throw error;
    if(error instanceof DatasetHostError)throw relayError(error.code==="not_authorized"?"not_found":error.code==="conflict"?"conflict":"bad_request");
    if(error instanceof JournalError)throw relayError(error.code==="invalid"?"bad_request":"conflict");
    if(error instanceof Error)throw relayError("conflict");
