@@ -34,6 +34,7 @@ export function createDatasetReplicaRoutes(host:RelayDatasetHost,storage:SyncRel
   }catch(error){
    if(error instanceof DatasetHostError)throw relayError(error.code==="not_authorized"?"not_found":error.code==="conflict"?"conflict":"bad_request");
    if(error instanceof JournalError)throw relayError(error.code==="invalid"?"bad_request":"conflict");
+   if(error instanceof Error)throw relayError("conflict");
    throw error;
   }finally{release();}
  };
