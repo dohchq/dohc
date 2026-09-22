@@ -1,11 +1,5 @@
-import { validateUserWritePath } from "@dohc/workspace-core";
-import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 
-export const APP_BACKEND_MAX_OPERATIONS = 128;
-export const APP_BACKEND_MAX_TABLES = 64;
-export const APP_BACKEND_MAX_DATABASE_BYTES = 16 * 1024 * 1024;
-export const APP_BACKEND_CAPABILITY_BYTES = 64 * 1024;
 export const APP_BACKEND_INPUT_BYTES = 64 * 1024;
 export const APP_BACKEND_REQUEST_BYTES = 128 * 1024;
 export const APP_BACKEND_RESULT_BYTES = 1024 * 1024;
@@ -16,29 +10,6 @@ export const APP_BACKEND_JSON_MAX_DEPTH = 32;
 export const APP_BACKEND_JSON_MAX_NODES = 16_384;
 
 export type AppBackendJson = null | boolean | number | string | AppBackendJson[] | { [key: string]: AppBackendJson };
-export interface AppBackendOperation {
-  name: string;
-  access: "link" | "helper" | "owner";
-  readOnly: boolean;
-}
-export interface AppBackendTable {
-  name: string;
-  primaryKey: string;
-  readOperation: string;
-  writeOperation: string | null;
-}
-export interface AppBackendCapability {
-  kind: "app-backend";
-  /** Stable workspace database identity. This path grants no file-selector access. */
-  dataPath: string;
-  backendPath: string;
-  schemaPath: string;
-  backendSha256: string;
-  schemaSha256: string;
-  schemaVersion: number;
-  operations: AppBackendOperation[];
-  tables: AppBackendTable[];
-}
 /** Constructed by the host from current credentials, never accepted from app input. */
 export type AppBackendCaller =
   | { kind: "link"; principalId: string; grantId: string }
@@ -76,9 +47,7 @@ export function parseAppBackendRefusal(value: unknown): AppBackendRefusal {
 
 const encoder = new TextEncoder();
 const forbiddenKeys = new Set(["__proto__", "prototype", "constructor"]);
-const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const operationPattern = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
-const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const bytes = (value: string) => encoder.encode(value).byteLength;
 
 function record(value: unknown): Record<string, unknown> {
@@ -180,39 +149,6 @@ export function parseAppBackendJson(value: unknown, maxBytes = APP_BACKEND_RESUL
   return visit(value, 0);
 }
 
-export function parseAppBackendCapability(value: unknown): AppBackendCapability {
-  const row = exact(parseAppBackendJson(value, APP_BACKEND_CAPABILITY_BYTES), ["kind", "dataPath", "backendPath", "schemaPath", "backendSha256", "schemaSha256", "schemaVersion", "operations", "tables"]);
-  if (row.kind !== "app-backend" || row.backendPath !== "backend.js" || row.schemaPath !== "schema.sql") throw new Error("Invalid app backend artifacts.");
-  const dataPath = text(row.dataPath, 1024);
-  const checked = validateUserWritePath(dataPath);
-  if (!checked.ok || checked.normalized !== dataPath || !dataPath.endsWith(".sqlite") || classifyEngineFilePath(dataPath).kind !== "tracked") throw new Error("Invalid app backend data path.");
-  if (!Array.isArray(row.operations) || !row.operations.length || row.operations.length > APP_BACKEND_MAX_OPERATIONS ||
-      !Array.isArray(row.tables) || row.tables.length > APP_BACKEND_MAX_TABLES) throw new Error("Invalid app backend inventory.");
-  const operations: AppBackendOperation[] = row.operations.map(value => {
-    const operation = exact(value, ["name", "access", "readOnly"]);
-    if (!["link", "helper", "owner"].includes(operation.access as string) || typeof operation.readOnly !== "boolean") throw new Error("Invalid app backend operation.");
-    return { name: name(operation.name), access: operation.access as AppBackendOperation["access"], readOnly: operation.readOnly };
-  }).sort((a, b) => compare(a.name, b.name));
-  const byName = new Map(operations.map(operation => [operation.name, operation]));
-  if (byName.size !== operations.length) throw new Error("Duplicate app backend operation.");
-  const tables: AppBackendTable[] = row.tables.map(value => {
-    const table = exact(value, ["name", "primaryKey", "readOperation", "writeOperation"]);
-    const readOperation = name(table.readOperation);
-    const writeOperation = table.writeOperation === null ? null : name(table.writeOperation);
-    if (byName.get(readOperation)?.readOnly !== true || (writeOperation !== null && byName.get(writeOperation)?.readOnly !== false)) {
-      throw new Error("Invalid app backend table operation.");
-    }
-    return { name: name(table.name, identifierPattern), primaryKey: name(table.primaryKey, identifierPattern), readOperation, writeOperation };
-  }).sort((a, b) => compare(a.name, b.name));
-  if (new Set(tables.map(table => table.name.toLowerCase())).size !== tables.length) throw new Error("Duplicate app backend table.");
-  const capability: AppBackendCapability = {
-    kind: "app-backend", dataPath, backendPath: "backend.js", schemaPath: "schema.sql",
-    backendSha256: hash(row.backendSha256), schemaSha256: hash(row.schemaSha256), schemaVersion: revision(row.schemaVersion), operations, tables,
-  };
-  if (bytes(JSON.stringify(capability)) > APP_BACKEND_CAPABILITY_BYTES) throw new Error("App backend capability exceeds its byte bound.");
-  return capability;
-}
-
 export function parseAppBackendCaller(value: unknown): AppBackendCaller {
   const row = record(value);
   if (row.kind === "owner") {
@@ -229,11 +165,6 @@ export function parseAppBackendCaller(value: unknown): AppBackendCaller {
     return { kind: "named", userId: text(row.userId, 256), grantId: text(row.grantId, 256), access: row.access, helper: row.helper };
   }
   throw new Error("Invalid app backend caller.");
-}
-
-export function canInvokeAppBackendOperation(caller: AppBackendCaller, operation: AppBackendOperation): boolean {
-  if (caller.kind === "owner") return true;
-  return operation.access === "link" || (operation.access === "helper" && caller.kind === "named" && caller.access === "edit" && caller.helper === true);
 }
 
 export function parseAppBackendInvokeRequest(value: unknown): AppBackendInvokeRequest {

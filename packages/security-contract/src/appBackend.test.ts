@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   APP_BACKEND_INPUT_BYTES, APP_BACKEND_JSON_MAX_DEPTH, APP_BACKEND_JSON_MAX_NODES,
-  APP_BACKEND_MAX_OPERATIONS, APP_BACKEND_MAX_TABLES, APP_BACKEND_UPLOAD_BYTES,
-  canInvokeAppBackendOperation, parseAppBackendCaller, parseAppBackendCapability,
+  APP_BACKEND_UPLOAD_BYTES,
+  parseAppBackendCaller, 
   parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest, parseAppBackendRefusal,
-  type AppBackendCaller, type AppBackendCapability,
+  type AppBackendCaller,
 } from "./appBackend";
 
 it("accepts only bounded safe app refusal fields", () => {
@@ -16,60 +16,8 @@ it("accepts only bounded safe app refusal fields", () => {
   expect(parseAppBackendRefusal({code:"full",message:"é".repeat(512)}).message).toHaveLength(512);
 });
 
-function capability(): AppBackendCapability {
-  return {
-    kind: "app-backend", dataPath: "data/registrations.sqlite", backendPath: "backend.js", schemaPath: "schema.sql",
-    backendSha256: "a".repeat(64), schemaSha256: "b".repeat(64), schemaVersion: 1,
-    operations: [
-      { name: "register", access: "link", readOnly: false },
-      { name: "registrations.list", access: "helper", readOnly: true },
-      { name: "registrations.update", access: "helper", readOnly: false },
-      { name: "organizers.manage", access: "owner", readOnly: false },
-    ],
-    tables: [{ name: "registrations", primaryKey: "id", readOperation: "registrations.list", writeOperation: "registrations.update" }],
-  };
-}
 const invoke = () => ({ authorityRevision: 1, operation: "register", idempotencyKey: "attempt:1", input: { attendees: ["Alex"], count: 1 } });
 const upload = () => ({ authorityRevision: 1, idempotencyKey: "upload:1", name: "receipt.pdf", contentType: "application/pdf", bytesBase64: "JVBERg==" });
-
-describe("app backend capability", () => {
-  it("keeps the stable database identity separate from compiled artifacts and returns a detached canonical inventory", () => {
-    const input = capability();
-    const result = parseAppBackendCapability(input);
-    expect(result.dataPath).toBe("data/registrations.sqlite");
-    expect(result.operations.map(operation => operation.name)).toEqual(["organizers.manage", "register", "registrations.list", "registrations.update"]);
-    input.operations[0]!.access = "owner";
-    expect(result.operations.find(operation => operation.name === "register")!.access).toBe("link");
-    expect(parseAppBackendCapability({ ...capability(), tables: [] }).tables).toEqual([]);
-  });
-
-  it.each(["../private.sqlite", "/data.sqlite", "C:\\data.sqlite", "data\\app.sqlite", "data/./app.sqlite", ".dohc/app.sqlite", ".env", "data/app.env", "data//app.sqlite", "data/app.db", "data/app.sqlite3"])("rejects unsafe or noncanonical database path %s", dataPath => {
-    expect(() => parseAppBackendCapability({ ...capability(), dataPath })).toThrow();
-  });
-
-  it.each([
-    { backendPath: "../backend.js" }, { schemaPath: "source.sql" }, { backendSha256: "A".repeat(64) },
-    { schemaSha256: "b".repeat(63) }, { schemaSha256: "b".repeat(64) + "\n" }, { schemaVersion: 0 }, { schemaVersion: 1.1 }, { network: true },
-  ])("rejects invalid artifacts, schema revisions, and extra authority: %j", patch => {
-    expect(() => parseAppBackendCapability({ ...capability(), ...patch })).toThrow();
-  });
-
-  it("rejects duplicate, excessive, and invalid operation or table declarations", () => {
-    const input = capability();
-    for (const operations of [[], [...input.operations, input.operations[0]], Array(APP_BACKEND_MAX_OPERATIONS + 1).fill(input.operations[0]),
-      [{ name: "constructor", access: "link", readOnly: true }], [{ name: "x.__proto__", access: "link", readOnly: true }],
-      [{ name: "run", access: "edit", readOnly: false }], [{ name: "run", access: "owner", readOnly: "false" }],
-      [{ ...input.operations[0], userId: "owner" }]]) {
-      expect(() => parseAppBackendCapability({ ...input, operations })).toThrow();
-    }
-    for (const tables of [[...input.tables, { ...input.tables[0], name: "REGISTRATIONS" }], Array(APP_BACKEND_MAX_TABLES + 1).fill(input.tables[0]),
-      [{ ...input.tables[0], primaryKey: "id); DROP TABLE registrations" }], [{ ...input.tables[0], readOperation: "missing" }],
-      [{ ...input.tables[0], readOperation: "register" }], [{ ...input.tables[0], writeOperation: "registrations.list" }]]) {
-      expect(() => parseAppBackendCapability({ ...input, tables })).toThrow();
-    }
-    expect(parseAppBackendCapability({ ...input, tables: [{ ...input.tables[0], writeOperation: null }] }).tables[0]!.writeOperation).toBeNull();
-  });
-});
 
 describe("verified app backend callers", () => {
   const callers: AppBackendCaller[] = [
@@ -81,12 +29,8 @@ describe("verified app backend callers", () => {
     { kind: "owner", userId: "owner" },
   ];
 
-  it("requires both an explicit helper assignment and a named Edit grant for helper operations", () => {
-    const operations = capability().operations;
+  it("parses verified caller records", () => {
     expect(callers.map(caller => parseAppBackendCaller(caller))).toEqual(callers);
-    for (const caller of callers) expect(canInvokeAppBackendOperation(caller, operations[0]!)).toBe(true);
-    expect(callers.map(caller => canInvokeAppBackendOperation(caller, operations[1]!))).toEqual([false, false, false, false, true, true]);
-    expect(callers.map(caller => canInvokeAppBackendOperation(caller, operations[3]!))).toEqual([false, false, false, false, false, true]);
   });
 
   it.each([
