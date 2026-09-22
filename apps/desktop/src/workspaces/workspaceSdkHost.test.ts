@@ -1,4 +1,3 @@
-import { databaseOpLogPath } from "@dohc/workspace-core";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -400,25 +399,29 @@ describe("workspace SDK host authority", () => {
     }
   });
 
-  it("threads the injected clock/id seams into a database edit's op log", async () => {
+  it("passes the injected clock, operation ID, author, and signal to the admitted database writer", async () => {
     const root = await workspace();
-    await mkdir(join(root, "data"), { recursive: true });
-    seedDatabase(join(root, "data", "app.sqlite"), "start");
+    const readDatabase = vi.fn(async (path: string) => ({ path, tables: [] }));
+    const written = { path: "data/app.sqlite", version: 1 };
+    const editDatabase = vi.fn<WorkspaceSdkHostContext["editDatabase"]>(async () => {
+      expect(readDatabase).toHaveBeenCalledExactlyOnceWith("data/app.sqlite");
+      return written;
+    });
+    const now = vi.fn(() => 1_700_000_000_000), createId = vi.fn(() => "op_sdk_0001");
+    const controller = new AbortController();
     const context = hostContext(root, {
-      now: () => 1_700_000_000_000,
-      createId: () => "op_sdk_0001",
+      now, createId, signal: controller.signal,
+      reads: { ...localWorkspaceSdkReads(root), readDatabase }, editDatabase,
     });
-    await invokeWorkspaceSdkHost(context, "databases.edit", {
-      path: "data/app.sqlite",
-      edit: { table: "sentinel", op: "update", pkColumn: "id", rowId: "1", payload: { marker: "edited" } },
+    const edit = { table: "sentinel", op: "update", pkColumn: "id", rowId: "1", payload: { marker: "edited" } };
+    await expect(invokeWorkspaceSdkHost(context, "databases.edit", {
+      path: "data//./app.sqlite", edit, author: { kind: "user", userId: "forged" },
+    })).resolves.toBe(written);
+    expect(editDatabase).toHaveBeenCalledExactlyOnceWith({
+      path: "data/app.sqlite", edit, operationId: "op_sdk_0001", nowMs: 1_700_000_000_000,
+      author: USER_AUTHOR, signal: controller.signal,
     });
-    const log = await readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8");
-    const ops = log.trim().split("\n").map((l) => JSON.parse(l));
-    expect(ops[0]).toMatchObject({
-      operationId: "op_sdk_0001",
-      appliedAt: 1_700_000_000_000,
-      author: { kind: "user", userId: "local" },
-    });
+    expect(now).toHaveBeenCalledOnce(); expect(createId).toHaveBeenCalledOnce();
   });
 
   it("refuses every write when the context has no write authority", async () => {
