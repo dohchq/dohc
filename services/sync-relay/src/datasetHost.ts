@@ -258,6 +258,22 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
     return {
+      offlineAccessFingerprint(auth: Extract<AppBackendAuth, {kind: "named"}>) {
+        current();
+        if (!auth.grantId) throw notFound();
+        const verified = named(auth.workspaceId, auth.grantId, auth.userId);
+        const digest = createHash("sha256").update(JSON.stringify(["named-dataset-copy-v1", auth.workspaceId, verified.principalKey, verified.authorityToken]));
+        // Stream metadata only: no record counts, source, or other principals' grants enter the response.
+        for (const row of storage.db.prepare(`SELECT g.dataset_id,g.token,g.grant_json,
+          json_extract(c.revision_json,'$.revisionSha256') AS revision,COALESCE(l.generation,0) AS lifecycle
+          FROM dohc_dataset_data_grants g JOIN dohc_dataset_catalog c
+          ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id
+          LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=g.workspace_id AND l.dataset_id=g.dataset_id
+          WHERE g.workspace_id=? AND g.principal_key=? ORDER BY g.dataset_id`).iterate(auth.workspaceId, verified.principalKey)) {
+          digest.update(JSON.stringify(row));
+        }
+        return digest.digest("hex");
+      },
       activate(auth: AppBackendAuth, input: Parameters<typeof host.activate>[1]) {
         return host.activate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },

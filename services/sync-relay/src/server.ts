@@ -630,8 +630,17 @@ export function createSyncRelayHandler({
         const actor = await resolveActor(new Request(request.url, { headers: { authorization: authorization! }, signal: request.signal }), "");
         const granted = requireShareAction(route.shareId, actor.userId, "read");
         if (granted.grant.principalKind !== "user" || granted.grant.principalUserId !== actor.userId) throw notFound();
-        return await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action, named: true },
-          { kind: "named", workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId });
+        const auth = { kind: "named" as const, workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId };
+        const fingerprint = datasetHost!.offlineAccessFingerprint(auth);
+        const response = await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action, named: true }, auth);
+        const currentFingerprint = datasetHost!.offlineAccessFingerprint(auth);
+        if (fingerprint !== currentFingerprint) {
+          await response.body?.cancel();
+          return Response.json({ message: "Collection access changed. Refresh the Collection." }, { status: 409,
+            headers: { "cache-control": "no-store", "x-dohc-dataset-access": currentFingerprint } });
+        }
+        response.headers.set("x-dohc-dataset-access", fingerprint);
+        return response;
       }
       if (route.route === "dataset" || route.route === "dataset-replica") {
         if (!respondToDataset) throw notFound();

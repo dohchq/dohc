@@ -111,7 +111,7 @@ export const DatasetMigrationPreparation = z.object({ preparationId: identity, p
   sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
   migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
-export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative() }).strict();
+export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative(), coverage: z.literal("saved-pages").optional() }).strict();
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;
 export const DatasetInvocationResult = z.object({
   result: z.unknown().transform((value, context) => {

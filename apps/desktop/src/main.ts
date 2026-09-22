@@ -23,6 +23,8 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/loca
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
+import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
+import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
@@ -749,6 +751,7 @@ type CloudSessionCredentials = NonNullable<
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
+const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
@@ -763,16 +766,22 @@ const credentialSessionCache =
     credentialCacheGeneration = snapshot.generation;
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
+    // A credential load publishes a temporary null first. Keep saved pages until the account is known.
+    if (snapshot.credentials) void namedDatasetPages.credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
+      .catch(error => console.error("Saved Collection page cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
   });
-function refreshCredentialCache(): Promise<void> {
-  return credentialSessionCache.refresh(() => cloudLogin().credentials());
+async function refreshCredentialCache(): Promise<void> {
+  try { await credentialSessionCache.refresh(() => cloudLogin().credentials()); }
+  finally { if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null); }
 }
-function warmCredentialCache(): Promise<void> {
-  return credentialSessionCache.warm(() => cloudLogin().credentials());
+async function warmCredentialCache(): Promise<void> {
+  await credentialSessionCache.warm(() => cloudLogin().credentials());
+  if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
 }
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
+  void namedDatasetPages.credentialsChanged(null).catch(error => console.error("Saved Collection page cleanup failed", error));
   peekedReceivedGrantKinds.clear();
   // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
   // transition (login adoption, logout, or a current-session 401 — all three
@@ -892,13 +901,15 @@ const relayShareFetch = relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS);
 
 async function relayShareResponseWithCredentials(
   credentials: CloudSessionCredentials, path: string, init: RequestInit,
+  classifyNamedOffline = false,
 ): Promise<Response> {
   if (!credentials.relayUrl) throw new Error("Reconnect your sharing server, then try again.");
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${credentials.token}`);
-  const response = await relayShareFetch(`${normalizeServerUrl(credentials.relayUrl)}${path}`, {
+  const fetchResponse = () => relayShareFetch(`${normalizeServerUrl(credentials.relayUrl!)}${path}`, {
     ...init, headers, redirect: "error", cache: "no-store", credentials: "omit",
   });
+  const response = await (classifyNamedOffline ? namedDatasetFetch(fetchResponse) : fetchResponse());
   if (response.status === 401) {
     await handleRelayUnauthorized({
       requestCredentials: credentials, currentCredentials: cachedCredentials,
@@ -3779,6 +3790,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
       activeDatasetHosts.clear();
       await ownerDatasetCopies.closeAll();
+      await namedDatasetPages.close();
     },
     disposeDatabase: () => workspaceDatabaseWorker.dispose(),
     closeRelay: closeAllRelayTransportWorkspaces,
@@ -4184,9 +4196,15 @@ function registerIpcHandlers(): void {
       await warmCredentialCache();
       const credentials = requireCredentials(cachedCredentials), credentialGeneration = credentialCacheGeneration;
       signal.throwIfAborted();
-      return createNamedDatasetData({ workspaceId: workspace.workspaceId, shareView: workspace.shareView, credentials, credentialGeneration, signal,
+      const cache = namedDatasetPages.scope({ owner: datasetCopyOwnerKey(credentials),
+        binding: [workspace.workspaceId, workspace.rootPath, (workspace.shareView as { shareId?: unknown } | null)?.shareId, credentials.relayUrl],
+        assertCurrent: () => { signal.throwIfAborted(); if (credentialGeneration !== credentialCacheGeneration) throw Error("Your server session changed. Reopen this workspace."); },
+      });
+      try { return createNamedDatasetData({ workspaceId: workspace.workspaceId, shareView: workspace.shareView, credentials, credentialGeneration, signal,
         currentCredentialGeneration: () => credentialCacheGeneration,
-        assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
+        assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials,
+        offline: { relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init, true), cache },
+      }); } catch (error) { await cache.clear(); throw error; }
     },
     dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       const local = await datasetForWorkspace(workspace, signal);
