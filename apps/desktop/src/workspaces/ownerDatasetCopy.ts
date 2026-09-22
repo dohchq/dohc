@@ -79,6 +79,21 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       };
       return {
         ...remote,
+        ...(remote.deleteDataset ? { async deleteDataset(input: Parameters<NonNullable<OwnerDatasetData["deleteDataset"]>>[0]) {
+          selected(input.datasetId);
+          const result = await remote.deleteDataset!(input);
+          // A confirmed deletion invalidates local data even if its caller was cancelled meanwhile.
+          if (result.deleted && result.datasetId === options.scope.datasetId) await revoke();
+          return result;
+        } } : {}),
+        ...(remote.deletionStatus ? { async deletionStatus(input: Parameters<NonNullable<OwnerDatasetData["deletionStatus"]>>[0]) {
+          options.assertOwner(); signal.throwIfAborted();
+          if (input.datasetId !== options.scope.datasetId) throw Error("This copy belongs to another Collection.");
+          const result = await remote.deletionStatus!(input);
+          if (result.deleted) await revoke();
+          else authorize();
+          return result;
+        } } : {}),
         async inspect(datasetId, metadata?: { includeArchived?: boolean }) {
           selected(datasetId);
           try {
@@ -120,7 +135,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
           const operation = state.dataset.operations.find(operation => operation.operationId === input.operationId);
           if (!operation?.readOnly) {
             if (state.copy.offline) throw Error("This Collection copy is read-only. Reconnect to make changes.");
-            return remote.invoke(input);
+            const result = await remote.invoke(input); authorize(); return result;
           }
           const result = await replica.read(input); authorize();
           return { result: result.result, revision: result.revision, replayed: false, copy: state.copy };
