@@ -131,9 +131,10 @@ export function createRemoteDatasetTransferTarget(input: {
       const chunks = value.stream[Symbol.asyncIterator]();
       const body = new ReadableStream<Uint8Array>({ async pull(controller) { try { signal.throwIfAborted(); session.assertCurrent(); const item = await chunks.next(); if (item.done) controller.close(); else controller.enqueue(item.value); } catch (error) { controller.error(error); } }, async cancel() { await chunks.return?.(); } });
       try {
-      const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), { method: "POST", signal,
+      const request: RequestInit & { duplex: "half" } = { method: "POST", signal, duplex: "half",
         headers: { "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": value.manifestSha256,
-          "x-dohc-dataset-source-cursor": JSON.stringify(value.sourceCursor) }, body }));
+          "x-dohc-dataset-source-cursor": JSON.stringify(value.sourceCursor) }, body };
+      const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), request));
       const confirmed = receipt(result, value.transferId);
       if (!confirmed) throw new Error("The sharing server did not confirm this transfer.");
       return confirmed;
