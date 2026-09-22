@@ -15,7 +15,7 @@ export interface DatasetRoute {
   route: "dataset";
   workspaceId: string;
   datasetId?: string;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -68,7 +68,17 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "describe") return host.describe(auth, scope);
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
-        const raw = await json(request, signal, route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        if (route.action === "upload") {
+          const body = record(raw, ["revision", "revisionSha256", "idempotencyKey", "name", "contentType", "bytesBase64"]);
+          let parsed; try {parsed = parseAppBackendUploadRequest({authorityRevision: positive(body.revision), idempotencyKey: body.idempotencyKey, name: body.name, contentType: body.contentType, bytesBase64: body.bytesBase64});} catch {throw badRequest("Invalid dataset upload.");}
+          const {authorityRevision: revision, ...file} = parsed;
+          return host.ownerUpload(auth, {...scope, ...file, revision, revisionSha256: digest(body.revisionSha256)}, signal);
+        }
+        if (route.action === "file") {
+          const body = record(raw, ["revision", "revisionSha256", "fileId"]);
+          return host.ownerReadFile(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), fileId: text(body.fileId, 128)}, signal);
+        }
         if (route.action === "activate" || route.action === "migrate") {
           const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "migrate" ? ["expected", "migrationSql"] : [])], ["capacityBytes"]);
           let revision; try {revision = parseDatasetRevision(body.revision);} catch {throw badRequest("Invalid dataset revision.");}

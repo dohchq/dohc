@@ -209,6 +209,25 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           if (!head || head.active !== 1 || head.approved_revision_hash !== scope.revisionSha256) throw notFound();
         });
       },
+      ownerUpload(auth: AppBackendAuth, input: Omit<AppBackendUploadRequest, "authorityRevision"> & {workspaceId: string; datasetId: string; revision: number; revisionSha256: string}, signal?: AbortSignal) {
+        const scope = {workspaceId: input.workspaceId, datasetId: input.datasetId};
+        const authorize = () => {
+          signal?.throwIfAborted(); const authority = owner(auth, input.workspaceId);
+          const description = host.describe(auth, scope);
+          const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId);
+          if (!head || head.active !== 1 || head.approved_revision_hash !== input.revisionSha256 || description.revision !== input.revision || description.revisionSha256 !== input.revisionSha256) throw new DatasetHostError("conflict", "Dataset revision is stale. Reload it before uploading.");
+          return authority;
+        };
+        return files.upload(scope, authorize(), {authorityRevision: input.revision, idempotencyKey: input.idempotencyKey, name: input.name, contentType: input.contentType, bytesBase64: input.bytesBase64}, authorize);
+      },
+      ownerReadFile(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; revision: number; revisionSha256: string; fileId: string}, signal?: AbortSignal) {
+        return storage.tx(() => {
+          owner(auth, input.workspaceId); signal?.throwIfAborted();
+          const description = host.describe(auth, input);
+          if (description.revision !== input.revision || description.revisionSha256 !== input.revisionSha256) throw new DatasetHostError("conflict", "Dataset revision is stale. Reload it before reading.");
+          return files.readOwner(input, input.fileId);
+        });
+      },
       readFile(auth: AppBackendAuth, publicationId: string, input: {authorityRevision: number; fileId: string; operation: string; input: AppBackendJson}, signal?: AbortSignal) {
         const published = publication(auth, publicationId);
         if (!published || published.authorityRevision !== input.authorityRevision) throw notFound();

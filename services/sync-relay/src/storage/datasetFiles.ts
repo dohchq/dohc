@@ -27,6 +27,12 @@ export function createDatasetFiles(storage: StorageContext, account: (workspaceI
   }
   const usable = (row: FileRow, authority: DatasetAuthority) => (row.attached_revision !== null || row.expires_at_ms > nowMs()) &&
     (authority.caller.kind === "owner" || (row.principal_key === authority.principalKey && row.app_id === (authority.appId ?? "")));
+  function bytes(scope: Scope, fileId: string, row: FileRow) {
+    const file = parseAppBackendFile(JSON.parse(row.metadata));
+    const content = storage.db.prepare("SELECT content FROM sync_relay_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(scope.workspaceId, scope.datasetId, fileId)!.content as Uint8Array;
+    if (content.byteLength !== file.byteLength || digest(content) !== file.sha256) throw relayError("conflict", "File integrity check failed.");
+    return {file, bytesBase64: Buffer.from(content).toString("base64")};
+  }
   return {
     upload(scope: Scope, authority: DatasetAuthority, raw: AppBackendUploadRequest, authorize: () => void) {
       const input = parseAppBackendUploadRequest(raw), bytes = Buffer.from(input.bytesBase64, "base64"), sha256 = digest(bytes);
@@ -85,10 +91,13 @@ export function createDatasetFiles(storage: StorageContext, account: (workspaceI
       if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).length !== 1 || (result as {fileId?: unknown}).fileId !== fileId) throw notFound();
       const row = read(scope, fileId);
       if (!row || row.attached_revision === null) throw notFound();
-      const file = parseAppBackendFile(JSON.parse(row.metadata));
-      const content = storage.db.prepare("SELECT content FROM sync_relay_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(scope.workspaceId, scope.datasetId, fileId)!.content as Uint8Array;
-      if (content.byteLength !== file.byteLength || digest(content) !== file.sha256) throw relayError("conflict", "File integrity check failed.");
-      return {file, bytesBase64: Buffer.from(content).toString("base64")};
+      return bytes(scope, fileId, row);
+    },
+    /** The authenticated workspace owner can inspect pending as well as attached files. */
+    readOwner(scope: Scope, fileId: string) {
+      const row = read(scope, fileId);
+      if (!row || (row.attached_revision === null && row.expires_at_ms <= nowMs())) throw notFound();
+      return bytes(scope, fileId, row);
     },
   };
 }

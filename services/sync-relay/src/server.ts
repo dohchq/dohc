@@ -908,7 +908,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     const datasetId = parts[3];
     if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
-    if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
+    if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions","upload","file"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
     if (parts.length === 5 && parts[4] === "grants") return {route:"dataset", workspaceId, datasetId, action:"grant"};
     if (parts.length === 5 && parts[4] === "binding") return {route:"dataset", workspaceId, datasetId, action:"binding"};
     throw notFound();

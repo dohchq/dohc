@@ -221,3 +221,16 @@ it("bounds pending uploads and rolls quota refusals back without retaining file 
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(32);
   expect(f.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes).toBe(quota);
 });
+
+it("lets the workspace owner upload and inspect files without an app publication", async () => {
+  const f = await httpFixture(); await f.activate();
+  const {authorityRevision: _revision, ...bytes} = upload;
+  const body = {...bytes, revision: 1, revisionSha256: revision.revisionSha256};
+  const uploaded = await f.http(`${f.path}/upload`, body); expect(uploaded.status).toBe(200);
+  const {file} = await uploaded.json(), request = {revision: 1, revisionSha256: revision.revisionSha256, fileId: file.fileId};
+  expect(await (await f.http(`${f.path}/file`, request)).json()).toEqual({file, bytesBase64: upload.bytesBase64});
+  expect((await f.http(`${f.path}/file`, request, {authorization: "Bearer stranger"})).status).toBe(404);
+  expect((await f.http(`${f.path}/upload`, body, {authorization: "Bearer stranger"})).status).toBe(404);
+  expect((await f.http(`${f.path}/upload`, {...body, revision: 2})).status).toBe(409);
+  expect((await f.http(`${f.path}/file`, {...request, revision: 2})).status).toBe(409);
+});
