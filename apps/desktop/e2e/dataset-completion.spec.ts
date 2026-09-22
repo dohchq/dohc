@@ -125,6 +125,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!, table = dataset.tables[0]!;
     const guest = await shared.browser.newPage();
+    guest.setDefaultTimeout(30_000);
     guest.on("pageerror", error => shared!.failures.push(error.message));
     await guest.goto(linkUrl);
     await guest.getByRole("button", { name: "Open app", exact: true }).click();
