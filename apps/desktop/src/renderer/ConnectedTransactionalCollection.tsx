@@ -13,6 +13,7 @@ import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
+  owner?: boolean;
   workspaceId: string;
   datasetId: string;
   tableId: string;
@@ -22,7 +23,7 @@ export interface ConnectedTransactionalCollectionProps {
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
@@ -63,11 +64,11 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
   </div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
-    onCreateForm={() => setCreatingForm(true)}
-    onTransferCsv={() => setTransferringCsv(true)}
-    onHistory={() => setViewingHistory(true)}
-    onReviewSchema={() => setReviewingSchema(true)}
-    onManageAccess={() => setManagingAccess(true)}
+    onCreateForm={owner ? () => setCreatingForm(true) : undefined}
+    onTransferCsv={owner ? () => setTransferringCsv(true) : undefined}
+    onHistory={owner ? () => setViewingHistory(true) : undefined}
+    onReviewSchema={owner ? () => setReviewingSchema(true) : undefined}
+    onManageAccess={owner ? () => setManagingAccess(true) : undefined}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {

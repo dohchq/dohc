@@ -18,29 +18,45 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
+  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke">>;
+  exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
-  /** Resolves current host authority and streams its private recovery archive to an owner-selected destination. */
-  exportArchive?(workspace: W, request: Extract<DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
 }) {
   return async (caller: Caller, raw: unknown) => {
     const input = DatasetRequest.parse(raw);
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
       current();
-      if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
       if (input.action === "export") {
+        if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
         if (!dependencies.exportArchive) throw new Error("Collection recovery export is unavailable. Restart dohc and try again.");
         const savedPath = await dependencies.exportArchive(operation.workspace, input, operation.signal, current);
         current();
         return { kind: "exported" as const, savedPath };
       }
+      if (shareViewIsPresent(operation.workspace.shareView)) {
+        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
+        const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
+        current();
+        if (input.action === "list") { const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
+        if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+        if (input.action === "invoke") {
+          try { const result = await data.invoke({ ...input, signal: operation.signal }); current(); return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) }; }
+          catch (error) { current(); if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal }; throw error; }
+        }
+        throw new Error("This Collection action is unavailable.");
+      }
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "permissions", "setGrant", "removeGrant", "history"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
+      if (input.action === "history") {
+        if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
+        const result = await data.history(input); current(); return { kind: "history" as const, ...result };
+      }
       if (input.action === "permissions") {
         if (!("permissions" in data) || !data.permissions) throw new Error("Publish this Collection before managing shared access.");
         const result = await data.permissions(input); current(); return { kind: "permissions" as const, ...result };
@@ -51,7 +67,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
       if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
-      if (input.action === "history") { const result = await data.history(input); current(); return { kind: "history" as const, ...result }; }
       if (input.action === "upload") {
         const description = await data.describe(input.datasetId);
         current();

@@ -7,7 +7,7 @@ import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
-function fixture(remote?: OwnerDatasetData) {
+function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list" | "describe" | "invoke">) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -28,6 +28,7 @@ function fixture(remote?: OwnerDatasetData) {
     },
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
+    ...(named ? { namedDataForWorkspace: async () => named } : {}),
     withAdapter: vi.fn(), createSources,
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetId, revision: 1, revisionSha256: revision.revisionSha256,
@@ -49,6 +50,15 @@ it("routes history to shared authority and rejects stale history replies", async
   expect(remote.history).toHaveBeenCalledWith({ workspaceId: "workspace", datasetId, action: "history", limit: 10 });
   vi.mocked(remote.history).mockImplementation(async () => { f.stale(); return page; });
   await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "history" })).rejects.toThrow("stale workspace");
+});
+it("allows named Collection data actions without opening a local owner store or source controls", async () => {
+  const named = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), describe: vi.fn(), invoke: vi.fn() };
+  const f = fixture(undefined, named); f.workspace.shareView = { shareId: "shared" };
+  expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toMatchObject({ kind: "list" });
+  expect(named.list).toHaveBeenCalled(); expect(f.host.list).not.toHaveBeenCalled();
+  await expect(f.handler("window", f.createForm)).rejects.toThrow(/original workspace/);
+  await expect(f.handler("window", { action: "prepare", workspaceId: "workspace", descriptorPath: "data/dataset.json" })).rejects.toThrow(/original workspace/);
+  expect(f.host.approvedArtifacts).not.toHaveBeenCalled();
 });
 it("routes owner reads and writes to shared authority without falling back locally", async () => {
   const remote = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => { throw Error("shared server offline"); }) } as unknown as OwnerDatasetData;

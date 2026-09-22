@@ -135,6 +135,7 @@ export interface CreateSyncRelayHandlerOptions {
 type SyncRelayRoute =
   | AppBackendRoute
   | DatasetRoute
+  | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" }
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -618,6 +619,16 @@ export function createSyncRelayHandler({
       ) {
         return await respondToLinkRead(request, route);
       }
+      if (route.route === "named-dataset") {
+        if (!respondToDataset) throw notFound();
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || request.headers.has("x-dohc-dataset-grant") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, { headers: { authorization: authorization! }, signal: request.signal }), "");
+        const granted = requireShareAction(route.shareId, actor.userId, "read");
+        if (granted.grant.principalKind !== "user" || granted.grant.principalUserId !== actor.userId) throw notFound();
+        return await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action },
+          { kind: "named", workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId });
+      }
       if (route.route === "dataset") {
         if (!respondToDataset) throw notFound();
         const authorization = request.headers.get("authorization");
@@ -838,6 +849,14 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts[1] === "shares") {
     if (parts.length === 2) return { route: "shares-list" };
     const shareId = parseShareId(parts[2]);
+    if (parts[3] === "datasets") {
+      if (parts.length === 4) return { route: "named-dataset", shareId, action: "list" };
+      const datasetId = parts[4];
+      if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
+      if (parts.length === 5) return { route: "named-dataset", shareId, datasetId, action: "describe" };
+      if (parts.length === 6 && parts[5] === "invoke") return { route: "named-dataset", shareId, datasetId, action: "invoke" };
+      throw notFound();
+    }
     if (parts.length === 3) return { route: "share", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {

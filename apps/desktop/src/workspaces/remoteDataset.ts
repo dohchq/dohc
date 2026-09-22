@@ -34,12 +34,14 @@ const artifacts = z.object({
 /** A remote authority is never replaced by a local fallback when the server is unavailable. */
 export function createRemoteDatasetData(input: {
   workspaceId: string; credentials: CloudCredentials; credentialGeneration: number; signal: AbortSignal;
+  /** Main derives this from the pinned share-view marker, never a renderer request. */
+  shareId?: string;
   currentCredentialGeneration(): number; assertCurrent(): void;
   relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
 }): OwnerDatasetData {
   const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration,
     currentGeneration: input.currentCredentialGeneration, assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
-  const base = `/sync/${encodeURIComponent(input.workspaceId)}/datasets`;
+  const base = input.shareId === undefined ? `/sync/${encodeURIComponent(input.workspaceId)}/datasets` : `/sync/shares/${encodeURIComponent(input.shareId)}/datasets`;
   const path = (datasetId: string) => `${base}/${identity.parse(datasetId)}`;
   const request = (url: string, body?: unknown, signal = input.signal) => session.run(async () => {
     signal.throwIfAborted();
@@ -84,6 +86,7 @@ export function createRemoteDatasetData(input: {
       return result;
     },
     async approvedArtifacts(datasetId) {
+      if (input.shareId !== undefined) throw new Error("Only the Collection owner can read its approved source.");
       const result = artifacts.parse(await request(`${path(datasetId)}/artifacts`));
       verifyDatasetArtifacts(result);
       if (result.revision.datasetId !== datasetId || result.cursor.datasetId !== datasetId || result.cursor.workspaceId !== input.workspaceId ||
@@ -97,6 +100,7 @@ export function createRemoteDatasetData(input: {
         { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey }, signal));
     },
     async upload(upload) {
+      if (input.shareId !== undefined) throw new Error("Use the shared app to upload a file.");
       const signal = upload.signal ? AbortSignal.any([input.signal, upload.signal]) : input.signal;
       const result = DatasetResult.parse({ ...(await request(`${path(upload.datasetId)}/upload`, {
         revision: upload.revision, revisionSha256: upload.revisionSha256, idempotencyKey: upload.idempotencyKey,
@@ -109,6 +113,7 @@ export function createRemoteDatasetData(input: {
       return { file: result.file, replayed: result.replayed };
     },
     async file(file) {
+      if (input.shareId !== undefined) throw new Error("Use the shared app's approved file action to open this file.");
       const signal = file.signal ? AbortSignal.any([input.signal, file.signal]) : input.signal;
       const result = DatasetResult.parse({ ...(await request(`${path(file.datasetId)}/file`, {
         revision: file.revision, revisionSha256: file.revisionSha256, fileId: file.fileId,
