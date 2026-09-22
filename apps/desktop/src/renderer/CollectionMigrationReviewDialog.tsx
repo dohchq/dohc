@@ -12,6 +12,9 @@ export interface CollectionMigrationReviewDialogProps {
   datasetId: string;
   descriptorPath?: string;
   migrationPath?: string;
+  initialPreparation?: DatasetMigrationPreparation;
+  /** Native field controls prepare generated changes without asking for source paths. */
+  generatedChange?: boolean;
   onClose(): void;
   onPrepare(input: { workspaceId: string; datasetId: string; descriptorPath: string; migrationPath: string }, signal: AbortSignal): Promise<DatasetMigrationPreparation>;
   onApprove(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void>;
@@ -51,7 +54,7 @@ export function CollectionMigrationReviewDialog(props: CollectionMigrationReview
 function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   const [descriptorPath, setDescriptorPath] = useState(props.descriptorPath ?? "dataset.json");
   const [migrationPath, setMigrationPath] = useState(props.migrationPath ?? "");
-  const [preparation, setPreparation] = useState<DatasetMigrationPreparation | null>(null);
+  const [preparation, setPreparation] = useState<DatasetMigrationPreparation | null>(props.initialPreparation ?? null);
   const [invalid, setInvalid] = useState<string | null>(null), [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const active = useRef<AbortController | null>(null), alive = useRef(true), locked = useRef(false);
@@ -59,7 +62,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   const diff = useMemo(() => preparation ? changes(preparation.previousRevision, preparation.revision) : [], [preparation]);
   async function run(kind: "prepare" | "approve"): Promise<void> {
     if (!alive.current || locked.current) return;
-    if (kind === "prepare") {
+    if (kind === "prepare" && !props.generatedChange) {
       if (!validPath(descriptorPath.trim()) || !validPath(migrationPath.trim()) || descriptorPath.trim() === migrationPath.trim() || descriptorPath.trim().endsWith("/dataset.json") === false && descriptorPath.trim() !== "dataset.json") { setInvalid("Choose separate Collection source files in this workspace."); return; }
     }
     if (kind === "approve" && (!preparation || !confirmed)) return;
@@ -89,10 +92,10 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
   return <Overlay onClose={busy ? undefined : () => void discard()}><div role="dialog" aria-modal="true" aria-labelledby="collection-migration-title" className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(720px,calc(100vw-32px))] max-w-[calc(100vw-32px)] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
-    <div><h2 id="collection-migration-title" className="m-0 text-sm font-semibold text-ink">Review Collection change</h2><p className="m-0 text-[12px] text-muted">Review the captured source before applying it. dohc will not edit the authored operations for you.</p></div>
+    <div><h2 id="collection-migration-title" className="m-0 text-sm font-semibold text-ink">Review Collection change</h2><p className="m-0 text-[12px] text-muted">{props.generatedChange ? "Review the fields before applying this change." : "Review the captured source before applying it. dohc will not edit the authored operations for you."}</p></div>
     {!preparation ? <form onSubmit={event => { event.preventDefault(); void run("prepare"); }} className="flex flex-col gap-3">
-      <label className="text-[12px] text-muted">Collection definition<input aria-label="Collection definition" value={descriptorPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setDescriptorPath(event.target.value)} /></label>
-      <label className="text-[12px] text-muted">Migration file<input aria-label="Migration file" value={migrationPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setMigrationPath(event.target.value)} /></label>
+      {!props.generatedChange ? <><label className="text-[12px] text-muted">Collection definition<input aria-label="Collection definition" value={descriptorPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setDescriptorPath(event.target.value)} /></label>
+      <label className="text-[12px] text-muted">Migration file<input aria-label="Migration file" value={migrationPath} disabled={busy} className={`${inputClass} mt-1 font-mono`} onChange={event => setMigrationPath(event.target.value)} /></label></> : <p className="m-0 text-[12px] text-muted">Prepare a fresh review before applying these field changes.</p>}
       {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}<div className="flex justify-end gap-2"><SecondaryButton type="button" disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={busy}>{busy ? "Preparing…" : "Review change"}</PrimaryButton></div>
     </form> : <>
       <div className="grid grid-cols-2 gap-3 text-[12px]"><div className="rounded-lg border border-line bg-panel-2 p-3"><span className="text-muted">Current revision</span><strong className="mt-1 block font-mono text-ink">{preparation.previousRevision.revision}</strong></div><div className="rounded-lg border border-line bg-panel-2 p-3"><span className="text-muted">New revision</span><strong className="mt-1 block font-mono text-ink">{preparation.revision.revision}</strong></div></div>
@@ -101,7 +104,7 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
       <details><summary className="cursor-pointer text-[12px] text-muted">Show migration SQL</summary><pre className="max-h-48 overflow-auto rounded-lg border border-line bg-bg p-3 font-mono text-[11px] text-ink">{preparation.migrationSql}</pre></details>
       <details><summary className="cursor-pointer text-[12px] text-muted">Show new schema</summary><pre className="max-h-48 overflow-auto rounded-lg border border-line bg-bg p-3 font-mono text-[11px] text-ink">{preparation.schemaSql}</pre></details>
       <details><summary className="cursor-pointer text-[12px] text-muted">Show new operation source</summary><pre className="max-h-48 overflow-auto rounded-lg border border-line bg-bg p-3 font-mono text-[11px] text-ink">{preparation.operationSource}</pre></details>
-      <p className="m-0 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-warning">This change can replace or delete data. dohc has no undo for this change. Review the captured SQL and operations.</p>
+      <p className="m-0 rounded-lg border border-warning/50 bg-panel-2 p-3 text-[12px] text-warning">{props.generatedChange ? "Existing records will stay. Shared apps and helpers need approval for this revision before they can use it." : "This change can replace or delete data. dohc has no undo for this change. Review the captured SQL and operations."}</p>
       <label className="flex items-center gap-2 text-[12px] text-ink"><input type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />I reviewed this change and its effect on existing data</label>
       {invalid ? <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p> : null}<div className="flex flex-wrap justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => void discard(false)}>Review another change</SecondaryButton><SecondaryButton disabled={busy} onClick={() => void discard()}>Discard review</SecondaryButton><PrimaryButton disabled={busy || !confirmed} onClick={() => void run("approve")}>{busy ? "Applying…" : "Approve change"}</PrimaryButton></div>
     </>}

@@ -10,6 +10,7 @@ import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
 import { DatasetCsvTransferDialog } from "./DatasetCsvTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
+import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -30,6 +31,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [transferringCsv, setTransferringCsv] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
+  const [editingFields, setEditingFields] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
@@ -67,7 +69,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     onCreateForm={owner ? () => setCreatingForm(true) : undefined}
     onTransferCsv={owner ? () => setTransferringCsv(true) : undefined}
     onHistory={owner ? () => setViewingHistory(true) : undefined}
-    onReviewSchema={owner ? () => setReviewingSchema(true) : undefined}
+    onReviewSchema={owner ? () => setEditingFields(true) : undefined}
     onManageAccess={owner ? () => setManagingAccess(true) : undefined}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
@@ -135,6 +137,28 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
+    {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
+      onPrepare={async (change, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
+        signal.throwIfAborted();
+        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this field change. Try again.");
+        return result;
+      }}
+      onApprove={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "approveMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
+        await refresh();
+      }}
+      onDiscard={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "discardMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
+      }} />}
     {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
       onClose={() => setReviewingSchema(false)}
       onPrepare={async (input, signal) => {

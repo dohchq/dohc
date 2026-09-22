@@ -7,6 +7,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
@@ -102,6 +103,24 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
       if (input.action === "discardMigration") { host.discardMigration(input.preparationId); return { kind: "migration-discarded" as const }; }
+      if (input.action === "prepareSchemaChange") {
+        const approved = host.approvedArtifacts(input.datasetId);
+        if (!approved.active) throw new Error("This Collection is hosted elsewhere. Review schema changes on its active host.");
+        if (approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("Collection rules changed. Refresh the Collection before changing fields.");
+        const generated = generateDatasetSchemaChange({ ...approved, change: input.change });
+        const expected = describeDatasetRevision({ definition: generated.definition, revision: input.revision + 1,
+          schemaSql: generated.schemaSql, operationSource: generated.operationSource });
+        await dependencies.createSources(operation.workspace, generated.files, operation.signal);
+        current();
+        const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepareMigration({ datasetId: input.datasetId,
+          descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath, adapter, signal: operation.signal }));
+        current();
+        if (prepared.previousRevision.revisionSha256 !== input.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
+          host.discardMigration(prepared.preparationId);
+          throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
+        }
+        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
+      }
       if (input.action === "prepareMigration") {
         const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepareMigration({ ...input, adapter, signal: operation.signal }));
         current();

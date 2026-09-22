@@ -33,6 +33,15 @@ export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discrimi
   z.object({ kind: z.literal("app"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: z.unknown().transform(value => parseDatasetBindingReference(value)) }).strict(),
 ])).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
 export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
+export const DatasetSchemaChange = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("renameCollection"), name: z.string().trim().min(1).max(128) }).strict(),
+  z.object({ kind: z.literal("renameTable"), tableId: identity, name: z.string().trim().min(1).max(128) }).strict(),
+  z.object({ kind: z.literal("renameField"), tableId: identity, fieldId: identity, name: z.string().trim().min(1).max(128) }).strict(),
+  z.object({ kind: z.literal("addField"), tableId: identity, field: z.object({ name: z.string().trim().min(1).max(128),
+    type: z.enum(["text", "number", "checkbox", "date", "select", "multi-select", "url", "attachment"]), required: z.boolean(), unique: z.boolean(),
+    default: json.optional(), options: z.array(z.string().min(1).max(128)).min(1).max(100).optional() }).strict() }).strict(),
+]);
+export type DatasetSchemaChange = z.infer<typeof DatasetSchemaChange>;
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("history"), beforeRevision: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
@@ -53,6 +62,7 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), descriptorPath: z.string().min(1).max(1024), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
   z.object({ ...workspace, action: z.literal("approveMigration"), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
