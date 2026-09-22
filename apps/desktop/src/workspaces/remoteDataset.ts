@@ -9,6 +9,7 @@ import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
+import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 
@@ -60,6 +61,7 @@ export function createRemoteDatasetData(input: {
     currentGeneration: input.currentCredentialGeneration, assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
   const base = input.shareId === undefined ? `/sync/${encodeURIComponent(input.workspaceId)}/datasets` : `/sync/shares/${encodeURIComponent(input.shareId)}/datasets`;
   const path = (datasetId: string) => `${base}/${identity.parse(datasetId)}`;
+  const confirmationSignal = () => AbortSignal.any([input.signal, AbortSignal.timeout(RELAY_FETCH_TIMEOUT_MS)]);
   const request = (url: string, body?: unknown, signal = input.signal) => session.run(async () => {
     signal.throwIfAborted();
     const value = await input.relayJson(input.credentials, url, { signal, method: body === undefined ? "GET" : "POST",
@@ -73,7 +75,7 @@ export function createRemoteDatasetData(input: {
     },
     async deletionStatus(value) {
       if (input.shareId !== undefined) throw new Error("Open the original workspace to manage this Collection.");
-      return z.object({ deleted: z.boolean() }).strict().parse(await request(`${path(value.datasetId)}/deletion-status`));
+      return z.object({ deleted: z.boolean() }).strict().parse(await request(`${path(value.datasetId)}/deletion-status`, undefined, confirmationSignal()));
     },
     async deletePreview(value) {
       if (input.shareId !== undefined) throw new Error("Open the original workspace to delete this Collection.");
@@ -91,7 +93,7 @@ export function createRemoteDatasetData(input: {
       const expected = CursorSchema.parse(value.expected);
       if (expected.workspaceId !== input.workspaceId || expected.datasetId !== value.datasetId) throw new Error("This deletion belongs to another Collection.");
       z.literal(true).parse(value.acknowledge);
-      const result = DatasetDeleted.parse(await request(`${path(value.datasetId)}/delete`, { expected, reviewToken: sha256.parse(value.reviewToken), acknowledge: true }));
+      const result = DatasetDeleted.parse(await request(`${path(value.datasetId)}/delete`, { expected, reviewToken: sha256.parse(value.reviewToken), acknowledge: true }, confirmationSignal()));
       if (result.datasetId !== value.datasetId) throw new Error("The server did not confirm this Collection deletion. Refresh the Collection.");
       return result;
     },

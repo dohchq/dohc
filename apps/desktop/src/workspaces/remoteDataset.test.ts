@@ -182,6 +182,20 @@ it("validates the private deletion status response", async () => {
     f.relay.mockResolvedValue(value); await expect(f.data.deletionStatus!({datasetId:id(1)})).rejects.toThrow();
   }
 });
+it.each(["delete", "status"])("bounds %s confirmation by timeout even with an explicit workspace signal", async kind => {
+  const f=fixture(), deadline=new AbortController();
+  const timeout=vi.spyOn(AbortSignal,"timeout").mockReturnValue(deadline.signal);
+  try {
+    f.relay.mockImplementation(async(_credentials,_path,init)=>new Promise((_,reject)=>{
+      expect(init.signal).not.toBe(f.controller.signal);
+      init.signal!.addEventListener("abort",()=>reject(init.signal!.reason),{once:true});
+    }));
+    const pending=kind==="delete" ? f.data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true}) : f.data.deletionStatus!({datasetId:id(1)});
+    expect(timeout).toHaveBeenCalledWith(15_000);
+    const refused=expect(pending).rejects.toThrow("deadline");
+    deadline.abort(Error("deadline"));await refused;
+  }finally{timeout.mockRestore();}
+});
 it("omits only confirmed remote deletions from the transfer catalog and keeps failures visible", async () => {
   const local={list:vi.fn(async()=>({datasets:[description],nextCursor:null}))} as unknown as OwnerDatasetData;
   const remote={deletionStatus:vi.fn(async()=>({deleted:true})),describe:vi.fn(async()=>description)} as unknown as OwnerDatasetData;
