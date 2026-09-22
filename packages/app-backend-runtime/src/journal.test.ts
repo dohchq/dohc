@@ -232,3 +232,30 @@ it("retains every older checkpoint over multiple approved transitions",()=>{
   f.db.exec("UPDATE dohc_dataset_checkpoint_history SET definition_json='{}' WHERE revision=0");
   expect(()=>f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize})).toThrow("history is damaged");
 });
+
+it("exports pinned immutable history while later writes and schema transitions continue",()=>{
+  const f=fixture(); const first=f.journal.commitOperation(f.prepare());if(first.kind!=="committed")throw Error();
+  const captured=f.journal.captureExport({scope:f.scope,authorize:f.authorize,capture:()=>({label:"approved original"})});
+  expect(captured.cursor).toEqual(first.event.cursor);expect(captured.checkpoint.cursor).toEqual(f.initial);
+  f.journal.transitionCheckpoint(migration(f,first.event.cursor));
+  const records=f.journal.exportPage({scope:f.scope,through:captured.cursor,afterRevision:-1,authorize:f.authorize});
+  expect(records.map(record=>[record.kind,record.cursor.revision])).toEqual([["checkpoint",0],["event",1]]);
+  const checkpoint=f.journal.exportBlob({scope:f.scope,record:records[0],offset:0,authorize:f.authorize});
+  expect(checkpoint).toEqual(new Uint8Array(f.initialization.checkpoint));
+  expect(f.journal.exportBlob({scope:f.scope,record:records[1],offset:0,authorize:f.authorize})).toEqual(first.event.changeset);
+  expect(records[1]).toMatchObject({resultJson:first.event.resultJson,idempotencyKey:first.event.idempotencyKey});
+  f.revoke();expect(()=>f.journal.exportBlob({scope:f.scope,record:records[0],offset:0,authorize:f.authorize})).toThrow("denied");
+});
+
+it("slices large checkpoint exports without loading whole blobs and rejects damaged metadata",()=>{
+  const f=fixture(),scope={...f.scope,datasetId:"large"},checkpoint=new Uint8Array(3*1024*1024+111);checkpoint.set(f.initialization.checkpoint);
+  const cursor=f.journal.initialize({...f.initialization,scope,checkpoint});
+  const record=f.journal.exportPage({scope,through:cursor,afterRevision:-1,authorize:f.authorize})[0];
+  const parts:Uint8Array[]=[];for(let offset=0;offset<checkpoint.byteLength;offset+=1024*1024)parts.push(f.journal.exportBlob({scope,record,offset,authorize:f.authorize}));
+  expect(parts.map(part=>part.byteLength)).toEqual([1024*1024,1024*1024,1024*1024,111]);
+  expect(Buffer.concat(parts)).toEqual(Buffer.from(checkpoint));
+  expect(()=>f.journal.exportBlob({scope,record,offset:0,length:1024*1024+1,authorize:f.authorize})).toThrow();
+  expect(()=>f.journal.exportPage({scope,through:{...cursor,digest:digest("wrong")},afterRevision:-1,authorize:f.authorize})).toThrow();
+  f.db.prepare("UPDATE dohc_dataset_journals SET checkpoint_sha256=? WHERE dataset_id='large'").run(digest("wrong"));
+  expect(()=>f.journal.exportBlob({scope,record,offset:0,authorize:f.authorize})).toThrow("damaged");
+});

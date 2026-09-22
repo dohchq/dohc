@@ -87,7 +87,15 @@ export interface TransitionCheckpointInput extends Omit<InitializeDatasetInput,"
   checkpoint: Uint8Array;
   account?: (allocation: Readonly<{bytes: number; capacityBytes: number; capacityDeltaBytes: number; cursor: DatasetCursor}>) => unknown;
 }
+export type JournalExportRecord =
+  | ({ kind: "event"; byteLength: number } & Omit<JournalEvent, "changeset">)
+  | { kind: "checkpoint"; cursor: DatasetCursor; previous: DatasetCursor | null; source: string; schemaSql: string;
+      definitionJson: string; capacityBytes: number; byteLength: number; sha256: string };
+export interface JournalExportCapture<T> { cursor: DatasetCursor; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }>; captured: T }
 export interface DatasetJournal {
+  captureExport<T>(input: { scope: DatasetScope; authorize: Authorize; capture(): T }): JournalExportCapture<T>;
+  exportPage(input: { scope: DatasetScope; through: DatasetCursor; afterRevision: number; limit?: number; authorize: Authorize }): JournalExportRecord[];
+  exportBlob(input: { scope: DatasetScope; record: JournalExportRecord; offset: number; length?: number; authorize: Authorize }): Uint8Array;
   initialize(input: InitializeDatasetInput): DatasetCursor;
   transitionCheckpoint(input: TransitionCheckpointInput): DatasetCursor;
   head(scope: DatasetScope, authorize: Authorize): DatasetHead;
@@ -231,7 +239,75 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
   function assertCursor(wanted: DatasetCursor, actual: DatasetCursor) {
     if(!sameCursor(wanted,actual))throw new JournalError("conflict","Dataset cursor changed.");
   }
+  function exportRecord(key: DatasetScope, revision: number): JournalExportRecord {
+    const h = storedHead(key);
+    const checkpoint = revision === h.checkpointCursor.revision
+      ? { cursor_json: JSON.stringify(h.checkpointCursor), previous_json: h.checkpointPrevious === null ? null : JSON.stringify(h.checkpointPrevious),
+          source: h.source, schema_sql: h.schemaSql, definition_json: h.definitionJson, capacity_bytes: h.capacityBytes, checkpoint_sha256: h.checkpointSha256,
+          byte_length: db.prepare("SELECT length(checkpoint) AS n FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)!.n }
+      : db.prepare(`SELECT cursor_json,previous_json,source,schema_sql,definition_json,capacity_bytes,checkpoint_sha256,length(checkpoint) AS byte_length
+          FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=?`).get(key.workspaceId,key.datasetId,revision);
+    if (checkpoint) {
+      const current=cursor(JSON.parse(String(checkpoint.cursor_json))), previous=checkpoint.previous_json===null?null:cursor(JSON.parse(String(checkpoint.previous_json)));
+      const source=text(String(checkpoint.source),256*1024),schemaSql=text(String(checkpoint.schema_sql),256*1024),definitionJson=resultText(String(checkpoint.definition_json));
+      const capacityBytes=integer(Number(checkpoint.capacity_bytes),4096),byteLength=integer(Number(checkpoint.byte_length),100,maxCheckpoint),sha256=digest(String(checkpoint.checkpoint_sha256));
+      if(current.workspaceId!==key.workspaceId||current.datasetId!==key.datasetId||current.revision!==revision||
+        (previous ? previous.revision+1!==revision||previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId : revision!==0)||
+        checkpointHash(current,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==current.digest) return corrupt("Export checkpoint metadata is damaged.");
+      return {kind:"checkpoint",cursor:current,previous,source,schemaSql,definitionJson,capacityBytes,byteLength,sha256};
+    }
+    const row=db.prepare(`SELECT workspace_id,dataset_id,revision,previous_digest,digest,host_epoch,approved_revision_hash,proposal_id,operation,
+        caller_key,idempotency_key,payload_sha256,result_json,changeset_sha256,attached_file_ids,recorded_at_ms,length(changeset) AS byte_length
+        FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?`).get(key.workspaceId,key.datasetId,revision);
+    if(!row)return corrupt("Export history is incomplete.");
+    const event:Omit<JournalEvent,"changeset">={cursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision,digest:String(row.digest)}),
+      previousDigest:digest(String(row.previous_digest)),proposalId:text(String(row.proposal_id),256),operation:text(String(row.operation),256),callerKey:text(String(row.caller_key),1024),
+      idempotencyKey:text(String(row.idempotency_key),128),payloadSha256:digest(String(row.payload_sha256)),resultJson:resultText(String(row.result_json)),
+      changesetSha256:digest(String(row.changeset_sha256)),attachedFileIds:fileIds(JSON.parse(String(row.attached_file_ids))),recordedAtMs:integer(Number(row.recorded_at_ms))};
+    if(eventHash(event)!==event.cursor.digest)return corrupt("Export event metadata is damaged.");
+    return {...event,kind:"event",byteLength:integer(Number(row.byte_length),0,maxEvent)};
+  }
   return {
+    captureExport(input) {
+      const key=scope(input.scope);
+      return tx(()=>{
+        callback(input.authorize); const h=storedHead(key), checkpoint=exportRecord(key,h.checkpointCursor.revision);
+        if(checkpoint.kind!=="checkpoint")return corrupt("Export checkpoint is missing.");
+        const captured=callback(input.capture);callback(input.authorize);
+        return {cursor:h.cursor,checkpoint,captured};
+      });
+    },
+    exportPage(input) {
+      const key=scope(input.scope),through=cursor(input.through),after=integer(input.afterRevision,-1),limit=integer(input.limit??64,1,64);
+      if(through.workspaceId!==key.workspaceId||through.datasetId!==key.datasetId||after>through.revision)invalid("Invalid export range.");
+      return tx(()=>{
+        callback(input.authorize); assertCursor(through,exportRecord(key,through.revision).cursor);
+        const records:JournalExportRecord[]=[];let bytes=0;
+        for(let revision=after+1;revision<=through.revision&&records.length<limit;revision++){
+          const record=exportRecord(key,revision),size=Buffer.byteLength(JSON.stringify(record));
+          if(size>1024*1024)invalid("Export record metadata exceeds its limit.");
+          if(bytes+size>1024*1024)break;
+          records.push(record);bytes+=size;
+        }
+        return records;
+      });
+    },
+    exportBlob(input) {
+      const key=scope(input.scope),record=input.record,revision=integer(record.cursor.revision),offset=integer(input.offset),length=integer(input.length??1024*1024,1,1024*1024);
+      if(record.cursor.workspaceId!==key.workspaceId||record.cursor.datasetId!==key.datasetId||offset>record.byteLength)invalid("Invalid export blob range.");
+      return tx(()=>{
+        callback(input.authorize);
+        const current=exportRecord(key,revision);
+        if(JSON.stringify(current)!==JSON.stringify(record))return corrupt("Export record changed.");
+        const row=record.kind==="event"
+          ? db.prepare("SELECT substr(changeset,?,?) AS bytes FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision=?").get(offset+1,length,key.workspaceId,key.datasetId,revision)
+          : db.prepare(`SELECT substr(checkpoint,?,?) AS bytes FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=?
+              UNION ALL SELECT substr(checkpoint,?,?) AS bytes FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=?`)
+            .get(offset+1,length,key.workspaceId,key.datasetId,revision,offset+1,length,key.workspaceId,key.datasetId,revision);
+        if(!row||!(row.bytes instanceof Uint8Array)||row.bytes.byteLength!==Math.min(length,record.byteLength-offset))return corrupt("Export blob is incomplete.");
+        return new Uint8Array(row.bytes);
+      });
+    },
     initialize(input) {
       const key=scope(input.scope),hostEpoch=text(input.hostEpoch,256),approvedRevisionHash=digest(input.approvedRevisionHash),source=text(input.source,256*1024),schemaSql=text(input.schemaSql,256*1024),definitionJson=resultText(input.definitionJson);
       const checkpoint=copyBytes(input.checkpoint,maxCheckpoint),capacityBytes=integer(input.capacityBytes??128*1024*1024,4096,maxCheckpoint);
