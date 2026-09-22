@@ -60,7 +60,7 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
   }
   definition.name = restoreLabel(old.name, after.name, definition.name, "Collection name");
   const directory = posix.join(posix.dirname(definition.schemaPath), `restore-${current.revision.revision + 1}-${randomUUID()}`);
-  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, "operations.js");
+  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(restoresSource ? old.operationsPath : definition.operationsPath)}`);
   const parsed = parseDatasetDefinition(definition), descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");
   const schemaSql = current.schemaSql, operationSource = restoresSource ? saved.operationSource : current.operationSource, migrationSql = "SELECT 1;";
   return { definition: parsed, descriptorPath, migrationPath, schemaSql, operationSource, migrationSql,

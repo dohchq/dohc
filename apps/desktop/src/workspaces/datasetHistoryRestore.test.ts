@@ -26,7 +26,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name
   ] };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
-async function fixture(initial: DatasetDefinition = definition, remote = false) {
+async function fixture(initial: DatasetDefinition = definition, remote = false, sourceSuffix = "") {
   const root = await mkdtemp(join(tmpdir(), "dohc-history-restore-"));
   const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
@@ -41,6 +41,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
     const bytes = blobs.get(String(input.sha256))!;
     return { id: request.id, result: { bytesBase64: Buffer.from(bytes).toString("base64"), byteLength: bytes.byteLength } };
   } }, "owner", { workspaceId: "w" });
+  if (sourceSuffix) files.set(initial.operationsPath, files.get(initial.operationsPath)! + sourceSuffix);
   const first = await host.prepare({ descriptorPath: "people/dataset.json", adapter });
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
   const workspace = { workspaceId: "w" };
@@ -146,4 +147,21 @@ it("reverses only the selected change while preserving unrelated later names and
   expect(() => generateDatasetHistoryRestore(artifact(laterDefinition, 3), saved, changed)).toThrow("changed again");
   const ruleChange = artifact(generated.definition, 2, operationSource + "\n// selected rule");
   expect(() => generateDatasetHistoryRestore(later, saved, ruleChange)).toThrow("rules changed again");
+});
+
+it.each([false, true])("compiles TypeScript when reversing a saved change (source change: %s)", async sourceChanged => {
+  const initial = structuredClone(definition); initial.operationsPath = "people/operations.ts";
+  const f = await fixture(initial, false, "\nconst authored: string = 'original';");
+  const first = f.host.approvedArtifacts(id(1));
+  const nextDefinition = structuredClone(first.revision.definition); nextDefinition.name = "Updated name";
+  const operationSource = sourceChanged ? first.operationSource.replace("'original'", "'updated'") : first.operationSource;
+  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql: first.schemaSql, operationSource });
+  const candidate = await f.host.prepareMigrationCandidate({ workspaceId: "w", revision, schemaSql: first.schemaSql, operationSource, migrationSql: "SELECT 1;", expected: first.cursor });
+  await f.host.approveMigrationCandidate({ workspaceId: "w", datasetId: id(1), candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256 });
+  const review = await restore(f);
+  expect(review.revision.definition.operationsPath).toMatch(/operations\.ts$/);
+  expect(review.operationSource).toBe(first.operationSource);
+  const result = await approve(f, review);
+  expect(result.revision.definition.name).toBe("People");
+  expect((await f.host.query(call(result.revision, id(5)))).result).toMatchObject({ rows: [] });
 });
