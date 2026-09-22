@@ -28,7 +28,7 @@ it("manages the authoritative relay Collection through the desktop owner adapter
     const operationSource = `globalThis.operations={submit(ctx,input){if(!input.name)ctx.refuse('name_required','Enter your name.');ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO registrations VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId]);return {accepted:true};},list(ctx){return ctx.db.query('SELECT * FROM registrations ORDER BY id');}};`;
     const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
     await host.activate({ kind: "named", workspaceId: "w", userId: "owner" }, { workspaceId: "w", revision, schemaSql, operationSource });
-    const handler = createSyncRelayHandler({ storage: f.storage, datasetHost: host, appBackendsEnabled: true, appPublicationLimits: limits,
+    const handler = createSyncRelayHandler({ storage: f.storage, datasetHost: host, appPublicationLimits: limits,
       resolveActor(request, workspaceId) { if (request.headers.get("authorization") !== "Bearer token") throw Error("Wrong credentials"); return { workspaceId, userId: "owner" }; } });
     const data = createRemoteDatasetData({ workspaceId: "w", credentials: { serverUrl: "https://account", relayUrl: "https://relay", token: "token", userId: "owner", email: "owner@example.test" },
       credentialGeneration: 1, currentCredentialGeneration: () => 1, signal: controller.signal, assertCurrent() {},

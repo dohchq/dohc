@@ -59,7 +59,7 @@ export async function actualFundraiserFixture() {
   storage.tx(()=>storage.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('helper','s','user','helper-user',NULL,'view',1,'active',1,NULL,NULL)").run());
   const accountCookie=`${getCookies({baseURL:viewerOrigin}).sessionToken.name}=synthetic-organizer-session`;
   let signedIn=false;
-  const relay=createSyncRelayHandler({storage,datasetHost,appPublicationLimits:APP_PUBLICATION_LIMITS,appBackendsEnabled:true,linkKey,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,
+  const relay=createSyncRelayHandler({storage,datasetHost,appPublicationLimits:APP_PUBLICATION_LIMITS,linkKey,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,
     resolveActor(request,workspaceId) {
       if(request.headers.get("authorization")==="Bearer owner")return {workspaceId,userId:"owner"};
       if(signedIn&&request.headers.get("cookie")===accountCookie)return {workspaceId,userId:"helper-user"};

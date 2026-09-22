@@ -36,7 +36,7 @@ async function httpFixture(maxParticipantsPerGrant?: number) {
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
   const linkKey = "dataset-http-test-key", token = "T".repeat(43);
   f.storage.mintLinkSession({session: {sessionId: "dataset-http", capabilityHash: hashLinkBearer(token, linkKey), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
-  const handler = createSyncRelayHandler({storage: f.storage, datasetHost: host, appBackendsEnabled: true, appPublicationLimits: limits, linkKey, nowMs: () => 10,
+  const handler = createSyncRelayHandler({storage: f.storage, datasetHost: host, appPublicationLimits: limits, linkKey, nowMs: () => 10,
     resolveActor(request, workspaceId) {
       const credential = request.headers.get("authorization");
       if (credential !== "Bearer owner" && credential !== "Bearer helper" && credential !== "Bearer stranger") throw new UnauthorizedError();

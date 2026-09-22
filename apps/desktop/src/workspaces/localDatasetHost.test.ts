@@ -157,7 +157,7 @@ describe("local dataset owner adapter", () => {
     };
     let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
     const controller=new AbortController(); let offline=false,posted=0;
-    const handler=()=>createSyncRelayHandler({storage:f.storage,datasetHost:relayHost,appBackendsEnabled:true,appPublicationLimits:relayLimits,
+    const handler=()=>createSyncRelayHandler({storage:f.storage,datasetHost:relayHost,appPublicationLimits:relayLimits,
       resolveActor(request,workspaceId){if(request.headers.get("authorization")!=="Bearer token")throw Error("credentials");return {workspaceId,userId:"owner"};}});
     const credentials={serverUrl:"https://account",relayUrl:"https://relay",token:"token",userId:"owner",email:"owner@example.test"};
     const transport=async (_credentials:typeof credentials,path:string,init:RequestInit)=>{

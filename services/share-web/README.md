@@ -63,9 +63,8 @@ on the relay to a positive integer. This limits accepted creates over each grant
 Leave it unset or set it to `0` to disable collection access. Owners must approve each app's collection capability.
 Disabling collection access still lets owners revoke an existing approval.
 
-For private transactional app data, also set `DOHC_RELAY_APP_BACKENDS=1` on the relay.
-It requires `DOHC_RELAY_APP_PUBLICATIONS=1`; unset or `0` disables backend routes,
-and invalid values stop startup. `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT`
+Published apps use their approved datasets without a separate backend setting.
+`DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT`
 limits enrolled link principals per grant and defaults to `1000`. Set a positive
 safe integer; `0` is invalid. This counts browser identities, not submitted rows.
 Backend operations do not require the collection-create setting or public Edit.

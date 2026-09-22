@@ -184,11 +184,6 @@ const appPublicationLimits = (() => {
   try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
   catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
 })();
-const appBackendsEnabled = process.env.DOHC_RELAY_APP_BACKENDS === "1";
-if (process.env.DOHC_RELAY_APP_BACKENDS !== undefined && !["0", "1"].includes(process.env.DOHC_RELAY_APP_BACKENDS)) {
-  fatal("FATAL: DOHC_RELAY_APP_BACKENDS must be 0 or 1.");
-}
-if (appBackendsEnabled && !appPublicationLimits) fatal("FATAL: App backends require DOHC_RELAY_APP_PUBLICATIONS=1.");
 const appBackendMaxParticipantsPerGrant = (() => {
   try { return readAppBackendParticipantLimit(process.env.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT); }
   catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app backend participant limit"}`); }
@@ -335,7 +330,6 @@ const relayApplication = createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
-  appBackendsEnabled,
   datasetHost,
   appCollectionPolicy,
 });

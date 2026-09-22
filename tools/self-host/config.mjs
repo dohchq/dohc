@@ -15,11 +15,8 @@ export function readSettings(path = '.env.self-host') {
 
 export function validateSettings(settings) {
   const errors = [];
-  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS', 'DOHC_RELAY_APP_BACKENDS']) {
+  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS']) {
     if (settings[name] !== undefined && !['0', '1'].includes(settings[name])) errors.push(`Set ${name} to 0 or 1.`);
-  }
-  if (settings.DOHC_RELAY_APP_BACKENDS === '1' && settings.DOHC_RELAY_APP_PUBLICATIONS !== '1') {
-    errors.push('App backends require DOHC_RELAY_APP_PUBLICATIONS=1.');
   }
   const participants = settings.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT;
   if (participants !== undefined && (!/^[1-9]\d*$/.test(participants) || !Number.isSafeInteger(Number(participants)))) {

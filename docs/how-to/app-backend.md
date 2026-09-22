@@ -78,7 +78,7 @@ It is not a public share link.
 ## Share the app
 
 Configure a [self-hosted server](self-host.md) with the [app-origin and publication settings](../../services/share-web/README.md).
-Enable `DOHC_RELAY_APP_PUBLICATIONS=1` and `DOHC_RELAY_APP_BACKENDS=1`.
+Enable `DOHC_RELAY_APP_PUBLICATIONS=1`.
 Use the release tooling so the server includes its compiled runtime and QuickJS dependencies.
 
 Share the app source folder, then prepare and approve the publication:

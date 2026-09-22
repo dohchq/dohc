@@ -80,7 +80,6 @@ export type SyncRelayHandler = (request: Request) => Promise<Response>;
 export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
   appCollectionPolicy?: AppCollectionPolicy;
-  appBackendsEnabled?: boolean;
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
@@ -171,7 +170,6 @@ const MAX_LINK_CURRENT_FILES = 5_000;
 export function createSyncRelayHandler({
   appPublicationLimits,
   appCollectionPolicy,
-  appBackendsEnabled = false,
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
@@ -219,7 +217,6 @@ export function createSyncRelayHandler({
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
-  if (appBackendsEnabled && !appPublicationLimits) throw new TypeError("App backends require app publications.");
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
