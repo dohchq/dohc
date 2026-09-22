@@ -10,6 +10,7 @@ function fixture() {
     stages.push(stage(`${dataset}/cold-reopen`, 30));
     stages.push(stage(`${dataset}/burst-10`, 10, {rowsAdded: 10}));
     stages.push(stage(`${dataset}/burst-100`, 100, {count: 64, rowsAdded: 64, failures: Array.from({length: 36}, () => ({message: 'Dataset operation queue is full. Retry this operation.'}))}));
+    for(const diagnostic of ['late-page','broad-text-search','export'])stages.push(stage(`${dataset}/${diagnostic}`,3));
   }
   stages.push(stage('ten-dataset-churn',100),stage('soak/0',100));
   return {stages,errors:[],remainingOwnedPids:[],fixtures:Array(10).fill({}),soak:{requestedSeconds:3600,actualSeconds:3601},
@@ -48,5 +49,12 @@ test('any workload failure, missing duration, duplicate burst count, or survivor
     value=>value.errors.push({message:'shutdown failed'}),
     value=>value.stages.splice(0,1),
     value=>value.memory=[],
+    value=>value.stages.find(stage=>stage.label.endsWith('/export')).count=0,
   ]) {const evidence=fixture();mutate(evidence);assert.equal(summarizeBenchmark(evidence).passed,false);}
+});
+
+test('frequent RSS observations cannot be hidden by low stage snapshots',()=>{
+  const evidence=fixture();evidence.memorySampling={samples:10,maxSampledWorkerWorkingSetBytes:513*1024*1024};
+  const summary=summarizeBenchmark(evidence);assert.equal(summary.passed,false);assert.equal(summary.checks.observedWorkerMemory,false);
+  assert.equal(summary.diagnostics.length,6);assert.equal(summary.memory.idleGrowth.parentRss.delta,0);
 });
