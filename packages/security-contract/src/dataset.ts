@@ -272,9 +272,10 @@ export function parseDatasetDescription(value: unknown): DatasetDescription {
     if (!table || operation.fieldIds.some(id => !table.fields.some(field => field.fieldId === id))) fail();
   }
   for (const table of result.tables) {
-    if (!result.operations.some(operation => operation.tableId === table.tableId)) fail();
+    const archivedMetadata = result.archived === true && result.operations.length === 0;
+    if (!archivedMetadata && !result.operations.some(operation => operation.tableId === table.tableId)) fail();
     for (const field of table.fields) {
-      if (!result.operations.some(operation => operation.tableId === table.tableId && operation.fieldIds.includes(field.fieldId))) fail();
+      if (!archivedMetadata && !result.operations.some(operation => operation.tableId === table.tableId && operation.fieldIds.includes(field.fieldId))) fail();
       if (!field.relation) continue;
       const target = tables.get(field.relation.tableId)?.fields.find(candidate => candidate.fieldId === field.relation!.fieldId);
       if (field.relation.datasetId !== result.datasetId || !target || !target.unique || !target.required || !["text", "number"].includes(target.type)) fail();

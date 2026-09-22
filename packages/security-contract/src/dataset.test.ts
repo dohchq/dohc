@@ -34,6 +34,16 @@ function binding(rev = revision()): AppDatasetBinding {
 }
 
 describe("dataset publication binding", () => {
+  it("accepts archived owner metadata with no runnable actions but still validates its fields", () => {
+    const approved = revision();
+    const archived = { datasetId: approved.datasetId, name: approved.definition.name, revision: 1, revisionSha256: approved.revisionSha256,
+      archived: true, operations: [], tables: approved.definition.tables.map(table => ({ tableId: table.tableId, name: table.name,
+        fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })) };
+    expect(parseDatasetDescription(archived)).toEqual(archived);
+    expect(() => parseDatasetDescription({ ...archived, archived: false })).toThrow();
+    const invalid = structuredClone(archived); invalid.tables[0]!.fields[0]!.fieldId = "invalid";
+    expect(() => parseDatasetDescription(invalid)).toThrow();
+  });
   it("derives only selected dispatch metadata from the approved revision", () => {
     const approved = revision();
     const requested = { ...binding(approved), operationIds: [id(6), id(5)] };

@@ -44,8 +44,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       const describeRemote = (datasetId: string, metadata?: { includeArchived?: boolean }) => enqueueMetadata(async () => {
         authorize(); const dataset = await remoteDescribe(datasetId,metadata); authorize();
         if ("archived" in dataset && dataset.archived === true) {
-          const { archived: _archived, ...description } = dataset;
-          const value = markerSchema.parse({binding,dataset:description,savedAtMs:Date.now()}), temporary = `${markerPath}.${randomUUID()}`;
+          const value = markerSchema.parse({binding,dataset,savedAtMs:Date.now()}), temporary = `${markerPath}.${randomUUID()}`;
           try {
             const file = await open(temporary,"wx",0o600);
             try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
