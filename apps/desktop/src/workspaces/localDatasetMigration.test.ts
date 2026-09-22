@@ -140,6 +140,15 @@ describe("owner Collection migration", () => {
     expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: expectedName, note: null }]);
   });
 
+  it("refuses a failed value conversion before producing an approvable review", async () => {
+    const { host } = await open(), f = fixture(), first = await activate(host, f);
+    await host.action(call(first, id(6), { name: "Must stay" }, "unchanged"));
+    f.next(); f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; UPDATE items SET name=NULL;");
+    await expect(prepare(host, f)).rejects.toThrow();
+    expect(host.describe(id(1)).revision).toBe(1);
+    expect((await host.query(call(first, id(5)))).result).toEqual([{ id: expect.any(String), name: "Must stay" }]);
+  });
+
   it("rolls back a rejected migration allocation with data and schema intact", async () => {
     let reject = true;
     const { host } = await open({ resources: () => ({ accountMigration() { if (reject) throw new Error("quota refused"); } }) });

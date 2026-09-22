@@ -142,6 +142,9 @@ it("captures remote schema changes without opening the fenced local store and bi
   const f = await fixture(definition, true);
   const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
   const input = { action: "approveMigration", workspaceId: "w", preparationId: review.preparationId, revisionSha256: review.revision.revisionSha256, approvalDigest: review.approvalDigest };
+  const page = { action: "migrationPreviewPage", workspaceId: "w", preparationId: review.preparationId, limit: 1 };
+  await expect(f.handler("another owner session", page)).rejects.toThrow(/review expired/);
+  expect(await f.handler("owner", page)).toMatchObject({ kind: "migration-preview-page", changes: [], nextCursor: null });
   await expect(f.handler("another owner session", input)).rejects.toThrow(/review expired/);
   const changed = await approve(f, review);
   expect(changed.revision.definition.name).toBe("Remote people");
