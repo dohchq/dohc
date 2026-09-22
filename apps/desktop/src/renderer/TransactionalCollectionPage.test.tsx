@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
@@ -38,6 +38,29 @@ describe("transactional Collection page", () => {
     fireEvent.click(screen.getByRole("button",{name:"Amount"}));await waitFor(()=>expect(result.invoke.mock.calls.at(-1)![0].input).toMatchObject({filters:activeView.filters,sort:{fieldId:amount,direction:"asc"}}));
     result.rerender(<TransactionalCollectionPage {...result.props} activeView={{...activeView,viewId:id(31),search:"Bob"}}/>);
     await waitFor(()=>expect(result.invoke.mock.calls.at(-1)![0].input).toMatchObject({search:"Bob",sort:activeView.sort}));expect(result.invoke.mock.calls.at(-1)![0].input).not.toHaveProperty("after");
+  });
+  it("opens record details and edits through the existing versioned action", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const details = within(screen.getByRole("dialog", { name: "Record details" }));
+    expect(details.getByText("Alice")).toBeTruthy();
+    expect(details.queryByText("Private note")).toBeNull();
+    fireEvent.click(details.getByRole("button", { name: "Edit Name" }));
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText("Name"));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    expect(result.invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } });
+  });
+
+  it("closes details on Escape and returns keyboard focus to the row", async () => {
+    setup(); await screen.findByText("Alice");
+    const open = screen.getByRole("button", { name: "Open record 1" });
+    fireEvent.click(open);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+    expect(document.activeElement).toBe(open);
   });
   it("clears previously displayed records when a read loses access", async () => {
     const result = setup(); await screen.findByText("Alice");

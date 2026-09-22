@@ -6,6 +6,7 @@ import type { CollectionTableView } from "./collectionTableViews";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
+import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
   display, initialValue, inputProblem, object, parsePage, supportsInput, supportsSort,
@@ -94,6 +95,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [query, setQuery] = useState<Query>({ after: null, search: "" });
   const [previous, setPrevious] = useState<Array<TransactionalCursor | null>>([]);
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [details, setDetails] = useState<TransactionalRow | null>(null);
+  const editorForm = useRef<HTMLFormElement>(null);
   const [draft, setDraft] = useState<Record<string, AppBackendJson>>({});
   const [invalid, setInvalid] = useState<string | null>(null);
   const [pending, setPending] = useState<Mutation | null>(null);
@@ -106,12 +109,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const trigger = useRef<HTMLElement | null>(null);
   const currentQuery = useRef(query); currentQuery.current = query;
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); }; }, []);
+  useLayoutEffect(() => { if (editor) editorForm.current?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
   }
   async function load(next: Query, history = previous): Promise<void> {
     if (!read || !alive.current || mutation.current) return;
+    setDetails(null);
     active.current?.abort();
     const abort = new AbortController(); active.current = abort;
     const mine = ++sequence.current;
@@ -223,17 +228,21 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
         {supportsSort(field) ? <button type="button" disabled={disabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
-      </th>)}{remove && confirmDelete ? <th scope="col"><span className="sr-only">Actions</span></th> : null}</tr></thead>
+      </th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation: edit, row, field });
         }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
-      })}{remove && confirmDelete ? <td className="px-3 py-2"><SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton></td> : null}</tr>)}</tbody>
+      })}<td className="px-3 py-2"><div className="flex gap-2"><SecondaryButton size="compact" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}>Details</SecondaryButton>{remove && confirmDelete ? <SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
     {page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
-    {editor ? <form aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
+    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError}
+      onClose={() => { setDetails(null); trigger.current?.focus(); }}
+      onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}
+      onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
+    {editor ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
       <div className="flex flex-wrap gap-3">{editorFields.map(field => {
         const input = { field, value: draft[field.fieldId] ?? null, disabled, onChange: (value: AppBackendJson) => { setDraft(current => ({ ...current, [field.fieldId]: value })); setInvalid(null); } };
         return <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => {
