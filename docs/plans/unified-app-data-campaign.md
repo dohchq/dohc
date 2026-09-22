@@ -2,7 +2,25 @@
 
 Reader: Ice, the implementation lead, and reviewers approving and delivering this campaign.
 
-Status: implemented on `campaign/unified-app-data`, September 22, 2026. Not merged or deployed. Functional proofs and reference-machine performance checks pass; the remaining acceptance work is listed below.
+Status: implementation continues on `campaign/unified-app-data` after the September 23 alignment review. Not merged or deployed. Earlier functional proofs pass for their recorded scopes; the remaining integrations below are required before declaring the campaign complete.
+
+## Approved completion work, September 23
+
+Ice confirmed these decisions after reviewing the implemented behavior. This section supersedes narrower delivery claims below. Routine implementation choices belong to the implementation lead. Do not weaken ownership, permissions, durability, or business rules to simplify the interface.
+
+1. Preserve ordinary editing after custom rules are authored. Display renames retain field identities and custom source. Safe additions preserve existing records. Consequential changes use understandable previews and the existing migration validation. Invalid conversions stop for explicit resolution; no value is silently discarded. A person can author advanced changes without an agent.
+2. Keep compatible edits from interrupting live apps. Display changes must not invalidate an otherwise unchanged grant. Changes to executable rules, exposed fields, or access require an exact review of the affected consumers. Existing source, publication, and data permissions remain separate.
+3. Connect transactional records to the existing table, board, and calendar experience. Moving a card or date invokes the same governed edit as the table. Bound data fetching and rendering; never present a partially fetched page as a complete board or calendar.
+4. Support multiple upload fields and permitted relation selection in generated forms. A public form must not gain discovery of private records, labels, or counts. Remove the unexplained 24-field form limit and examine the underlying field and payload limits. Retain documented resource bounds supported by evidence rather than promising unlimited capacity.
+5. Add authorized offline reading for named collaborators. Never copy an owner's unfiltered database or history to a restricted recipient. Persist only the permitted data, enforce known revocation on reconnect, and make stale/offline state visible. Shared writes still require the host. Previously downloaded information cannot be remotely erased from a disconnected device.
+6. Connect file, document, record, schema, and rule history through familiar inspection and comparison controls. Link related changes without implying one cross-system transaction. Add schema/rule changes to Collection history and provide reviewed forward reversals that preserve later records or stop on conflicts. Restoring source alone must not activate old rules or permissions. All history reads and reversals enforce current authority. A whole-workspace rewind is outside scope.
+7. Reproduce and diagnose the multi-second large-dataset foreground pauses. Fix foreground stalls before declaring readiness; do not hide them behind passing p95 results or classify their cause without evidence.
+
+The completion proof includes a customized fundraiser whose owner renames and adds fields, keeps its live form usable, manages records through table/board/calendar, uploads multiple files, and selects explicitly exposed related records. A named collaborator reads only authorized downloaded records offline and loses further access after revocation is observed. History connects a reviewed rule/schema change to its source and safely reverses it without discarding later registrations. Repeat the stock/orders example to prove generality.
+
+Windows x64-only creation is accepted for now. Ordinary hardware and controlled-LAN measurements remain unavailable; independent human usability testing is deferred at Ice's request. Drive, native mobile, unrestricted backend networking/dependencies, cross-dataset transactions, and offline shared writes remain outside scope. The original fundraiser deployment and records remain untouched.
+
+Implementation proceeds in isolated schema/continuity, view, form, recipient-copy, history, and performance lanes. The integration lead owns cross-lane contracts, source integration, one full verification run, and the maintained review record. Review authorization and offline/history disclosure independently. Conserve Fable usage by reviewing bounded completed changes, retaining reviewers through fixes, and reusing valid earlier evidence. Do not file a PR or merge until the agreed work and required reviews are ready for that step.
 
 ## Delivery status
 
