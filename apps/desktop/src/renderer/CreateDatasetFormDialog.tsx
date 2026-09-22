@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DATASET_MAX_FIELDS, type DatasetDescription, type DatasetField } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
@@ -109,6 +110,9 @@ function ScopedCreateForm(props: CreateDatasetFormDialogProps) {
     if (!selected.length || selected.length > DATASET_MAX_FIELDS) { setInvalid(`Show 1 to ${DATASET_MAX_FIELDS} fields on the form.`); return; }
     if (required.some(field => !selected.includes(field.fieldId))) { setInvalid("Show every required field on the form."); return; }
     const fields = allowed.filter(field => selected.includes(field.fieldId));
+    if (required.filter(field => field.type === "attachment").length > APP_BACKEND_OPERATION_FILES) {
+      setInvalid(`A response can include ${APP_BACKEND_OPERATION_FILES} files. Make additional file fields optional before creating this form.`); return;
+    }
     if (fields.some(field => field.type === "relation" && !relationChoices.some(choice => choice.fieldId === field.fieldId &&
       choiceActions(field).some(candidate => candidate.action.operationId === choice.operationId && candidate.label.fieldId === choice.labelFieldId)))) {
       setInvalid("Choose an approved public read action for each related-record field."); return;

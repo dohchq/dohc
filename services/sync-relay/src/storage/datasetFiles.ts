@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { appBackendFileSignatureMatches, parseAppBackendFile, parseAppBackendUploadRequest, type AppBackendFile, type AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendFile, parseAppBackendUploadRequest, type AppBackendFile, type AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { DatasetAuthority } from "@dohc/app-backend-runtime/dataset-host";
 import type { StorageContext } from "./context";
 import { badRequest, notFound, relayError } from "../errors";
@@ -55,7 +55,7 @@ export function createDatasetFiles(storage: StorageContext, account: (workspaceI
         }
         const count = storage.db.prepare("SELECT count(*) AS count FROM sync_relay_dataset_files WHERE workspace_id=? AND dataset_id=? AND principal_key=? AND app_id=? AND attached_revision IS NULL")
           .get(scope.workspaceId, scope.datasetId, authority.principalKey, appId)!.count;
-        if (Number(count) >= 32) throw relayError("conflict", "Submit pending uploads before uploading more files.");
+        if (Number(count) >= APP_BACKEND_OPERATION_FILES) throw relayError("conflict", "Submit pending uploads before uploading more files.");
         const file: AppBackendFile = {fileId: randomBytes(24).toString("base64url"), name: input.name, contentType: input.contentType, byteLength: bytes.byteLength, sha256};
         const metadata = JSON.stringify(file), storageBytes = bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(authority.principalKey + appId + input.idempotencyKey) + 384;
         storage.db.prepare("INSERT INTO sync_relay_dataset_files VALUES(?,?,?,?,?,?,?,?,?,NULL,?)")
@@ -74,7 +74,7 @@ export function createDatasetFiles(storage: StorageContext, account: (workspaceI
       collect(input);
       const files: AppBackendFile[] = [];
       for (const id of ids) { const row = read(scope, id); if (row && usable(row, authority)) files.push(parseAppBackendFile(JSON.parse(row.metadata))); }
-      if (files.length > 32) throw badRequest("An action can attach at most 32 files.");
+      if (files.length > APP_BACKEND_OPERATION_FILES) throw badRequest(`An action can attach at most ${APP_BACKEND_OPERATION_FILES} files.`);
       const captured = new Set(files.map(file => file.fileId));
       return { files, accountAndAttach(allocation: {revision: number; bytes: number; attachedFileIds: readonly string[]}) {
         for (const fileId of allocation.attachedFileIds) {

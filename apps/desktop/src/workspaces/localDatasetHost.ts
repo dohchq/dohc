@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
-import { appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_OPERATION_FILES, appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveCompatibleDatasetRevision, createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
@@ -258,7 +258,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           const row = db.prepare("SELECT metadata,key,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)").get(workspaceId, request.datasetId, fileId, Date.now());
           if (row && (context === owner || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
         }
-        if (files.length > 32) throw new Error("A Collection action can attach at most 32 files.");
+        if (files.length > APP_BACKEND_OPERATION_FILES) throw new Error(`A Collection action can attach at most ${APP_BACKEND_OPERATION_FILES} files.`);
         const capturedFiles = new Set(files.map(file => file.fileId));
         return { files: [...(extra?.files ?? []), ...files], accountAndAttach(allocation) {
           // The journal already owns the transaction containing this callback.
@@ -413,7 +413,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
               authorize(); return {file, replayed:true};
             }
             const staged = Number(db.prepare("SELECT count(*) AS count FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL").get(workspaceId, input.datasetId)!.count);
-            if (staged >= 32) throw new Error("Attach or wait for existing uploads before uploading more files.");
+            if (staged >= APP_BACKEND_OPERATION_FILES) throw new Error("Attach or wait for existing uploads before uploading more files.");
             const file: AppBackendFile = {fileId: randomBytes(24).toString("base64url"), name: parsed.name, contentType: parsed.contentType, byteLength: bytes.byteLength, sha256};
             const metadata = JSON.stringify(file), storageBytes = bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(key) + 384;
             db.prepare("INSERT INTO local_dataset_files VALUES(?,?,?,?,?,?,?,?,NULL,?)").run(workspaceId, input.datasetId, file.fileId, key, metadata, bytes, now, now + 86_400_000, storageBytes);

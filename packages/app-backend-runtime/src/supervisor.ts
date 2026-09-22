@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
@@ -644,7 +645,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     },
     invoke(raw: DatasetInvocation): Promise<DatasetInvocationResult> {
       try {
-        if (raw.files && (!Array.isArray(raw.files) || raw.files.length > 32)) throw new Error("Too many files in dataset operation.");
+        if (raw.files && (!Array.isArray(raw.files) || raw.files.length > APP_BACKEND_OPERATION_FILES)) throw new Error("Too many files in dataset operation.");
         const filesJson = boundedText(JSON.stringify(raw.files ?? []), 32 * 1024, "Operation files");
         const callerJson = boundedText(JSON.stringify(raw.caller), DEFAULT_LIMITS.inputBytes, "Caller");
         const inputJson = boundedText(JSON.stringify(raw.input), DEFAULT_LIMITS.inputBytes, "Operation input");

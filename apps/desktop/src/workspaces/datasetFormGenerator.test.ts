@@ -66,6 +66,16 @@ describe("dataset form generation", () => {
     expect(JSON.parse(files["app.publish.json"]!).dataset.createFields[0].fieldIds).toHaveLength(DATASET_MAX_FIELDS);
     expect(files["frontend.js"]).toContain('"name":"Field 127"');
   });
+  it("refuses impossible required-upload forms without limiting optional file controls", () => {
+    const value = structuredClone(approvedRevision);
+    const files = Array.from({ length: 33 }, (_, index) => ({ fieldId: id(100 + index), name: `Upload ${index}`, sqlColumn: `file_${index}`, type: "attachment" as const, required: true, unique: false }));
+    value.definition.tables[0]!.fields.push(...files);
+    value.definition.operations[0]!.fieldIds.push(...files.map(field => field.fieldId));
+    const fieldIds = [id(4), ...files.map(field => field.fieldId)];
+    expect(() => generate({ approvedRevision: value, fieldIds })).toThrow(/32 files/);
+    files.forEach(field => { field.required = false; });
+    expect(generate({ approvedRevision: value, fieldIds }).files["frontend.js"]).toContain('"name":"Upload 32"');
+  });
 
   it("binds explicitly chosen public relation operations without embedding private data or source", () => {
     const value = structuredClone(approvedRevision);

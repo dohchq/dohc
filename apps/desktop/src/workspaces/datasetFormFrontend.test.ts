@@ -30,6 +30,12 @@ beforeEach(() => { document.body.replaceChildren(); vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("dataset form frontend", () => {
+  it("rejects more than the operation's file limit before uploading any file", async () => {
+    const app = mount(Array.from({ length: 33 }, (_, index) => field(`file${index}`, "attachment"))); await app.connect();
+    for (const input of document.querySelectorAll("input")) Object.defineProperty(input, "files", { value: [new File(["bytes"], `${input.name}.txt`)] });
+    await app.submit();
+    expect(app.requests).toHaveLength(0); expect(status()).toBe("Choose 32 files or fewer for one response.");
+  });
   it("uploads every field with separate retry identities and restores the complete saved response", async () => {
     vi.stubGlobal("FileReader", class { result = "data:application/pdf;base64,JVBERg=="; onload?: () => void; readAsDataURL() { this.onload?.(); } });
     const fields = [field("receipt", "attachment", { required: true }), field("waiver", "attachment", { required: true })];

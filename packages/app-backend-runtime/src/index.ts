@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -99,7 +100,7 @@ export async function evaluateAppOperation(input: EvaluateAppOperationInput, opt
   const secret = input.secret ?? randomBytes(32).toString("base64url");
   if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("Invalid app operation secret.");
   const files = input.files ?? [];
-  if (!Array.isArray(files) || files.length > 32 || files.some(file =>
+  if (!Array.isArray(files) || files.length > APP_BACKEND_OPERATION_FILES || files.some(file =>
     !/^[A-Za-z0-9._:-]{1,128}$/.test(file.fileId) || typeof file.name !== "string" || Buffer.byteLength(file.name) > 512 ||
     typeof file.contentType !== "string" || Buffer.byteLength(file.contentType) > 128 || !/^[a-f0-9]{64}$/.test(file.sha256) ||
     !Number.isSafeInteger(file.byteLength) || file.byteLength < 0) || new Set(files.map(file => file.fileId)).size !== files.length) throw new Error("Invalid app files.");

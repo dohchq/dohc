@@ -12,6 +12,9 @@ Submissions appear in the same Collection. Private fields remain outside the for
 
 Forms support multiple file fields and the full 128-field table envelope, without a separate form-field ceiling.
 Each file can contain up to 5 MiB. The form uploads files sequentially with separate retry identities.
+One response can attach up to 32 files, matching the operation's file-metadata admission bound.
+Forms can have more optional file controls, but cannot require more files than an operation accepts.
+The form checks the selected file count before uploading anything.
 The combined response, including file references, must fit the 64 KiB operation input limit.
 The form checks this bound before uploading. It stores the completed response before invoking its create action.
 After an uncertain submission or reload, retrying uses that same stored response and request identity.

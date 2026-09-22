@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -94,7 +95,7 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       if(!/^[A-Za-z0-9_-]{43}$/.test(secret)) reject("invalid_input","Invalid operation secret.");
       const files=operation.files ?? [];
       const readOnly=operation.readOnly===true;
-      if(!Array.isArray(files) || files.length>32 || files.some(file=>!file || !/^[A-Za-z0-9._:-]{1,128}$/.test(file.fileId) || typeof file.name!=="string" || Buffer.byteLength(file.name)>512 || typeof file.contentType!=="string" || Buffer.byteLength(file.contentType)>128 || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || file.byteLength<0) || new Set(files.map(file=>file.fileId)).size!==files.length) reject("invalid_input","Invalid operation files.");
+      if(!Array.isArray(files) || files.length>APP_BACKEND_OPERATION_FILES || files.some(file=>!file || !/^[A-Za-z0-9._:-]{1,128}$/.test(file.fileId) || typeof file.name!=="string" || Buffer.byteLength(file.name)>512 || typeof file.contentType!=="string" || Buffer.byteLength(file.contentType)>128 || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || file.byteLength<0) || new Set(files.map(file=>file.fileId)).size!==files.length) reject("invalid_input","Invalid operation files.");
       // Serialize before admission: invalid JSON and oversized inputs never consume queue slots.
       const inputJson=boundedText(JSON.stringify(operation.input),config.limits.inputBytes,"Operation input");
       const callerJson=boundedText(JSON.stringify(operation.caller),config.limits.inputBytes,"Caller");
