@@ -123,7 +123,7 @@ it.each(["result","changeset","receipt","gap","tail","checkpoint","definition"])
   if(kind==="receipt")f.db.exec("UPDATE dohc_dataset_receipts SET result_json='null' WHERE revision=1");
   if(kind==="gap")f.db.exec("DELETE FROM dohc_dataset_events WHERE revision=2");
   if(kind==="tail")f.db.exec("DELETE FROM dohc_dataset_events WHERE revision=3");
-  if(kind==="checkpoint")f.db.exec("UPDATE dohc_dataset_journals SET checkpoint=x'00'");
+  if(kind==="checkpoint")f.db.exec("UPDATE dohc_dataset_checkpoint_chunks SET bytes=x'00'");
   if(kind==="definition")f.db.exec("UPDATE dohc_dataset_journals SET definition_json='{}'");
   const action=kind==="receipt"?()=>f.journal.receipt({...f.prepare(f.initial,"order-0"),scope:f.scope}):["checkpoint","definition"].includes(kind)?()=>f.journal.checkpoint({scope:f.scope,authorize:f.authorize}):()=>f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize});
   expect(action).toThrow(/damaged|mismatch|missing|broken|integrity|differs/);
@@ -181,7 +181,8 @@ it("atomically activates a migrated checkpoint and preserves prior retries and r
   expect(f.journal.receipt({...f.prepare(),scope:f.scope})).toEqual(saved.receipt);
   expect(f.journal.commitOperation({...f.prepare(next),changeset:new Uint8Array(),changesetSha256:digest(new Uint8Array())})).toEqual({kind:"replayed",receipt:saved.receipt});
   expect(()=>f.journal.commitOperation({...f.prepare(next),payloadSha256:digest("changed")})).toThrow("another payload");
-  const rows=f.db.prepare("SELECT revision,checkpoint FROM dohc_dataset_checkpoint_history").all();expect(rows).toHaveLength(1);expect(rows[0].revision).toBe(0);expect(rows[0].checkpoint).toEqual(new Uint8Array(f.initialization.checkpoint));
+  const rows=f.db.prepare("SELECT revision,checkpoint_id FROM dohc_dataset_checkpoint_history").all();expect(rows).toHaveLength(1);expect(rows[0].revision).toBe(0);
+  expect(f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
   expect(f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize}).cursor).toEqual(f.initial);
   expect(()=>f.journal.checkpoint({scope:f.scope,revision:1,authorize:f.authorize})).toThrow("not available");
   expect(()=>f.journal.checkpoint({scope:f.scope,revision:999,authorize:f.authorize})).toThrow("not available");
