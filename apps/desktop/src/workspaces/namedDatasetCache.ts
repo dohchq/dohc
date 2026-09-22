@@ -15,7 +15,9 @@ export type NamedDatasetPageCache = {
   begin(): Promise<number>;
   accept(fingerprint: string, epoch: number): Promise<void>;
   read(key: unknown): Promise<z.infer<typeof savedPage> | null>;
-  put(key: unknown, value: unknown, fingerprint: string): Promise<number | null>;
+  /** Current authorized metadata for online invocation checks. Never an offline saved-page fallback. */
+  peek(key: unknown): Promise<unknown | null>;
+  put(key: unknown, value: unknown, fingerprint: string): Promise<void>;
   clear(): Promise<void>;
 };
 
@@ -27,8 +29,6 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
   let pending: Promise<unknown> = Promise.resolve();
   let durable: Saved | null = null, dirty = false, saving: Promise<void> | null = null;
   const sizes = new WeakMap<object, number>();
-  const pageIds = new WeakMap<Page, number>();
-  let nextPageId = 0;
   const pageBytes = (page: Page) => {
     let bytes = sizes.get(page);
     if (bytes === undefined) { bytes = Buffer.byteLength(JSON.stringify(page)); sizes.set(page, bytes); }
@@ -171,6 +171,10 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
           const entry = saved?.pages.find(page => page.key === hash(request));
           return entry ? structuredClone(entry) : null;
         }),
+        peek: request => run(async () => {
+          const page = scope()?.pages.find(page => page.key === hash(request));
+          return page ? structuredClone(page.value) : null;
+        }),
         put: (request, value, fingerprint) => {
           const started = epoch();
           return run(async () => {
@@ -181,16 +185,10 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
             const pages = selected.pages.filter(value => value.key !== page.key).concat(page).slice(-512);
             replaceScope(key, { ...selected, pages });
             trim();
-            const pageId = ++nextPageId;
-            pageIds.set(page, pageId);
-            return { pageKey: page.key, pageId, savedAtMs: page.savedAtMs, saved: flush() };
+            return { saved: flush() };
           }).then(async result => {
-            if (!result) return null;
-            await result.saved;
+            if (result) await result.saved;
             current();
-            const saved = durable?.scopes.find(value => value.key === key && value.fingerprint === fingerprint);
-            const page = saved?.pages.find(page => page.key === result.pageKey);
-            return started === epoch() && page && pageIds.get(page) === result.pageId ? result.savedAtMs : null;
           });
         },
         clear: () => run(async () => {

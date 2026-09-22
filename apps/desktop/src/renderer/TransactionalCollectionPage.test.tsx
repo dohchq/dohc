@@ -30,10 +30,10 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 }
 afterEach(cleanup);
 
-it.each([false,true])("labels saved-page coverage without implying the entire Collection is downloaded (offline: %s)", async offline => {
-  const copy = {offline,savedAtMs:1,coverage:"saved-pages" as const};
+it("labels saved-page coverage without implying the entire Collection is downloaded", async () => {
+  const copy = {offline:true,savedAtMs:1,coverage:"saved-pages" as const};
   setup({copy}); await screen.findByText("Alice");
-  const label = offline ? "Offline · Saved pages only" : "Saved pages on this device";
+  const label = "Offline · Saved pages only";
   expect(screen.getByText(`${label} · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
   expect(screen.queryByText(/Offline copy · Read-only|^Saved on this device/)).toBeNull();
 });

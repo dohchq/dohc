@@ -283,7 +283,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
       <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
       <SecondaryButton type="submit" disabled={readDisabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>
-      {props.copy ? <span role="status" className="self-center text-[12px] text-muted">{savedPages ? props.copy.offline ? "Offline · Saved pages only" : "Saved pages on this device" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
+      {props.copy ? <span role="status" className="self-center text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     </form>
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
