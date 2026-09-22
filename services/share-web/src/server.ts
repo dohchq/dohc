@@ -90,12 +90,12 @@ interface RelayCall {
   limiter?: ShareWebInFlightLimiter;
   /** Reads the whole relay body, up to the proxy limit, inside the deadline. */
   buffered?: boolean;
-  /** Refuses with this status when the session changed while the relay answered. */
+  /** Refuses with this status when the session changed before the call answered. */
   ifSessionChanged?: 404 | 409;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
-  ok?(relayResponse: Response, headers: Record<string, string>, holdSlot: () => () => void): Response | Promise<Response>;
+  ok?(relayResponse: Response, holdSlot: () => () => void): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
-  refusal?(relayResponse: Response, headers: Record<string, string>): Promise<Response | null>;
+  refusal?(relayResponse: Response): Promise<Response | null>;
 }
 
 export interface CreateShareWebApplicationOptions {
@@ -499,21 +499,18 @@ async function discussionState(
   }
 }
 
-async function discussionRefusal(
-  relayResponse: Response,
-  headers: Record<string, string>,
-): Promise<Response | null> {
+async function discussionRefusal(relayResponse: Response): Promise<Response | null> {
   if (relayResponse.status !== 403 && relayResponse.status !== 413) return null;
   const state = await discussionState(relayResponse);
   return state && jsonResponse(
     { ok: false, ...state },
-    { status: state.state === "limit-reached" ? 413 : 403, headers },
+    { status: state.state === "limit-reached" ? 413 : 403 },
   );
 }
 
-function relayJson(relayResponse: Response, headers: Record<string, string>): Response {
+function relayJson(relayResponse: Response): Response {
   return response(relayResponse.body, {
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json" },
   });
 }
 
@@ -716,7 +713,6 @@ function bodyBuffer(bytes: Uint8Array): ArrayBuffer {
 async function streamingBlobResponse(
   relayResponse: Response,
   release: () => void,
-  extraHeaders: HeadersInit = {},
 ): Promise<Response> {
   if (!relayResponse.body) {
     release();
@@ -724,7 +720,6 @@ async function streamingBlobResponse(
       headers: {
         "content-type": "application/octet-stream",
         "content-disposition": "attachment",
-        ...Object.fromEntries(new Headers(extraHeaders)),
       },
     });
   }
@@ -792,11 +787,10 @@ async function streamingBlobResponse(
   });
   return response(body, {
     headers: raster
-      ? { "content-type": raster, ...Object.fromEntries(new Headers(extraHeaders)) }
+      ? { "content-type": raster }
       : {
           "content-type": "application/octet-stream",
           "content-disposition": "attachment",
-          ...Object.fromEntries(new Headers(extraHeaders)),
         },
   });
 }
@@ -1035,22 +1029,31 @@ export function createShareWebApplication({
     }
   }
 
-  // A refusal that evicts or supersedes the session omits the refreshed
-  // cookie: it names a dead session and could overwrite a newer one.
   async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
     const refreshed = await refreshSession(browser);
     if (!refreshed.ok) return refused(refreshed.status);
-    const { headers } = refreshed;
+    const capabilityToken = browser.session.capabilityToken;
+    const current = (): boolean =>
+      sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
+    // Only an answer for a still-current session renews its cookie. A cookie
+    // for a dead session could overwrite a newer one.
+    const answer = (result: Response): Response => {
+      if (current()) {
+        for (const [name, value] of Object.entries(refreshed.headers)) result.headers.set(name, value);
+      }
+      return result;
+    };
+    const superseded = (): Response | null =>
+      call.ifSessionChanged && !current() ? refused(call.ifSessionChanged) : null;
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
-    if (!release) return refused(429, headers);
+    if (!release) return answer(refused(429));
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;
       return release;
     };
-    const capabilityToken = browser.session.capabilityToken;
     const bounded = boundedRelayRequest(
       request.signal,
       relayUrl,
@@ -1070,31 +1073,29 @@ export function createShareWebApplication({
     );
     try {
       let relayResponse = await fetchRelay(bounded.request);
-      if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
-      if (
-        call.ifSessionChanged &&
-        !sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs())
-      ) {
+      // Eviction never waits on the body, which may be oversized or broken.
+      if (relayResponse.status === 401) {
+        const stale = superseded();
+        sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
         await relayResponse.body?.cancel().catch(() => undefined);
-        return refused(call.ifSessionChanged);
+        return stale ?? refused(404);
+      }
+      if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
+      const stale = superseded();
+      if (stale) {
+        await relayResponse.body?.cancel().catch(() => undefined);
+        return stale;
       }
       if (relayResponse.status === 200) {
-        return await (call.ok ?? relayJson)(relayResponse, headers, holdSlot);
+        return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
       }
-      const translated = await call.refusal?.(relayResponse, headers);
-      if (translated) return translated;
+      const translated = await call.refusal?.(relayResponse);
+      if (translated) return answer(translated);
       await relayResponse.body?.cancel().catch(() => undefined);
-      if (relayResponse.status === 401) {
-        sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
-        return refused(404);
-      }
-      if (relayResponse.status === 429) return refused(429, headers);
-      return refused(
-        relayResponse.status >= 400 && relayResponse.status < 500 ? 404 : 503,
-        headers,
-      );
+      if (relayResponse.status === 429) return answer(refused(429));
+      return answer(refused(relayResponse.status >= 400 && relayResponse.status < 500 ? 404 : 503));
     } catch {
-      return refused(503, headers);
+      return superseded() ?? answer(refused(503));
     } finally {
       bounded.dispose();
       if (!slotHeld) release();
@@ -1260,18 +1261,15 @@ export function createShareWebApplication({
         path: "/sync/link-handoff",
         method: "POST",
         exchangeKey: true,
-        ok: async (relayResponse, headers) => {
+        ok: async (relayResponse) => {
           const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-          if (!handoff) return refused(503, headers);
-          return jsonResponse(
-            {
-              ok: true,
-              code: handoff.code,
-              relayUrl: publicRelayUrl,
-              expiresAtMs: handoff.expiresAtMs,
-            },
-            { headers },
-          );
+          if (!handoff) return refused(503);
+          return jsonResponse({
+            ok: true,
+            code: handoff.code,
+            relayUrl: publicRelayUrl,
+            expiresAtMs: handoff.expiresAtMs,
+          });
         },
       });
     }
@@ -1365,8 +1363,7 @@ export function createShareWebApplication({
       return await callRelay(request, authenticated, {
         path: `/sync/link/blobs/${sha}`,
         limiter: blobProxyLimiter,
-        ok: (relayResponse, headers, holdSlot) =>
-          streamingBlobResponse(relayResponse, holdSlot(), headers),
+        ok: (relayResponse, holdSlot) => streamingBlobResponse(relayResponse, holdSlot()),
       });
     }
 

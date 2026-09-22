@@ -1314,7 +1314,6 @@ describe("share-web relay call", () => {
     { name: "log", path: "/api/view/log?since=0&hold=0" },
     { name: "blob", path: `/api/view/blob/${blobSha}` },
   ];
-  const route = (name: string) => routes.find((candidate) => candidate.name === name)!;
 
   // The fake relay answers exchange and refresh itself; `relay` answers the route's call.
   async function linkSession(
@@ -1322,12 +1321,14 @@ describe("share-web relay call", () => {
     capabilityExpiresAtMs = 901_000,
   ) {
     const calls: Request[] = [];
+    let tokenByte = 100;
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
       relayExchangeKey: "relay-call-key",
       publicHosts: new Set([HOST]),
+      maxSessions: 1,
       nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 101).toString("base64url"),
+      newSessionToken: () => Buffer.alloc(32, ++tokenByte).toString("base64url"),
       newProfileSecret: () => PROFILE_ALPHA,
       fetchRelay: async (relayRequest) => {
         const pathname = new URL(relayRequest.url).pathname;
@@ -1358,12 +1359,16 @@ describe("share-web relay call", () => {
           body: target.body,
           signal,
         })),
+      // With one session allowed, a second exchange replaces this one.
+      replace: () => handler(request("/api/exchange", exchange(SECRET_ALPHA))),
     };
   }
 
-  const outcomes: Array<{ relay: number | "network error"; status: number }> = [
+  const outcomes: Array<{ relay: number | string; status: number }> = [
     { relay: 200, status: 200 },
     { relay: 401, status: 404 },
+    { relay: "401, oversized body", status: 404 },
+    { relay: "401, body fails", status: 404 },
     { relay: 403, status: 404 },
     { relay: 404, status: 404 },
     { relay: 409, status: 404 },
@@ -1378,15 +1383,29 @@ describe("share-web relay call", () => {
   it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
     for (const outcome of outcomes) {
       const state = await linkSession(async () => {
-        if (outcome.relay === "network error") throw new Error(`relay down ${CAP_ALPHA_2}`);
-        if (outcome.relay === 200) {
-          return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
+        switch (outcome.relay) {
+          case "network error":
+            throw new Error(`relay down ${CAP_ALPHA_2}`);
+          case 200:
+            return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
+          case 204:
+            return new Response(null, { status: 204 });
+          case "401, oversized body":
+            return new Response(new Uint8Array(2 * 1024 * 1024 + 1), { status: 401 });
+          case "401, body fails":
+            return new Response(new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(Uint8Array.of(1));
+              },
+              pull(controller) {
+                controller.error(new Error("relay body broke"));
+              },
+            }), { status: 401 });
+          default:
+            return new Response(`relay detail ${CAP_ALPHA_2}`, { status: Number(outcome.relay) });
         }
-        return new Response(outcome.relay === 204 ? null : `relay detail ${CAP_ALPHA_2}`, {
-          status: outcome.relay,
-        });
       }, 200_000);
-      const evicted = outcome.relay === 401;
+      const evicted = String(outcome.relay).startsWith("401");
 
       const answer = await state.call(target);
       const body = await answer.text();
@@ -1456,7 +1475,7 @@ describe("share-web relay call", () => {
       })));
       const browser = new AbortController();
 
-      const blob = await state.call(route("blob"), browser.signal);
+      const blob = await state.call(routes.at(-1)!, browser.signal);
       expect(blob.status).toBe(200);
       expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(60_000);
@@ -1474,29 +1493,38 @@ describe("share-web relay call", () => {
     }
   });
 
-  it("refuses a held read whose session ended without renewing its cookie", async () => {
-    let markHeld!: () => void;
-    const held = new Promise<void>((resolve) => { markHeld = resolve; });
-    let answerHeld!: (response: Response) => void;
-    const state = await linkSession(async (relayRequest) => {
-      if (new URL(relayRequest.url).pathname === "/sync/link/share") {
-        return new Response(null, { status: 401 });
-      }
-      markHeld();
-      return await new Promise<Response>((resolve) => { answerHeld = resolve; });
+  const supersededStatus: Record<string, number> = {
+    log: 409,
+    "discussion activity": 409,
+    discussion: 404,
+    "discussion append": 404,
+  };
+
+  it.each(routes.flatMap((target) => [
+    { ...target, settle: "answers" },
+    { ...target, settle: "fails" },
+  ]))("renews no cookie when $name $settle after its session was replaced", async (target) => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let settle!: () => void;
+    const state = await linkSession(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => { settle = resolve; });
+      if (target.settle === "fails") throw new Error("relay connection reset");
+      return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
     }, 200_000);
 
-    const log = state.call(route("log"));
-    await held;
-    expect((await state.call(route("meta"))).status).toBe(404);
-    answerHeld(Response.json({ ok: true, ops: [], nextCursor: 0, hasMore: false }));
+    const pending = state.call(target);
+    await started;
+    expect((await state.replace()).status).toBe(200);
+    settle();
 
-    const stale = await log;
-    expect({ status: stale.status, body: await stale.text() }).toEqual({
-      status: 409,
-      body: shareWebRefusalBody,
-    });
-    expect(stale.headers.has("set-cookie")).toBe(false);
+    const answer = await pending;
+    expect(answer.status).toBe(
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 503),
+    );
+    expect(answer.headers.has("set-cookie")).toBe(false);
+    await answer.body?.cancel();
   });
 });
 
