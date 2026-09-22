@@ -6,7 +6,14 @@ import { parsePage, type TransactionalCursor, type TransactionalDatasetDescripti
 export const CSV_IMPORT_MAX_BYTES = 4 * 1024 * 1024;
 export const CSV_IMPORT_MAX_ROWS = 10_000;
 const encoder = new TextEncoder();
-export interface CsvTable { headers: string[]; rows: string[][] }
+export interface CsvTable {
+  headers: string[];
+  rows: string[][];
+  /** Source adapters retain nulls and empty text; CSV itself has no distinction. */
+  literalValues?: Array<Array<AppBackendJson | undefined>>;
+  rowErrors?: string[];
+  cellErrors?: string[][];
+}
 export interface CsvPreviewRow { row: number; values: Record<string, AppBackendJson>; errors: string[] }
 export interface CsvPreview { fields: TransactionalField[]; rows: CsvPreviewRow[] }
 export type CsvOutcome = "pending" | "invalid" | "accepted" | "refused" | "uncertain";
@@ -74,11 +81,23 @@ export function previewDatasetCsv(csv: CsvTable, fields: readonly TransactionalF
   const missing = allowed.filter(field => field.required && !Object.hasOwn(field, "default") && !selected.includes(field.fieldId));
   return { fields: allowed, rows: csv.rows.map((cells, index) => {
     const values: Record<string, AppBackendJson> = {}, errors = missing.map(field => `Map the required field ${field.name}.`);
+    if (csv.rowErrors?.[index]) errors.push(csv.rowErrors[index]!);
     if (cells.length !== csv.headers.length) errors.push(`Expected ${csv.headers.length} columns; found ${cells.length}.`);
     for (const [column, fieldId] of mapping.entries()) {
       if (fieldId === null || cells[column] === undefined) continue;
+      if (csv.cellErrors?.[index]?.[column]) { errors.push(csv.cellErrors[index]![column]!); continue; }
       const field = allowed.find(field => field.fieldId === fieldId)!;
-      try { const value = convert(field, cells[column]!); if (value !== undefined) values[fieldId] = value; }
+      try {
+        const literal = csv.literalValues?.[index]?.[column];
+        let value: AppBackendJson | undefined;
+        if (csv.literalValues && literal === undefined) value = convert(field, "");
+        else if (csv.literalValues && literal === null) {
+          if (field.required) throw Error(`Enter ${field.name}.`);
+          value = null;
+        } else if (csv.literalValues && literal === "" && field.type === "text") value = "";
+        else value = convert(field, csv.literalValues && field.type === "relation" ? JSON.stringify(literal) : cells[column]!);
+        if (value !== undefined) values[fieldId] = value;
+      }
       catch (error) { errors.push(error instanceof Error ? error.message : "Check this field."); }
     }
     try { parseAppBackendJson({ values }); } catch { errors.push("This row is too large. Shorten its field values."); for (const fieldId of Object.keys(values)) delete values[fieldId]; }
