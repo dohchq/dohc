@@ -145,7 +145,7 @@ globalThis.operations = Object.fromEntries(definition.operations.map(operation =
   const fields = table.fields.filter(field => operation.fieldIds.includes(field.fieldId));
   const name = q(table.sqlName), pk = q(table.primaryKey);
   if (operation.kind === 'read') {
-    if (Object.keys(input).some(key => !['limit','after','search','filters','sort'].includes(key))) invalid(ctx);
+    if (Object.keys(input).some(key => !['limit','after','search','filters','sort','range','group','groupBy','groupAfter'].includes(key))) invalid(ctx);
     const limit = input.limit === undefined ? 50 : input.limit;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid(ctx);
     let sortField = primary, direction = 'asc';
@@ -178,12 +178,38 @@ globalThis.operations = Object.fromEntries(definition.operations.map(operation =
         terms.push(q(field.sqlColumn) + ' IS ?'); params.push(encode(field,filter.value));
       }
     }
+    if (input.group !== undefined) {
+      const group = input.group, field = object(group) && fields.find(field => field.fieldId === group.fieldId);
+      if (!field || Object.keys(group).some(key => !['fieldId','value'].includes(key)) || !valid(field,group.value)) invalid(ctx);
+      terms.push(q(field.sqlColumn) + ' IS ?'); params.push(encode(field,group.value));
+    }
+    if (input.range !== undefined) {
+      const range = input.range, field = object(range) && fields.find(field => field.fieldId === range.fieldId);
+      if (!field || field.type !== 'date' || Object.keys(range).some(key => !['fieldId','start','end'].includes(key)) || typeof range.start !== 'string' || typeof range.end !== 'string' || !valid(field,range.start) || !valid(field,range.end) || range.start >= range.end) invalid(ctx);
+      terms.push(q(field.sqlColumn) + ' >= ? AND ' + q(field.sqlColumn) + ' < ?'); params.push(range.start,range.end);
+    }
+    if (input.groupBy !== undefined) {
+      const field = fields.find(field => field.fieldId === input.groupBy);
+      if (!field || ['attachment','multi-select'].includes(field.type) || field.relation?.many || input.after !== undefined || input.sort !== undefined || limit > 8) invalid(ctx);
+      const group = q(field.sqlColumn);
+      if (input.groupAfter !== undefined) {
+        const cursor = input.groupAfter;
+        if (!object(cursor) || Object.keys(cursor).length !== 1 || !own(cursor,'value') || !valid(field,cursor.value)) invalid(ctx);
+        if (cursor.value === null) terms.push(group + ' IS NOT NULL');
+        else { terms.push(group + ' > ?'); params.push(encode(field,cursor.value)); }
+      }
+      params.push(limit + 1);
+      const rows = ctx.db.query('SELECT DISTINCT ' + group + ' AS value FROM ' + name + (terms.length ? ' WHERE ' + terms.join(' AND ') : '') + ' ORDER BY ' + group + ' ASC NULLS FIRST LIMIT ?',params);
+      const more = rows.length > limit; if (more) rows.pop();
+      return { groupBy: field.fieldId, groups: rows.map(row => decode(field,row.value)), nextGroupCursor: more ? {value:decode(field,rows[rows.length-1].value)} : null };
+    }
+    if (input.groupAfter !== undefined) invalid(ctx);
     const selected = [...new Set([table.primaryKey,'_record_version',sortField.sqlColumn,...fields.map(field => field.sqlColumn)])].map(q).join(',');
     params.push(limit + 1);
     const rows = ctx.db.query('SELECT ' + selected + ' FROM ' + name + (terms.length ? ' WHERE ' + terms.join(' AND ') : '') + ' ORDER BY ' + column + ' ' + direction + ' NULLS FIRST,' + pk + ' ' + direction + ' LIMIT ?',params);
     const more = rows.length > limit; if (more) rows.pop();
     const last = rows[rows.length - 1];
-    return {rows:rows.map(row => projected(table,fields,row)),nextCursor:more ? {id:last[table.primaryKey],value:decode(sortField,last[sortField.sqlColumn])} : null};
+    return {rows:rows.map(row => projected(table,fields,row)),nextCursor:more ? {id:last[table.primaryKey],value:decode(sortField,last[sortField.sqlColumn])} : null,...(input.range ? {range:input.range} : {}),...(input.group ? {group:input.group} : {})};
   }
   if (operation.kind === 'create') {
     if (Object.keys(input).some(key => key !== 'values')) invalid(ctx);
