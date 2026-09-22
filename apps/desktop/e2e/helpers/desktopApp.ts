@@ -18,6 +18,8 @@ export interface DesktopLogEntry {
   source: "main" | "renderer";
   level: string;
   text: string;
+  timestamp?: string;
+  elapsedMs?: number;
 }
 
 /** Fail the flow while the app is still open when its engine has already failed. */
@@ -102,12 +104,14 @@ export async function launchDesktopApp(input: {
   await mkdir(artifacts, { recursive: true });
 
   const logs: DesktopLogEntry[] = [];
+  const launchedAt = performance.now();
   const logPath = join(artifacts, "desktop.jsonl");
   await writeFile(logPath, "");
   let logFailure: unknown;
   const record = (entry: DesktopLogEntry) => {
-    logs.push(entry);
-    try { appendFileSync(logPath, JSON.stringify(entry) + "\n"); }
+    const timed = {...entry,timestamp:new Date().toISOString(),elapsedMs:Math.round(performance.now()-launchedAt)};
+    logs.push(timed);
+    try { appendFileSync(logPath, JSON.stringify(timed) + "\n"); }
     catch (error) { logFailure ??= error; }
   };
   const onStdoutData = (chunk: string) => {

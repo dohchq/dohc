@@ -556,22 +556,38 @@ export class EngineDaemonLifecycle {
       ...request,
       deadlineMs: request.deadlineMs ?? timeoutMs,
     };
+    const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
-        void client.cancelRequest?.(request.id).catch(() => undefined);
-        if (method === "workspace.open") killForReplacement(client);
-        reject(
-          new EngineDaemonUnavailableError(
-            `Rust engine ${method} timed out after ${timeoutMs}ms.`,
-          ),
-        );
+        const elapsedMs = Math.round(this.monotonicNowMs() - startedAt);
+        const diagnostic = { at: new Date(this.wallNowMs()).toISOString(), method, requestId: request.id, timeoutMs,
+          elapsedMs, timerLagMs: Math.max(0,elapsedMs-timeoutMs) };
+        console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic, action:"drain-pending-replies"}));
+        setImmediate(() => {
+          const activityAfter = client.inboundActivity?.();
+          const inboundFrames = activityBefore === undefined || activityAfter === undefined ? null : activityAfter-activityBefore;
+          if (settled) {
+            console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:"reply-drained"}));
+            return;
+          }
+          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:method === "workspace.open" ? "kill-for-replacement" : "cancel-request"}));
+          void client.cancelRequest?.(request.id).catch(() => undefined);
+          if (method === "workspace.open") killForReplacement(client);
+          reject(
+            new EngineDaemonUnavailableError(
+              `Rust engine ${method} timed out after ${timeoutMs}ms.`,
+            ),
+          );
+        });
       }, timeoutMs);
       timeout.unref();
     });
     try {
       return await Promise.race([client.sendRequest(boundedRequest), deadline]);
     } finally {
+      settled = true;
       if (timeout) clearTimeout(timeout);
     }
   }

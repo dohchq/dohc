@@ -1120,17 +1120,15 @@ export class EngineClient implements EngineTransport {
       const deadlineTimer =
         deadlineMs !== null
           ? setTimeout(() => {
-              const pending = this.pending.get(wireId);
-              if (!pending) return;
-              this.pending.delete(wireId);
-              this.abandonedRequestIds.add(wireId);
-              pending.reject(
-                new EngineRequestDeadlineError(
-                  wireId,
-                  request.method,
-                  deadlineMs,
-                ),
-              );
+              // Give an inbound frame already queued by the transport one
+              // event-loop turn to settle before expiring the request.
+              setImmediate(() => {
+                const pending = this.pending.get(wireId);
+                if (!pending) return;
+                this.pending.delete(wireId);
+                this.abandonedRequestIds.add(wireId);
+                pending.reject(new EngineRequestDeadlineError(wireId,request.method,deadlineMs));
+              });
             }, deadlineMs)
           : undefined;
       this.pending.set(wireId, {

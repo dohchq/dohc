@@ -26,6 +26,40 @@ afterEach(async () => {
 });
 
 describe("engine.ping against a real daemon", () => {
+  it.skipIf(engine.missing)("drains queued startup replies after the host event loop stalls beyond the request deadline", async () => {
+    const failures: Error[] = [];
+    let complete!: () => void, refuse!: (error: Error) => void, stalled = false;
+    const smoke = new Promise<void>((resolve,reject) => {complete=resolve;refuse=reject;});
+    const lifecycle = new EngineDaemonLifecycle({command:engine.require(),maxRestarts:0,
+      onFailure(error) {failures.push(error);refuse(error);},
+      launch:async options => {
+        const client = await createEngineClient(options);
+        return {
+          sendRequest:async request => {
+            const pending = client.sendRequest(request);
+            if (!stalled && request.method === "workspace.open") {
+              stalled = true;
+              // Freeze only this process after the pipe write. The real daemon
+              // keeps running and queues its reply before the 5s timer expires.
+              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5_500));
+            }
+            const response = await pending;
+            if (request.method === "workspace.close") complete();
+            return response;
+          },
+          cancelRequest:id=>client.cancelRequest(id),onEvent:handler=>client.onEvent(handler),onBlob:handler=>client.onBlob(handler),
+          close:()=>client.close(),closeUnresponsive:()=>{refuse(new Error("Healthy engine killed after host stall."));client.closeUnresponsive();},
+          inboundActivity:()=>client.inboundActivity(),waitForExit:()=>client.waitForExit(),
+        };
+      }});
+    lifecycles.push(lifecycle);
+    await lifecycle.start();
+    await smoke;
+    expect(stalled).toBe(true);
+    expect(failures).toEqual([]);
+    await expect(lifecycle.currentClient().sendRequest({id:99,method:"engine.ping",params:{}})).resolves.toMatchObject({id:99});
+  },20_000);
+
   it.skipIf(engine.missing)(
     "answers every probe, so a healthy daemon is never killed",
     async () => {
