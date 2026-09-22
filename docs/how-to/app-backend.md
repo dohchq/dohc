@@ -6,7 +6,7 @@ Replace uppercase values with IDs returned by dohc. JSON examples work in PowerS
 
 ## Create the Collection first
 
-Create a transactional Collection in the Data section, then choose **Create form**.
+Use **New collection** to create a transactional Collection, then choose **Create form** from its **Manage** menu.
 Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
 

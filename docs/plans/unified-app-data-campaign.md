@@ -2,7 +2,7 @@
 
 Reader: Ice, the implementation lead, and reviewers approving and delivering this campaign.
 
-Status: implementation continues on `campaign/unified-app-data` after the September 23 alignment review. Not merged or deployed. Earlier functional proofs pass for their recorded scopes; the remaining integrations below are required before declaring the campaign complete.
+Status: approved completion work is implemented and locally verified on `campaign/unified-app-data`. Fable's required completion review remains blocked by provider rate limits. Not merged or deployed.
 
 ## Approved completion work, September 23
 
@@ -24,19 +24,25 @@ Implementation proceeds in isolated schema/continuity, view, form, recipient-cop
 
 ## Delivery status
 
-The desktop now creates transactional Collections and connected forms without an agent. Visible controls cover local preview, sharing, and publication. Owner tables, apps, and agents use the same records and approved operations. Real desktop tests cover editing, restart, Undo, field management, archive, deletion, offline inspection, and clean-host recovery with private files and retry receipts. Both the fundraiser and stock examples pass real-browser tests.
+Transactional Collections, forms, apps, and agents use the same governed records. Owners can create a Collection and form without an agent, edit fields, manage access, export data, inspect history, and review source changes. Advanced rules remain editable workspace source.
 
-The canonical JavaScript and Rust gates passed at `b79c260c8`. Later recovery and worker-retirement fixes passed affected suites, 339 runtime tests, four desktop flows, and both browser examples. The verification record preserves each tested commit and explains reuse.
+The September 23 completion adds board/calendar views, custom-source-preserving field edits, lossless reviewed conversions, and continuity for display-only changes. Forms support multiple uploads and explicitly approved public relation choices. Named collaborators can read saved authorized pages offline. Collection history compares saved rules and prepares selected forward reversals that preserve later records and current access. Document Collections retain their document model; external CSV and SQLite files use explicit import/export.
 
-At `7e5d7a153`, the fresh ten-dataset soak completed 7,300 operations over 3,630 seconds with no unexpected failures. All 73 idle shutdown checks passed. On the Ryzen 9 workstation, warm read p95 was 2.9–3.9 ms and write p95 was 11.7–15.9 ms. Large-dataset cold reopening p95 was 984 ms. Rare writes waited up to 1.8 seconds for checkpoint maintenance; these results do not establish uniformly low latency. Peak sampled worker memory was 288 MiB. The separate 100,000-row desktop proof measured warm refresh p95 at 23.3 ms and input feedback at 14.5 ms.
+Real desktop proofs cover a shared form continuing after a custom-rule-preserving rename, rule reversal without losing later registrations, and board/calendar paging beyond fifty records with governed moves. A twenty-five-field form saves two files and permitted related-record choices. Both board themes were inspected. The fundraiser and stock-order examples pass again against integrated source. Collaborator isolation, restart, offline reads, and revocation pass through actual HTTP, runtime, and desktop IPC tests; this is not a two-person desktop usability study.
 
-The 100-participant public-link test passed, including expected fundraiser capacity refusals and a separate abuse test. Its transport and the local benchmark do not establish controlled-LAN or hosted-service guarantees.
+The canonical JavaScript gate passed at clean `891a361a7`, including 352 backend runtime tests, 9,749 desktop tests, native self-hosting, account-browser checks, and desktop persistence/onboarding. Passing Rust evidence at `b79c260c8` remains applicable: Rust source, dependencies, configuration, and gate inputs are unchanged. The verification record preserves each tested commit, individual passing desktop flows, failed attempts, and evidence reuse.
 
-Concurrent recovery exports were measured on the same workstation in twelve baseline and export-overlap trials. All 9,600 indexed operations and eighteen full backup restorations passed integrity checks. During exports, per-round read p95 was 7.0–9.8 ms and write p95 was 17.7–39.2 ms. Large-dataset reads sometimes paused for 2.49–2.97 seconds; baseline trials without export also had 2.10–2.64-second pauses. These measurements do not establish the cause of those pauses. Normal backups preserved their captured data version while later edits continued. This test used local archive files, one export at a time, and no attachment bytes or network transport.
+The earlier ten-dataset soak passed 7,300 operations over 3,630 seconds and all 73 idle shutdown checks. Warm read/write p95 was 2.9–3.9/11.7–15.9 ms on the Ryzen workstation, with 288 MiB peak sampled worker memory. The 100,000-row desktop proof measured warm refresh p95 at 23.3 ms and input feedback at 14.5 ms. The 100-participant public-link test also passed, including capacity refusals and a separate abuse test.
 
-Fable reviewed the implementation through the recovery-launcher fixes. The final worker-retirement delta passed independent risk review, but its Fable review remains blocked by provider rate limits. Ice confirmed that no ordinary computer or second network device is available and deferred independent human usability testing. Ordinary four-core hardware, controlled-LAN performance, and human usability remain unverified. Desktop creation and compilation currently require Windows x64. The campaign is not yet fully accepted or ready to merge under the review policy.
+Earlier concurrent-export trials passed 9,600 operations and eighteen restored archives, but exposed multi-second foreground pauses. Diagnosis traced the reproduced pause to checkpoint maintenance sharing the foreground operation lane. The completion fix stages and seals checkpoints in the background. A quiet eight-hundred-operation continuation completed two 118 MB caches with no result, count, or cursor errors. Read p95/max were 21.74/93.33 ms; write p95/max were 38.23/219.75 ms. No new hour soak ran after this fix. These workstation measurements do not promise uniform latency or network performance.
 
-Local evidence is recorded in `.agent-artifacts/campaign-review-ledger.md`. The final host benchmark is retained at `C:/w/dohc-benchmark-cache-racefix-20260922`; concurrent-export evidence is in `.agent-artifacts/concurrent-export-20260922`. Earlier failed runs remain separately identified. No live fundraiser records or deployment were changed.
+Named collaborators can reopen only saved, previously authorized read pages. Pages can have different save times; attachments and shared writes require the host. Generated forms share the 128-field envelope and accept at most 32 files per response, 5 MiB each, within the 64 KiB operation-input bound. Public relation actions grant their complete output, so approval must account for the actual source.
+
+Independent risk review approved the completed authorization, migration, offline, history, and performance changes, including the native source-capture fix. Fable's completion review attempts returned provider 429 without review output. Earlier Fable approvals cover only their recorded scopes. The required second-family review remains outstanding; the campaign is not ready to merge under repository policy.
+
+Ice accepted Windows x64-only creation for now. Ordinary four-core hardware and controlled-LAN measurements remain unavailable; independent human usability testing is deferred. Drive, native mobile, unrestricted backend networking/dependencies, cross-dataset transactions, and offline shared writes remain outside scope.
+
+The maintained evidence record is `.agent-artifacts/campaign-review-ledger.md`. Performance evidence remains in `C:/w/dohc-benchmark-cache-racefix-20260922`, `.agent-artifacts/concurrent-export-20260922`, and `.agent-artifacts/foreground-stall-20260923`. Earlier failed runs remain separately identified. The original fundraiser records and deployment remain untouched.
 
 ## The result we will deliver
 
