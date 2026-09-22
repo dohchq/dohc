@@ -206,7 +206,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         authorize(); return current;
       }
       const compiledSource = await compile(source, approved.definition.operationsPath);
-      const checkpoint = await initializeAppDatabase({ schemaSql, tables: approved.definition.tables.map(table => table.sqlName), signal }, options.runtime);
+      const checkpoint = await initializeAppDatabase({ schemaSql, tables: approved.definition.tables.map(table => table.sqlName), signal, journaled: true }, options.runtime);
       authorize();
       journal.initialize({ scope: key, hostEpoch: randomUUID(), approvedRevisionHash: approved.revisionSha256, source: compiledSource, schemaSql,
         definitionJson: JSON.stringify(approved), checkpoint, capacityBytes, authorize,

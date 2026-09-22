@@ -243,3 +243,12 @@ it("enforces a form's create-field subset before operation execution", async () 
   expect(f.journal.head(scope,()=>{}).cursor.revision).toBe(0);
   await expect(invoke({values:{[id(4)]:"allowed"}})).resolves.toMatchObject({result:{accepted:true},revision:1});
 });
+
+it("refuses a non-replayable schema before committing dataset approval",async()=>{
+  const f=await fixture(),schema="CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL,secret TEXT NOT NULL);";
+  const definitionWithIntegerKey=structuredClone(definition);definitionWithIntegerKey.tables[0].fields[0].type="number";
+  const revision=describeDatasetRevision({definition:definitionWithIntegerKey,revision:1,schemaSql:schema,operationSource});
+  await expect(f.host.activate("owner",{workspaceId:"workspace",revision,schemaSql:schema,operationSource})).rejects.toThrow("AUTOINCREMENT");
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
+});
