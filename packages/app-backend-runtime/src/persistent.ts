@@ -112,7 +112,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     },
     async finalize(operation:FinalizeOperation):Promise<DatasetCursor> {
       checkCursor(operation);checkDigest(operation.previousDigest);checkDigest(operation.changesetSha256);
-      return await send({kind:"finalize",input:{...operation}}) as DatasetCursor;
+      return await send({kind:"finalize",input:{proposalId:operation.proposalId,previousDigest:operation.previousDigest,
+        revision:operation.revision,digest:operation.digest,changesetSha256:operation.changesetSha256}}) as DatasetCursor;
     },
     async discard(proposalId:string):Promise<void> {await send({kind:"discard",proposalId});},
     async apply(event:CommittedChangeset):Promise<DatasetCursor> {
