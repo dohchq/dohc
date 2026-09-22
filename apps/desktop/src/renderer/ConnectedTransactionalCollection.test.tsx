@@ -94,3 +94,15 @@ it("reports the saved recovery file through the shell notice callback", async ()
   fireEvent.click(screen.getByRole("button", { name: "Save recovery file" }));
   await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Saved recovery file: C:/private/fundraiser.dohc-recovery"));
 });
+
+it("keeps archived offline Collections read-only until refresh reaches the host", async () => {
+  backend.dataset.mockResolvedValueOnce({ kind: "description", dataset: { ...dataset, archived: true }, copy: { offline: true } })
+    .mockResolvedValue({ kind: "description", dataset: { ...dataset, archived: true } });
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} />);
+  const restore = await screen.findByRole("button", { name: "Restore Collection" });
+  expect(restore.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(restore); expect(backend.dataset.mock.calls.some(([input]) => input.action === "restore")).toBe(false);
+  expect(screen.getByRole("status").textContent).toContain("Offline copy");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Restore Collection" }).hasAttribute("disabled")).toBe(false));
+});

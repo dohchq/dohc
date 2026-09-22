@@ -81,7 +81,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
   </div>;
   async function restore() {
-    if (restoreLock.current || !owner) return;
+    if (restoreLock.current || !owner || copy?.offline) return;
     restoreLock.current = true; const sequence = request.current; setRestoring(true);
     try {
       const result = await bridge().dataset({ workspaceId, datasetId, action: "restore" });
@@ -91,7 +91,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     } catch (error) { if (sequence === request.current) onError("Could not restore this Collection.", error, () => { void restore(); }); }
     finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
   }
-  if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{owner && <SecondaryButton disabled={restoring} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}</div>;
+  if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}{owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}<SecondaryButton disabled={loading} onClick={() => void refresh()}>Refresh</SecondaryButton></div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
     copy={copy}
     onRefresh={() => { void refresh(); }}
