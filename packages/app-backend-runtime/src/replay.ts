@@ -12,7 +12,8 @@ function stageTable(source:DatabaseSync, shadow:DatabaseSync, table:string):stri
   const primary=columns.filter(column=>Number(column.pk)>0).sort((a,b)=>Number(a.pk)-Number(b.pk));
   const index=source.prepare(`PRAGMA index_list(${quote(table)})`).all().find(index=>index.origin==="pk");
   const keys:Columns=index ? source.prepare(`PRAGMA index_xinfo(${quote(String(index.name))})`).all().filter(key=>key.key===1) : [];
-  const withoutRowid=source.prepare("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?").get(table)?.wr===1;
+  const tableOptions=source.prepare("SELECT wr,strict FROM pragma_table_list WHERE schema='main' AND name=?").get(table);
+  const withoutRowid=tableOptions?.wr===1, strict=tableOptions?.strict===1;
   const alias=!index && primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER";
   const nonAliasInteger=!withoutRowid && !!index && primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER";
   const definitions=columns.map(column=>{
@@ -24,7 +25,8 @@ function stageTable(source:DatabaseSync, shadow:DatabaseSync, table:string):stri
     const key=keys.find(key=>key.name===column.name);
     return `${quote(String(column.name))}${key ? ` COLLATE ${quote(String(key.coll))}${key.desc===1 ? " DESC" : ""}` : ""}`;
   }).join(",")})`);
-  shadow.exec(`CREATE TABLE ${quote(table)} (${definitions.join(",")})${withoutRowid ? " WITHOUT ROWID" : ""}`);
+  const suffix=[withoutRowid ? "WITHOUT ROWID" : "",strict ? "STRICT" : ""].filter(Boolean).join(", ");
+  shadow.exec(`CREATE TABLE ${quote(table)} (${definitions.join(",")})${suffix ? " "+suffix : ""}`);
   const names=columns.map(column=>String(column.name));
   copyRows(source,shadow,table,names);
   return names;

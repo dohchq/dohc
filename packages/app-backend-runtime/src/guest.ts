@@ -17,6 +17,7 @@ interface AuthorizationOptions extends GuestOptions {
 
 const connectionCounters = new Set(["changes", "total_changes", "last_insert_rowid"]);
 const unsafeFunctions = new Set(["load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"]);
+const persistentRowidTables=new WeakMap<DatabaseSync,ReadonlySet<string>>();
 
 export function authorize(
   db: DatabaseSync,
@@ -37,7 +38,10 @@ export function authorize(
     }
     // SQLite's session extension reads table metadata while an admitted statement runs.
     if (sessionIntrospection && action === constants.SQLITE_PRAGMA && first === "table_xinfo" && tables.has((second ?? "").toLowerCase())) return constants.SQLITE_OK;
-    if (action === constants.SQLITE_READ) return tables.has(table) || (initializing && schemaTables.has(table)) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+    if (action === constants.SQLITE_READ) {
+      if(persistentConnection && second?.toUpperCase()==="ROWID" && !persistentRowidTables.get(db)?.has(table)) return constants.SQLITE_DENY;
+      return tables.has(table) || (initializing && schemaTables.has(table)) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+    }
     if ([constants.SQLITE_INSERT, constants.SQLITE_UPDATE, constants.SQLITE_DELETE].includes(action)) {
       return writable && (tables.has(table) || (initializing && schemaTables.has(table))) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     }
@@ -56,6 +60,15 @@ export function authorize(
 
 // The trusted caller owns the transaction and clears authorization before host metadata writes.
 export async function evaluate(db: DatabaseSync, request: GuestRequest, options: GuestOptions = {}): Promise<{resultJson: string; attachedFileIds: string[]}> {
+  if(options.persistentConnection && !persistentRowidTables.has(db)) {
+    db.setAuthorizer(null);
+    const tables=new Set<string>();
+    for(const table of request.tables) {
+      const primary=db.prepare(`PRAGMA table_info("${table}")`).all().filter(column=>Number(column.pk)>0);
+      if(primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !db.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk")) tables.add(table.toLowerCase());
+    }
+    persistentRowidTables.set(db,tables);
+  }
   authorize(db, request, options);
   const engine = await getQuickJS();
   const runtime = engine.newRuntime();

@@ -47,6 +47,18 @@ describe("persistent dataset worker",()=>{
       await expect(open({schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL);"})).rejects.toMatchObject({code:"invalid_schema",message:expect.stringContaining("AUTOINCREMENT")});
     });
   });
+  it("denies implicit rowid aliases but retains declared INTEGER PRIMARY KEY identity",async()=>{
+    await fixture(async({open})=>{
+      const worker=await open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); INSERT INTO items VALUES('id','value');"});
+      for(const alias of ["rowid","_rowid_","oid"]) {
+        await expect(worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('SELECT ${alias} FROM items')}}`})).rejects.toThrow();
+      }
+      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
+      await expect(open({schemaSql:"CREATE TABLE Items(id INTEGER PRIMARY KEY,value TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
+      const captured=await open({schemaSql:"CREATE TABLE items(ROWID INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(42,'value');"});
+      expect((await captured.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT oid AS id FROM items')}}"})).result).toEqual([{id:42}]);
+    });
+  });
   it("commits only after host finalization and restores checkpoint scope/cursor",async()=>{
     await fixture(async({root,open})=>{
       const worker=await open();
@@ -126,13 +138,15 @@ describe("persistent dataset worker",()=>{
 
   it("replays a valid unique-value swap through a constraint-free shadow",async()=>{
     await fixture(async({open})=>{
-      const config={schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'a'),(2,'b');",tables:["items"]};
+      const config={schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'a'),(2,'b'); CREATE TABLE unrelated(id ANY PRIMARY KEY NOT NULL,value ANY) STRICT, WITHOUT ROWID; INSERT INTO unrelated VALUES('000456','000123');",tables:["items","unrelated"]};
       const writer=await open(config),recovered=await open(config);
       const prepared=await writer.prepare({...operation(),source:"globalThis.operations={run(ctx){ctx.db.execute(\"UPDATE items SET value='temp' WHERE id=1\");ctx.db.execute(\"UPDATE items SET value='a' WHERE id=2\");ctx.db.execute(\"UPDATE items SET value='b' WHERE id=1\");return true}}"});
       const committed=event(prepared);await writer.discard(prepared.proposalId);
       const cursor=await recovered.apply(committed);
       const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM items ORDER BY id')}}"});
       expect(read.result).toEqual([{id:1,value:"b"},{id:2,value:"a"}]);
+      const unrelated=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT id,value,typeof(id) AS idType,typeof(value) AS valueType FROM unrelated')}}"});
+      expect(unrelated.result).toEqual([{id:"000456",value:"000123",idType:"text",valueType:"text"}]);
     });
   });
 

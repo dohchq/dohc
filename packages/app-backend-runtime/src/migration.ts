@@ -22,11 +22,14 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
     expected.exec(schemaSql);expected.setAuthorizer(null);
     if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
     const schema=expected.prepare(datasetSchema).all();
-    if (schema.filter(row=>row.type==="table").length!==tables.length || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","Invalid dataset schema.");
+    const declaredTables=schema.filter(row=>row.type==="table");
+    if (declaredTables.length!==tables.length || declaredTables.some(row=>!tables.includes(String(row.name))) || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","Invalid dataset schema.");
     for (const table of tables) {
-      const primary=expected.prepare(`PRAGMA table_info("${table}")`).all().filter(column=>Number(column.pk)>0);
+      const columns=expected.prepare(`PRAGMA table_info("${table}")`).all();
+      const primary=columns.filter(column=>Number(column.pk)>0);
       const rowid=primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !expected.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk");
       if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Dataset tables require non-null primary keys.");
+      if(columns.some(column=>/^(rowid|oid|_rowid_)$/i.test(String(column.name)) && !(rowid && column.name===primary[0].name))) reject("invalid_schema","Rowid aliases are reserved unless they name the INTEGER PRIMARY KEY.");
     }
     if (JSON.stringify(db.prepare(datasetSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","Checkpoint schema does not match the approved dataset.");
   } finally {expected.close();}

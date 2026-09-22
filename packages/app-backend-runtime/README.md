@@ -137,6 +137,8 @@ Initialization keeps its separate eight-second deadline when the host lowers the
 Each operation receives a fresh QuickJS runtime. Reused SQLite connections additionally deny `changes()`, `total_changes()`, and `last_insert_rowid()`.
 Use `ctx.db.execute(...).changes` for the current statement's affected row count.
 Journaled datasets reject `AUTOINCREMENT` because SQLite changesets omit its retained sequence state. Use an `INTEGER PRIMARY KEY` or an explicit ID.
+Implicit `rowid`, `oid`, and `_rowid_` reads are unavailable unless backed by a declared `INTEGER PRIMARY KEY`.
+Those alias names are reserved for an `INTEGER PRIMARY KEY`; use other names for ordinary fields.
 Prepare refuses deferred foreign-key violations and transactions ended by conflict handling before the host can commit a journal event.
 The persistent storage reservation defaults to 128 MiB and can be lowered. It includes internal cursor pages; other guest limits retain snapshot defaults.
 This reservation is a bound, not a measured performance or scale guarantee.
