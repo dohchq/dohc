@@ -36,7 +36,7 @@ export interface DatasetTable {
   tableId: string;
   name: string;
   sqlName: string;
-  /** Names a required, unique text field. The host generates its record UUID. */
+  /** Names a required, unique text or number field. Numeric record keys must be safe integers. */
   primaryKey: string;
   fields: DatasetField[];
 }
@@ -124,10 +124,10 @@ function revision(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) fail();
   return value;
 }
-function sourcePath(value: unknown, extension: string): string {
+function sourcePath(value: unknown, extensions: readonly string[]): string {
   const result = text(value, 1024);
   const checked = validateUserWritePath(result);
-  if (!checked.ok || checked.normalized !== result || !result.endsWith(extension) || classifyEngineFilePath(result).kind !== "tracked") fail();
+  if (!checked.ok || checked.normalized !== result || !extensions.some(extension => result.endsWith(extension)) || classifyEngineFilePath(result).kind !== "tracked") fail();
   return result;
 }
 function unique(values: string[]): void {
@@ -183,7 +183,7 @@ function table(value: unknown): DatasetTable {
   unique(result.fields.map(field => field.sqlColumn.toLowerCase()));
   unique(result.fields.map(field => field.name));
   const primary = result.fields.find(field => field.sqlColumn === result.primaryKey);
-  if (!primary || primary.type !== "text" || !primary.required || !primary.unique || Object.hasOwn(primary, "default")) fail();
+  if (!primary || !["text", "number"].includes(primary.type) || !primary.required || !primary.unique || Object.hasOwn(primary, "default")) fail();
   return result;
 }
 function operation(value: unknown): DatasetOperation {
@@ -202,7 +202,7 @@ function definition(value: unknown): DatasetDefinition {
   const row = record(value, ["formatVersion", "datasetId", "name", "schemaPath", "operationsPath", "tables", "operations"]);
   if (row.formatVersion !== 1) fail();
   const result: DatasetDefinition = { formatVersion: 1, datasetId: uuid(row.datasetId), name: text(row.name),
-    schemaPath: sourcePath(row.schemaPath, ".sql"), operationsPath: sourcePath(row.operationsPath, ".js"),
+    schemaPath: sourcePath(row.schemaPath, [".sql"]), operationsPath: sourcePath(row.operationsPath, [".js", ".ts"]),
     tables: boundedArray(row.tables, DATASET_MAX_TABLES, 1).map(table), operations: boundedArray(row.operations, DATASET_MAX_OPERATIONS, 1).map(operation) };
   unique([result.datasetId, ...result.tables.map(table => table.tableId), ...result.tables.flatMap(table => table.fields.map(field => field.fieldId)), ...result.operations.map(operation => operation.operationId)]);
   unique(result.tables.map(table => table.sqlName.toLowerCase()));
@@ -219,7 +219,7 @@ function definition(value: unknown): DatasetDefinition {
   for (const operation of result.operations) {
     const table = tables.get(operation.tableId);
     if (!table || operation.fieldIds.some(id => !table.fields.some(field => field.fieldId === id))) fail();
-    if (["create", "edit"].includes(operation.kind) && operation.fieldIds.some(id => table.fields.some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
+    if (operation.kind === "edit" && operation.fieldIds.some(id => table.fields.some(field => field.fieldId === id && field.sqlColumn === table.primaryKey))) fail();
   }
   return result;
 }

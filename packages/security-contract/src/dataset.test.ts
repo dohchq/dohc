@@ -59,6 +59,19 @@ describe("dataset definition", () => {
     expect(second.tables[0]!.fields[0]!.name).toBe("Name");
   });
 
+  it("accepts authored text or numeric record keys and TypeScript operation source", () => {
+    const value = definition();
+    value.operationsPath = "data/operations.ts";
+    value.tables[0]!.fields[0]!.type = "number";
+    value.operations[0]!.fieldIds = [id(3), id(4)];
+    expect(parseDatasetDefinition(value).tables[0]!.fields[0]!.type).toBe("number");
+    value.tables[0]!.fields[0]!.type = "checkbox";
+    expect(() => parseDatasetDefinition(value)).toThrow();
+    value.tables[0]!.fields[0]!.type = "text";
+    value.operationsPath = "data/operations.txt";
+    expect(() => parseDatasetDefinition(value)).toThrow();
+  });
+
   it.each(["../schema.sql", "/schema.sql", "C:\\schema.sql", "data/./schema.sql", "data//schema.sql", ".dohc/schema.sql", ".env/schema.sql", "shared-with-me/schema.sql", "data/schema.json"])("rejects unsafe schema path %s", schemaPath => {
     expect(() => parseDatasetDefinition({ ...definition(), schemaPath })).toThrow();
   });
@@ -86,7 +99,7 @@ describe("dataset definition", () => {
       value => { value.tables[0]!.fields[0]!.required = false; },
       value => { value.tables[0]!.primaryKey = "missing"; },
       value => { value.operations[0]!.fieldIds = [id(100)]; },
-      value => { value.operations[0]!.fieldIds = [id(3)]; },
+      value => { value.operations[0]!.kind = "edit"; value.operations[0]!.fieldIds = [id(3)]; },
       value => { value.operations[0]!.readOnly = true; },
       value => { value.operations[1]!.readOnly = false; },
       value => { value.operations[2]!.fieldIds = [id(4)]; },
