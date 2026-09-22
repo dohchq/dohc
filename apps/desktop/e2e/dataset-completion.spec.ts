@@ -345,14 +345,14 @@ test("@dataset-completion board and calendar page all records and save governed 
     await views.getByRole("button", { name: "Done", exact: true }).click();
     await collection.getByRole("button", { name: "Next records in this calendar", exact: true }).click();
     await expect(collection.getByRole("button", { name: "Next records in this calendar", exact: true })).toBeDisabled();
-    const event = collection.locator(".rbc-event").filter({ hasText: "Task 051" });
+    const event = collection.locator(".rbc-event").filter({ hasText: "Task 050" });
     await expect(event).toBeVisible();
     const calendarRow = event.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' rbc-month-row ')]");
     // Drop onto a different day of the same visible week; calendar applies its date field operation.
     const originalDay = new Date(today.getFullYear(), today.getMonth(), 10).getDay();
     await event.dragTo(calendarRow.locator(".rbc-day-bg").nth((originalDay + 1) % 7));
     await expect.poll(async () => {
-      const result = await readTask("Task 051");
+      const result = await readTask("Task 050");
       if (result.kind !== "invoked") return null;
       const data = result.result as { rows: Array<{ values: Record<string, unknown> }> };
       const due = data.rows[0]?.values[field("Due")];
