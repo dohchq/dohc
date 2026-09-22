@@ -9,6 +9,7 @@ import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
+import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 
 export interface OwnerDatasetData {
   list(input: { after?: string; limit?: number }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
@@ -94,6 +95,40 @@ export function createRemoteDatasetData(input: {
       if (result.file.fileId !== file.fileId || bytes.toString("base64") !== result.bytesBase64 || result.file.byteLength !== bytes.byteLength ||
         result.file.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new Error("The server returned a different Collection file.");
       return { file: result.file, bytesBase64: result.bytesBase64 };
+    },
+  };
+}
+
+/** Owner-authenticated streaming target for the durable local-to-shared transfer coordinator. */
+export function createRemoteDatasetTransferTarget(input: {
+  workspaceId: string; datasetId: string; origin: string; credentials: CloudCredentials; credentialGeneration: number;
+  currentCredentialGeneration(): number; signal: AbortSignal; assertCurrent(): void;
+  relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
+}): DatasetTransferTarget & { status(transferId: string): Promise<DatasetTransferReceipt | null> } {
+  const origin = new URL(input.origin);
+  if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("Choose a configured sharing server.");
+  const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration, currentGeneration: input.currentCredentialGeneration,
+    assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
+  const path = (transferId: string) => `/sync/${encodeURIComponent(input.workspaceId)}/datasets/${encodeURIComponent(identity.parse(input.datasetId))}/imports/${encodeURIComponent(transferId)}`;
+  const receipt = (value: unknown): DatasetTransferReceipt | null => {
+    if (value === null) return null;
+    const result = value as Record<string, unknown>;
+    if (!result || typeof result !== "object" || typeof result.transferId !== "string" || typeof result.manifestSha256 !== "string" ||
+      !result.sourceCursor || !result.targetCursor) throw new Error("The sharing server returned an invalid transfer receipt.");
+    return result as DatasetTransferReceipt;
+  };
+  return {
+    async importRecovery(value) {
+      const chunks = value.stream[Symbol.asyncIterator]();
+      const body = new ReadableStream<Uint8Array>({ async pull(controller) { try { const item = await chunks.next(); if (item.done) controller.close(); else controller.enqueue(item.value); } catch (error) { controller.error(error); } }, async cancel() { await chunks.return?.(); } });
+      const result = await session.run(() => input.relayStream(input.credentials, path(value.transferId), { method: "POST", signal: value.signal ?? input.signal,
+        headers: { "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": value.manifestSha256,
+          "x-dohc-dataset-source-cursor": JSON.stringify(value.sourceCursor) }, body }));
+      return receipt(result)!;
+    },
+    async status(transferId) {
+      const result = await session.run(() => input.relayStream(input.credentials, path(transferId), { method: "GET", signal: input.signal }));
+      return receipt(result);
     },
   };
 }
