@@ -2,7 +2,21 @@
 
 Reader: Ice, the implementation lead, and reviewers approving and delivering this campaign.
 
-Status: implementation in progress, September 22, 2026. Ice approved the campaign. This document defines the work and its acceptance gates; it does not claim that the target already ships.
+Status: implemented on `campaign/unified-app-data`, September 22, 2026. Not merged or deployed. Functional proofs and reference-machine performance checks pass; the remaining acceptance work is listed below.
+
+## Delivery status
+
+The desktop now creates transactional Collections and connected forms without an agent. Visible controls cover local preview, sharing, and publication. Owner tables, apps, and agents use the same records and approved operations. Real desktop tests cover editing, restart, Undo, field management, archive, deletion, offline inspection, and clean-host recovery with private files and retry receipts. Both the fundraiser and stock examples pass real-browser tests.
+
+The canonical JavaScript and Rust gates passed at `b79c260c8`. Later recovery and worker-retirement fixes passed affected suites, 339 runtime tests, four desktop flows, and both browser examples. The verification record preserves each tested commit and explains reuse.
+
+At `7e5d7a153`, the fresh ten-dataset soak completed 7,300 operations over 3,630 seconds with no unexpected failures. All 73 idle shutdown checks passed. On the Ryzen 9 workstation, warm read p95 was 2.9–3.9 ms and write p95 was 11.7–15.9 ms. Large-dataset cold reopening p95 was 984 ms. Rare writes waited up to 1.8 seconds for checkpoint maintenance; these results do not establish uniformly low latency. Peak sampled worker memory was 288 MiB. The separate 100,000-row desktop proof measured warm refresh p95 at 23.3 ms and input feedback at 14.5 ms.
+
+The 100-participant public-link test passed, including expected fundraiser capacity refusals and a separate abuse test. Its transport and the local benchmark do not establish controlled-LAN or hosted-service guarantees.
+
+Fable reviewed the implementation through the recovery-launcher fixes. The final worker-retirement delta passed independent risk review, but its Fable review remains blocked by provider rate limits. Ordinary four-core hardware, controlled-LAN measurement, concurrent export effects, and an independent human usability pass remain outstanding. Desktop creation and compilation currently require Windows x64. The campaign is not yet fully accepted or ready to merge under the review policy.
+
+Local evidence is recorded in `.agent-artifacts/campaign-review-ledger.md`. The final host benchmark is retained at `C:/w/dohc-benchmark-cache-racefix-20260922`; earlier failed runs remain separately identified. No live fundraiser records or deployment were changed.
 
 ## The result we will deliver
 
