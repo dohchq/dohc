@@ -93,8 +93,8 @@ export interface DatasetSupervisorOptions {
   maintenanceStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
-type Job = { bytes: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
-type Lane = { scope: DatasetScope; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
+type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
+type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function copyScope(value:DatasetScope):DatasetScope {
   if(!value||![value.workspaceId,value.datasetId].every(part=>typeof part==="string"&&/^[A-Za-z0-9._:-]{1,128}$/.test(part)))throw new Error("Invalid dataset scope.");
@@ -121,7 +121,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
   let preparingCandidates = 0;
-  let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0;
+  let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0, capacityWaiters = 0, capacityWaitBytes = 0;
   const now = options.nowMs ?? Date.now;
 
   function reportMaintenanceError(scope:DatasetScope,error:unknown):void {
@@ -247,17 +247,61 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   function head(input: DatasetAccess) {
     return options.journal.head(input.scope, () => standing(input));
   }
-  async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
-    if (lane.stopping) await lane.stopping;
-    while (workerCount >= maxWorkers) {
-      const idle = [...lanes.values()].find(candidate => candidate !== lane && !candidate.active && candidate.worker);
-      if (!idle) throw new Error("Dataset workers are busy. Retry this operation.");
-      if (idle.idle) clearTimeout(idle.idle);
-      await stopWorker(idle);
+  async function waitForCapacity(lane:Lane,input:DatasetAccess,pending:Promise<void>[]):Promise<void> {
+    standing(input);lane.lifecycle.signal.throwIfAborted();
+    const remaining=lane.admission!.deadline-performance.now();
+    if(remaining<=0)throw new Error("Dataset operation expired while waiting for a worker.");
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    let abort:()=>void=()=>{};
+    try {
+      await new Promise<void>((resolve,reject)=>{
+        abort=()=>reject(input.signal?.aborted ? input.signal.reason : lane.lifecycle.signal.reason);
+        input.signal?.addEventListener("abort",abort,{once:true});
+        lane.lifecycle.signal.addEventListener("abort",abort,{once:true});
+        if(input.signal?.aborted||lane.lifecycle.signal.aborted)abort();
+        timer=setTimeout(()=>reject(new Error("Dataset operation expired while waiting for a worker.")),remaining);
+        // A different dataset's cleanup error does not determine this request's authority.
+        Promise.race(pending.map(promise=>promise.catch(()=>{}))).then(resolve);
+      });
+    } finally {
+      if(timer)clearTimeout(timer);
+      input.signal?.removeEventListener("abort",abort);
+      lane.lifecycle.signal.removeEventListener("abort",abort);
     }
-    standing(input);
-    // Reserve before asynchronous opening so different datasets cannot exceed the pool.
-    workerCount++;
+    standing(input);lane.lifecycle.signal.throwIfAborted();
+    if(performance.now()>=lane.admission!.deadline)throw new Error("Dataset operation expired while waiting for a worker.");
+    if(!head(input).active)throw new Error("Dataset authority was transferred.");
+  }
+  async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
+    let waiting=false;
+    const admitWait=()=>{
+      if(waiting)return;
+      const bytes=lane.admission!.bytes;
+      if(queuedCount+capacityWaiters>=128||queuedBytes+capacityWaitBytes+bytes>16*1024*1024)throw new Error("Dataset host queue is full. Retry this operation.");
+      waiting=true;capacityWaiters++;capacityWaitBytes+=bytes;
+    };
+    try {
+      if(lane.stopping){admitWait();await waitForCapacity(lane,input,[lane.stopping]);}
+      while(workerCount>=maxWorkers) {
+        standing(input);lane.lifecycle.signal.throwIfAborted();
+        const idle=[...lanes.values()].find(candidate=>candidate!==lane&&!candidate.active&&candidate.worker);
+        if(idle) {
+          admitWait();if(idle.idle)clearTimeout(idle.idle);
+          await waitForCapacity(lane,input,[stopWorker(idle)]);
+        } else {
+          const pending=[...lanes.values()].filter(candidate=>candidate!==lane)
+            .flatMap(candidate=>candidate.idleWork?[candidate.idleWork]:candidate.stopping?[candidate.stopping]:[]);
+          if(!pending.length)throw new Error("Dataset workers are busy. Retry this operation.");
+          admitWait();await waitForCapacity(lane,input,pending);
+        }
+      }
+      standing(input);lane.lifecycle.signal.throwIfAborted();
+      if(!head(input).active)throw new Error("Dataset authority was transferred.");
+      // Reserve before asynchronous opening so different datasets cannot exceed the pool.
+      workerCount++;
+    } finally {
+      if(waiting){capacityWaiters--;capacityWaitBytes-=lane.admission!.bytes;}
+    }
     let directory: string | undefined;
     try {
       const current = head(input);
@@ -375,11 +419,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       return { result: JSON.parse(committed.receipt.resultJson), revision: committed.receipt.revision, replayed: committed.kind === "replayed" };
     } catch (error) {
       if (isAppBackendRuntimeError(error)) {
-        try { currentAuthority(); } catch (authorityError) { await stopWorker(lane); throw authorityError; }
+        try { currentAuthority(); } catch (authorityError) { if(lane.worker)await stopWorker(lane); throw authorityError; }
         throw error;
       }
       // Closing rolls back any proposal. A durable host event remains and is replayed next time.
-      await stopWorker(lane);
+      if(lane.worker)await stopWorker(lane);
       currentAuthority();
       throw error;
     } finally {
@@ -417,7 +461,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       const candidate:Candidate={result,authorityKey:input.authorityKey,directory,path,reportPath,capacityBytes:captured.capacityBytes,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,timer:undefined!,reservations:[...reservations]};
       candidate.timer=setTimeout(()=>expireCandidate(candidate),10*60_000);candidate.timer.unref();candidates.set(result.candidateId,candidate);directory=undefined;
       reservations.length=0;return structuredClone(result);
-    }catch(error){await stopWorker(lane);standing(input);throw error;}
+    }catch(error){if(lane.worker)await stopWorker(lane);standing(input);throw error;}
     finally{
       preparingCandidates--;input.signal?.removeEventListener("abort",abort);if(directory)await removeDirectory(directory);
       if(options.maintenanceStorage)for(const stage of reservations)try{options.journal.discardCheckpoint({stage,...options.maintenanceStorage});}catch{}
@@ -491,16 +535,16 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         // Revocation preserves the reservation for owner cleanup instead of bypassing authority.
         try{options.journal.discardCheckpoint({stage,authorize:()=>standing(input),account:input.accountStage});}catch{}
       }
-      await stopWorker(lane);standing(input);throw error;
+      if(lane.worker)await stopWorker(lane);standing(input);throw error;
     } finally {input.signal?.removeEventListener("abort",abort);}
   }
 
   function enqueue<T>(input:DatasetAccess,bytes:number,work:(lane:Lane)=>Promise<T>):Promise<T> {
     standing(input);head(input);
-    if (queuedCount >= 128 || queuedBytes + bytes > 16 * 1024 * 1024) throw new Error("Dataset host queue is full. Retry this operation.");
+    if (queuedCount + capacityWaiters >= 128 || queuedBytes + capacityWaitBytes + bytes > 16 * 1024 * 1024) throw new Error("Dataset host queue is full. Retry this operation.");
     const key=JSON.stringify(input.scope);
     let lane=lanes.get(key);
-    if(!lane){lane={scope:input.scope,queue:[],active:false};lanes.set(key,lane);}
+    if(!lane){lane={scope:input.scope,lifecycle:new AbortController(),queue:[],active:false};lanes.set(key,lane);}
     if(lane.queue.length+Number(lane.active)>=64)throw new Error("Dataset operation queue is full. Retry this operation.");
     if(lane.idle){clearTimeout(lane.idle);lane.idle=undefined;}
     const target=lane;
@@ -511,7 +555,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         clearTimeout(job.timeout);input.signal?.removeEventListener("abort",job.abort);
         reject(new Error("Dataset operation expired before execution."));
       };
-      const job:Job={bytes,signal:input.signal,abort:expire,timeout:setTimeout(expire,queueMs),resolve:result=>resolve(result as T),reject,
+      const job:Job={bytes,deadline:performance.now()+queueMs,signal:input.signal,abort:expire,timeout:setTimeout(expire,queueMs),resolve:result=>resolve(result as T),reject,
         work:async()=>{standing(input);return work(target);}};
       input.signal?.addEventListener("abort",expire,{once:true});target.queue.push(job);queuedCount++;queuedBytes+=bytes;pump(target);
     });
@@ -524,10 +568,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (lane.worker) {
         lane.idle = setTimeout(() => {
           lane.active=true;
-          lane.done=(async()=>{
+          lane.idleWork=(async()=>{
             try {await maintainMaterialization(lane);await stopWorker(lane);}
-            finally {lane.active=false;pump(lane);}
+            finally {lane.idleWork=undefined;lane.active=false;pump(lane);}
           })();
+          lane.done=lane.idleWork;
           // close observes cleanup failures; timers must not reject without a handler.
           void lane.done.catch(() => {});
         }, idleMs);
@@ -540,6 +585,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     queuedBytes -= job.bytes;
     job.signal?.removeEventListener("abort", job.abort);
     lane.active = true;
+    lane.admission={bytes:job.bytes,deadline:job.deadline};
     lane.done = (async () => {
       let released=false;
       try {
@@ -547,11 +593,14 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         if(options.maintenanceStorage&&lane.worker&&!blockedMaintenance.has(JSON.stringify(lane.scope))&&lane.worker.cursor.revision>=(lane.nextMaterializationRevision??materializationEvents)) {
           job.resolve(result);
           // Respond first; keep this lane serialized while a bounded cache is prepared.
-          await new Promise<void>(resolve=>setImmediate(resolve));
-          await maintainMaterialization(lane);
-        } else {released=true;lane.active=false;pump(lane);job.resolve(result);return;}
+          lane.idleWork=(async()=>{
+            try {await new Promise<void>(resolve=>setImmediate(resolve));await maintainMaterialization(lane);}
+            finally {lane.idleWork=undefined;}
+          })();
+          await lane.idleWork;
+        } else {released=true;lane.admission=undefined;lane.active=false;pump(lane);job.resolve(result);return;}
       } catch (error) { job.reject(error); }
-      finally {if(!released){lane.active=false;pump(lane);}}
+      finally {if(!released){lane.admission=undefined;lane.active=false;pump(lane);}}
     })();
   }
 
@@ -620,6 +669,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     async retire(raw: DatasetScope): Promise<void> {
       const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
       if (!lane) {await retireMigrationCandidates(scope);return;}
+      lane.lifecycle.abort(new Error("Dataset was permanently deleted."));
       if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
       for (const job of lane.queue.splice(0)) {
         queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout);
@@ -635,6 +685,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     async close(): Promise<void> {
       closed = true;
       for (const lane of lanes.values()) {
+        lane.lifecycle.abort(new Error("Dataset host closed."));
         if (lane.idle) clearTimeout(lane.idle);
         if (lane.active && lane.worker) void lane.worker.runtime.abort("Dataset host closed.").catch(() => {});
         for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("Dataset host closed.")); }

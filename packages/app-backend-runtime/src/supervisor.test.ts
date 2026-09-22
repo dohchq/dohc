@@ -21,7 +21,7 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
@@ -42,7 +42,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
-    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,onMaintenanceError:options.onMaintenanceError });
+    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,queueMs:options.queueMs,onMaintenanceError:options.onMaintenanceError });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
@@ -519,4 +519,117 @@ it("stages and restores a large materialization through bounded chunks",async()=
   expect((await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize})).result).toEqual([{count:1501}]);
   expect(staged.length).toBeGreaterThan(1);expect(restored.length).toBeGreaterThan(1);
   expect(Math.max(...staged,...restored)).toBeLessThanOrEqual(1024*1024);
+});
+
+
+it("waits for idle worker retirement instead of reporting false pool saturation",async()=>{
+  let entered!:()=>void,release:(()=>void)|undefined;
+  const retiring=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({maxWorkers:1,idleMs:1,launch:launcher((command,controls)=>{
+    if(command.command.kind==="close"&&!release){release=controls.deliver;entered();return;}controls.deliver();
+  })});
+  f.initialize("second");await f.invoke({}, {readOnly:true});await retiring;
+  let outcome:unknown;
+  const next=f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true}).then(value=>{outcome=value;return value;},error=>{outcome=error;return error;});
+  try {await new Promise<void>(resolve=>setImmediate(resolve));expect(outcome).toBeUndefined();}
+  finally {release!();}
+  expect(await next).toMatchObject({result:[]});
+});
+
+it("waits for post-response cache work before reclaiming its worker slot",async()=>{
+  let entered!:()=>void,release:(()=>void)|undefined;
+  const snapshot=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({maxWorkers:1,materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},launch:launcher((command,controls)=>{
+    if(command.command.kind==="snapshot"&&!release){release=controls.deliver;entered();return;}controls.deliver();
+  })});
+  f.initialize("second");await f.invoke({id:"one",value:"saved"});await snapshot;
+  let outcome:unknown;
+  const next=f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true}).then(value=>{outcome=value;return value;},error=>{outcome=error;return error;});
+  try {await new Promise<void>(resolve=>setImmediate(resolve));expect(outcome).toBeUndefined();}
+  finally {release!();}
+  expect(await next).toMatchObject({result:[]});
+});
+
+
+async function heldIdleRetirement() {
+  let entered!:()=>void,release:(()=>void)|undefined;
+  const retiring=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({maxWorkers:1,idleMs:1,launch:launcher((command,controls)=>{
+    if(command.command.kind==="close"&&!release){release=controls.deliver;entered();return;}controls.deliver();
+  })});
+  await f.invoke({}, {readOnly:true});await retiring;
+  return {...f,release(){release!();}};
+}
+
+it.each(["abort","revoke","delete","close"])("rechecks %s while waiting for a retiring worker",async(kind)=>{
+  const f=await heldIdleRetirement();f.initialize("second");
+  const scope={...f.scope,datasetId:"second"},controller=new AbortController();
+  let outcome:unknown;
+  const pending=f.invoke({}, {scope,readOnly:true,signal:controller.signal}).then(value=>{outcome=value;return value;},error=>{outcome=error;return error;});
+  await new Promise<void>(resolve=>setImmediate(resolve));expect(outcome).toBeUndefined();
+  let finished:Promise<void>|undefined;
+  if(kind==="abort")controller.abort(new Error("cancelled"));
+  if(kind==="revoke")f.db.exec("UPDATE grants SET allowed=0");
+  if(kind==="delete"){
+    f.journal.destroy({expected:f.journal.head(scope,f.authorize).cursor,authorize:f.authorize});
+    finished=f.supervisor.retire(scope);
+  }
+  if(kind==="close")finished=f.supervisor.close();
+  if(kind==="revoke")f.release();
+  try {expect(await pending).toBeInstanceOf(Error);}
+  finally {if(kind!=="revoke")f.release();await finished;}
+});
+
+it("keeps genuine active-user saturation as an immediate overload",async()=>{
+  let entered!:()=>void,release:(()=>void)|undefined;
+  const preparing=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({maxWorkers:1,launch:launcher((command,controls)=>{
+    if(command.command.kind==="prepare"&&!release){release=controls.deliver;entered();return;}controls.deliver();
+  })});
+  f.initialize("second");const active=f.invoke({}, {readOnly:true});await preparing;
+  try {await expect(f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true})).rejects.toThrow("workers are busy");}
+  finally {release!();await active;}
+});
+
+it("counts retiring-worker waiters against the shared 128-request admission limit",async()=>{
+  const f=await heldIdleRetirement(),controllers:AbortController[]=[],pending:Promise<unknown>[]=[];
+  try {
+    for(let index=0;index<128;index++){
+      const datasetId=`waiting-${index}`;f.initialize(datasetId);const controller=new AbortController();controllers.push(controller);
+      pending.push(f.invoke({}, {scope:{...f.scope,datasetId},readOnly:true,signal:controller.signal}).catch(error=>error));
+    }
+    f.initialize("over-limit");
+    await expect(f.invoke({}, {scope:{...f.scope,datasetId:"over-limit"},readOnly:true})).rejects.toThrow("host queue is full");
+  }finally{for(const controller of controllers)controller.abort(new Error("cancelled"));await Promise.all(pending);f.release();}
+});
+
+it("does not restart the original queue deadline when worker capacity is pending",async()=>{
+  const f=await heldIdleRetirement();f.initialize("second");
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout","performance"]});
+  try {
+    let outcome:unknown;
+    const pending=f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true}).catch(error=>{outcome=error;return error;});
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(outcome).toBeInstanceOf(Error);expect((await pending).message).toContain("expired while waiting");
+  }finally{vi.useRealTimers();f.release();}
+});
+
+
+it.each(["abort","deadline"])("settles %s promptly when its own old worker is being evicted",async(kind)=>{
+  let entered!:()=>void,release:(()=>void)|undefined;
+  const stopping=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({maxWorkers:1,launch:launcher((command,controls)=>{
+    if(command.command.kind==="close"&&!release){release=controls.deliver;entered();return;}controls.deliver();
+  })});
+  f.initialize("second");await f.invoke({}, {readOnly:true});
+  const other=f.invoke({}, {scope:{...f.scope,datasetId:"second"},readOnly:true}).catch(error=>error);await stopping;
+  const controller=new AbortController();let outcome:unknown;
+  if(kind==="deadline")vi.useFakeTimers({toFake:["setTimeout","clearTimeout","performance"]});
+  const pending=f.invoke({}, {readOnly:true,signal:controller.signal}).catch(error=>{outcome=error;return error;});
+  try {
+    if(kind==="abort"){controller.abort(new Error("cancelled"));await new Promise<void>(resolve=>setImmediate(resolve));}
+    else await vi.advanceTimersByTimeAsync(30_000);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((await pending).message).toContain(kind==="abort"?"cancelled":"expired");
+  }finally{vi.useRealTimers();release!();await other;await pending;}
 });
