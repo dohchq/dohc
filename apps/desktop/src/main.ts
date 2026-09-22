@@ -23,6 +23,7 @@ import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteA
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./workspaces/remoteDataset";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -4158,6 +4159,22 @@ function registerIpcHandlers(): void {
     });
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      const local = await datasetForWorkspace(workspace, signal);
+      return createDatasetAuthorityRouter(local, {
+        status: async datasetId => { signal.throwIfAborted(); return local.transferStatus(datasetId); },
+        remote: async targetOrigin => {
+          const remote = await remoteForWorkspace(workspace);
+          signal.throwIfAborted();
+          if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) {
+            throw new Error("Sign in to the server that hosts this Collection.");
+          }
+          return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+            currentCredentialGeneration: () => credentialCacheGeneration,
+            assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
+        },
+      });
+    },
     withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);
       if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");

@@ -134,7 +134,10 @@ describe("local dataset owner adapter", () => {
     await expect(restarted.action({...input,input:{name:"Other"}})).rejects.toThrow(/retry|payload/i);
     expect(await readdir(workspaceRoot)).toEqual([".dohc"]);
     await restarted.close();
-    expect(await readdir(join(workspaceRoot,".dohc","datasets","workers"))).toEqual([]);
+    // Persistent coordination files keep later supervisor sessions on the same lock inode.
+    expect((await readdir(join(workspaceRoot,".dohc","datasets","workers"))).sort()).toEqual([
+      ".dohc-worker-lock.sqlite", ".dohc-worker-session.json",
+    ]);
   });
 
   it("requires exact approval and revision, and separates queries from actions", async () => {

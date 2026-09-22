@@ -22,7 +22,7 @@ import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./local
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
 type LocalContext = OwnerContext | LocalDatasetAppContext;
-type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration">;
+type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
 export interface LocalDatasetHostOptions {
   workspaceId: string;
   workspaceRoot: string;
@@ -184,6 +184,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       accountCreation(context, allocation) { charge(allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       accountMetadata(_context, allocation) { charge(allocation.bytes); },
       accountMigration(context, allocation) { charge(allocation.bytes); return resources?.accountMigration?.(context, allocation); },
+      accountCheckpointStage(context, allocation) { charge(allocation.bytes); return resources?.accountCheckpointStage?.(context, allocation); },
       operationResources(context, request) {
         const extra = resources?.operationResources?.(context, request);
         const ids = new Set<string>();
