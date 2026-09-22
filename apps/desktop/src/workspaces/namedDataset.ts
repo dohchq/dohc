@@ -30,7 +30,7 @@ export function createNamedDatasetData(input: {
     input.signal.throwIfAborted(); input.assertCurrent();
     if (input.currentCredentialGeneration() !== input.credentialGeneration) throw Error("Your server session changed. Reopen this workspace.");
   };
-  const copy = (savedAtMs: number, offline: boolean) => ({ offline, savedAtMs, coverage: "saved-pages" as const });
+  const copy = (savedAtMs: number) => ({ offline: true, savedAtMs, coverage: "saved-pages" as const });
   async function request<T>(key: unknown, read: (remote: OwnerDatasetData) => Promise<T>, parse: (value: unknown) => T, save: boolean) {
     current();
     const epoch = await cache.begin();
@@ -65,7 +65,7 @@ export function createNamedDatasetData(input: {
       if (!save) throw Error("This Collection is offline. Connect to change records or open attachments.");
       const page = await cache.read(key); current();
       if (!page) throw Error("This view is not saved on this device. Connect to the sharing server and open it first.");
-      return { value: parse(page.value), copy: copy(page.savedAtMs, true) };
+      return { value: parse(page.value), copy: copy(page.savedAtMs) };
     }
   }
   const inspect: NonNullable<OwnerDatasetData["inspect"]> = async datasetId => {
@@ -85,8 +85,8 @@ export function createNamedDatasetData(input: {
     describe: async datasetId => (await inspect(datasetId)).dataset,
     async invoke(invocation) {
       current(); invocation.signal?.throwIfAborted();
-      const saved = await cache.read(["describe", invocation.datasetId]);
-      const dataset = saved ? parseDatasetDescription(saved.value) : (await inspect(invocation.datasetId)).dataset;
+      const description = await cache.peek(["describe", invocation.datasetId]);
+      const dataset = description ? parseDatasetDescription(description) : (await inspect(invocation.datasetId)).dataset;
       const eligible = dataset.revision === invocation.revision && dataset.revisionSha256 === invocation.revisionSha256 &&
         dataset.operations.some(operation => operation.operationId === invocation.operationId && operation.readOnly);
       const key = ["invoke", invocation.datasetId, invocation.revision, invocation.revisionSha256, invocation.operationId, invocation.input];

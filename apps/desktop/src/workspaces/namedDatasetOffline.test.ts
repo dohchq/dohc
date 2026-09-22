@@ -134,7 +134,8 @@ it("bounds saved pages and declines oversized pages instead of claiming they wer
   for (let i = 0; i < 20; i++) await cache.put(i, "x".repeat(300), fingerprint);
   expect((await readFile(join(f.directory, "pages.json"))).byteLength).toBeLessThanOrEqual(1800);
   expect(await cache.read(0)).toBeNull(); expect(await cache.read(19)).not.toBeNull();
-  expect(await cache.put("large", "x".repeat(1000), fingerprint)).toBeNull();
+  await cache.put("large", "x".repeat(1000), fingerprint);
+  expect(await cache.read("large")).toBeNull();
 });
 
 it("removes interrupted cache writes when signing out instead of leaving former account bytes behind", async () => {
@@ -192,7 +193,7 @@ it.each([["clear", false], ["account", false], ["clear", true], ["account", true
     release.resolve();
     await purge;
     const saved = await save;
-    if (action === "clear") expect(saved).toBeNull(); else expect(saved).toBeInstanceOf(Error);
+    if (action === "account") expect(saved).toBeInstanceOf(Error);
     await f.restart();
     expect(await f.cache().read("delayed")).toBeNull();
     await expect(readFile(join(f.directory, "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -232,4 +233,42 @@ it("stops new cache work during close and drains a save already admitted", async
     expect(await f.cache().read("admitted")).toMatchObject({ value: result });
     expect(await f.cache().read("late")).toBeNull();
   } finally { release.resolve(); await saved; }
+});
+
+
+it.each([false, true])("uses authorized in-memory metadata during the first save without an extra describe (changed fingerprint: %s)", async changed => {
+  const f = await fixture(), cache = f.cache();
+  await cache.accept(fingerprint, await cache.begin());
+  if (changed) { await f.data().describe(id(1)); await f.settled(); f.token("d".repeat(64)); }
+  f.relayResponse.mockClear();
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let purges = changed ? 1 : 0;
+  disk.beforeSync = async () => {
+    if (purges-- > 0) return;
+    disk.beforeSync = null; entered.resolve(); await release.promise;
+  };
+  try {
+    expect(await f.data().inspect!(id(1))).toEqual({ dataset: description, copy: undefined });
+    await entered.promise;
+    expect(await cache.read(["describe", id(1)])).toBeNull();
+    expect(await cache.peek(["describe", id(1)])).toEqual(description);
+    expect(await f.data().invoke(invocation)).toEqual(result);
+    expect(f.relayResponse.mock.calls.map(([, path]) => path.split("/").at(-1))).toEqual([id(1), "invoke"]);
+  } finally { release.resolve(); await f.settled(); }
+});
+
+it("fences in-memory metadata after fingerprint, local authority, revocation and account changes", async () => {
+  const f = await fixture(), cache = f.cache();
+  await cache.accept(fingerprint, await cache.begin()); await cache.put("metadata", description, fingerprint);
+  expect(await cache.peek("metadata")).toEqual(description);
+  const next = "d".repeat(64);
+  await cache.accept(next, await cache.begin());
+  expect(await cache.peek("metadata")).toBeNull();
+  await cache.put("metadata", description, next); await cache.clear();
+  expect(await cache.peek("metadata")).toBeNull();
+  await cache.accept(next, await cache.begin()); await cache.put("metadata", description, next);
+  const narrowed = f.registry().scope({ owner, binding: ["workspace", "share"], localAuthority: "narrower", assertCurrent() {} });
+  expect(await narrowed.peek("metadata")).toBeNull();
+  await f.registry().credentialsChanged("f".repeat(64));
+  await expect(cache.peek("metadata")).rejects.toThrow(/account changed/);
 });
