@@ -11,7 +11,7 @@ async function openManagement(collection: Locator): Promise<void> {
   if (!await trigger.evaluate(element => element.closest("details")?.open)) await trigger.click();
 }
 
-test("@dataset-collection owner creates a Collection and form, submits, edits, and reopens the same records", async ({ browser }) => {
+test("@dataset-collection owner creates a Collection and form, submits, edits, and undoes from history after restart", async ({ browser }) => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -69,11 +69,37 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     const read = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: workspace.rootPath, actor: "agent", request } }, { stateDir: workspace.homeDir });
     expect(JSON.stringify(read)).toContain("Synthetic participant");
     await page.screenshot({ path: test.info().outputPath("collection-light.png") });
+    await collection.getByRole("button", { name: /^Edit Name for record / }).click();
+    await collection.getByRole("form", { name: "Edit Name" }).getByLabel("Name").fill("Reviewed before restart");
+    await collection.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Reviewed before restart");
+    const edited = await page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
+    expect(JSON.stringify(edited)).toContain("Reviewed before restart");
+    assertDesktopEngineHealthy(desktop.logs);
     await desktop.close();
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const restored = await desktop.page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
-    expect(restored).toEqual(read);
+    expect(restored).toEqual(edited);
+    await desktop.page.getByTestId(`tab-${path}`).click();
+    const reopened = desktop.page.getByRole("region", { name: "Registrations", exact: true });
+    await expect(reopened.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Reviewed before restart");
+    await expect(reopened.getByRole("button", { name: "Undo last edit" })).toHaveCount(0);
+    await openManagement(reopened);
+    await reopened.getByRole("button", { name: "History", exact: true }).click();
+    const history = desktop.page.getByRole("dialog", { name: "Collection history", exact: true });
+    const latest = history.locator("details").first();
+    await latest.locator("summary").click();
+    await expect(latest.getByText('"Synthetic participant"', { exact: true })).toBeVisible();
+    await desktop.page.screenshot({ path: test.info().outputPath("collection-durable-undo.png") });
+    await latest.getByRole("button", { name: "Undo edit", exact: true }).click();
+    await expect(history.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
+    await history.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(history).toBeHidden();
+    await expect(reopened.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");
+    const reversed = await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset", args: { cwd: workspace.rootPath, actor: "agent", request } }, { stateDir: workspace.homeDir });
+    expect(JSON.stringify(reversed)).toContain("Synthetic participant");
+    expect(JSON.stringify(reversed)).not.toContain("Reviewed before restart");
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
     assertDesktopEngineHealthy(desktop.logs);
   } finally {
