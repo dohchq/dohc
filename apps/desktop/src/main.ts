@@ -6,7 +6,6 @@ import {
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
-import { readAppBackendResponse } from "./ipc/readAppBackendResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
@@ -19,9 +18,7 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
-import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
@@ -31,10 +28,7 @@ import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createFile as createDatasetSourceFile } from "./workspaces/workspaceFiles";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
-import { activatePublishedAppBackend } from "./workspaces/publishAppBackend";
-import { createDesktopAppBackendRuntime, createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
-import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
-import type { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
+import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
@@ -950,12 +944,9 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const backendAction = /\/app-publications\/[a-f0-9]{64}\/backend\/([a-z]+)$/.exec(path)?.[1];
   const datasetRoute = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
   const data = (datasetRoute
     ? await readDatasetResponse(response, datasetRoute[2] ?? (datasetRoute[1] ? "describe" : "list"), init?.signal ?? new AbortController().signal)
-    : backendAction
-    ? await readAppBackendResponse(response, backendAction, init?.signal ?? new AbortController().signal)
     : options && "retainRestoreConflict" in options
     ? await readOwnerRestoreResponse(response)
     : await response.json().catch(() => null)) as {
@@ -3063,7 +3054,6 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   );
 }
 
-let ownerAppBackendForCli: ((input: OwnerAppBackendRequest) => Promise<OwnerAppBackendResult>) | undefined;
 let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
@@ -3076,10 +3066,6 @@ const { startDesktopCliServer } = createDesktopCliServer({
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
-  },
-  appBackend: input => {
-    if (!ownerAppBackendForCli) throw new Error("App data is not ready. Try again.");
-    return ownerAppBackendForCli(input);
   },
   ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
@@ -4131,7 +4117,6 @@ function registerIpcHandlers(): void {
       if (result.workspaceId !== workspaceId || result.sha256 !== sha256 || result.byteLength !== bytes.byteLength) throw new Error("The uploaded app bundle does not match. Try publishing again.");
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
-  const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
   const localDatasetHosts = new WeakMap<AbortSignal, Promise<LocalDatasetHost>>();
   const datasetRuntimePath = join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
   const datasetForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
@@ -4250,29 +4235,9 @@ function registerIpcHandlers(): void {
   });
   datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
-  const localAppLaunches = new WeakMap<LocalAppBackendHost, Promise<LocalAppLaunchHost>>();
-  const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime", "child.mjs"));
-  const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
-    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-      signal.throwIfAborted(); operation.assertCurrent();
-      if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The app workspace attachment changed.");
-      let pending = localAppHosts.get(operation.signal);
-      if (!pending) {
-        pending = createLocalAppBackendHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, runtime: localRuntime });
-        localAppHosts.set(operation.signal, pending);
-        const capturedSignal = operation.signal;
-        void pending.then(host => {
-          if (capturedSignal.aborted) host.close();
-          else capturedSignal.addEventListener("abort", () => host.close(), { once: true });
-        }, () => localAppHosts.delete(capturedSignal));
-      }
-      const host = await pending;
-      signal.throwIfAborted(); operation.assertCurrent(); host.assertCurrent();
-      return host;
-    });
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
-      ...ownerPublicationDependencies, localForWorkspace, datasetForWorkspace,
+      ...ownerPublicationDependencies, datasetForWorkspace,
       launchLocalDataset: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
         signal.throwIfAborted(); operation.assertCurrent();
         const host = await datasetForWorkspace(workspace, signal);
@@ -4281,19 +4246,6 @@ function registerIpcHandlers(): void {
           pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
           localDatasetLaunches.set(host, pending);
           void pending.catch(() => localDatasetLaunches.delete(host));
-        }
-        const launcher = await pending;
-        signal.throwIfAborted(); operation.assertCurrent();
-        return launcher.launch(publicationId, signal);
-      }),
-      launchLocal: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-        signal.throwIfAborted(); operation.assertCurrent();
-        const backend = await localForWorkspace(workspace, signal);
-        let pending = localAppLaunches.get(backend);
-        if (!pending) {
-          pending = createLocalAppLaunchHost({ backend, lifetime: operation.signal });
-          localAppLaunches.set(backend, pending);
-          void pending.catch(() => localAppLaunches.delete(backend));
         }
         const launcher = await pending;
         signal.throwIfAborted(); operation.assertCurrent();
@@ -4314,22 +4266,12 @@ function registerIpcHandlers(): void {
       await local.transferToShared({ datasetId: dataset.datasetId, targetOrigin, target, signal });
       return;
     }
-    const backend = candidate.capabilities.find(capability => capability.kind === "app-backend");
-    if (!backend) return;
-    const local = await localForWorkspace(workspace, signal);
-    const existing = local.findByDataPath(backend.dataPath);
-    if (existing && (existing.appRoot !== candidate.appRoot || existing.capability.schemaSha256 !== backend.schemaSha256 ||
-        (!existing.sharedPublicationId && existing.capability.backendSha256 !== backend.backendSha256))) {
-      throw new Error("The shared app does not match its local data. Approve its current backend locally before transferring.");
-    }
   };
-  const activateBackend: NonNullable<Parameters<typeof createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>>[0]["activateBackend"]> =
-    async (workspace, input, request, signal) => activatePublishedAppBackend(input, await localForWorkspace(workspace, signal), request, signal);
   const resolveDatasetRevision = async (workspace: DesktopRendererWorkspaceOperation["workspace"], binding: import("@dohc/security-contract/dataset").AppDatasetBinding, signal: AbortSignal) =>
     resolveRemoteDatasetRevision(await datasetDependencies.dataForWorkspace(workspace, signal), binding);
-  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend, resolveDatasetRevision });
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, resolveDatasetRevision });
   const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend, resolveDatasetRevision,
+    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, resolveDatasetRevision,
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
@@ -4349,44 +4291,6 @@ function registerIpcHandlers(): void {
     ...ownerResponseDependencies,withWorkspaceOperation:(_caller,workspaceId,work)=>workspaceAuthorities.withOperation(workspaceId,work),
   });
   ownerAppResponsesForCli=input=>cliOwnerResponses(input.workspaceId,input);
-  const ownerBackendDependencies = {
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler), assertTrustedSender, withRendererWorkspaceOperation,
-    transportForWorkspace: async (workspace, publicationId, signal) => {
-      const local = await localForWorkspace(workspace, signal);
-      const sharedPublicationId = local.sharedPublicationFor(publicationId);
-      if (local.has(publicationId) && !sharedPublicationId) return local;
-      const remote = await remoteForWorkspace(workspace);
-      signal.throwIfAborted();
-      const transport = createRemoteAppBackendTransport({ workspaceId: workspace.workspaceId, ...remote,
-        currentCredentialGeneration: () => credentialCacheGeneration, relayJson: relayShareJsonWithCredentials });
-      if (!sharedPublicationId) return transport;
-      return { assertCurrent: transport.assertCurrent, request: async (_publicationId, action, body, requestSignal) => {
-        const result = await transport.request(sharedPublicationId, action, body, requestSignal);
-        if ((action === "describe" || action === "restore") && result && typeof result === "object" && "publicationId" in result) {
-          if (result.publicationId !== sharedPublicationId) throw new Error("The shared app identity changed. Refresh and try again.");
-          return { ...result, publicationId };
-        }
-        return result;
-      } } satisfies import("./ipc/ownerAppBackendIpc").OwnerAppBackendTransport;
-    },
-    saveExport: async (_workspace, publicationId, bundle, signal, destination) => {
-      if (!destination) {
-        const chosen = await dialog.showSaveDialog({ title: "Export app recovery data",
-          defaultPath: `app-recovery-${publicationId.slice(0, 12)}.json`, filters: [{ name: "Recovery JSON", extensions: ["json"] }] });
-        signal.throwIfAborted();
-        if (chosen.canceled || !chosen.filePath) return null;
-        destination = { path: chosen.filePath, overwrite: true };
-      }
-      return writeAppBackendExport({ ...destination, bundle, signal });
-    },
-  } satisfies Parameters<typeof registerOwnerAppBackendIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
-  registerOwnerAppBackendIpc(ownerBackendDependencies);
-  const cliOwnerBackend = createOwnerAppBackendHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerBackendDependencies, readRecovery: readAppBackendRecovery, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
-  });
-  ownerAppBackendForCli = input => cliOwnerBackend(input.workspaceId, input);
-
-
   const {
     assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,
