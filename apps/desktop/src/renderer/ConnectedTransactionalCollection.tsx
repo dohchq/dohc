@@ -67,7 +67,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       setRecordsVersion(value => value + 1);
     } catch (error) {
       if (sequence !== request.current) return;
-      setDataset(null);
+      setRecordsVersion(value => value + 1);
       onError("Could not open this Collection.", error, () => { void refresh(); });
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetId, onError, owner]);
@@ -136,7 +136,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
       return result;
     }} />}</>;
-  return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
+  return <><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError} onNotice={onNotice}
     activeView={owner ? activeView : null}
     viewControls={owner ? disabled => <CollectionTableViewsControl disabled={disabled} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onSelect={setActiveView} onError={onError} /> : undefined}
     copy={copy}

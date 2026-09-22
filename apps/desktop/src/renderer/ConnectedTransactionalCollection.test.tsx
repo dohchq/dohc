@@ -7,7 +7,9 @@ import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollec
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { recordsVersion?: number; onRefresh?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void }) => <>
+  <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
+  <button onClick={props.onRefresh}>Refresh records</button>
   {props.onTransferCsv && <button onClick={props.onTransferCsv}>Import or export CSV</button>}
   {props.onPendingResponses && <button onClick={props.onPendingResponses}>Pending responses</button>}
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
@@ -15,6 +17,22 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+it("keeps the page mounted through successful and failed metadata refreshes", async () => {
+  backend.dataset.mockResolvedValue({ kind: "description", dataset });
+  const onError = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={onError} onFormCreated={vi.fn()} />);
+  const input = await screen.findByLabelText("Collection view state");
+  fireEvent.change(input, { target: { value: "pending edit and current search" } });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+  await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("2"));
+  expect(screen.getByLabelText("Collection view state")).toBe(input);
+  backend.dataset.mockRejectedValueOnce(Error("Offline"));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+  await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  expect(screen.getByLabelText("Collection view state")).toBe(input);
+  expect(input.getAttribute("data-records-version")).toBe("3");
+  expect((input as HTMLInputElement).value).toBe("pending edit and current search");
+});
 async function setup() {
   backend.listCollections.mockResolvedValue({ collections: [] }); backend.listWorkspaceFiles.mockResolvedValue({ files: [] });
   backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset } : { kind: "invoked", result: { id: "created", version: 1 } });

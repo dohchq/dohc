@@ -31,6 +31,67 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("keeps search, sort, cursor history and undo when records refresh", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page("Alice", true) : { id: 1, version: 3, priorValues: { [name]: "Alice" } } }));
+    const result = setup({ invoke, recordsVersion: 1 }); await screen.findByText("Alice");
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Ali" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Amount" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Amount" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit Name for record 1" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Undo last edit" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" }).hasAttribute("disabled")).toBe(false));
+    const count = invoke.mock.calls.length;
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={{ ...dataset(), name: "Updated title" }} recordsVersion={2} />);
+    await waitFor(() => expect(invoke.mock.calls.length).toBeGreaterThan(count));
+    expect(invoke.mock.calls.at(-1)![0].input).toEqual({ limit: 50, search: "Ali", sort: { fieldId: amount, direction: "asc" }, after: { id: 1, value: "Alice" } });
+    expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("Ali");
+    expect(screen.getByRole("button", { name: "Undo last edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  const receipts: AppBackendJson[] = [null, {}, { id: 1, version: 3 }, { id: 1, version: 3, priorValues: "invalid" }];
+  it.each(receipts)("accepts a committed custom edit without usable undo metadata: %j", async receipt => {
+    const invoke = vi.fn(async (request: TransactionalInvoke) => ({ result: request.operationId === read ? page() : receipt }));
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(result.onNotice).toHaveBeenCalledWith("Saved the edit"));
+    expect(result.onError).not.toHaveBeenCalled();
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
+  });
+
+  it("keeps an uncertain edit and its exact request while refreshing and browsing", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page("Alice", true) };
+      throw Error("Connection ended");
+    });
+    const result = setup({ invoke, recordsVersion: 1 });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Change not confirmed");
+    const count = invoke.mock.calls.length;
+    result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={2} />);
+    await waitFor(() => expect(invoke.mock.calls.length).toBeGreaterThan(count));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByRole("button", { name: "Try again" });
+    expect(screen.getByRole("button", { name: "New record" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("button", { name: "Try again" });
+    const writes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]![0]).toEqual(writes[0]![0]);
+  });
+
   it("keeps saved filters when sorting and resets paging when switching views",async()=>{
     const activeView={viewId:id(30),name:"Pending",kind:"table" as const,search:"Alice",filters:[{fieldId:status,value:"New"}],sort:{fieldId:name,direction:"asc" as const}};
     const result=setup({activeView});await screen.findByText("Alice");
@@ -148,7 +209,9 @@ describe("transactional Collection page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("button", { name: "Try again" });
-    expect((screen.getByLabelText("Name") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
     expect(onError).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await screen.findByRole("button", { name: "Undo last edit" });

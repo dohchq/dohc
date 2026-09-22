@@ -28,6 +28,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   viewControls?(disabled: boolean): ReactNode;
   copy?: DatasetCopyStatus;
   onRefresh?(): void;
+  recordsVersion?: number;
   workspaceId: string;
   dataset: TransactionalDatasetDescription;
   tableId: string;
@@ -48,8 +49,24 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
 }
 type Query = { after: TransactionalCursor | null; search: string; filters?: Array<{ fieldId: string; value: AppBackendJson }>; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
-type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean };
+type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke };
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
+
+function undoFromReceipt(change: Mutation, raw: AppBackendJson): Undo | null {
+  if (change.operation.kind !== "edit" || change.undo) return null;
+  let result: Record<string, AppBackendJson>;
+  try { result = object(parseAppBackendJson(raw)); } catch { return null; }
+  const priorRaw = result.priorValues;
+  if (priorRaw === undefined) return null;
+  try {
+    const prior = object(priorRaw);
+    const sent = object(change.input);
+    const changedFields = Object.keys(object(sent.values!)).sort();
+    if (typeof result.version !== "number" || !Number.isSafeInteger(result.version) || result.version < 1 || result.id !== sent.id ||
+      JSON.stringify(Object.keys(prior).sort()) !== JSON.stringify(changedFields) || Object.keys(prior).some(field => !change.operation.fieldIds.includes(field))) return null;
+    return { operation: change.operation, input: { id: result.id!, expectedVersion: result.version, values: prior } };
+  } catch { return null; }
+}
 
 function ValueInput({ field, value, disabled, onChange }: { field: TransactionalField; value: AppBackendJson; disabled: boolean; onChange(value: AppBackendJson): void }) {
   if (field.type === "checkbox") return <input aria-label={field.name} type="checkbox" checked={value === true} disabled={disabled} onChange={event => onChange(event.target.checked)} />;
@@ -72,9 +89,9 @@ function Cell({ field, value }: { field: TransactionalField; value: AppBackendJs
   return <span className="truncate text-[13px] text-ink">{display(value) || "—"}</span>;
 }
 
-/** Remount on authority or workspace changes, before old data can appear under new labels. */
+/** Keep view state across refreshes, but never across Collection identities. */
 export function TransactionalCollectionPage(props: TransactionalCollectionPageProps) {
-  const scope = JSON.stringify([props.workspaceId, props.dataset, props.tableId]);
+  const scope = JSON.stringify([props.workspaceId, props.dataset.datasetId, props.tableId]);
   return <ScopedCollectionPage key={scope} {...props} />;
 }
 function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
@@ -104,21 +121,22 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [resourceBusy, setResourceBusy] = useState(false);
   const resourceLock = useRef(false);
   const pendingResources = useRef(new Set<string>());
-  const alive = useRef(true), sequence = useRef(0), active = useRef<AbortController | null>(null);
+  const alive = useRef(true), sequence = useRef(0), active = useRef<AbortController | null>(null), readActive = useRef<AbortController | null>(null);
   const mutation = useRef<Mutation | null>(null), locked = useRef(false);
   const trigger = useRef<HTMLElement | null>(null);
   const currentQuery = useRef(query); currentQuery.current = query;
-  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); }; }, []);
+  const loadedVersion = useRef(props.recordsVersion);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); }; }, []);
   useLayoutEffect(() => { if (editor) editorForm.current?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
   }
   async function load(next: Query, history = previous): Promise<void> {
-    if (!read || !alive.current || mutation.current) return;
+    if (!read || !alive.current) return;
     setDetails(null);
-    active.current?.abort();
-    const abort = new AbortController(); active.current = abort;
+    readActive.current?.abort();
+    const abort = new AbortController(); readActive.current = abort;
     const mine = ++sequence.current;
     locked.current = true; setBusy(true);
     try {
@@ -139,13 +157,26 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (alive.current && sequence.current === mine) { locked.current = false; setBusy(false); }
     }
   }
-  const activeViewKey = JSON.stringify(props.activeView ?? null);
+  const contractKey = JSON.stringify([dataset.revision, dataset.revisionSha256, dataset.operations, props.copy?.offline ?? false]);
+  const priorContract = useRef(contractKey);
+  const activeViewKey = JSON.stringify([props.activeView ?? null, contractKey]);
+  useLayoutEffect(() => {
+    if (priorContract.current === contractKey) return;
+    priorContract.current = contractKey;
+    sequence.current++; readActive.current?.abort();
+    setPage(null); setUndo(null); setEditor(null); setDetails(null);
+  }, [contractKey]);
   useEffect(() => {
     const view = props.activeView;
     setPage(null);
     setSearch(view?.search ?? "");
     void load({ after: null, search: view?.search ?? "", filters: view?.filters, sort: view?.sort ?? undefined }, []);
   }, [activeViewKey]);
+  useEffect(() => {
+    if (loadedVersion.current === props.recordsVersion || busy || editor || resourceBusy) return;
+    loadedVersion.current = props.recordsVersion;
+    void load(currentQuery.current);
+  }, [props.recordsVersion, pending, editor, resourceBusy, busy]);
 
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
   async function execute(change: Mutation): Promise<void> {
@@ -154,25 +185,19 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     mutation.current = change; setPending(change); locked.current = true; setBusy(true);
     const abort = new AbortController(); active.current = abort;
     try {
-      const response = await invoke(request(change.operation, change.input, change.key), abort.signal);
+      const submission = change.request ??= request(change.operation, change.input, change.key);
+      const response = await invoke(submission, abort.signal);
       if (!alive.current || abort.signal.aborted) return;
-      const result = object(parseAppBackendJson(response.result));
-      if (change.operation.kind === "edit" && !change.undo) {
-        const prior = object(result.priorValues!);
-        const sent = object(change.input);
-        const changedFields = Object.keys(object(sent.values!)).sort();
-        if (typeof result.version !== "number" || !Number.isSafeInteger(result.version) || result.version < 1 || result.id !== sent.id ||
-          JSON.stringify(Object.keys(prior).sort()) !== JSON.stringify(changedFields) || Object.keys(prior).some(field => !change.operation.fieldIds.includes(field))) throw new Error("The collection returned an invalid edit receipt.");
-        setUndo({ operation: change.operation, input: { id: result.id!, expectedVersion: result.version, values: prior } });
-      } else setUndo(null);
+      setUndo(priorContract.current === contractKey ? undoFromReceipt(change, response.result) : null);
       mutation.current = null; setPending(null); closeEditor();
       locked.current = false; setBusy(false);
       onNotice?.(change.undo ? "Reversed the last edit" : change.label);
-      await load(currentQuery.current);
+      if (priorContract.current === contractKey) await load(currentQuery.current);
     } catch (cause) {
       if (alive.current && !abort.signal.aborted) {
         const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
         if (refused) { mutation.current = null; setPending(null); }
+        else closeEditor();
         onError(refused ? "The collection refused this change." : "dohc could not confirm this change.", cause, refused ? null : () => { if (alive.current) void execute(change); });
       }
     } finally { if (alive.current) { locked.current = false; setBusy(false); } }
@@ -200,6 +225,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
   const disabled = busy || pending !== null || resourceBusy;
+  const readDisabled = busy || resourceBusy;
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
@@ -218,16 +244,16 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
     </div></header>
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
-      <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={disabled || editor !== null} onChange={event => setSearch(event.target.value)} />
-      <SecondaryButton type="submit" disabled={disabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={disabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>
+      <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
+      <SecondaryButton type="submit" disabled={readDisabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>
       {props.copy ? <span role="status" className="self-center text-[12px] text-muted">{props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     </form>
-    {pending && !busy ? <div className="flex items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
+    {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
     {page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
     {page && page.rows.length > 0 ? <div className="min-h-0 flex-1 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
-        {supportsSort(field) ? <button type="button" disabled={disabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
+        {supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}>{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : field.name}
       </th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-panel-2/60">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
@@ -237,7 +263,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         }}>{field.type === "attachment" ? "Change file" : field.type === "checkbox" ? row.values[field.fieldId] === true ? "Yes" : row.values[field.fieldId] === false ? "No" : "—" : display(row.values[field.fieldId]) || "—"}</button> : attachment ? null : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
       })}<td className="px-3 py-2"><div className="flex gap-2"><SecondaryButton size="compact" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}>Details</SecondaryButton>{remove && confirmDelete ? <SecondaryButton size="compact" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}>Delete</SecondaryButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
-    {page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={disabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={disabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
+    {page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span>{page.rows.length} records on this page</span><div className="flex gap-2"><SecondaryButton disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}>Previous</SecondaryButton><SecondaryButton disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}>Next</SecondaryButton></div></footer> : null}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError}
       onClose={() => { setDetails(null); trigger.current?.focus(); }}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}
