@@ -10,6 +10,7 @@ import {
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
 import { revokeShareGrantInTransaction } from "./shares";
+import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_RESTORE_OPERATIONS as table } from "./liveRestoreOperationSchema";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, visibleSharePath } from "../shareFilter";
@@ -209,9 +210,10 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
   return storage.readTx(() => {
     owner(storage, document.workspaceId, input.ownerUserId);
     requireLiveJournalHistory(storage);
-    const share = storage.getShare(input.shareId), grant = storage.getShareGrant(input.grantId);
-    if (!share || share.workspaceId !== document.workspaceId || share.granterUserId !== input.ownerUserId ||
-      !grant || grant.shareId !== share.shareId || grant.status !== "active") refuse();
+    const current = readCurrentShareGrant(storage, {grantId: input.grantId});
+    if (!current || current.share.shareId !== input.shareId || current.share.workspaceId !== document.workspaceId ||
+      current.share.granterUserId !== input.ownerUserId) refuse();
+    const {share, grant} = current;
     const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(document));
     if (!row) refuse();
@@ -277,9 +279,10 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       if (!completed?.lifecycle.resume || completed.lifecycle.resume.binding.restoreFenceGeneration!==intent.expectedFence ||
         !isDeepStrictEqual(key(completed.lifecycle.resume.binding),key(intent.document))) refuse();
     }
-    const share = storage.getShare(intent.shareId), grant = storage.getShareGrant(intent.grantId);
-    if (!share || share.workspaceId !== intent.document.workspaceId || share.granterUserId !== intent.ownerUserId ||
-      !grant || grant.shareId !== intent.shareId || grant.generation !== intent.expectedGrantGeneration || grant.status !== "active") refuse();
+    const current = readCurrentShareGrant(storage, {grantId: intent.grantId, generation: intent.expectedGrantGeneration});
+    if (!current || current.share.shareId !== intent.shareId || current.share.workspaceId !== intent.document.workspaceId ||
+      current.share.granterUserId !== intent.ownerUserId) refuse();
+    const {share, grant} = current;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
     if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||

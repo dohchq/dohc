@@ -9,6 +9,7 @@ import { requireLinkAppPublication, type LinkAppPublicationInput, type ReadAppPu
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { assertWorkspaceQuota } from "./workspaces";
 import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBytes, linkWriteRefusal, readLinkEnrollment } from "./linkEnrollment";
+import { readCurrentShareGrant } from "./currentShareGrant";
 import type {AppCollectionReceipt,AppCollectionPage} from "@dohc/security-contract/app-publication";
 export type {AppCollectionReceipt,AppCollectionPage} from "@dohc/security-contract/app-publication";
 
@@ -64,8 +65,9 @@ export function approveAppCollection(storage: StorageContext, input: ApproveAppC
     const revision = Number(row.authority_revision);
     if (revision !== input.expectedAuthorityRevision || revision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority changed.");
     if (capability) {
-      const share = storage.getShare(String(row.share_id)), grant = storage.getShareGrant(String(row.grant_id));
-      if (row.active !== 1 || !share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId || !grant || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null || grant.generation !== row.grant_generation) throw notFound();
+      const current = row.active === 1 ? readCurrentShareGrant(storage, {grantId: String(row.grant_id), generation: Number(row.grant_generation)}) : null;
+      if (!current || current.share.shareId !== String(row.share_id) || current.share.workspaceId !== input.workspaceId || current.share.granterUserId !== input.ownerUserId) throw notFound();
+      const {share, grant} = current;
       const manifest = boundedBlob(storage,input.workspaceId,String(row.manifest_sha256),input.limits.maxMetadataBytes);
       const candidate = parseAppPublicationCandidate(JSON.parse(Buffer.from(manifest).toString("utf8")),input.limits);
       const requested = candidate.capabilities?.[0] && parseAppCollectionCapability(candidate.capabilities[0]);

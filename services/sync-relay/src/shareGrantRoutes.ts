@@ -7,6 +7,7 @@ import type { createLinkResponseStreams } from "./linkResponseStreams";
 import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
+import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
@@ -82,30 +83,25 @@ export function createShareGrantRoutes(
       throw relayError("invalid_access", "Edit links require files on the main version.");
     }
   };
-  // The share and an active grant of `kind` on it, when the actor owns both
-  // the share and its workspace right now. Anything else is a generic 404.
+  // The share and a current grant of `kind` on it, when the actor granted the
+  // share and still owns its workspace. Anything else is a generic 404.
   function requireOwnedGrant(
     kind: "link" | "user",
     shareId: string,
     grantId: string,
     actor: { userId: string },
   ): SyncRelayShareWithGrantRow {
-    const share = storage.getShare(shareId);
-    const grant = storage.getShareGrant(grantId);
+    const current = readCurrentShareGrant(storage, { grantId });
     if (
-      !share ||
-      share.granterUserId !== actor.userId ||
-      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
-      !grant ||
-      grant.shareId !== share.shareId ||
-      grant.principalKind !== kind ||
-      (kind === "user" && !grant.principalUserId) ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null
+      !current ||
+      current.share.shareId !== shareId ||
+      current.share.granterUserId !== actor.userId ||
+      current.grant.principalKind !== kind ||
+      (kind === "user" && !current.grant.principalUserId)
     ) {
       throw notFound();
     }
-    return { share, grant };
+    return current;
   }
 
   const dependentSetConflict = async (

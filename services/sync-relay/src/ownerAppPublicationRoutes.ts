@@ -4,6 +4,7 @@ import { badRequest, notFound, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import { parseShareId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
+import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -75,9 +76,10 @@ export function createOwnerAppPublicationRoutes(options: {
     const input = record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"]);
     if (typeof input.shareId !== "string" || typeof input.grantId !== "string") throw badRequest("Invalid publication share or grant.");
     const shareId = parseShareId(input.shareId), grantId = parseShareId(input.grantId);
-    const share = storage.getShare(shareId), grant = storage.getShareGrant(grantId);
-    if (!share || !grant || share.workspaceId !== route.workspaceId || share.granterUserId !== ownerUserId || grant.shareId !== shareId ||
-        grant.status !== "active" || grant.revokedAtMs !== null) throw notFound();
+    const current = readCurrentShareGrant(storage, {grantId});
+    if (!current || current.share.shareId !== shareId || current.share.workspaceId !== route.workspaceId ||
+        current.share.granterUserId !== ownerUserId) throw notFound();
+    const {grant} = current;
     if (!Number.isSafeInteger(input.expectedGrantGeneration) || Number(input.expectedGrantGeneration) < 1) throw badRequest("Invalid publication grant generation.");
     if (input.expectedGrantGeneration !== grant.generation) throw relayError("conflict", "Publication grant changed.");
     let candidate;

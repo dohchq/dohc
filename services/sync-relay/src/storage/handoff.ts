@@ -1,5 +1,7 @@
+import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 import { type StorageContext } from "./context";
 import { insertShareGrant } from "./shares";
+import { readCurrentShareGrant } from "./currentShareGrant";
 import { type SyncRelayLinkHandoffCodeRow, type LinkHandoffRedeemResult, type SyncRelayShareGrantRow } from "./types";
 import { LINK_HANDOFF_CODES_PER_GRANT_LIMIT, constantTimeHashEqual } from "../linkSecurity";
 import { rowToLinkHandoffCodeRow, rowToShareGrantRow } from "./rows";
@@ -23,17 +25,12 @@ export function mintLinkHandoffCode(storage: StorageContext, input: {
     }
     return storage.tx(() => {
       if (!input.guard()) return false;
-      const grant = storage.getShareGrant(code.grantId);
-      if (
-        !grant ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        grant.generation !== code.generation ||
-        (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
-      ) {
-        return false;
-      }
+      const grant = readCurrentShareGrant(storage, {
+        grantId: code.grantId,
+        principal: { kind: "link" },
+        generation: code.generation,
+      })?.grant;
+      if (!grant || !isShareAccessValue(grant.access)) return false;
 
       storage.db
         .prepare("DELETE FROM sync_relay_link_handoff_codes WHERE expires_at_ms <= ?")
@@ -166,35 +163,26 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
       }
       if (!authorized) return refuseAndConsume();
 
-      const parent = storage.getShareGrant(code.grantId);
-      if (
-        !parent ||
-        parent.principalKind !== "link" ||
-        parent.status !== "active" ||
-        parent.revokedAtMs !== null ||
-        parent.generation !== code.generation ||
-        (parent.access !== "view" && parent.access !== "comment" && parent.access !== "edit")
-      ) {
-        return refuseAndConsume();
-      }
+      const current = readCurrentShareGrant(storage, {
+        grantId: code.grantId,
+        principal: { kind: "link" },
+        generation: code.generation,
+      });
+      if (!current || !isShareAccessValue(current.grant.access)) return refuseAndConsume();
+      const { share, grant: parent } = current;
       if (code.resultGrantId !== null) {
-        const grant = storage.getShareGrant(code.resultGrantId);
-        if (
-          !grant ||
-          grant.principalUserId !== input.principalUserId ||
-          grant.principalKind !== "user" ||
-          grant.status !== "active" ||
-          grant.revokedAtMs !== null ||
-          (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit")
-        ) {
+        const grant = readCurrentShareGrant(storage, {
+          grantId: code.resultGrantId,
+          principal: { kind: "user", userId: input.principalUserId },
+        })?.grant;
+        if (!grant || !isShareAccessValue(grant.access)) {
           deleteCode();
           return { ok: false };
         }
         return { ok: true, shareId: grant.shareId, grant };
       }
 
-      const share = storage.getShare(parent.shareId);
-      if (!share || share.granterUserId === input.principalUserId) {
+      if (share.granterUserId === input.principalUserId) {
         return refuseAndConsume();
       }
 

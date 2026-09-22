@@ -8,6 +8,7 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import { authorizeLinkShareAction } from "../shareAuthorization";
 import { isPublicLinkAccess } from "../linkSecurity";
 import { readLinkEnrollment } from "./linkEnrollment";
+import { readCurrentShareGrant } from "./currentShareGrant";
 
 export interface PublicationOwner { workspaceId: string; shareId: string; grantId: string; generation: number; ownerUserId: string }
 export interface PublishAppPublicationInput extends PublicationOwner {
@@ -63,10 +64,10 @@ function validateBuildIdentity(candidate: AppPublicationCandidate): void {
 }
 const integer = (value: number) => { if (!Number.isSafeInteger(value) || value < 0) throw badRequest("Invalid publication integer.");return value; };
 function authority(storage: StorageContext, owner: PublicationOwner, candidate?: AppPublicationCandidate): void {
-  const share = storage.getShare(owner.shareId), grant = storage.getShareGrant(owner.grantId);
-  if (!share || !grant || !storage.workspaceIsOwnedBy(owner.workspaceId, owner.ownerUserId) || share.workspaceId !== owner.workspaceId ||
-      share.granterUserId !== owner.ownerUserId || grant.shareId !== share.shareId || grant.status !== "active" || grant.revokedAtMs !== null ||
-      grant.generation !== owner.generation || !Number.isSafeInteger(owner.generation) || owner.generation < 1) throw notFound();
+  const current = readCurrentShareGrant(storage, {grantId: owner.grantId, generation: owner.generation});
+  if (!current || current.share.shareId !== owner.shareId || current.share.workspaceId !== owner.workspaceId ||
+      current.share.granterUserId !== owner.ownerUserId) throw notFound();
+  const {share, grant} = current;
   const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, grant.access);
   if (!selector || "kind" in selector) throw notFound();
   if (candidate && (targetVersionId(selector) !== candidate.versionId || visibleSharePath(selector, candidate.appRoot) !== candidate.appRoot ||

@@ -16,6 +16,7 @@ import type {
   SyncRelayShareWithGrantRow,
   SyncRelayStorage,
 } from "./storage";
+import { readCurrentShareGrant, type CurrentShareGrantPrincipal } from "./storage/currentShareGrant";
 
 export type ShareAction =
   | "read"
@@ -66,8 +67,7 @@ type ShareGrantAuthorizationInput = {
   storage: Omit<ShareAuthorizationStorage, "listActiveShareGrantsForRecipient">;
   grantId: string;
   action: ShareAction;
-  principalKind: "user" | "link";
-  principalUserId?: string;
+  principal: CurrentShareGrantPrincipal;
 };
 
 export type NamedLiveEditShareGrantResult =
@@ -79,11 +79,9 @@ export function authorizeNamedLiveEditShareGrant(input: {
   actorUserId: string;
   grantId: string;
 }): NamedLiveEditShareGrantResult {
-  const current = resolveCurrentShareGrant({
-    storage: input.storage,
+  const current = readCurrentShareGrant(input.storage, {
     grantId: input.grantId,
-    principalKind: "user",
-    principalUserId: input.actorUserId,
+    principal: { kind: "user", userId: input.actorUserId },
   });
   if (!current) return { ok: false, reason: "not-authorized" };
   const validated = validateCurrentShareGrant(input.storage, current);
@@ -124,8 +122,7 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
       storage: input.storage,
       grantId: grant.grantId,
       action: input.action,
-      principalKind: "user",
-      principalUserId: input.actorUserId,
+      principal: { kind: "user", userId: input.actorUserId },
     });
     if (!result.ok) {
       denied ||= result.reason === "denied";
@@ -153,11 +150,9 @@ export function resolveReceivedShareAuthority(
   let genericChatWritable = false;
   let fallback: SyncRelayShareWithGrantRow | null = null;
   for (const grant of grants) {
-    const current = resolveCurrentShareGrant({
-      storage: input.storage,
+    const current = readCurrentShareGrant(input.storage, {
       grantId: grant.grantId,
-      principalKind: "user",
-      principalUserId: input.actorUserId,
+      principal: { kind: "user", userId: input.actorUserId },
     });
     if (!current) continue;
     fallback ??= current;
@@ -178,9 +173,9 @@ export function resolveReceivedShareAuthority(
 }
 
 export function authorizeLinkShareAction(
-  input: Omit<ShareGrantAuthorizationInput, "principalKind" | "principalUserId">,
+  input: Omit<ShareGrantAuthorizationInput, "principal">,
 ): ShareAuthorizationResult<ShareSelector> {
-  const result = authorizeShareGrantAction({ ...input, principalKind: "link" });
+  const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   if (!result.ok || "kind" in result.effectiveSelector) {
     return { ok: false, reason: "gauntlet" };
   }
@@ -200,48 +195,10 @@ function authorizeShareGrantAction(
 function validateShareGrant(
   input: Omit<ShareGrantAuthorizationInput, "action">,
 ): ShareAuthorizationResult {
-  const current = resolveCurrentShareGrant(input);
+  const current = readCurrentShareGrant(input.storage, input);
   return current
     ? validateCurrentShareGrant(input.storage, current)
     : { ok: false, reason: "gauntlet" };
-}
-
-function resolveCurrentShareGrant(
-  input: Omit<ShareGrantAuthorizationInput, "action">,
-): SyncRelayShareWithGrantRow | null {
-  const grant = input.storage.getShareGrant(input.grantId);
-  if (
-    !grant ||
-    grant.principalKind !== input.principalKind ||
-    grant.status !== "active" ||
-    grant.revokedAtMs !== null ||
-    !Number.isInteger(grant.generation) ||
-    grant.generation < 1 ||
-    !validStoredPrincipal(grant) ||
-    (input.principalKind === "user" && grant.principalUserId !== input.principalUserId)
-  ) {
-    return null;
-  }
-  const share = input.storage.getShare(grant.shareId);
-  if (!share || !input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
-    return null;
-  }
-  if (grant.parentGrantId !== null) {
-    const parent = input.storage.getShareGrant(grant.parentGrantId);
-    if (
-      grant.principalKind !== "user" ||
-      !parent ||
-      parent.shareId !== share.shareId ||
-      parent.principalKind !== "link" ||
-      parent.status !== "active" ||
-      parent.revokedAtMs !== null ||
-      !accessAtMost(grant.access, parent.access)
-    ) {
-      return null;
-    }
-  }
-
-  return { share, grant };
 }
 
 function validateCurrentShareGrant(
@@ -287,23 +244,6 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
       return (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link")
         && isLiveEditShareSelector(authorized.effectiveSelector);
   }
-}
-
-function validStoredPrincipal(grant: SyncRelayShareGrantRow): boolean {
-  switch (grant.principalKind) {
-    case "user":
-      return grant.principalUserId !== null && grant.principalEmail === null;
-    case "email":
-      return grant.principalUserId === null && grant.principalEmail !== null;
-    case "link":
-      return grant.principalUserId === null && grant.principalEmail === null;
-  }
-}
-
-function accessAtMost(access: string, ceiling: string): boolean {
-  const accessIndex = shareAccessRank(access);
-  const ceilingIndex = shareAccessRank(ceiling);
-  return accessIndex >= 0 && ceilingIndex >= 0 && accessIndex <= ceilingIndex;
 }
 
 function effectiveAccessRank(selector: AnyShareSelector): number {
