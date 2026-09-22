@@ -110,7 +110,9 @@ dohc dataset permissions '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"
 
 Generate a fresh retry key for each intended change. Keep the same key and exact input after a lost response.
 Changed input under the same key refuses. Revoked access cannot be recovered through a saved result.
-History shows saved-operation metadata, not private input or result payloads.
+History shows saved-operation metadata to the owner.
+For eligible reversible edits under the current approved rules, it also shows previous values for the operation's declared fields.
+Other input and result fields remain excluded. Choose **Undo edit** to restore the shown values if the record has not changed.
 
 Manage explicit data grants through **Access** or `dataset setGrant` and `dataset removeGrant`.
 Source-folder access alone does not grant Collection access. An app binding and a data grant are separate permissions.
