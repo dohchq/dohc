@@ -1,14 +1,18 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
-import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput } from "./journal.js";
+import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 
-export interface DatasetInvocation {
+interface DatasetAccess {
   scope: DatasetScope;
   tables: string[];
+  signal?: AbortSignal;
+  authorize(): void;
+}
+export interface DatasetInvocation extends DatasetAccess {
   operation: string;
   caller: JsonValue;
   callerKey: string;
@@ -17,10 +21,21 @@ export interface DatasetInvocation {
   payloadSha256: string;
   readOnly: boolean;
   files?: AppOperationFile[];
-  signal?: AbortSignal;
   /** Derived by the trusted host. Called again at commit and before disclosure. */
   authorize(): void;
   accountAndAttach?: CommitOperationInput["accountAndAttach"];
+}
+export interface DatasetMigration extends DatasetAccess {
+  expected: DatasetCursor;
+  newTables: string[];
+  schemaSql: string;
+  source: string;
+  definitionJson: string;
+  approvedRevisionHash: string;
+  migrationSql: string;
+  /** Current owner membership and immutable approval; the journal checks the old cursor. */
+  authorize(): void;
+  account?: TransitionCheckpointInput["account"];
 }
 export interface DatasetInvocationResult { result: JsonValue; revision: number; replayed: boolean }
 export interface DatasetSupervisorOptions {
@@ -34,9 +49,13 @@ export interface DatasetSupervisorOptions {
   nowMs?: () => number;
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
-type Job = { bytes: number; work(): Promise<DatasetInvocationResult>; resolve(result: DatasetInvocationResult): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
+type Job = { bytes: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
 type Lane = { scope: DatasetScope; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void> };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+function copyScope(value:DatasetScope):DatasetScope {
+  if(!value||![value.workspaceId,value.datasetId].every(part=>typeof part==="string"&&/^[A-Za-z0-9._:-]{1,128}$/.test(part)))throw new Error("Invalid dataset scope.");
+  return {workspaceId:value.workspaceId,datasetId:value.datasetId};
+}
 const sameCursor = (left: DatasetCursor, right: DatasetCursor) => left.workspaceId === right.workspaceId && left.datasetId === right.datasetId &&
   left.hostEpoch === right.hostEpoch && left.approvedRevisionHash === right.approvedRevisionHash && left.revision === right.revision && left.digest === right.digest;
 const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.workspaceId === right.workspaceId && left.datasetId === right.datasetId &&
@@ -70,16 +89,16 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     })();
     try { await lane.stopping; } finally { lane.stopping = undefined; }
   }
-  function standing(input: DatasetInvocation): void {
+  function standing(input: DatasetAccess): void {
     if (closed) throw new Error("Dataset host is closed.");
     input.signal?.throwIfAborted();
     const result: unknown = input.authorize();
     if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Dataset authority checks must be synchronous.");
   }
-  function head(input: DatasetInvocation) {
+  function head(input: DatasetAccess) {
     return options.journal.head(input.scope, () => standing(input));
   }
-  async function openWorker(lane: Lane, input: DatasetInvocation): Promise<Worker> {
+  async function openWorker(lane: Lane, input: DatasetAccess): Promise<Worker> {
     if (lane.stopping) await lane.stopping;
     while (workerCount >= maxWorkers) {
       const idle = [...lanes.values()].find(candidate => candidate !== lane && !candidate.active && candidate.worker);
@@ -113,7 +132,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       throw error;
     }
   }
-  async function recover(lane: Lane, input: DatasetInvocation): Promise<Worker> {
+  async function recover(lane: Lane, input: DatasetAccess): Promise<Worker> {
     const current = head(input);
     if (!current.active) throw new Error("Dataset authority was transferred.");
     if (lane.worker && (!sameAuthority(lane.worker.cursor, current.cursor) || JSON.stringify(lane.worker.tables) !== JSON.stringify(input.tables))) await stopWorker(lane);
@@ -186,6 +205,57 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     }
   }
 
+  async function migrate(lane: Lane, input: DatasetMigration): Promise<DatasetCursor> {
+    const captured=head(input);
+    if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed after the migration was approved. Preview it again.");
+    let worker:Worker|undefined;
+    const abort=()=>{void worker?.runtime.abort("Dataset migration was cancelled.").catch(()=>{});};
+    try {
+      worker=await recover(lane,input);standing(input);
+      input.signal?.addEventListener("abort",abort,{once:true});
+      const path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
+      const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
+      if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration checkpoint differs from its source dataset.");
+      const info=await lstat(path);
+      if(!info.isFile()||info.size<100||info.size>captured.capacityBytes)throw new Error("Migration checkpoint exceeds its storage reservation.");
+      const checkpoint=await readFile(path);standing(input);
+      const current=head(input);
+      if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("Dataset changed during migration. Preview it again.");
+      const committed=options.journal.transitionCheckpoint({expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
+        approvedRevisionHash:input.approvedRevisionHash,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,
+        checkpoint,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
+      await stopWorker(lane);
+      const after=head(input);
+      if(!after.active||!sameCursor(after.cursor,committed))throw new Error("Dataset approval changed after migration. Reload it.");
+      return committed;
+    } catch(error) {
+      // An uncertain journal commit is resolved on the next recovery, never rerun here.
+      await stopWorker(lane);standing(input);throw error;
+    } finally {input.signal?.removeEventListener("abort",abort);}
+  }
+
+  function enqueue<T>(input:DatasetAccess,bytes:number,work:(lane:Lane)=>Promise<T>):Promise<T> {
+    standing(input);head(input);
+    if (queuedCount >= 128 || queuedBytes + bytes > 16 * 1024 * 1024) throw new Error("Dataset host queue is full. Retry this operation.");
+    const key=JSON.stringify(input.scope);
+    let lane=lanes.get(key);
+    if(!lane){lane={scope:input.scope,queue:[],active:false};lanes.set(key,lane);}
+    if(lane.queue.length+Number(lane.active)>=64)throw new Error("Dataset operation queue is full. Retry this operation.");
+    if(lane.idle){clearTimeout(lane.idle);lane.idle=undefined;}
+    const target=lane;
+    return new Promise<T>((resolve,reject)=>{
+      const expire=()=>{
+        const index=target.queue.indexOf(job);if(index<0)return;
+        target.queue.splice(index,1);queuedCount--;queuedBytes-=job.bytes;
+        clearTimeout(job.timeout);input.signal?.removeEventListener("abort",job.abort);
+        reject(new Error("Dataset operation expired before execution."));
+      };
+      const job:Job={bytes,signal:input.signal,abort:expire,timeout:setTimeout(expire,queueMs),resolve:result=>resolve(result as T),reject,
+        work:async()=>{standing(input);return work(target);}};
+      input.signal?.addEventListener("abort",expire,{once:true});target.queue.push(job);queuedCount++;queuedBytes+=bytes;pump(target);
+    });
+  }
+
   function pump(lane: Lane): void {
     if (lane.active) return;
     const job = lane.queue.shift();
@@ -230,39 +300,25 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         const inputJson = boundedText(JSON.stringify(raw.input), DEFAULT_LIMITS.inputBytes, "Operation input");
         const bytes = Buffer.byteLength(filesJson) + Buffer.byteLength(callerJson) + Buffer.byteLength(inputJson);
         // Copy bounded request data before retaining anything in a queue.
-        const input: DatasetInvocation = { ...raw, scope: { ...raw.scope }, tables: approvedTables(raw.tables),
+        const input: DatasetInvocation = { ...raw, scope: copyScope(raw.scope), tables: approvedTables(raw.tables),
           caller: JSON.parse(callerJson), input: JSON.parse(inputJson), files: JSON.parse(filesJson) };
         boundedText(input.operation, 64, "Operation");
         boundedText(input.callerKey, 1024, "Caller key");
         boundedText(input.idempotencyKey, 128, "Retry key");
-        standing(input);
-        head(input);
-        if (queuedCount >= 128 || queuedBytes + bytes > 16 * 1024 * 1024) throw new Error("Dataset host queue is full. Retry this operation.");
-        const key = JSON.stringify(input.scope);
-        let lane = lanes.get(key);
-        if (!lane) { lane = { scope: input.scope, queue: [], active: false }; lanes.set(key, lane); }
-        if (lane.queue.length + Number(lane.active) >= 64) throw new Error("Dataset operation queue is full. Retry this operation.");
-        if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
-        const target = lane;
-        return new Promise((resolve, reject) => {
-          const expire = () => {
-            const index = target.queue.indexOf(job);
-            if (index < 0) return;
-            target.queue.splice(index, 1);
-            queuedCount--;
-            queuedBytes -= job.bytes;
-            clearTimeout(job.timeout); input.signal?.removeEventListener("abort", job.abort);
-            reject(new Error("Dataset operation expired before execution."));
-          };
-          const job: Job = { bytes, signal: input.signal, abort: expire, timeout: setTimeout(expire, queueMs), resolve, reject,
-            work: async () => { standing(input); return execute(target, input); } };
-          input.signal?.addEventListener("abort", expire, { once: true });
-          target.queue.push(job);
-          queuedCount++;
-          queuedBytes += bytes;
-          pump(target);
-        });
+        return enqueue(input,bytes,lane=>execute(lane,input));
       } catch (error) { return Promise.reject(error); }
+    },
+    migrate(raw:DatasetMigration):Promise<DatasetCursor> {
+      try {
+        const input:DatasetMigration={...raw,scope:copyScope(raw.scope),expected:{...copyScope(raw.expected),hostEpoch:raw.expected.hostEpoch,
+          approvedRevisionHash:raw.expected.approvedRevisionHash,revision:raw.expected.revision,digest:raw.expected.digest},tables:approvedTables(raw.tables),newTables:approvedTables(raw.newTables),
+          source:boundedText(raw.source,DEFAULT_LIMITS.sourceBytes,"Dataset source"),schemaSql:boundedText(raw.schemaSql,DEFAULT_LIMITS.sourceBytes,"Dataset schema"),
+          definitionJson:boundedText(raw.definitionJson,256*1024,"Dataset definition"),migrationSql:boundedText(raw.migrationSql,DEFAULT_LIMITS.sourceBytes,"Dataset migration")};
+        if(!/^[a-f0-9]{64}$/.test(input.approvedRevisionHash)||input.expected.workspaceId!==input.scope.workspaceId||input.expected.datasetId!==input.scope.datasetId)throw new Error("Invalid migration authority.");
+        JSON.parse(input.definitionJson);
+        const bytes=Buffer.byteLength(JSON.stringify([input.scope,input.expected,input.tables,input.newTables,input.source,input.schemaSql,input.definitionJson,input.migrationSql]));
+        return enqueue(input,bytes,lane=>migrate(lane,input));
+      }catch(error){return Promise.reject(error);}
     },
     async close(): Promise<void> {
       closed = true;

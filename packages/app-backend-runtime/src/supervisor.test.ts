@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
-import { createDatasetSupervisor, type DatasetInvocation } from "./supervisor.ts";
+import { createDatasetSupervisor, type DatasetInvocation, type DatasetMigration } from "./supervisor.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -49,6 +49,14 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
       idempotencyKey: "retry", payloadSha256: hash(JSON.stringify(input)), readOnly: false, authorize, ...overrides });
   }
   return { db, journal, supervisor, invoke, scope, authorize, initialize };
+}
+
+function migration(f:Awaited<ReturnType<typeof fixture>>,overrides:Partial<DatasetMigration>={}):DatasetMigration {
+  return {scope:f.scope,tables:["items"],newTables:["items"],expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize,
+    approvedRevisionHash:hash("approved-migrated"),definitionJson:'{"version":2}',
+    schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');",
+    source:source.replace("INSERT INTO items VALUES(?,?)","INSERT INTO items(id,value) VALUES(?,?)"),
+    migrationSql:"ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE items SET note='migrated';",...overrides};
 }
 
 function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void): AppRuntimeLauncher {
@@ -101,6 +109,55 @@ it("refuses a caught rollback conflict before later statements can autocommit",a
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(0);
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([]);
+});
+
+it("migrates an approved dataset through the real worker and recovers its new schema",async()=>{
+  let launches=0;
+  const f=await fixture({launch:launcher((command,controls)=>{if(command.command.kind==="open")launches++;controls.deliver();})});
+  await f.invoke({id:"before",value:"saved"});const input=migration(f);
+  const migrated=await f.supervisor.migrate(input);expect(migrated.revision).toBe(2);expect(migrated.approvedRevisionHash).toBe(input.approvedRevisionHash);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved",note:"migrated"}]);expect(launches).toBe(2);
+  expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
+  expect((await f.invoke({id:"before",value:"saved"})).replayed).toBe(true);
+});
+it("refuses migration after another queued write advances the approved preview",async()=>{
+  const f=await fixture(),input=migration(f);
+  const write=f.invoke({id:"new",value:"saved"});const change=f.supervisor.migrate(input);
+  await write;await expect(change).rejects.toThrow("Preview it again");
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"new",value:"saved"}]);
+});
+it("keeps the previous schema and quota after catalog activation fails",async()=>{
+  const f=await fixture();await f.invoke({id:"before",value:"saved"});
+  await expect(f.supervisor.migrate(migration(f,{account:()=>{f.db.exec("UPDATE files SET attached=1");throw Error("quota full");}}))).rejects.toThrow("quota full");
+  expect(f.db.prepare("SELECT attached FROM files").get()!.attached).toBe(0);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved"}]);
+});
+it("does not activate a migration whose owner was revoked during worker execution",async()=>{
+  let revoke=()=>{};
+  const f=await fixture({launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")revoke();controls.deliver();})});
+  revoke=()=>f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.supervisor.migrate(migration(f))).rejects.toThrow("denied");expect(f.db.prepare("SELECT revision FROM dohc_dataset_journals").get()!.revision).toBe(0);
+});
+it("recovers a committed migration after its host acknowledgment is lost without rerunning SQL",async()=>{
+  const f=await fixture({transform:journal=>({...journal,transitionCheckpoint(input){const result=journal.transitionCheckpoint(input);throw Error(`lost migration acknowledgment ${result.revision}`);}})});
+  const input=migration(f);await expect(f.supervisor.migrate(input)).rejects.toThrow("lost migration acknowledgment");
+  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(1);
+  await expect(f.supervisor.migrate(input)).rejects.toThrow("Preview it again");
+  expect((await f.invoke({id:"after",value:"saved"},{idempotencyKey:"after"})).result).toEqual([{id:"after",value:"saved",note:""}]);
+});
+it("withholds migrated state if owner access is revoked after the journal commits",async()=>{
+  let revoke=()=>{};
+  const f=await fixture({transform:journal=>({...journal,transitionCheckpoint(input){const result=journal.transitionCheckpoint(input);revoke();return result;}})});
+  revoke=()=>f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.supervisor.migrate(migration(f))).rejects.toThrow("denied");
+  expect(f.db.prepare("SELECT revision FROM dohc_dataset_journals").get()!.revision).toBe(1);
+  await expect(f.invoke({}, {readOnly:true})).rejects.toThrow("denied");
+});
+it("preserves the old dataset when the migration worker dies",async()=>{
+  const f=await fixture({launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")controls.stop();else controls.deliver();})});
+  await f.invoke({id:"before",value:"saved"});
+  await expect(f.supervisor.migrate(migration(f))).rejects.toThrow("stopped");
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved"}]);
 });
 
 it("recovers a host commit whose acknowledgment was lost and returns its receipt exactly once", async () => {
