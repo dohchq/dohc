@@ -56,7 +56,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     PRIMARY KEY(workspace_id,dataset_id,grant_id,principal_key),
     FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`));
   const supervisor = await createDatasetSupervisor({journal, directory: options.directory, runtime: options.runtime,
-    maxWorkers: options.maxWorkers, nowMs,maintenanceStorage:{authorize:current,account:allocation=>account(allocation.scope.workspaceId,allocation.scope.datasetId,allocation.bytes)}});
+    maxWorkers: options.maxWorkers, nowMs,onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
+    maintenanceStorage:{authorize:current,account:allocation=>account(allocation.scope.workspaceId,allocation.scope.datasetId,allocation.bytes)}});
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {
     if (!closing) {

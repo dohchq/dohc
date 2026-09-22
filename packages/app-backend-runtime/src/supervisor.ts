@@ -117,6 +117,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const ownership=await acquireSupervisorOwnership(root);
   const lanes = new Map<string, Lane>();
   const blockedMaintenance = new Set<string>();
+  const maintenanceWarnings = new Set<string>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
   let preparingCandidates = 0;
@@ -124,6 +125,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const now = options.nowMs ?? Date.now;
 
   function reportMaintenanceError(scope:DatasetScope,error:unknown):void {
+    const key=JSON.stringify(scope);
+    if(maintenanceWarnings.has(key))return;
+    maintenanceWarnings.add(key);
     try {options.onMaintenanceError?.({...scope},error);} catch { /* Diagnostics cannot change a committed response. */ }
   }
   async function maintainMaterialization(lane:Lane,force=false):Promise<void> {
@@ -171,6 +175,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         stage=options.journal.sealCheckpoint({stage,authorize});
         options.journal.cacheMaterialization({expected:worker.cursor,checkpoint:stage,authorize,account:allocation=>storage.account({
           scope:lane.scope,stage,bytes:allocation.bytes-allocation.stagedCreditBytes-allocation.releasedBytes})});
+        maintenanceWarnings.delete(JSON.stringify(lane.scope));
         reservations.pop();
       } finally {await file.close();}
     } catch(error) {
