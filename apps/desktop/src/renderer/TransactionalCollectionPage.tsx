@@ -31,6 +31,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   confirmDelete?(row: TransactionalRow): Promise<boolean>;
   onCustomAction?(operationId: string): void;
   onCreateForm?(): void;
+  onTransferCsv?(): void;
   onReviewSchema?(): void;
 }
 type Query = { after: TransactionalCursor | null; search: string; sort?: { fieldId: string; direction: "asc" | "desc" } };
@@ -178,6 +179,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold text-ink">{table.name}</h2><div className="flex flex-wrap gap-2">
       {props.onReviewSchema ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onReviewSchema}>Review source changes</SecondaryButton> : null}
       {props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly) ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
+      {props.onTransferCsv ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
       {undo ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
       {canCreate ? <PrimaryButton disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}

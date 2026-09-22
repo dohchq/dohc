@@ -12,7 +12,7 @@ export interface DatasetCsvTransferDialogProps {
   tableId: string;
   invoke: CsvInvoke;
   /** Must finish saving before resolving. The retry report is saved before any import writes. */
-  onSave(file: { name: string; content: string; contentType: string }, signal: AbortSignal): Promise<void>;
+  onSave(file: { name: string; content: string; contentType: string }, signal: AbortSignal): Promise<void | { path: string }>;
   onClose(): void;
   onImported?(): void;
   onError(fallback: string, error: unknown, retry: (() => void) | null): void;
@@ -28,6 +28,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const [csv, setCsv] = useState<CsvTable | null>(null), [mapping, setMapping] = useState<Array<string | null>>([]), [draft, setDraft] = useState("");
   const [plan, setPlan] = useState<CsvImportPlan | null>(null), [busy, setBusy] = useState(false), [invalid, setInvalid] = useState<string | null>(null), [raw, setRaw] = useState(false);
   const [exported, setExported] = useState<number | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const importPlan = useRef<CsvImportPlan | null>(null);
   const alive = useRef(true), locked = useRef(false), active = useRef<AbortController | null>(null);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; active.current?.abort(); }; }, []);
@@ -55,7 +56,12 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
     catch (error) { if (alive.current && !controller.signal.aborted) props.onError(fallback, error, () => { void task(action, fallback); }); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
-  const saveReport = (captured: CsvImportPlan, signal: AbortSignal) => props.onSave({ name: `${baseName}-import.json`, content: JSON.stringify(captured, null, 2), contentType: "application/json" }, signal);
+  const saveFile = async (file: { name: string; content: string; contentType: string }, signal: AbortSignal) => {
+    const result = await props.onSave(file, signal);
+    signal.throwIfAborted();
+    if (alive.current && result) setSavedPath(result.path);
+  };
+  const saveReport = (captured: CsvImportPlan, signal: AbortSignal) => saveFile({ name: `${baseName}-import.json`, content: JSON.stringify(captured, null, 2), contentType: "application/json" }, signal);
   async function importRows(signal: AbortSignal) {
     if (!create || !preview.value && !plan) return;
     const captured = importPlan.current ?? plan ?? createCsvImportPlan(scope(create.operationId), preview.value!);
@@ -97,9 +103,10 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
         <label className="flex items-center gap-2 text-[12px]"><input type="checkbox" checked={raw} disabled={busy} onChange={event => setRaw(event.target.checked)} />Export raw cell values</label>
         <p className="m-0 text-[12px] text-muted">{raw ? "Raw text may run as spreadsheet formulas. Choose raw values only for tools that treat cells as data." : "Spreadsheet-safe export prefixes formula-like text with an apostrophe. This changes those exported text values."}</p>
         {exported !== null && <p role="status" className="m-0 text-[12px] text-ink">Exported {exported} rows</p>}
-        <div className="flex justify-end"><PrimaryButton disabled={busy || !read} onClick={() => void task(async signal => { if (!read || !table) return; const result = await exportDatasetCsv({ scope: scope(read.operationId), operation: read, fields: table.fields, invoke: props.invoke, signal, spreadsheetSafe: !raw }); signal.throwIfAborted(); await props.onSave({ name: `${baseName}.csv`, content: result.content, contentType: "text/csv;charset=utf-8" }, signal); if (alive.current && !signal.aborted) setExported(result.rows); }, "dohc could not export this Collection.")}>{busy ? "Exporting…" : "Export CSV"}</PrimaryButton></div>
+        <div className="flex justify-end"><PrimaryButton disabled={busy || !read} onClick={() => void task(async signal => { if (!read || !table) return; const result = await exportDatasetCsv({ scope: scope(read.operationId), operation: read, fields: table.fields, invoke: props.invoke, signal, spreadsheetSafe: !raw }); signal.throwIfAborted(); await saveFile({ name: `${baseName}.csv`, content: result.content, contentType: "text/csv;charset=utf-8" }, signal); if (alive.current && !signal.aborted) setExported(result.rows); }, "dohc could not export this Collection.")}>{busy ? "Exporting…" : "Export CSV"}</PrimaryButton></div>
       </>}
     </>}
     {invalid && <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p>}
+    {savedPath && <p role="status" className="m-0 break-all text-[12px] text-muted">Saved in this workspace: {savedPath}</p>}
   </Overlay>;
 }

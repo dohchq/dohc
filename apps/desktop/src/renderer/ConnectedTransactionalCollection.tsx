@@ -7,6 +7,7 @@ import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
+import { DatasetCsvTransferDialog } from "./DatasetCsvTransferDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -24,6 +25,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
+  const [transferringCsv, setTransferringCsv] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
@@ -58,6 +60,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   </div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
     onCreateForm={() => setCreatingForm(true)}
+    onTransferCsv={() => setTransferringCsv(true)}
     onReviewSchema={() => setReviewingSchema(true)}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
@@ -99,6 +102,21 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       }), hasMore: page.nextCursor !== null };
     }}
     invoke={invoke} />
+    {transferringCsv && <DatasetCsvTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
+      onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
+      onSave={async (file, signal) => {
+        signal.throwIfAborted();
+        if (new TextEncoder().encode(file.content).byteLength > 10 * 1024 * 1024) throw Error("This file is larger than the workspace text limit. Export a smaller Collection view.");
+        const sequence = request.current;
+        const dot = file.name.lastIndexOf(".");
+        const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
+        const extension = dot > 0 ? file.name.slice(dot) : ".txt";
+        const relativePath = `${stem}-${crypto.randomUUID()}${extension}`;
+        const result = await bridge().createWorkspaceFile({ workspaceId, relativePath, initialText: file.content });
+        signal.throwIfAborted();
+        if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
+        return result;
+      }} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
