@@ -47,6 +47,7 @@ export interface CommittedChangeset extends DatasetCursor {
   changesetSha256: string;
   changeset: Uint8Array;
 }
+export interface MigrateCheckpointInput { path:string; schemaSql:string; tables:string[]; migrationSql:string }
 export interface OpenRequest extends Omit<PersistentOpenInput, "limits" | "databaseBytes" | "queueDeadlineMs"> { limits: RuntimeLimits }
 export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"prepare";expected:DatasetCursor;guest:GuestRequest}
@@ -54,6 +55,7 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"discard";proposalId:string}
   | {kind:"apply";input:CommittedChangeset}
   | {kind:"snapshot";path:string}
+  | {kind:"migrateCheckpoint";input:MigrateCheckpointInput}
   | {kind:"close"};
 export type PersistentResult = DatasetCursor | PreparedOperation | {path:string;cursor:DatasetCursor} | null;
 export type PersistentReply = {id:number;ok:true;result:PersistentResult}

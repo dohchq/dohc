@@ -1,10 +1,11 @@
-import { constants as fsConstants, copyFileSync, lstatSync, openSync, closeSync, statSync } from "node:fs";
+import { constants as fsConstants, copyFileSync, lstatSync, openSync, closeSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync, constants } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { authorize, evaluate } from "./guest.js";
 import { AppBackendRuntimeError } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
+import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -16,7 +17,6 @@ let busy=false;
 const marker="dohc_applied";
 const markerSchema=`CREATE TABLE ${marker}(id INTEGER PRIMARY KEY CHECK(id=1), scope TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL)`;
 const databaseOptions={allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false};
-const userSchema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name != 'dohc_applied' ORDER BY type,name";
 
 function noLinks(path:string, mayNotExist=false):void {
   trustedPath(path);
@@ -30,7 +30,7 @@ function noLinks(path:string, mayNotExist=false):void {
   }
 }
 function rollback():void {
-  if (db) { db.setAuthorizer(null); if (transaction) db.exec("ROLLBACK"); }
+  if (db) { db.setAuthorizer(null); if (db.isTransaction) db.exec("ROLLBACK"); }
   transaction=false; pending=undefined;
 }
 function requireIdle():void { if (pending) reject("pending_operation","Finalize or discard the prepared operation first."); }
@@ -49,6 +49,7 @@ function writeMarker(next:DatasetCursor):void {
 function initialize(input:OpenRequest):DatasetCursor {
   if (db) reject("invalid_state","The worker is already open.");
   config=openRequest({...input,databaseBytes:input.limits.databaseBytes,limits:Object.fromEntries(Object.entries(input.limits).filter(([key])=>key!=="databaseBytes"))});
+  assertReplayableSchema(config.schemaSql);
   noLinks(config.directory);
   if (!statSync(config.directory).isDirectory()) reject("invalid_input","Dataset directory is unavailable.");
   const path=join(config.directory,"app.sqlite");
@@ -62,25 +63,11 @@ function initialize(input:OpenRequest):DatasetCursor {
   db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0;");
   const pageSize=Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
-  const expected=new DatabaseSync(":memory:",databaseOptions);
-  try {
-    expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/4096)}`);
-    authorize(expected,{tables:config.tables},{initializing:true});
-    expected.exec(config.schemaSql);expected.setAuthorizer(null);
-    const schema=expected.prepare(userSchema).all();
-    if (schema.filter(row=>row.type==="table").length!==config.tables.length || schema.some(row=>!["table","index","trigger"].includes(String(row.type)))) reject("invalid_schema","Invalid dataset schema.");
-    for (const table of config.tables) {
-      const primary=expected.prepare(`PRAGMA table_info("${table}")`).all().filter(column=>Number(column.pk)>0);
-      const rowid=primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !expected.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk");
-      if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Dataset tables require non-null primary keys.");
-    }
-    if (!config.checkpointPath) {
-      authorize(db,{tables:config.tables},{initializing:true});
-      db.exec(config.schemaSql);db.setAuthorizer(null);
-    }
-    if (JSON.stringify(db.prepare(userSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","Checkpoint schema does not match the approved dataset.");
-  } finally { expected.close(); }
-  if (db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check!=="ok" || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_checkpoint","Checkpoint integrity check failed.");
+  if (!config.checkpointPath) {
+    authorize(db,{tables:config.tables},{initializing:true});
+    db.exec(config.schemaSql);db.setAuthorizer(null);
+  }
+  verifyDatasetSchema(db,config.schemaSql,config.tables,config.limits);
   const existing=db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(marker);
   if (existing) {
     if (existing.sql!==markerSchema) reject("invalid_checkpoint","Invalid checkpoint cursor schema.");
@@ -120,6 +107,8 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       ({resultJson,attachedFileIds}=await evaluate(db,{...command.guest,tables:config.tables,limits:config.limits},{persistentConnection:true}));
       db.setAuthorizer(null);changeset=session.changeset();
     } finally { session.close(); }
+    if (!db.isTransaction) reject("invalid_changeset","The prepared operation transaction ended.");
+    if (!db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The prepared operation violates a foreign-key constraint.");
     if (changeset.byteLength>config.limits.databaseBytes) reject("resource_limit","The changeset exceeds the dataset storage reservation.");
     const changesetSha256=digest(changeset), proposalId=randomUUID();
     if (command.guest.readOnly) {
@@ -149,6 +138,34 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     } catch (error) { rollback();throw error; }
     finally { db.exec("PRAGMA foreign_keys=ON"); }
+  }
+  if (command.kind==="migrateCheckpoint") {
+    noLinks(command.input.path,true);
+    const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
+    let copy:DatabaseSync | undefined, outputReserved=false, succeeded=false;
+    try {
+      closeSync(openSync(copyPath,"wx",0o600));
+      db.prepare("VACUUM INTO ?").run(copyPath);
+      copy=new DatabaseSync(copyPath,databaseOptions);
+      copy.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;");
+      const pageSize=Number(copy.prepare("PRAGMA page_size").get()!.page_size);
+      copy.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
+      copy.exec(`DROP TABLE ${marker}; BEGIN IMMEDIATE`);
+      authorizeMigration(copy,[...new Set([...config.tables,...command.input.tables])]);
+      copy.exec(command.input.migrationSql);copy.setAuthorizer(null);
+      if (copy.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(marker)) reject("invalid_checkpoint","Migration introduced internal metadata.");
+      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits);
+      copy.exec("COMMIT");
+      closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
+      copy.prepare("VACUUM INTO ?").run(command.input.path);
+      succeeded=true;
+      return {path:command.input.path,cursor:{...cursor}};
+    } finally {
+      if (copy) {copy.setAuthorizer(null);copy.close();}
+      for (const path of [copyPath,copyPath+"-journal",...(outputReserved && !succeeded ? [command.input.path] : [])]) {
+        try {unlinkSync(path);} catch (error) {if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error;}
+      }
+    }
   }
   noLinks(command.path,true);
   // SQLite refuses a nonempty destination; reserve exclusively so no existing file is touched.

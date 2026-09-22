@@ -70,6 +70,7 @@ export async function evaluate(db: DatabaseSync, request: GuestRequest, options:
   const attachedFileIds = new Set<string>();
   const callback = (write: boolean) => vm.newFunction(write ? "execute" : "query", (sqlValue, paramsValue) => {
     try {
+      if (options.persistentConnection && !db.isTransaction) throw new Error("The app operation transaction ended.");
       if (++statements > request.limits.statements || performance.now() >= deadline) throw new Error("App database operation limit exceeded.");
       if (vm.typeof(sqlValue) !== "string" || vm.typeof(paramsValue) !== "string") throw new Error("Invalid database arguments.");
       const sql = boundedText(vm.getString(sqlValue), request.limits.sourceBytes, "SQL statement");

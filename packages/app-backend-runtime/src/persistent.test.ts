@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
+// These tests start real processes; process deadlines remain enforced independently.
+vi.setConfig({testTimeout:30_000});
 const initial={revision:0,digest:hash("initial")};
 const scope={workspaceId:"workspace",datasetId:"dataset",hostEpoch:"epoch-1",approvedRevisionHash:hash("approved")};
 const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);";
@@ -40,6 +42,11 @@ async function fixture(run:(context:{root:string;open:(input?:Partial<Persistent
 }
 
 describe("persistent dataset worker",()=>{
+  it("refuses AUTOINCREMENT state that SQLite changesets cannot replay",async()=>{
+    await fixture(async({open})=>{
+      await expect(open({schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL);"})).rejects.toMatchObject({code:"invalid_schema",message:expect.stringContaining("AUTOINCREMENT")});
+    });
+  });
   it("commits only after host finalization and restores checkpoint scope/cursor",async()=>{
     await fixture(async({root,open})=>{
       const worker=await open();
@@ -152,7 +159,84 @@ describe("persistent dataset worker",()=>{
       await worker.snapshot(checkpointPath);
       await expect(open({checkpointPath,databaseBytes:16*1024*1024})).rejects.toMatchObject({code:"invalid_checkpoint"});
     });
+  },15_000);
+
+  it("migrates a disposable copy and opens its marker-free checkpoint under a new approved revision",async()=>{
+    await fixture(async({root,open})=>{
+      const worker=await open();
+      const prepared=await worker.prepare(operation(initial,{id:1,value:"existing"}));
+      const cursor=await worker.finalize(event(prepared));
+      const nextSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new');";
+      const path=join(root,"migrated.sqlite");
+      expect(await worker.migrateCheckpoint({path,schemaSql:nextSchema,tables:["items"],migrationSql:"ALTER TABLE items ADD COLUMN status TEXT NOT NULL DEFAULT 'new';"})).toEqual({path,cursor});
+      const checkpoint=new DatabaseSync(path);
+      try {expect(checkpoint.prepare("SELECT name FROM sqlite_schema WHERE name='dohc_applied'").all()).toEqual([]);}finally{checkpoint.close();}
+      expect((await worker.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"existing"}]);
+      const nextCursor={revision:cursor.revision+1,digest:hash("transition")};
+      const next=await open({checkpointPath:path,cursor:nextCursor,schemaSql:nextSchema,scope:{...scope,hostEpoch:"epoch-2",approvedRevisionHash:hash(nextSchema)}});
+      expect((await next.prepare({...operation(nextCursor),readOnly:true})).result).toEqual([{id:1,value:"existing",status:"new"}]);
+    });
   });
+
+  it("normalizes a checkpoint without changing its rows or live cursor",async()=>{
+    await fixture(async({root,open})=>{
+      const worker=await open();const path=join(root,"normalized.sqlite");
+      const result=await worker.migrateCheckpoint({path,schemaSql,tables:["items"],migrationSql:""});
+      expect(result.cursor).toEqual(initial);
+      const next=await open({checkpointPath:path,scope:{...scope,hostEpoch:"epoch-2"}});
+      expect((await next.prepare({...operation(),readOnly:true})).result).toEqual([]);
+    });
+  });
+
+  it.each([
+    "ATTACH DATABASE ':memory:' AS escape",
+    "PRAGMA writable_schema=ON",
+    "SELECT load_extension('escape')",
+    "CREATE TEMP TRIGGER escape AFTER INSERT ON main.items BEGIN DELETE FROM items; END",
+    "CREATE VIEW escape AS SELECT * FROM items",
+    "CREATE TABLE dohc_applied(id INTEGER PRIMARY KEY)",
+    "DROP TABLE items",
+    "UPDATE items SET value='changed'; CREATE TABLE escape(id INTEGER PRIMARY KEY)",
+  ])("refuses unsafe or mismatched migration without changing live data: %s",async migrationSql=>{
+    await fixture(async({root,open})=>{
+      const worker=await open();
+      const prepared=await worker.prepare(operation(initial,{id:1,value:"original"}));const cursor=await worker.finalize(event(prepared));
+      const path=join(root,"refused.sqlite");
+      await expect(worker.migrateCheckpoint({path,schemaSql,tables:["items"],migrationSql})).rejects.toThrow();
+      await expect(readFile(path)).rejects.toMatchObject({code:"ENOENT"});
+      expect((await worker.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"original"}]);
+    });
+  });
+
+  it("admits leading-underscore table identifiers through schema, guest and migration",async()=>{
+    await fixture(async({root,open})=>{
+      const schemaSql="CREATE TABLE _items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);";
+      const worker=await open({schemaSql,tables:["_items"]});
+      const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO _items VALUES(1,'value')\")}}"});
+      const cursor=await worker.finalize(event(prepared));
+      const path=join(root,"underscore.sqlite");
+      await worker.migrateCheckpoint({path,schemaSql,tables:["_items"],migrationSql:"UPDATE _items SET value='updated'"});
+      const next=await open({schemaSql,tables:["_items"],checkpointPath:path,cursor});
+      const read=await next.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM _items')}}"});
+      expect(read.result).toEqual([{id:1,value:"updated"}]);
+    });
+  });
+
+  it("kills a migration that exceeds its native SQL deadline without changing the live database",async()=>{
+    await fixture(async({root,open})=>{
+      const worker=await open({limits:{deadlineMs:1000}});
+      await expect(worker.migrateCheckpoint({path:join(root,"timeout.sqlite"),schemaSql,tables:["items"],
+        migrationSql:"INSERT INTO items VALUES(1,'copy only'); WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count;"}))
+        .rejects.toMatchObject({code:"worker_deadline"});
+      await worker.close();
+      const live=new DatabaseSync(join(root,"1","app.sqlite"));
+      try {
+        expect(live.prepare("SELECT * FROM items").all()).toEqual([]);
+        expect(live.prepare("SELECT revision FROM dohc_applied").get()?.revision).toBe(0);
+      }finally{live.close();}
+      await expect(readFile(join(root,"timeout.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
+    });
+  },15_000);
 
   it("kills native SQL at its deadline and requires journal recovery instead of silently restarting",async()=>{
     await fixture(async({open})=>{

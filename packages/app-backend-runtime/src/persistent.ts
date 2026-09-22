@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { AppBackendRuntimeError, boundedText } from "./protocol.js";
+import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppRuntimeChild, AppRuntimeLauncher } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
-import type { CommittedChangeset, DatasetCursor, FinalizeOperation, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
-export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
+import type { CommittedChangeset, DatasetCursor, FinalizeOperation, MigrateCheckpointInput, PersistentCommand, PersistentOpenInput, PersistentPrepareInput, PersistentReply, PersistentResult, PreparedOperation } from "./persistent-protocol.js";
+export type { CommittedChangeset, DatasetCursor, DatasetScope, FinalizeOperation, MigrateCheckpointInput, PersistentOpenInput, PersistentPrepareInput, PreparedOperation } from "./persistent-protocol.js";
 export { PersistentRuntimeError } from "./persistent-protocol.js";
 
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string }
@@ -40,7 +40,8 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
     const entry=queue.shift();
     if(!entry) return;
     clearTimeout(entry.timer);active=entry;
-    entry.timer=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline","The dataset worker exceeded its deadline. Reopen it from the journal.")),config.limits.deadlineMs);
+    const deadlineMs=entry.command.kind==="open" ? DEFAULT_LIMITS.deadlineMs : config.limits.deadlineMs;
+    entry.timer=setTimeout(()=>fail(new PersistentRuntimeError("worker_deadline","The dataset worker exceeded its deadline. Reopen it from the journal.")),deadlineMs);
     try {child.postMessage({id:entry.id,command:entry.command});}catch(error){fail(error instanceof Error ? error : new Error(String(error)));}
   }
   function send(command:PersistentCommand):Promise<PersistentResult> {
@@ -122,6 +123,11 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       return await send({kind:"apply",input:{...event}}) as DatasetCursor;
     },
     async snapshot(path:string):Promise<{path:string;cursor:DatasetCursor}> {return await send({kind:"snapshot",path:trustedPath(path)}) as {path:string;cursor:DatasetCursor};},
+    async migrateCheckpoint(input:MigrateCheckpointInput):Promise<{path:string;cursor:DatasetCursor}> {
+      return await send({kind:"migrateCheckpoint",input:{path:trustedPath(input.path),tables:approvedTables(input.tables),
+        schemaSql:boundedText(input.schemaSql,config.limits.sourceBytes,"Database schema"),
+        migrationSql:boundedText(input.migrationSql,config.limits.sourceBytes,"Database migration")}}) as {path:string;cursor:DatasetCursor};
+    },
     async abort(reason="The dataset operation was cancelled."):Promise<void> {
       closing=true;fail(new PersistentRuntimeError("worker_aborted",reason));
       if(!exited) await exitPromise;

@@ -128,16 +128,33 @@ The host owns directory cleanup after `close` completes. It must not reuse an or
 The client bounds admitted work to 64 messages and gives queued work its own deadline.
 Queued and active message payloads together cannot exceed 129 MiB.
 The execution deadline starts on dispatch and kills blocked native SQL as well as guest code.
+Initialization keeps its separate eight-second deadline when the host lowers the subsequent operation deadline.
 `abort(reason)` immediately kills the worker and waits for process exit. Use it when authority is revoked or execution is cancelled.
 
 Each operation receives a fresh QuickJS runtime. Reused SQLite connections additionally deny `changes()`, `total_changes()`, and `last_insert_rowid()`.
 Use `ctx.db.execute(...).changes` for the current statement's affected row count.
+Journaled datasets reject `AUTOINCREMENT` because SQLite changesets omit its retained sequence state. Use an `INTEGER PRIMARY KEY` or an explicit ID.
+Prepare refuses deferred foreign-key violations and transactions ended by conflict handling before the host can commit a journal event.
 The persistent storage reservation defaults to 128 MiB and can be lowered. It includes internal cursor pages; other guest limits retain snapshot defaults.
 This reservation is a bound, not a measured performance or scale guarantee.
 Electron hosts must inject their utility-process launcher and package the `persistent-child` export.
 
 Changeset filtering was checked against Node 24.16.0's [SQLite binding at c7d10158bc31036de6783d66beaaaf551e3167aa](https://github.com/nodejs/node/blob/c7d10158bc31036de6783d66beaaaf551e3167aa/src/node_sqlite.cc).
 Its filter includes tables when the callback returns true. Tests cover admitted replay and rollback of mixed admitted/internal changesets.
+
+## Approved schema transitions
+
+`migrateCheckpoint({path,schemaSql,tables,migrationSql})` applies an owner-approved migration to a disposable copy of the idle materialization.
+The host must obtain approval for the new rules and warn before destructive changes. The worker does not grant that approval.
+Migration SQL has the source byte limit and the worker execution deadline. It cannot attach databases, access files, change transaction control, or create temporary objects.
+It can change declared tables, indexes, and triggers. Table identifiers can start with an underscore; internal `dohc_` and `sqlite_` names remain reserved.
+The resulting schema must exactly match the new approved schema, and integrity and foreign-key checks must pass.
+
+The output checkpoint omits the internal scope and cursor marker. The returned cursor identifies the unchanged live dataset it came from.
+The host hashes the checkpoint, commits the schema transition against that cursor, and opens a new worker under the committed identity.
+An empty migration normalizes a checkpoint without changing its schema or records.
+Failures leave the live dataset unchanged. Cancellation kills the worker; the host removes its disposable directory after process exit.
+The host retains the prior approved artifacts and checkpoint before activation so the owner can reverse the transition.
 The launcher starts the compiled `entryPath` with an empty environment and maps utility-process messages, errors, exits, and kill.
 The child accepts one request on `process.parentPort` and sends one reply.
 The utility-process adapter should send `{ kind: "close" }` after it receives the reply.

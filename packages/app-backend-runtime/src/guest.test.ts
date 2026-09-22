@@ -18,9 +18,11 @@ async function withDatabase(run: (db: DatabaseSync) => Promise<void>): Promise<v
   try {
     db.exec("CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE dohc_receipts(id INTEGER PRIMARY KEY);");
     db.exec("INSERT INTO dohc_receipts VALUES(42)");
+    db.exec("BEGIN IMMEDIATE");
     await run(db);
   } finally {
     db.setAuthorizer(null);
+    if (db.isTransaction) db.exec("ROLLBACK");
     db.close();
   }
 }

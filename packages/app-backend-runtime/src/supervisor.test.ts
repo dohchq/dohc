@@ -21,9 +21,10 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[] } = {}) {
+  const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
-  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(schemaSql); seed.close();
+  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
   const checkpoint = await readFile(join(directory, "seed.sqlite"));
   const db = new DatabaseSync(join(directory, "authority.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0);");
@@ -36,15 +37,15 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   const scope = { workspaceId: "workspace", datasetId: "dataset" };
   const authorize = () => { if (db.prepare("SELECT allowed FROM grants").get()!.allowed !== 1) throw Error("denied"); };
   function initialize(datasetId = scope.datasetId) {
-    journal.initialize({ scope: { ...scope, datasetId }, hostEpoch: "host", approvedRevisionHash: hash("approved"), source,
-      schemaSql, definitionJson: "{}", checkpoint, authorize });
+    journal.initialize({ scope: { ...scope, datasetId }, hostEpoch: "host", approvedRevisionHash: hash("approved"), source:approvedSource,
+      schemaSql:approvedSchema, definitionJson: "{}", checkpoint, authorize });
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
     directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
-    return supervisor.invoke({ scope, tables: ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
+    return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
       idempotencyKey: "retry", payloadSha256: hash(JSON.stringify(input)), readOnly: false, authorize, ...overrides });
   }
   return { db, journal, supervisor, invoke, scope, authorize, initialize };
@@ -67,6 +68,39 @@ it("serializes concurrent writes and reuses a worker without copying the databas
   expect(results.map(result => result.revision)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
   expect(launches).toBe(1);
   expect((await f.invoke({}, { readOnly: true })).result).toHaveLength(12);
+});
+
+it("journals only operations whose deferred foreign keys can commit",async()=>{
+  const f=await fixture({tables:["items","parents"],
+    schemaSql:"CREATE TABLE parents(id TEXT PRIMARY KEY NOT NULL); CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,parent_id TEXT NOT NULL REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);",
+    source:`globalThis.operations={run(ctx,input){
+      ctx.db.execute("INSERT INTO items VALUES('child','parent')");
+      if(input.parent) ctx.db.execute("INSERT INTO parents VALUES('parent')");
+      return ctx.db.query('SELECT * FROM items');
+    }}`,
+  });
+  await expect(f.invoke({parent:false})).rejects.toThrow("foreign-key");
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(0);
+  const valid=await f.invoke({parent:true},{idempotencyKey:"valid"});
+  expect(valid).toMatchObject({revision:1,result:[{id:"child",parent_id:"parent"}]});
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
+});
+
+it("refuses a caught rollback conflict before later statements can autocommit",async()=>{
+  const f=await fixture({source:`globalThis.operations={run(ctx,input){
+    if(input.conflict){
+      ctx.db.execute("INSERT INTO items VALUES('same','first')");
+      try {ctx.db.execute("INSERT OR ROLLBACK INTO items VALUES('same','duplicate')");}catch{}
+      try {ctx.db.execute("INSERT INTO items VALUES('escaped','autocommit')");}catch{}
+      return 'caught';
+    }
+    return ctx.db.query('SELECT * FROM items');
+  }}`});
+  await expect(f.invoke({conflict:true})).rejects.toThrow("transaction ended");
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(0);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([]);
 });
 
 it("recovers a host commit whose acknowledgment was lost and returns its receipt exactly once", async () => {
