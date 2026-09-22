@@ -5,12 +5,12 @@ await build({
   entryPoints: {
     recovery: fileURLToPath(new URL("../src/recovery.ts", import.meta.url)),
     "recovery-export": fileURLToPath(new URL("../src/recovery-export.ts", import.meta.url)),
+    "recovery-import": fileURLToPath(new URL("../src/recovery-import.ts", import.meta.url)),
     "dataset-host": fileURLToPath(new URL("../src/dataset-host.ts", import.meta.url)),
     index: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     child: fileURLToPath(new URL("../src/child.ts", import.meta.url)),
     persistent: fileURLToPath(new URL("../src/persistent.ts", import.meta.url)),
     journal: fileURLToPath(new URL("../src/journal.ts", import.meta.url)),
-    recovery: fileURLToPath(new URL("../src/recovery.ts", import.meta.url)),
     supervisor: fileURLToPath(new URL("../src/supervisor.ts", import.meta.url)),
     "persistent-child": fileURLToPath(new URL("../src/persistent-child.ts", import.meta.url)),
   },
