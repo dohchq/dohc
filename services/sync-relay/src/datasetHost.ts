@@ -255,6 +255,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           });
         }
       },
+      replicaCapture: host.replicaCapture, replicaPage: host.replicaPage, replicaBlob: host.replicaBlob,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },

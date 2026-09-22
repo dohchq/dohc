@@ -10,6 +10,11 @@ import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOpt
 import { compileClosedApp } from "./closedAppCompiler";
 import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
 import { writeDatasetRecoveryExport } from "./datasetRecoveryExport";
+import { fixture as relayFixture, limits as relayLimits } from "../../../../services/sync-relay/src/appBackendTestFixture";
+import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget } from "./remoteDataset";
+import { readDatasetResponse } from "../ipc/readDatasetResponse";
+import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
 
 vi.setConfig({ testTimeout: 20_000 });
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -92,6 +97,64 @@ describe("local dataset owner adapter", () => {
       } finally { await staged.dispose(); }
     } finally { await archive.dispose(); }
   });
+  it("moves actual local records and attachments to the relay and recovers a lost response after both hosts restart", async () => {
+    const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
+    const compileOperations = async (source:string,path:string) => {
+      const bytes=Buffer.from(source),built=await compileClosedApp({entryPath:path,inputs:[{path,bytes,sha256:digest(bytes)}],packageMap:{},bounds:{maxInputFiles:1,maxInputBytes:256*1024,maxOutputBytes:256*1024}});
+      return Buffer.from(built.files[0]!.bytes).toString("utf8");
+    };
+    let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
+    const controller=new AbortController(); let offline=false,posted=0;
+    const handler=()=>createSyncRelayHandler({storage:f.storage,datasetHost:relayHost,appBackendsEnabled:true,appPublicationLimits:relayLimits,
+      resolveActor(request,workspaceId){if(request.headers.get("authorization")!=="Bearer token")throw Error("credentials");return {workspaceId,userId:"owner"};}});
+    const credentials={serverUrl:"https://account",relayUrl:"https://relay",token:"token",userId:"owner",email:"owner@example.test"};
+    const transport=async (_credentials:typeof credentials,path:string,init:RequestInit)=>{
+      if(offline)throw Error("offline after response loss");
+      const request=new Request(`https://relay${path}`,{...init,headers:{...Object.fromEntries(new Headers(init.headers)),authorization:"Bearer token"},...(init.body instanceof ReadableStream?{duplex:"half" as const}:{})});
+      const response=await handler()(request),value=path.includes("/imports/")?await response.json():await readDatasetResponse(response,path.split("/").at(-1)!,controller.signal);
+      if(!response.ok)throw Error(`Relay ${response.status}: ${JSON.stringify(value)}`);
+      if(path.includes("/imports/")&&init.method==="POST"){posted++;offline=true;throw Error("lost import response");}
+      return value;
+    };
+    const target=()=>createRemoteDatasetTransferTarget({workspaceId:"w",datasetId:id(1),origin:"https://relay",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayStream:transport});
+    try{
+      const local=await open(),approved=await activate(local.host);
+      const bytesBase64=Buffer.from("%PDF-transfer-actual-file").toString("base64"),upload={datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"receipt",name:"receipt.pdf",contentType:"application/pdf",bytesBase64};
+      const file=await local.host.upload(upload),mutation=call(approved,id(6),"before-transfer",{name:"First",fileId:file.file.fileId});
+      await local.host.action(mutation);
+      await expect(local.host.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()})).rejects.toThrow("lost import response");
+      expect(local.host.transferStatus(id(1))?.state).toBe("ready");
+      await expect(local.host.action(call(approved,id(6),"forbidden",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+      await local.host.close();await relayHost.close();f.restart();
+      relayHost=await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
+      const restarted=(await open({workspaceRoot:local.workspaceRoot})).host;offline=false;
+      const completed=await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()});
+      expect(completed.state).toBe("imported");expect(posted).toBe(1);
+      const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
+      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
+      expect((await routed.invoke(call(approved,id(5)))).result).toMatchObject([{name:"First"}]);
+      expect(await routed.file({...upload,workspaceId:"w",action:"file",fileId:file.file.fileId})).toEqual({file:file.file,bytesBase64});
+      expect(await routed.invoke(mutation)).toMatchObject({replayed:true});
+      await routed.invoke(call(approved,id(6),"remote-write",{name:"Second"}));
+      expect((await routed.invoke(call(approved,id(5)))).result).toHaveLength(2);
+      await expect(restarted.action(call(approved,id(6),"local-after",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+      const replica=await createDatasetReplica({directory:join(local.workspaceRoot,"replica"),scope:{workspaceId:"w",datasetId:id(1)},ownerKey:"owner",origin:"https://relay",assertOwner(){}});
+      const replicaRequest=async(action:string,body?:unknown)=>{
+        if(offline)throw Error("offline");
+        const response=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/replica/${action}`,{method:body?"POST":"GET",headers:{authorization:"Bearer token",...(body?{"content-type":"application/json"}:{})},...(body?{body:JSON.stringify(body)}:{})}));
+        if(!response.ok)throw Error(`Replica ${response.status}: ${await response.text()}`);
+        return response;
+      };
+      try{
+        const source={async capture(){return (await replicaRequest("capture")).json();},async page(input:unknown){return (await replicaRequest("page",input)).json();},async blob(input:unknown){return new Uint8Array(await (await replicaRequest("blob",input)).arrayBuffer());}};
+        await replica.catchUp(source);offline=true;
+        expect((await replica.read({...call(approved,id(5)),operationId:id(5)})).result).toHaveLength(2);
+        await expect(replica.read({...call(approved,id(6)),operationId:id(6)})).rejects.toThrow("read-only");
+        offline=false;await routed.invoke(call(approved,id(6),"remote-third",{name:"Third"}));await replica.catchUp(source);
+        expect((await replica.read({...call(approved,id(5)),operationId:id(5)})).result).toHaveLength(3);
+      }finally{await replica.close();}
+    }finally{controller.abort();await relayHost.close();await rm(remoteDirectory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
+  },30_000);
   it("persists a local fence before sharing and resumes the same archive after a lost remote response", async () => {
     const {host,workspaceRoot} = await open(), approved = await activate(host);
     const attachment = Buffer.from("%PDF-synthetic-transfer-receipt");

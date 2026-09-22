@@ -3,6 +3,7 @@ import type { AppPublicationLimits } from "@dohc/security-contract/app-publicati
 import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { createDatasetAppRoutes, createDatasetRoutes, type DatasetRoute } from "./datasetRoutes";
+import { createDatasetReplicaRoutes, type DatasetReplicaRoute } from "./datasetReplicaRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -136,6 +137,7 @@ type SyncRelayRoute =
   | AppBackendRoute
   | DatasetRoute
   | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" }
+  | DatasetReplicaRoute
   | LinkAppPublicationRoute
   | LinkAppCollectionRoute
   | OwnerAppPublicationRoute
@@ -224,6 +226,7 @@ export function createSyncRelayHandler({
     {limits: appBackendAdmissionLimits, nowMs},
   ) : undefined;
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
+  const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetApp = datasetHost ? createDatasetAppRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
@@ -629,13 +632,17 @@ export function createSyncRelayHandler({
         return await respondToDataset(request, { route: "dataset", workspaceId: granted.share.workspaceId, datasetId: route.datasetId, action: route.action, named: true },
           { kind: "named", workspaceId: granted.share.workspaceId, userId: actor.userId, grantId: granted.grant.grantId });
       }
-      if (route.route === "dataset") {
+      if (route.route === "dataset" || route.route === "dataset-replica") {
         if (!respondToDataset) throw notFound();
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
         const actor = await resolveActor(new Request(request.url, {headers: {authorization: authorization!}, signal: request.signal}), route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         const grant = request.headers.get("x-dohc-dataset-grant");
+        if (route.route === "dataset-replica") {
+          if (!respondToDatasetReplica || grant !== null) throw notFound();
+          return await respondToDatasetReplica(request,route,{kind:"named",workspaceId:route.workspaceId,userId:actor.userId});
+        }
         return await respondToDataset(request, route, {kind:"named", workspaceId:route.workspaceId, userId:actor.userId,
           ...(grant === null ? {} : {grantId: parseShareId(grant)})});
       }
@@ -926,6 +933,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 3) return {route:"dataset", workspaceId, action:"list"};
     const datasetId = parts[3];
     if (!datasetId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(datasetId)) throw notFound();
+    if (parts.length === 6 && parts[4] === "replica" && ["capture","page","blob"].includes(parts[5]!)) return {route:"dataset-replica",workspaceId,datasetId,action:parts[5] as DatasetReplicaRoute["action"]};
     if (parts.length === 6 && parts[4] === "imports" && /^[A-Za-z0-9_-]{1,128}$/.test(parts[5]!)) return {route: "dataset", workspaceId, datasetId, action: "import", transferId: parts[5]};
     if (parts.length === 4) return {route:"dataset", workspaceId, datasetId, action:"describe"};
     if (parts.length === 5 && ["activate","artifacts","invoke","migrate","permissions","upload","file","history"].includes(parts[4]!)) return {route:"dataset", workspaceId, datasetId, action:parts[4] as DatasetRoute["action"]};
