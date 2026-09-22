@@ -1,5 +1,6 @@
 import { DATASET_MAX_FIELDS, parseDatasetRevision, resolveAppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
+import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { generateDatasetFormFrontend, type DatasetFormField } from "./datasetFormFrontend";
 
 export interface DatasetFormInput {
@@ -61,6 +62,9 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
       ...(field.options ? { options: [...field.options] } : {}) };
   });
   const title = input.title ?? revision.definition.name;
+  if (fields.filter(field => field.type === "attachment" && field.required).length > APP_BACKEND_OPERATION_FILES) {
+    throw new Error(`A response can include ${APP_BACKEND_OPERATION_FILES} files. Make additional file fields optional before creating this form.`);
+  }
   if (typeof title !== "string" || !title.trim() || title.length > 200 || /[\u0000-\u001f\u007f]/u.test(title)) throw new Error("Use a form title with 1 to 200 characters.");
   const capability = resolveAppDatasetCapability({ kind: "dataset", datasetId: revision.datasetId, revision: revision.revision,
     revisionSha256: revision.revisionSha256, operationIds: [...new Set([operation.operationId, ...relationOperations])], createFields: [{ operationId: operation.operationId, fieldIds: input.fieldIds }] }, revision);

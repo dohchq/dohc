@@ -1,4 +1,4 @@
-import { APP_BACKEND_INPUT_BYTES, APP_BACKEND_UPLOAD_BYTES, type AppBackendJson } from "@dohc/security-contract/app-backend";
+import { APP_BACKEND_INPUT_BYTES, APP_BACKEND_UPLOAD_BYTES, APP_BACKEND_OPERATION_FILES, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import { FORM_CSS } from "./datasetFormStyles";
 
 export interface DatasetFormField {
@@ -14,7 +14,7 @@ export interface DatasetFormField {
 export interface DatasetFormFrontendInput { title: string; operation: string; fields: DatasetFormField[] }
 
 export function generateDatasetFormFrontend(input: DatasetFormFrontendInput): { "frontend.js": string; "frontend.css": string } {
-  const data = JSON.stringify({ ...input, inputBytes: APP_BACKEND_INPUT_BYTES, uploadBytes: APP_BACKEND_UPLOAD_BYTES })
+  const data = JSON.stringify({ ...input, inputBytes: APP_BACKEND_INPUT_BYTES, uploadBytes: APP_BACKEND_UPLOAD_BYTES, operationFiles: APP_BACKEND_OPERATION_FILES })
     .replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
   return { "frontend.js": `import './frontend.css';\n(() => {\nconst definition = ${data};\n${SCRIPT}\n})();\n`, "frontend.css": FORM_CSS };
 }
@@ -238,6 +238,9 @@ const readDraft = () => {
     }
   }
   if (invalid) { invalid.focus(); invalid.reportValidity(); return; }
+  if (uploads.length > definition.operationFiles) {
+    status.textContent = "Choose " + definition.operationFiles + " files or fewer for one response."; status.focus(); return;
+  }
   const boundedValues = { ...values, ...Object.fromEntries(uploads.map(upload => [upload.fieldId, "x".repeat(128)])) };
   if (new TextEncoder().encode(JSON.stringify({ values: boundedValues })).byteLength > definition.inputBytes) {
     status.textContent = "Your response is too long. Shorten the answers and try again."; status.focus(); return;

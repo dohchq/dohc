@@ -4,6 +4,8 @@ export const APP_BACKEND_INPUT_BYTES = 64 * 1024;
 export const APP_BACKEND_REQUEST_BYTES = 128 * 1024;
 export const APP_BACKEND_RESULT_BYTES = 1024 * 1024;
 export const APP_BACKEND_UPLOAD_BYTES = 5 * 1024 * 1024;
+/** Maximum file metadata entries admitted to one operation by local and shared hosts. */
+export const APP_BACKEND_OPERATION_FILES = 32;
 export const APP_BACKEND_UPLOAD_REQUEST_BYTES = 8 * 1024 * 1024;
 export const APP_BACKEND_REFUSAL_BYTES = 8 * 1024;
 export const APP_BACKEND_JSON_MAX_DEPTH = 32;
