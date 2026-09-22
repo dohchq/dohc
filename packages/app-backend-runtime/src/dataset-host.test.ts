@@ -321,6 +321,25 @@ it("rechecks grants and data revision when a protected resource is read",async()
   await expect(f.host.readOperation("owner",{...request,operationId:id(6)},()=>"file")).rejects.toThrow("read-only");
 });
 
+it("refuses file disclosure when a committed row change removes visibility after the read result",async()=>{
+  const f=await fixture(),visibleSource=operationSource.replace("'SELECT id,value FROM items ORDER BY id'","'SELECT id,value FROM items WHERE value=? ORDER BY id',['visible']");
+  const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:visibleSource});
+  await f.host.activate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:visibleSource});
+  const base={...scope,revision:1,revisionSha256:revision.revisionSha256};
+  await f.host.invoke("owner",{...base,operationId:id(6),input:{value:"visible"},idempotencyKey:"create-visible"});
+  const invoke=f.host.invoke.bind(f.host);
+  f.host.invoke=async(context,input)=>{
+    const result=await invoke(context,input);
+    const record=(result.result as Array<{id:string}>)[0]!;
+    await invoke("owner",{...base,operationId:id(8),input:{id:record.id,value:"hidden"},idempotencyKey:"hide-before-disclosure"});
+    return result;
+  };
+  let disclosed=false;
+  await expect(f.host.readOperation("owner",{...base,operationId:id(7),input:{},idempotencyKey:"read-visible"},()=>{disclosed=true;return "private receipt";})).rejects.toThrow("Dataset changed before");
+  expect(disclosed).toBe(false);
+  expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
+});
+
 
 it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
   let refunded = 0;

@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, verifyAppDatasetCapability, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
-import { parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
 import type { DatasetAccess, DatasetAuthority, InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
-import type { LocalDatasetFileRequest, LocalDatasetUpload } from "./localDatasetHost";
+import type { LocalDatasetUpload } from "./localDatasetHost";
 import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 
 export interface LocalDatasetAppContext { publicationId: string; authorityRevision: number }
@@ -23,7 +23,7 @@ export function createLocalDatasetApps(options: {
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
   upload(context: LocalDatasetAppContext, input: LocalDatasetUpload): Promise<unknown>;
-  file(input: LocalDatasetFileRequest): Promise<unknown>;
+  readFile(context: LocalDatasetAppContext, input: InvokeDatasetInput, fileId: string): Promise<unknown>;
   attempt(context: LocalDatasetAppContext, input: Pick<InvokeDatasetInput, "workspaceId" | "datasetId" | "revision" | "revisionSha256" | "operationId" | "access">, request: DatasetAttemptRequest): unknown;
 }) {
   const { db } = options;
@@ -165,12 +165,8 @@ export function createLocalDatasetApps(options: {
         const { capability: cap } = current(publicationId, input.authorityRevision);
         const operation = cap.operations.find(operation => operation.name === input.operation && operation.readOnly);
         if (!operation || typeof raw.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(raw.fileId)) throw new Error("Choose an approved read action for this file.");
-        const result = await options.invoke(context, { workspaceId: options.workspaceId, datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256,
-          operationId: operation.operationId, idempotencyKey: "file-read", input: input.input, access: { kind: "app", appId: publicationId }, signal });
-        const contains = (value: unknown): boolean => value === raw.fileId || (Array.isArray(value) ? value.some(contains) : !!value && typeof value === "object" && Object.values(value).some(contains));
-        if (!contains(parseAppBackendJson(result.result))) throw new Error("This action does not grant access to the file.");
-        current(publicationId, input.authorityRevision);
-        return options.file({ datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256, fileId: raw.fileId, signal });
+        return options.readFile(context, { workspaceId: options.workspaceId, datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256,
+          operationId: operation.operationId, idempotencyKey: "file-read", input: input.input, access: { kind: "app", appId: publicationId }, signal }, raw.fileId);
       });
     },
   };

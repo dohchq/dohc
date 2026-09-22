@@ -224,7 +224,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const files: AppBackendFile[] = [];
         for (const fileId of ids) {
           const row = db.prepare("SELECT metadata,key,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)").get(workspaceId, request.datasetId, fileId, Date.now());
-          if (row && (context === owner || row.attached_revision !== null || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
+          if (row && (context === owner || JSON.parse(String(row.key))[2] === request.authority.principalKey)) files.push(parseAppBackendFile(JSON.parse(String(row.metadata))));
         }
         if (files.length > 32) throw new Error("A Collection action can attach at most 32 files.");
         const capturedFiles = new Set(files.map(file => file.fileId));
@@ -232,6 +232,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           // The journal already owns the transaction containing this callback.
           for (const fileId of allocation.attachedFileIds) {
             if (!capturedFiles.has(fileId)) throw new Error("This Collection file is unavailable.");
+            const current=db.prepare("SELECT key FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId,request.datasetId,fileId);
+            if (!current || (context !== owner && JSON.parse(String(current.key))[2] !== request.authority.principalKey)) throw new Error("This Collection file is unavailable.");
             const changed = db.prepare("UPDATE local_dataset_files SET attached_revision=coalesce(attached_revision,?) WHERE workspace_id=? AND dataset_id=? AND file_id=? AND (attached_revision IS NOT NULL OR expires_at_ms>?)")
               .run(allocation.revision, workspaceId, request.datasetId, fileId, Date.now());
             if (changed.changes !== 1) throw new Error("This Collection file expired. Upload it again.");
@@ -240,6 +242,15 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         } };
       },
     });
+    function readFile(input: LocalDatasetFileRequest, attachedOnly: boolean) {
+      assertCurrent();signal(input.signal).throwIfAborted();
+      if (typeof input.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(input.fileId)) throw new Error("Invalid Collection file.");
+      const row = db.prepare("SELECT metadata,content,expires_at_ms,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId, input.datasetId, input.fileId) as {metadata:string;content:Uint8Array;expires_at_ms:number;attached_revision:number|null}|undefined;
+      if (!row || (row.attached_revision === null && (attachedOnly || row.expires_at_ms <= Date.now()))) throw new Error("This Collection file is unavailable.");
+      const file = parseAppBackendFile(JSON.parse(row.metadata));
+      if (row.content.byteLength !== file.byteLength || digest(row.content) !== file.sha256) throw new Error("Collection file integrity check failed.");
+      return {file, bytesBase64: Buffer.from(row.content).toString("base64")};
+    }
     const migrations = createLocalDatasetMigrations({ workspaceId, assertCurrent,
       approvedArtifacts: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       migrate: input => host.migrate(owner, input) });
@@ -369,14 +380,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       file(input: LocalDatasetFileRequest) {
         return tracked(async () => {
           signal(input.signal).throwIfAborted(); checkRevision(input);
-          if (typeof input.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(input.fileId)) throw new Error("Invalid Collection file.");
-          return transaction(() => {
-            const row = db.prepare("SELECT metadata,content,expires_at_ms,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=?").get(workspaceId, input.datasetId, input.fileId) as {metadata:string;content:Uint8Array;expires_at_ms:number;attached_revision:number|null}|undefined;
-            if (!row || (row.attached_revision === null && row.expires_at_ms <= Date.now())) throw new Error("This Collection file is unavailable.");
-            const file = parseAppBackendFile(JSON.parse(row.metadata));
-            if (row.content.byteLength !== file.byteLength || digest(row.content) !== file.sha256) throw new Error("Collection file integrity check failed.");
-            return {file, bytesBase64: Buffer.from(row.content).toString("base64")};
-          });
+          return transaction(() => readFile(input,false));
         });
       },
       invoke: (input: LocalDatasetInvocation) => invoke(input),
@@ -396,7 +400,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       bind: (datasetId, appId, binding, commit) => host.setBinding(owner, { workspaceId, datasetId, appId, binding }, commit),
       invoke: (context, input) => tracked(() => host.invoke(context, { ...input, signal: signal(input.signal) })),
       upload: (context, input) => local.upload(input, context),
-      file: input => local.file(input),
+      readFile: (context,input,fileId) => tracked(() => host.readOperation(context,{...input,signal:signal(input.signal)},result=>{
+        if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).length !== 1 || result.fileId !== fileId) throw new Error("This action does not grant access to the file.");
+        return readFile({...input,fileId},true);
+      })),
       attempt(context, input, request) {
         const admitted = host.authorize(context, input);
         const authority = admitted.authority;

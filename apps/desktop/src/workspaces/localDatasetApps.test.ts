@@ -23,6 +23,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name
   ] }], operations: [
     { operationId: id(6), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4), id(5)] },
     { operationId: id(7), name: "list", label: "List", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4), id(5)] },
+    { operationId: id(8), name: "fileRead", label: "Read receipt", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(5)] },
   ] };
 const roots: string[] = [], hosts: LocalDatasetHost[] = [], launchers: LocalAppLaunchHost[] = [];
 afterEach(async () => {
@@ -48,6 +49,12 @@ async function fixture() {
   const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024 }); hosts.push(host);
   const generated = generateDatasetSources(definition);
   const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
+  files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
+    if(input.echo)return {echo:input.fileId};
+    if(input.extra)return {fileId:input.fileId,extra:true};
+    if(input.guess)return {fileId:input.fileId};
+    return {fileId:ctx.db.query('SELECT receipt FROM responses WHERE receipt=?',[input.fileId])[0]?.receipt||null};
+  };`);
   const adapter = sourceAdapter(files);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
@@ -138,9 +145,18 @@ describe("local approved dataset apps", () => {
     const invoke = f.invocation(); invoke.input.values[id(5)] = uploaded.file.fileId;
     await f.host.apps.request(f.published.publicationId, "invoke", invoke);
     await expect(f.host.apps.readBrowserFile(f.published.publicationId, { authorityRevision: 1, fileId: uploaded.file.fileId, operation: "list", input: {} })).rejects.toThrow(/approved read/);
-    const admin = await f.host.apps.activate(await f.prepareApp("admin", [id(7)]), new AbortController().signal);
-    expect(await f.host.apps.readBrowserFile(admin.publicationId, { authorityRevision: admin.authorityRevision, fileId: uploaded.file.fileId, operation: "list", input: {} })).toMatchObject({ bytesBase64: "JVBERi0=" });
+    const admin = await f.host.apps.activate(await f.prepareApp("admin", [id(7),id(8)]), new AbortController().signal);
+    await expect(f.host.apps.readBrowserFile(admin.publicationId, { authorityRevision: admin.authorityRevision, fileId: uploaded.file.fileId, operation: "list", input: {} })).rejects.toThrow(/does not grant/);
+    const request={authorityRevision:admin.authorityRevision,fileId:uploaded.file.fileId,operation:"fileRead",input:{fileId:uploaded.file.fileId}};
+    expect(await f.host.apps.readBrowserFile(admin.publicationId,request)).toMatchObject({bytesBase64:"JVBERi0="});
+    await expect(f.host.apps.readBrowserFile(admin.publicationId,{...request,input:{...request.input,echo:true}})).rejects.toThrow(/does not grant/);
+    await expect(f.host.apps.readBrowserFile(admin.publicationId,{...request,input:{...request.input,extra:true}})).rejects.toThrow(/does not grant/);
+    const pending=await f.host.upload({datasetId:id(1),revision:1,revisionSha256:f.revision.revisionSha256,idempotencyKey:"owner-pending",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:"JVBERi0="});
+    await expect(f.host.apps.readBrowserFile(admin.publicationId,{...request,fileId:pending.file.fileId,input:{fileId:pending.file.fileId,guess:true}})).rejects.toThrow(/unavailable/);
     await expect(f.host.apps.request(admin.publicationId, "upload", { authorityRevision: admin.authorityRevision, idempotencyKey: "other", name: "receipt.pdf", contentType: "application/pdf", bytesBase64: "JVBERi0=" })).rejects.toThrow(/cannot upload/);
+    const disclosure=f.host.apps.readBrowserFile(admin.publicationId,request);
+    f.host.apps.withdraw(admin.publicationId,admin.authorityRevision);
+    await expect(disclosure).rejects.toThrow();
   });
 
   it("rejects altered capabilities and bundle bytes before replacing a working app", async () => {
@@ -170,6 +186,15 @@ describe("local approved dataset apps", () => {
     expect(own.file.fileId).not.toBe(first.file.fileId);
     const input = f.invocation(); input.authorityRevision = other.authorityRevision; input.input.values[id(5)] = first.file.fileId;
     await expect(f.host.apps.request(other.publicationId, "invoke", input)).rejects.toThrow();
+    const attach=f.invocation("First app","attach-first");attach.input.values[id(5)]=first.file.fileId;
+    await f.host.apps.request(f.published.publicationId,"invoke",attach);
+    await expect(f.host.apps.request(other.publicationId,"invoke",{...input,idempotencyKey:"steal-attached"})).rejects.toThrow();
+    const native={datasetId:id(1),revision:1,revisionSha256:f.revision.revisionSha256};
+    const ownerUpload=await f.host.upload({...native,idempotencyKey:"owner-file",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:"JVBERi0="});
+    await f.host.action({...native,operationId:id(6),idempotencyKey:"owner-attach",input:{values:{[id(4)]:"Owner",[id(5)]:ownerUpload.file.fileId}}});
+    input.input.values[id(5)]=ownerUpload.file.fileId;
+    await expect(f.host.apps.request(other.publicationId,"invoke",{...input,idempotencyKey:"steal-owner-attached"})).rejects.toThrow();
+    expect(await f.host.action({...native,operationId:id(6),idempotencyKey:"owner-reuse-app",input:{values:{[id(4)]:"Owner reuse",[id(5)]:first.file.fileId}}})).toMatchObject({replayed:false});
   });
 
   it("enforces the generated form's field subset even when a client forges the request", async () => {
