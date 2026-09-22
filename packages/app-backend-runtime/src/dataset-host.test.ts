@@ -8,6 +8,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor } from "./supervisor.ts";
 import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
+import { createDatasetAttempts } from "./dataset-attempts.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
 const cleanups: Array<() => Promise<void>> = [];
@@ -64,7 +65,7 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const binding = (operationIds = [id(6)]) => ({ kind: "dataset" as const, datasetId: id(1), revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds });
   const invoke = (context: Context, operationId: string, input = {}, appId?: string) => host.invoke(context, { ...scope, revision: prepared.revision.revision, revisionSha256: prepared.revision.revisionSha256, operationId, input,
     idempotencyKey: "request", ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
-  return { host, db, journal, supervisor, activate, invoke, binding };
+  return { host, db, journal, supervisor, activate, invoke, binding, transaction };
 }
 
 it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
@@ -313,4 +314,35 @@ it("rechecks grants and data revision when a protected resource is read",async()
   await expect(f.host.readOperation("owner",request,()=>Buffer.from("file"))).resolves.toEqual(Buffer.from("file"));
   await expect(f.host.readOperation("owner",request,async()=>{read=true;})).rejects.toThrow("synchronous");expect(read).toBe(false);
   await expect(f.host.readOperation("owner",{...request,operationId:id(6)},()=>"file")).rejects.toThrow("read-only");
+});
+
+
+it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
+  let refunded = 0;
+  const f = await fixture({accountMetadata(_context, allocation) {refunded += allocation.bytes;}}); await f.activate();
+  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const attemptScope = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  const pending = attempts.request(attemptScope, {action: "save", idempotencyKey: "request", input: {value: "private answer"}}, () => {});
+  const unconfirmed = f.host.pendingAttempts("owner", scope).entries[0]!;
+  expect(unconfirmed).toMatchObject({operation: "Submit", outcome: "unconfirmed", revision: null, recordedAtMs: null});
+  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("unconfirmed");
+  await f.invoke("friend", id(6), {value: "private answer"}, "form");
+  const review = f.host.pendingAttempts("owner", scope);
+  expect(review.entries[0]).toMatchObject({reference: unconfirmed.reference, operation: "Submit", outcome: "committed", revision: 1, attachmentCount: 0});
+  expect(JSON.stringify(review)).not.toMatch(/private answer|friend|idempotency|principal|token/);
+  for (const caller of ["friend", "helper"] as const) {
+    expect(() => f.host.pendingAttempts(caller, scope)).toThrow("not permitted");
+    expect(() => f.host.reconcileAttempt(caller, {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("not permitted");
+  }
+  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: false as true})).toThrow("Review");
+  const before = refunded;
+  expect(f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toEqual({cleared: true});
+  expect(refunded).toBeLessThan(before);
+  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual({attempt: null});
+  expect((await f.invoke("friend", id(6), {value: "private answer"}, "form")).replayed).toBe(true);
+  const next = attempts.request(attemptScope, {action: "save", idempotencyKey: "new", input: {value: "Next"}}, () => {});
+  f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
+  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
+  expect(next.attempt!.token).not.toBe(pending.attempt!.token);
 });

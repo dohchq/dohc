@@ -6,6 +6,54 @@ export interface DatasetAttemptScope {
   workspaceId: string; datasetId: string; appId: string; principalKey: string; operationId: string;
   revisionSha256: string;
 }
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function committedAttempt(db: JournalDb, scope: DatasetScope, row: Record<string, unknown>) {
+  const attempt = parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!;
+  const callerKey = digest([row.principal_key, {kind: "app", appId: row.app_id}]);
+  const receipt = db.prepare(`SELECT r.payload_sha256,r.revision,e.operation,e.recorded_at_ms,json_array_length(e.attached_file_ids) AS attachment_count
+    FROM dohc_dataset_receipts r JOIN dohc_dataset_events e ON e.workspace_id=r.workspace_id AND e.dataset_id=r.dataset_id AND e.revision=r.revision
+    WHERE r.workspace_id=? AND r.dataset_id=? AND r.caller_key=? AND r.idempotency_key=?`)
+    .get(scope.workspaceId, scope.datasetId, callerKey, attempt.idempotencyKey);
+  return receipt?.payload_sha256 === digest([row.revision_sha256, row.operation_id, attempt.input]) ? receipt : undefined;
+}
+const reviewReference = (scope: DatasetScope, row: Record<string, unknown>) => digest([scope.workspaceId, scope.datasetId, row.app_id, row.principal_key, row.operation_id, parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!.token]);
+export interface PendingAttemptReview {
+  reference: string; operation: string; recordedAtMs: number | null; revision: number | null;
+  outcome: "committed" | "unconfirmed"; attachmentCount: number;
+}
+/** Owner-facing metadata excludes submission input, participant identity, and the participant retry key. */
+export function reviewDatasetAttempts(db: JournalDb, scope: DatasetScope, after = 0, limit = 50) {
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid pending response page.");
+  const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT ?").all(scope.workspaceId, scope.datasetId, after, limit + 1);
+  const selected = rows.slice(0, limit);
+  const entries: PendingAttemptReview[] = selected.map(row => {
+    const receipt = committedAttempt(db, scope, row);
+    const catalog = db.prepare(`SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=? AND json_extract(revision_json,'$.revisionSha256')=?
+      UNION ALL SELECT revision_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND json_extract(revision_json,'$.revisionSha256')=? LIMIT 1`)
+      .get(scope.workspaceId, scope.datasetId, row.revision_sha256, scope.workspaceId, scope.datasetId, row.revision_sha256);
+    const approved = catalog ? JSON.parse(String(catalog.revision_json)) as {definition: {operations: {operationId: string; label: string}[]}} : undefined;
+    return {reference: reviewReference(scope, row), operation: approved?.definition.operations.find(operation => operation.operationId === row.operation_id)?.label ?? "Submission",
+      recordedAtMs: receipt ? Number(receipt.recorded_at_ms) : null, revision: receipt ? Number(receipt.revision) : null,
+      outcome: receipt ? "committed" : "unconfirmed", attachmentCount: receipt ? Number(receipt.attachment_count) : 0};
+  });
+  return {datasetId: scope.datasetId, entries, nextAfter: rows.length > limit ? Number(selected.at(-1)!.rowid) : null};
+}
+/** Caller supplies owner authorization and byte accounting in the surrounding transaction. */
+export function reconcileDatasetAttempt(db: JournalDb, scope: DatasetScope, reference: string): number {
+  if (typeof reference !== "string" || reference.length !== 64 || !/^[a-f0-9]{64}$/.test(reference)) throw new Error("Invalid pending response reference.");
+  let after = 0;
+  for (;;) {
+    const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
+    if (!rows.length) return 0;
+    for (const row of rows) {
+      after = Number(row.rowid);
+      if (reviewReference(scope, row) !== reference) continue;
+      if (!committedAttempt(db, scope, row)) throw new Error("This submission is unconfirmed. Retry it in the original app before clearing its retry.");
+      db.prepare("DELETE FROM dohc_dataset_attempts WHERE rowid=?").run(row.rowid);
+      return Number(row.storage_bytes);
+    }
+  }
+}
 export function initializeDatasetAttempts(db: JournalDb): void {
   db.exec(`CREATE TABLE IF NOT EXISTS dohc_dataset_attempts(
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,app_id TEXT NOT NULL,principal_key TEXT NOT NULL,operation_id TEXT NOT NULL,
@@ -19,12 +67,7 @@ export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScop
     const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
     if (!rows.length) return;
     for (const row of rows) {
-      const attempt = parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!;
-      const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-      const callerKey = hash([row.principal_key, {kind: "app", appId: row.app_id}]);
-      const receipt = db.prepare("SELECT payload_sha256 FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=? AND caller_key=? AND idempotency_key=?")
-        .get(scope.workspaceId, scope.datasetId, callerKey, attempt.idempotencyKey);
-      if (!receipt || receipt.payload_sha256 !== hash([row.revision_sha256, row.operation_id, attempt.input])) throw new Error("A submission is unconfirmed. Retry it in the current app before moving this Collection.");
+      if (!committedAttempt(db, scope, row)) throw new Error("A submission is unconfirmed. Retry it in the current app before moving this Collection.");
       after = Number(row.rowid);
     }
   }

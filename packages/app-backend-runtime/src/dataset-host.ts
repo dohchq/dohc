@@ -14,7 +14,7 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { initializeDatasetAttempts } from "./dataset-attempts.js";
+import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt } from "./dataset-attempts.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -481,6 +481,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         const entries = rows.slice(0, limit).map(row => ({ revision: Number(row.revision), operation: String(row.operation), callerReference: String(row.caller_key),
           recordedAtMs: Number(row.recorded_at_ms), approvedRevisionHash: String(row.approved_revision_hash), changesetBytes: Number(row.changeset_bytes), attachmentCount: Number(row.attachment_count) }));
         return { datasetId: key.datasetId, headRevision: Number(head.revision), entries, nextBeforeRevision: rows.length > limit ? entries.at(-1)!.revision : null };
+      });
+    },
+    pendingAttempts(context: Context, raw: DatasetScope & {after?: number; limit?: number}) {
+      const key = scope(raw);
+      return transaction(() => {
+        owner(context, key); revision(key);
+        const result = reviewDatasetAttempts(db, key, raw.after, raw.limit);
+        owner(context, key); return result;
+      });
+    },
+    reconcileAttempt(context: Context, raw: DatasetScope & {reference: string; acknowledge: true}) {
+      const key = scope(raw);
+      if (raw.acknowledge !== true) throw new DatasetHostError("invalid", "Review this response before clearing its retry.");
+      return transaction(() => {
+        owner(context, key); revision(key);
+        const bytes = reconcileDatasetAttempt(db, key, raw.reference);
+        if (bytes && options.accountMetadata) synchronous(() => options.accountMetadata!(context, {...key, bytes: -bytes}));
+        owner(context, key); return {cleared: true as const};
       });
     },
     permissions(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
