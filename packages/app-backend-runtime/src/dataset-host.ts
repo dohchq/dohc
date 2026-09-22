@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetRevisionsPreserveAccess, effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
@@ -23,6 +23,25 @@ export class DatasetHostError extends Error {
   constructor(readonly code: "not_authorized" | "conflict" | "invalid", message: string) {
     super(message); this.name = "DatasetHostError";
   }
+}
+/** Resolve only immutable revisions already approved at this host; callers cannot supply compatibility. */
+export function resolveCompatibleDatasetRevision(db: JournalDb, key: DatasetScope, reference: { revision: number; revisionSha256: string }, current?: DatasetRevision): DatasetRevision {
+  const row = current ? undefined : db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+  const approved = current ?? (row ? parseDatasetRevision(JSON.parse(String(row.revision_json))) : undefined);
+  if (!approved) throw new DatasetHostError("not_authorized", "Dataset access is not permitted.");
+  if (reference.revision === approved.revision && reference.revisionSha256 === approved.revisionSha256) return approved;
+  const saved = db.prepare("SELECT revision_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>=? ORDER BY revision").all(key.workspaceId,key.datasetId,reference.revision);
+  const history = saved.map(row => parseDatasetRevision(JSON.parse(String(row.revision_json))));
+  const previous = history[0];
+  const executable = db.prepare("SELECT source FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+  if (!previous || previous.revision !== reference.revision || previous.revisionSha256 !== reference.revisionSha256 || history.length !== approved.revision-reference.revision || !executable)
+    throw new DatasetHostError("conflict", "Dataset access needs approval for the current revision.");
+  for (const [index, revision] of history.entries()) {
+    const checkpoint = db.prepare("SELECT source FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND json_extract(cursor_json,'$.approvedRevisionHash')=? LIMIT 1").get(key.workspaceId,key.datasetId,revision.revisionSha256);
+    if (revision.revision !== reference.revision+index || !datasetRevisionsPreserveAccess(revision,approved) || !checkpoint || checkpoint.source !== executable.source)
+      throw new DatasetHostError("conflict", "Dataset access needs approval for the current revision.");
+  }
+  return previous;
 }
 export interface DatasetAuthority {
   caller: AppBackendCaller;
@@ -118,6 +137,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
   transaction(() => initializeDatasetAttempts(db));
   transaction(() => db.exec(`
+    CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoint_approval ON dohc_dataset_checkpoint_history(workspace_id,dataset_id,json_extract(cursor_json,'$.approvedRevisionHash'));
     CREATE TABLE IF NOT EXISTS dohc_dataset_catalog (
       workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, revision_json TEXT NOT NULL,
       artifacts_json TEXT NOT NULL,
@@ -192,9 +212,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (typeof result !== "string" || !result.length || Buffer.byteLength(result) > 256 * 1024 || result.includes("\0")) throw new Error("Compiled dataset operations exceed the host limit.");
     return result;
   }
-  function currentGrant(value: unknown, approved: DatasetRevision): StoredGrant {
+  function currentGrant(key: DatasetScope, value: unknown, approved: DatasetRevision): StoredGrant {
     const grant = value as StoredGrant;
-    if (grant.revision !== approved.revision || grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset data grant needs approval for the current revision.");
+    resolveCompatibleDatasetRevision(db,key,grant,approved);
     return grant;
   }
   function permissions(context: Context, key: DatasetScope, through: DatasetAccess, includeArchived = false): Permission {
@@ -206,25 +226,26 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
       if (!row) denied();
       const binding = JSON.parse(String(row.binding_json)) as AppDatasetBinding;
-      if (binding.revision !== approved.revision || binding.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "App binding needs approval for the current dataset revision.");
+      const boundRevision = resolveCompatibleDatasetRevision(db,key,binding,approved);
       let dataToken = "", allowedHelperIds = new Set<string>();
       if (verified.caller.kind === "named") {
         const grant = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
         if (grant) {
           const parsed = JSON.parse(String(grant.grant_json)) as StoredGrant;
-          if (parsed.revision === approved.revision && parsed.revisionSha256 === approved.revisionSha256) allowedHelperIds = new Set(parsed.operationIds);
+          try { currentGrant(key,parsed,approved); allowedHelperIds = new Set(parsed.operationIds); }
+          catch (error) { if (!(error instanceof DatasetHostError) || error.code !== "conflict") throw error; }
           dataToken = String(grant.token);
         }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
-      operations = effectiveDatasetOperations(binding, approved, verified.caller)
+      operations = effectiveDatasetOperations(binding, boundRevision, verified.caller)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
       createFields = binding.createFields;
     } else if (verified.caller.kind !== "owner") {
       const row = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
       if (!row) denied();
-      const grant = currentGrant(JSON.parse(String(row.grant_json)), approved);
+      const grant = currentGrant(key,JSON.parse(String(row.grant_json)), approved);
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
       operations = effectiveDatasetOperations({ kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
@@ -444,7 +465,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     /** Trusted host admission only; adapters must not publish this unfiltered metadata. */
     authorize(context: Context, raw: Pick<InvokeDatasetInput,"workspaceId"|"datasetId"|"revision"|"revisionSha256"|"operationId"|"access">) {
       const key=scope(raw),permitted=permissions(context,key,access(raw.access)),operation=permitted.operations.find(operation=>operation.operationId===text(raw.operationId));
-      if(raw.revision!==permitted.revision.revision||raw.revisionSha256!==permitted.revision.revisionSha256)throw new DatasetHostError("conflict","Dataset revision is stale. Reload it before retrying.");
+      resolveCompatibleDatasetRevision(db,key,raw,permitted.revision);
       if(!operation)denied();
       return { authority: permitted.authority, revision: permitted.revision, operation };
     },
@@ -546,7 +567,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }
         else {
           if (typeof raw.grant.discover !== "boolean" || Object.keys(raw.grant).some(key => !["operationIds", "discover", "revision", "revisionSha256"].includes(key))) throw new Error("Invalid dataset data grant.");
-          currentGrant(raw.grant, approved);
+          if (raw.grant.revision !== approved.revision || raw.grant.revisionSha256 !== approved.revisionSha256) throw new DatasetHostError("conflict", "Dataset data grant needs approval for the current revision.");
           const binding = parseDatasetBinding({ kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
             revisionSha256: approved.revisionSha256, operationIds: raw.grant.operationIds }, approved);
           if (approved.definition.operations.some(operation => binding.operationIds.includes(operation.operationId) && operation.access === "owner")) throw new Error("Owner-only operations cannot be granted.");
@@ -667,13 +688,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       return { permissions: selected.map(row => {
         const metadata = JSON.parse(String(row.metadata));
         return { kind: String(row.kind) as "app" | "data", principal: String(row.principal),
-          current: metadata.revision === approved.revision && metadata.revisionSha256 === approved.revisionSha256, metadata };
+          current: (() => { try { resolveCompatibleDatasetRevision(db,key,metadata,approved); return true; } catch (error) { if (error instanceof DatasetHostError && error.code === "conflict") return false; throw error; } })(), metadata };
       }), nextCursor: rows.length > limit ? String(selected.at(-1)!.cursor) : null };
     },
     async invoke(context: Context, raw: InvokeDatasetInput): Promise<DatasetInvocationResult> {
       const key = scope(raw), through = access(raw.access), operationId = text(raw.operationId), idempotencyKey = text(raw.idempotencyKey, 128);
       const input = parseAppBackendJson(raw.input, 64 * 1024), permitted = permissions(context, key, through);
-      if (raw.revision !== permitted.revision.revision || raw.revisionSha256 !== permitted.revision.revisionSha256) throw new DatasetHostError("conflict", "Dataset revision is stale. Reload it before retrying.");
+      resolveCompatibleDatasetRevision(db,key,raw,permitted.revision);
       const operation = permitted.operations.find(operation => operation.operationId === operationId);
       if (!operation) denied();
       const restricted = permitted.createFields?.find(entry => entry.operationId === operationId);
@@ -693,7 +714,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
       return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
         operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
-        input, idempotencyKey, payloadSha256: hash(JSON.stringify([permitted.revision.revisionSha256, operationId, input])), readOnly: operation.readOnly,
+        input, idempotencyKey, payloadSha256: hash(JSON.stringify([raw.revisionSha256, operationId, input])), readOnly: operation.readOnly,
         files: resources.files, accountAndAttach: resources.accountAndAttach, signal: raw.signal, authorize });
     },
     /** Resolve a protected resource only while the operation's data revision and grants still hold. */

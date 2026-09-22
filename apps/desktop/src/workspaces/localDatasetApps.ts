@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, verifyAppDatasetCapability, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
-import type { DatasetAccess, DatasetAuthority, InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
+import { resolveCompatibleDatasetRevision, type DatasetAccess, type DatasetAuthority, type InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
@@ -44,7 +44,9 @@ export function createLocalDatasetApps(options: {
     const candidate = parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS);
     const current = options.approved(value.dataset_id);
     if (!current.active) throw new Error("This Collection is unavailable on this device.");
-    return verifyAppDatasetCapability(candidate.capabilities[0], current.revision);
+    const requested = candidate.capabilities[0];
+    if (requested?.kind !== "dataset") throw new Error("Invalid app approval.");
+    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(db,{workspaceId:options.workspaceId,datasetId:value.dataset_id},requested,current.revision));
   }
   function current(id: string, expected?: number) { const value = row(id, expected); return { row: value, capability: capability(value) }; }
   function resolveAuthority(context: LocalDatasetAppContext, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority {

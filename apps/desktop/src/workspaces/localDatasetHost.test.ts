@@ -422,8 +422,8 @@ describe("local dataset owner adapter", () => {
     const approved = {prepared,revision,fixture};
     await expect(host.query(call(approved,id(6)))).rejects.toThrow(/approved Collection action/);
     await expect(host.action(call(approved,id(5)))).rejects.toThrow(/approved Collection action/);
-    await expect(host.invoke({...call(approved,id(6)),revisionSha256:"0".repeat(64)})).rejects.toThrow(/rules changed/);
-    await expect(host.invoke({...call(approved,id(6)),revision:2})).rejects.toThrow(/rules changed/);
+    await expect(host.invoke({...call(approved,id(6)),revisionSha256:"0".repeat(64)})).rejects.toThrow(/needs approval/);
+    await expect(host.invoke({...call(approved,id(6)),revision:2})).rejects.toThrow(/needs approval/);
     await expect(host.invoke({...call(approved,id(6)),operationId:"SELECT * FROM items"})).rejects.toThrow(/access/);
     expect((await host.query(call(approved,id(5)))).result).toEqual([]);
   });
@@ -477,7 +477,7 @@ describe("local dataset owner adapter", () => {
     const huge = Buffer.alloc(1024 * 1024,32);huge.write("%PDF-");
     await expect(host.upload({...input,bytesBase64:huge.toString("base64")})).rejects.toThrow(/storage is full/);
     await expect(host.upload({...input,datasetId:id(10)})).rejects.toThrow(/access/);
-    await expect(host.upload({...input,revisionSha256:"0".repeat(64)})).rejects.toThrow(/rules changed/);
+    await expect(host.upload({...input,revisionSha256:"0".repeat(64)})).rejects.toThrow(/needs approval/);
     const abort = new AbortController(); abort.abort();
     await expect(host.upload({...input,signal:abort.signal})).rejects.toThrow();
     expect((await host.upload(input)).replayed).toBe(false);
