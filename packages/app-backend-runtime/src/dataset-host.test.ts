@@ -1,0 +1,181 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, expect, it, vi } from "vitest";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { createDatasetJournal } from "./journal.ts";
+import { createDatasetSupervisor } from "./supervisor.ts";
+import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
+
+vi.setConfig({ testTimeout: 30_000 });
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL);";
+const operationSource = `globalThis.operations={
+  create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?)',[ctx.requestId,input.value,'private']);return {accepted:true};},
+  read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');},
+  edit(ctx,input){ctx.db.execute('UPDATE items SET value=? WHERE id=?',[input.value,input.id]);return {changed:true};},
+  privateRead(ctx){return ctx.db.query('SELECT * FROM items');}
+};`;
+const definition: DatasetDefinition = {
+  formatVersion: 1, datasetId: id(1), name: "Orders", schemaPath: "orders/schema.sql", operationsPath: "orders/operations.js",
+  tables: [{ tableId: id(2), name: "Items", sqlName: "items", primaryKey: "id", fields: [
+    { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+    { fieldId: id(4), name: "Value", sqlColumn: "value", type: "text", required: true, unique: false },
+    { fieldId: id(5), name: "Secret", sqlColumn: "secret", type: "text", required: true, unique: false },
+  ] }],
+  operations: [
+    { operationId: id(6), name: "create", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] },
+    { operationId: id(7), name: "read", label: "Read", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)] },
+    { operationId: id(8), name: "edit", label: "Edit", tableId: id(2), kind: "edit", access: "helper", readOnly: false, fieldIds: [id(4)] },
+    { operationId: id(9), name: "privateRead", label: "Private read", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4), id(5)] },
+  ],
+};
+const prepared = { revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource }), schemaSql, operationSource };
+const scope = { workspaceId: "workspace", datasetId: id(1) };
+type Context = "owner" | "helper" | "friend";
+async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-dataset-host-"));
+  const db = new DatabaseSync(join(directory, "host.sqlite"));
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE permissions(user TEXT PRIMARY KEY,active INTEGER); INSERT INTO permissions VALUES('owner',1),('helper',1),('friend',1); CREATE TABLE accounting(bytes INTEGER); INSERT INTO accounting VALUES(0);");
+  function transaction<T>(run: () => T): T {
+    db.exec("BEGIN IMMEDIATE");
+    try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
+  }
+  const journal = createDatasetJournal({ db, transaction });
+  const supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
+  cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
+  const host = createDatasetHost<Context>({ db, transaction, journal, supervisor,
+    resolveAuthority(context, request) {
+      if (request.workspaceId !== "workspace" || db.prepare("SELECT active FROM permissions WHERE user=?").get(context)?.active !== 1) throw new Error("revoked");
+      if (request.access.kind === "app" && request.access.appId !== "form") throw new Error("Wrong publication credential.");
+      return { principalKey: context, ...(request.access.kind === "app" ? { appId: "form" } : {}),
+        caller: context === "owner" ? { kind: "owner", userId: "owner" } : context === "helper"
+          ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false }
+          : { kind: "link", principalId: "friend", grantId: "public-link" } };
+    },
+    accountCreation(_context, allocation) { db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes); },
+    ...overrides,
+  });
+  const activate = () => host.activate("owner", { workspaceId: scope.workspaceId, ...prepared });
+  const binding = (operationIds = [id(6)]) => ({ kind: "dataset" as const, datasetId: id(1), revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds });
+  const invoke = (context: Context, operationId: string, input = {}, appId?: string) => host.invoke(context, { ...scope, revision: prepared.revision.revision, revisionSha256: prepared.revision.revisionSha256, operationId, input,
+    idempotencyKey: "request", ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
+  return { host, db, journal, supervisor, activate, invoke, binding };
+}
+
+it("creates a dataset without an app and several views share its authoritative records", async () => {
+  const f = await fixture(); await f.activate();
+  expect(f.host.list("owner", { workspaceId: "workspace" }).datasets[0].name).toBe("Orders");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  await expect(f.invoke("friend", id(6), { value: "submitted" }, "form")).resolves.toMatchObject({ result: { accepted: true }, revision: 1 });
+  const rows = await f.invoke("owner", id(7));
+  expect(rows.result).toMatchObject([{ value: "submitted" }]);
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7), id(8)], discover: true } });
+  await f.invoke("helper", id(8), { id: (rows.result as Array<{ id: string }>)[0].id, value: "managed" });
+  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "managed" }]);
+  expect(f.host.describe("helper", scope).tables[0].fields.map(field => field.name)).toEqual(["ID", "Value"]);
+  expect(JSON.stringify(f.host.describe("helper", scope))).not.toContain("Secret");
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBeGreaterThan(128 * 1024 * 1024);
+});
+
+it("keeps submission, data discovery, private reads, and source approval separate", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(9)]) });
+  await expect(f.invoke("friend", id(9), {}, "form")).rejects.toThrow("not permitted");
+  await expect(f.invoke("friend", id(6), { value: "hello" }, "another-form")).rejects.toThrow("Wrong publication");
+  expect(() => f.host.describe("friend", scope)).toThrow("not permitted");
+  expect(f.host.list("friend", { workspaceId: "workspace" })).toEqual({ datasets: [], nextCursor: null });
+  expect(() => f.host.approvedArtifacts("helper", scope)).toThrow("not permitted");
+  expect(() => f.host.setBinding("helper", { ...scope, appId: "form", binding: f.binding() })).toThrow("not permitted");
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(9)], discover: true } })).toThrow("Owner-only");
+  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.binding(), revisionSha256: "0".repeat(64) } })).toThrow();
+});
+
+it("approving another consumer cannot replace rules and changed artifacts cannot activate", async () => {
+  const f = await fixture(); await f.activate();
+  await expect(f.host.activate("owner", { workspaceId: "workspace", ...prepared, operationSource: "globalThis.operations={};" })).rejects.toThrow("artifacts");
+  const changedSource = operationSource.replace("'private'", "'different'");
+  const changed = { revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource: changedSource }), schemaSql, operationSource: changedSource };
+  await expect(f.host.activate("owner", { workspaceId: "workspace", ...changed })).rejects.toThrow("already approved");
+  await expect(f.activate()).resolves.toEqual(prepared.revision);
+  expect(f.host.approvedArtifacts("owner", scope).operationSource).toBe(operationSource);
+});
+
+it("rolls back catalog creation and quota when the final authority check fails", async () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
+  f = await fixture({ accountCreation() { f.db.prepare("UPDATE permissions SET active=0 WHERE user='owner'").run(); } });
+  await expect(f.activate()).rejects.toThrow("revoked");
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT active FROM permissions WHERE user='owner'").get()!.active).toBe(1);
+});
+
+it("blocks queued operations and receipt disclosure after binding or data grant revocation", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  const first = f.invoke("friend", id(6), { value: "first" }, "form");
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  await expect(first).rejects.toThrow("not permitted");
+  expect((await f.invoke("owner", id(7))).result).toEqual([]);
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  await f.invoke("friend", id(6), { value: "saved" }, "form");
+  expect((await f.invoke("friend", id(6), { value: "saved" }, "form")).replayed).toBe(true);
+  await expect(f.invoke("friend", id(6), { value: "changed retry" }, "form")).rejects.toThrow();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  await expect(f.invoke("friend", id(6), { value: "saved" }, "form")).rejects.toThrow("not permitted");
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  const read = f.invoke("helper", id(7));
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
+  await expect(read).rejects.toThrow("not permitted");
+});
+
+it("compiles verified TypeScript captures but preserves original artifacts", async () => {
+  const typedDefinition = { ...definition, operationsPath: "orders/operations.ts" }, typedSource = "const value: string = 'ok';";
+  const compiled = vi.fn(async () => operationSource);
+  const f = await fixture({ compileOperations: compiled });
+  const revision = describeDatasetRevision({ definition: typedDefinition, revision: 1, schemaSql, operationSource: typedSource });
+  await f.host.activate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource: typedSource });
+  expect(compiled).toHaveBeenCalledWith(typedSource, typedDefinition.operationsPath);
+  expect(f.host.approvedArtifacts("owner", scope).operationSource).toBe(typedSource);
+  expect(f.journal.head(scope, () => {}).source).toBe(operationSource);
+  await f.host.invoke("owner", { ...scope, revision: revision.revision, revisionSha256: revision.revisionSha256,
+    operationId: id(6), input: { value: "compiled" }, idempotencyKey: "request" });
+  expect((await f.host.invoke("owner", { ...scope, revision: revision.revision, revisionSha256: revision.revisionSha256,
+    operationId: id(7), input: {}, idempotencyKey: "read" })).result).toMatchObject([{ value: "compiled" }]);
+});
+
+it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7), id(8)]) });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: false } });
+  await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
+  await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("not permitted");
+  expect(() => f.host.describe("helper", scope)).toThrow("not permitted");
+  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("stale");
+});
+
+it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
+  let f: Awaited<ReturnType<typeof fixture>>, refuse = false;
+  f = await fixture({ accountMetadata(_context, allocation) {
+    f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
+    if (refuse) throw new Error("quota");
+  } });
+  await f.activate(); const initial = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  const populated = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
+  refuse = true;
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7), id(8)], discover: true } })).toThrow("quota");
+  expect(f.host.describe("helper", scope).operations.map(operation => operation.operationId)).toEqual([id(7)]);
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
+  refuse = false;
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(initial);
+});

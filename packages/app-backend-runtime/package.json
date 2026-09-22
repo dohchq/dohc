@@ -8,10 +8,11 @@
     "./persistent": { "types": "./src/persistent.ts", "default": "./dist/persistent.mjs" },
     "./persistent-child": "./dist/persistent-child.mjs",
     "./journal": { "types": "./src/journal.ts", "default": "./dist/journal.mjs" },
-    "./supervisor": { "types": "./src/supervisor.ts", "default": "./dist/supervisor.mjs" }
+    "./supervisor": { "types": "./src/supervisor.ts", "default": "./dist/supervisor.mjs" },
+    "./dataset-host": { "types": "./src/dataset-host.ts", "default": "./dist/dataset-host.mjs" }
   },
   "files": ["dist", "src", "README.md"],
   "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },
-  "dependencies": { "quickjs-emscripten": "0.32.0" },
+  "dependencies": { "@dohc/security-contract": "workspace:*", "quickjs-emscripten": "0.32.0" },
   "devDependencies": { "@types/node": "^24.13.3", "esbuild": "0.28.1", "typescript": "^7.0.2", "vitest": "^4.1.11" }
 }

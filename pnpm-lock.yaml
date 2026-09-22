@@ -419,6 +419,9 @@ importers:
 
   packages/app-backend-runtime:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       quickjs-emscripten:
         specifier: 0.32.0
         version: 0.32.0
