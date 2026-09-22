@@ -10,6 +10,7 @@ export { equalRecoveryCursor, parseRecoveryCursor, parseRecoveryJournalRecord } 
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import type { JsonValue } from "./protocol.js";
 import type { DatasetReplicaCapture, DatasetReplicaPage } from "./replica-host.js";
+import { createReplicaReadPool } from "./replica-read-pool.js";
 
 type Checkpoint = Extract<JournalExportRecord, { kind: "checkpoint" }>;
 export interface DatasetReplicaSource {
@@ -19,6 +20,8 @@ export interface DatasetReplicaSource {
 }
 export interface DatasetReplicaState { cursor: DatasetCursor; checkpoint: Checkpoint; savedAtMs: number }
 interface StoredReplica extends DatasetReplicaState { snapshot: string; sha256: string }
+interface ReplicaReadWorker { active: PersistentAppBackend; snapshot: string; sha256: string; cursor: DatasetCursor; close(): Promise<void> }
+const readWorkers = createReplicaReadPool<ReplicaReadWorker>();
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex"), CHUNK = 1024 * 1024;
 const sameScope = (a: DatasetScope, b: DatasetScope) => a.workspaceId === b.workspaceId && a.datasetId === b.datasetId;
 const sameEpoch = (a: DatasetCursor, b: DatasetCursor) => sameScope(a,b) && a.hostEpoch === b.hostEpoch && a.approvedRevisionHash === b.approvedRevisionHash;
@@ -38,9 +41,11 @@ export async function createDatasetReplica(options: {
   } catch(error) {db.close();throw error;}
   const binding = hash(JSON.stringify([options.scope, options.ownerKey, new URL(options.origin).origin]));
   const maximum = options.maxCheckpointBytes ?? 128 * CHUNK;
-  let closed = false, revoked = false, pending: Promise<unknown> = Promise.resolve();
+  let closed = false, closing = false, revoked = false, pending: Promise<unknown> = Promise.resolve();
+  let closePromise: Promise<void> | undefined;
+  const readWorkerKey = Symbol("replica read worker");
   function authorize(signal?: AbortSignal) {
-    if (closed || revoked) throw Error("This Collection copy is unavailable. Download it again after restoring access.");
+    if (closed || closing || revoked) throw Error("This Collection copy is unavailable. Download it again after restoring access.");
     options.assertOwner(); signal?.throwIfAborted();
   }
   function read(): StoredReplica | null {
@@ -90,6 +95,7 @@ export async function createDatasetReplica(options: {
     authorize(signal); const snapshot = `${randomUUID()}.sqlite`, path=join(root,snapshot);
     await active.snapshot(path);
     const sha256=await digestFile(path,signal), value={snapshot,sha256,checkpoint,cursor,savedAtMs:Date.now()};
+    await readWorkers.invalidate(readWorkerKey);
     authorize(signal);
     db.prepare("INSERT INTO copy VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET binding=excluded.binding,state=excluded.state").run(binding,JSON.stringify(value));
     return value;
@@ -97,6 +103,10 @@ export async function createDatasetReplica(options: {
   async function cleanup() {
     const kept=read()?.snapshot;
     for(const name of await readdir(root)) if (/^[a-f0-9-]{36}\.sqlite$/.test(name) && name!==kept) await rm(join(root,name),{force:true});
+  }
+  async function erase() {
+    db.prepare("DELETE FROM copy").run();
+    for(const name of await readdir(root))if(/^[a-f0-9-]{36}\.sqlite$/.test(name))await rm(join(root,name),{force:true});
   }
   try {
     read();
@@ -161,16 +171,36 @@ export async function createDatasetReplica(options: {
         authorize(input.signal);const state=read();if(!state)throw Error("Download this Collection before opening it offline.");
         const approved=revision(state.checkpoint),operation=approved.definition.operations.find(item=>item.operationId===input.operationId);
         if(approved.revision!==input.revision||approved.revisionSha256!==input.revisionSha256||!operation?.readOnly)throw Error("This Collection copy is read-only. Reconnect to make changes.");
-        if(await digestFile(join(root,state.snapshot),input.signal)!==state.sha256)throw Error("The Collection copy changed. Download it again.");
-        const directory=await mkdtemp(join(root,"read-"));let active:PersistentAppBackend|undefined;
-        try {active=await worker(state.checkpoint,state.cursor,join(root,state.snapshot),directory);
-          const value=await active.prepare({expected:state.cursor,source:state.checkpoint.source,operation:operation.name,caller:{kind:"owner"},input:input.input,nowMs:Date.now(),requestId:randomUUID(),readOnly:true});
+        const lease = await readWorkers.acquire(readWorkerKey, async () => {
+          authorize(input.signal);
+          if(await digestFile(join(root,state.snapshot),input.signal)!==state.sha256)throw Error("The Collection copy changed. Download it again.");
+          const directory=await mkdtemp(join(root,"read-"));
+          let active: PersistentAppBackend;
+          try { active=await worker(state.checkpoint,state.cursor,join(root,state.snapshot),directory); }
+          catch(error) { await rm(directory,{recursive:true,force:true}); throw error; }
+          return { active, snapshot: state.snapshot, sha256: state.sha256, cursor: state.cursor,
+            async close() { await active.close(); await rm(directory,{recursive:true,force:true}); } };
+        });
+        let failed = false;
+        try {
+          authorize(input.signal);
+          if(lease.value.snapshot!==state.snapshot || lease.value.sha256!==state.sha256 || !equalRecoveryCursor(lease.value.cursor,state.cursor)) throw Error("The Collection copy changed. Download it again.");
+          const value=await lease.value.active.prepare({expected:state.cursor,source:state.checkpoint.source,operation:operation.name,caller:{kind:"owner"},input:input.input,nowMs:Date.now(),requestId:randomUUID(),readOnly:true});
           authorize(input.signal);return {result:value.result,revision:state.cursor.revision,replayed:false as const,offline:true as const,savedAtMs:state.savedAtMs};
-        } finally {await active?.close();await rm(directory,{recursive:true,force:true});}
+        } catch(error) { failed=true; throw error; }
+        finally {lease.release();if(failed)await readWorkers.invalidate(readWorkerKey);}
       });
     },
-    async revoke() { revoked=true;await pending;db.prepare("DELETE FROM copy").run();for(const name of await readdir(root))if(/^[a-f0-9-]{36}\.sqlite$/.test(name))await rm(join(root,name),{force:true}); },
-    async close() {await pending;if(!closed){closed=true;db.close();}},
+    async revoke() {
+      if (closed) throw Error("This Collection copy is closed.");
+      revoked=true;
+      if (closing) { await closePromise; return; }
+      return enqueue(async()=>{await readWorkers.invalidate(readWorkerKey);await erase();});
+    },
+    close() {
+      if(!closePromise){closing=true;closePromise=enqueue(async()=>{await readWorkers.invalidate(readWorkerKey);if(!closed){if(revoked)await erase();closed=true;db.close();}});}
+      return closePromise;
+    },
   };
 }
 export type DatasetReplica = Awaited<ReturnType<typeof createDatasetReplica>>;
