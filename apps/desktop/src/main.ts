@@ -23,7 +23,9 @@ import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteA
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
-import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./workspaces/remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
+import { createNamedDatasetData } from "./workspaces/namedDataset";
+import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -949,7 +951,7 @@ async function relayShareJsonWithCredentials<T>(
     );
   }
   const backendAction = /\/app-publications\/[a-f0-9]{64}\/backend\/([a-z]+)$/.exec(path)?.[1];
-  const datasetRoute = /^\/sync\/[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+  const datasetRoute = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
   const data = (datasetRoute
     ? await readDatasetResponse(response, datasetRoute[2] ?? (datasetRoute[1] ? "describe" : "list"), init?.signal ?? new AbortController().signal)
     : backendAction
@@ -4159,6 +4161,14 @@ function registerIpcHandlers(): void {
     });
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    namedDataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      await warmCredentialCache();
+      const credentials = requireCredentials(cachedCredentials), credentialGeneration = credentialCacheGeneration;
+      signal.throwIfAborted();
+      return createNamedDatasetData({ workspaceId: workspace.workspaceId, shareView: workspace.shareView, credentials, credentialGeneration, signal,
+        currentCredentialGeneration: () => credentialCacheGeneration,
+        assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
+    },
     dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       const local = await datasetForWorkspace(workspace, signal);
       return createDatasetAuthorityRouter(local, {
@@ -4209,6 +4219,18 @@ function registerIpcHandlers(): void {
   };
   const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
     ...datasetDependencies,
+    exportArchive: async (workspace, input, signal, authorize) => {
+      if (input.savePath !== undefined || input.overwrite !== undefined) throw new Error("Choose the recovery export location in the save dialog.");
+      const chosen = await dialog.showSaveDialog({ title: "Export Collection recovery", defaultPath: `collection-${input.datasetId.slice(0, 8)}.dohc-recovery`,
+        filters: [{ name: "Collection recovery", extensions: ["dohc-recovery"] }] });
+      signal.throwIfAborted(); authorize();
+      if (chosen.canceled || !chosen.filePath) return null;
+      const local = await datasetForWorkspace(workspace, signal);
+      if (local.transferStatus(input.datasetId)) throw new Error("Export this Collection from its shared authority.");
+      const archive = await local.prepareExport(input.datasetId, { signal });
+      try { return (await writeDatasetRecoveryExport({ path: chosen.filePath, overwrite: true, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+      finally { await archive.dispose(); }
+    },
     withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
   });
   ipcMain.handle(CHANNELS.dataset, async (event, raw: unknown) => {
@@ -4217,6 +4239,14 @@ function registerIpcHandlers(): void {
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+    exportArchive: async (workspace, input, signal, authorize) => {
+      if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
+      const local = await datasetForWorkspace(workspace, signal);
+      if (local.transferStatus(input.datasetId)) throw new Error("Export this Collection from its shared authority.");
+      const archive = await local.prepareExport(input.datasetId, { signal });
+      try { return (await writeDatasetRecoveryExport({ path: input.savePath, overwrite: input.overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+      finally { await archive.dispose(); }
+    },
   });
   datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
@@ -4271,6 +4301,19 @@ function registerIpcHandlers(): void {
       }),
     });
   const beforeSharedPublish = async (workspace: DesktopRendererWorkspaceOperation["workspace"], candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate, signal: AbortSignal) => {
+    const dataset = candidate.capabilities.find(capability => capability.kind === "dataset");
+    if (dataset) {
+      const remote = await remoteForWorkspace(workspace);
+      signal.throwIfAborted();
+      if (!remote.credentials.relayUrl) throw new Error("Reconnect your sharing server before publishing.");
+      const local = await datasetForWorkspace(workspace, signal);
+      const targetOrigin = new URL(remote.credentials.relayUrl).origin;
+      const target = createRemoteDatasetTransferTarget({ workspaceId: workspace.workspaceId, datasetId: dataset.datasetId, origin: targetOrigin,
+        ...remote, currentCredentialGeneration: () => credentialCacheGeneration, signal, assertCurrent: () => signal.throwIfAborted(),
+        relayStream: relayShareJsonWithCredentials });
+      await local.transferToShared({ datasetId: dataset.datasetId, targetOrigin, target, signal });
+      return;
+    }
     const backend = candidate.capabilities.find(capability => capability.kind === "app-backend");
     if (!backend) return;
     const local = await localForWorkspace(workspace, signal);
@@ -4282,9 +4325,11 @@ function registerIpcHandlers(): void {
   };
   const activateBackend: NonNullable<Parameters<typeof createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>>[0]["activateBackend"]> =
     async (workspace, input, request, signal) => activatePublishedAppBackend(input, await localForWorkspace(workspace, signal), request, signal);
-  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend });
+  const resolveDatasetRevision = async (workspace: DesktopRendererWorkspaceOperation["workspace"], binding: import("@dohc/security-contract/dataset").AppDatasetBinding, signal: AbortSignal) =>
+    resolveRemoteDatasetRevision(await datasetDependencies.dataForWorkspace(workspace, signal), binding);
+  registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({ ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend, resolveDatasetRevision });
   const cliOwnerPublication = createOwnerAppPublicationHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
-    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend,
+    ...ownerPublicationDependencies, localPublication, beforeSharedPublish, activateBackend, resolveDatasetRevision,
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });

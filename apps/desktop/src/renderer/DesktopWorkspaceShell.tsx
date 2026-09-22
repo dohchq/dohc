@@ -1403,9 +1403,9 @@ export function DesktopWorkspaceShell(props: {
     isShareView,
   );
   useEffect(() => {
-    if (!workspaceIsReady || isShareView) return;
+    if (!workspaceIsReady) return;
     void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error, () => { void refreshDatasets(); }));
-  }, [workspaceIsReady, isShareView, refreshDatasets, reportShellError]);
+  }, [workspaceIsReady, refreshDatasets, reportShellError]);
   // Engine history page state: newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -5252,6 +5252,7 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
+                  owner={!isShareView}
                   onError={reportShellError}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));

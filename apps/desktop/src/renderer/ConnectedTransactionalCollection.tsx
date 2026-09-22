@@ -4,6 +4,7 @@ import { bridge } from "./bridge";
 import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
+import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -34,6 +35,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [editingFields, setEditingFields] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
+  const [exportingRecovery, setExportingRecovery] = useState(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
@@ -71,6 +73,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     onHistory={owner ? () => setViewingHistory(true) : undefined}
     onReviewSchema={owner ? () => setEditingFields(true) : undefined}
     onManageAccess={owner ? () => setManagingAccess(true) : undefined}
+    onExportRecovery={owner ? () => setExportingRecovery(true) : undefined}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {
@@ -135,6 +138,10 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         return result;
       }} />}
     {managingAccess && <CollectionPermissionsDialog workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
+    {exportingRecovery && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
+      onSaved={() => { /* The dialog closes after the writer confirms the durable file. */ }}
+      onExport={async signal => { signal.throwIfAborted(); const result = await bridge().dataset({ action: "export", workspaceId, datasetId }); signal.throwIfAborted();
+        if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again."); return result.savedPath; }} />}
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
