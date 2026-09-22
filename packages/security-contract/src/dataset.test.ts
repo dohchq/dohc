@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
+  datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
   effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision,
   parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
   type AppDatasetBinding, type DatasetDefinition, type DatasetField, type DatasetRevision,
@@ -272,4 +272,32 @@ describe("approved dataset consumer bindings", () => {
     }
     expect(datasetRevisionDigestContent({ ...approved, revisionSha256: "d".repeat(64) })).toBe(datasetRevisionDigestContent(approved));
   });
+});
+
+
+it("permits only display names and source locations in access-preserving revisions", () => {
+  const before = revision(), after = structuredClone(before);
+  after.revision = 2; after.revisionSha256 = "a".repeat(64); after.definitionSha256 = "d".repeat(64);
+  after.definition.name = "Fundraiser"; after.definition.tables[0].name = "Registrations";
+  after.definition.tables[0].fields[1].name = "Full name";
+  after.definition.schemaPath = "revision-2/schema.sql"; after.definition.operationsPath = "revision-2/operations.js";
+  expect(datasetRevisionsPreserveAccess(before,after)).toBe(true);
+  const changes: Array<(value: DatasetRevision) => void> = [
+    value => { value.schemaSha256 = "e".repeat(64); },
+    value => { value.operationsSha256 = "e".repeat(64); },
+    value => { value.definition.tables[0].fields[1].required = false; },
+    value => { value.definition.tables[0].fields[1].unique = true; },
+    value => { value.definition.tables[0].fields[1].default = "changed"; },
+    value => { value.definition.tables[0].fields[1].type = "number"; },
+    value => { value.definition.tables[0].fields[1].sqlColumn = "other"; },
+    value => { value.definition.operations[0].fieldIds.push(id(3)); },
+    value => { value.definition.operations[0].access = "owner"; },
+    value => { value.definition.operations[0].name = "other"; },
+    value => { value.definition.operations[0].label = "Other"; },
+    value => { value.definition.operations[0].readOnly = true; value.definition.operations[0].kind = "read"; },
+  ];
+  for (const change of changes) {
+    const changed = structuredClone(after); change(changed);
+    expect(datasetRevisionsPreserveAccess(before,changed)).toBe(false);
+  }
 });
