@@ -469,14 +469,15 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   function candidateInput<T extends DatasetMigrationCandidateAccess>(raw:T):T {
     return {...raw,scope:copyScope(raw.scope),tables:approvedTables(raw.tables),candidateId:boundedText(raw.candidateId,128,"Migration candidate"),authorityKey:boundedText(raw.authorityKey,4096,"Migration authority")};
   }
+  async function retireMigrationCandidates(scope:DatasetScope):Promise<void> {
+    const key=copyScope(scope);
+    for(const candidate of candidates.values())if(candidate.result.expected.workspaceId===key.workspaceId&&candidate.result.expected.datasetId===key.datasetId) {
+      candidate.reservations.length=0;await dropCandidate(candidate);
+    }
+  }
   return {
     /** Called only after durable dataset deletion reclaimed all checkpoint reservations. */
-    async retireMigrationCandidates(scope:DatasetScope):Promise<void> {
-      const key=copyScope(scope);
-      for(const candidate of candidates.values())if(candidate.result.expected.workspaceId===key.workspaceId&&candidate.result.expected.datasetId===key.datasetId) {
-        candidate.reservations.length=0;await dropCandidate(candidate);
-      }
-    },
+    retireMigrationCandidates,
     prepareMigration(raw:DatasetMigration & {authorityKey:string}):Promise<DatasetMigrationCandidate> {
       try {
         const input={...migrationInput(raw),authorityKey:boundedText(raw.authorityKey,4096,"Migration authority")};
@@ -521,7 +522,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     /** Called after the authority has durably deleted the dataset. */
     async retire(raw: DatasetScope): Promise<void> {
       const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
-      if (!lane) return;
+      if (!lane) {await retireMigrationCandidates(scope);return;}
       if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
       for (const job of lane.queue.splice(0)) {
         queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout);
@@ -532,6 +533,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (lane.idle) clearTimeout(lane.idle);
       await stopWorker(lane);
       if (lanes.get(key) === lane) lanes.delete(key);
+      await retireMigrationCandidates(scope);
     },
     async close(): Promise<void> {
       closed = true;

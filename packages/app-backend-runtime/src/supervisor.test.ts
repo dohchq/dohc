@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -48,7 +48,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
       idempotencyKey: "retry", payloadSha256: hash(JSON.stringify(input)), readOnly: false, authorize, ...overrides });
   }
-  return { db, journal, supervisor, invoke, scope, authorize, initialize };
+  return { db, journal, supervisor, invoke, scope, authorize, initialize,directory };
 }
 
 function migration(f:Awaited<ReturnType<typeof fixture>>,overrides:Partial<DatasetMigration>={}):DatasetMigration {
@@ -111,6 +111,19 @@ function launcher(hook: (command: any, controls: { stop(): void; deliver(): void
     return { postMessage(message) { hook(message, { stop: () => child.kill("SIGKILL"), deliver: () => child.send(message as object) }); }, kill() { child.kill("SIGKILL"); } };
   };
 }
+
+it("deletes migration candidates and reservations with their dataset without a second refund",async()=>{
+  const account=vi.fn();const f=await fixture({migrationStorage:{authorize(){},account}});
+  const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner"});
+  expect(account).toHaveBeenCalledTimes(2);
+  expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toHaveLength(2);
+  f.journal.destroy({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
+  await f.supervisor.retire(f.scope);
+  expect(account).toHaveBeenCalledTimes(2);
+  expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toEqual([]);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+  expect(()=>f.supervisor.migrationPreviewPage({scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize})).toThrow("unavailable");
+});
 
 it("retires active and queued operations after permanent deletion without reviving their worker", async () => {
   let entered!: () => void;

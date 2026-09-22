@@ -273,6 +273,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
             db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(key.workspaceId,key.datasetId);
       } });
       await options.supervisor.retire?.(key);
+      for(const [id,saved] of migrationCandidates)if(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId)migrationCandidates.delete(id);
       return { deleted: true as const, datasetId: key.datasetId };
     },
     async prepareMigration(context:Context,raw:MigrateDatasetInput):Promise<DatasetMigrationCandidate> {
