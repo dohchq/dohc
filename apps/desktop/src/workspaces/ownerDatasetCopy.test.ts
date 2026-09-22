@@ -26,7 +26,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   const source:DatasetReplicaSource={async capture(){if(denied){copy.accessLost();throw Error("revoked");}if(offline)throw new DatasetCopyOfflineError("offline");return host.replicaCapture(actor,scope);},async page(input){return host.replicaPage(actor,{...scope,...input});},blob};
   const pinned={...scope,revision:1,revisionSha256:revision.revisionSha256};
   const invoke=vi.fn(async(input:Parameters<OwnerDatasetData["invoke"]>[0])=>host.invoke(actor,{...input,workspaceId:"w",access:{kind:"data"}}));
-  const remote={invoke,async describe(){if(offline)throw new TypeError("fetch failed"); return {...host.describe(actor,{...scope,access:{kind:"data"}}),archived};}} as unknown as OwnerDatasetData;
+  const remote={invoke,async describe(){if(offline)throw new TypeError("fetch failed"); return {...host.describe(actor,scope),archived};}} as unknown as OwnerDatasetData;
   const signal=new AbortController().signal;
   try {
     await host.activate(actor,{workspaceId:"w",revision,schemaSql,operationSource});
@@ -47,3 +47,4 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     offline=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow(/no longer available/);
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 }, 15_000);
+
