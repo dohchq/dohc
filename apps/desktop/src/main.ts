@@ -23,6 +23,7 @@ import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/loca
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
+import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecoveryExport";
 import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -890,7 +891,7 @@ async function relayShareResponseWithCredentials(
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${credentials.token}`);
   const response = await relayShareFetch(`${normalizeServerUrl(credentials.relayUrl)}${path}`, {
-    ...init, headers, redirect: "error", cache: "no-store",
+    ...init, headers, redirect: "error", cache: "no-store", credentials: "omit",
   });
   if (response.status === 401) {
     await handleRelayUnauthorized({
@@ -4223,6 +4224,24 @@ function registerIpcHandlers(): void {
       notifyRenderer({ workspaceId: workspace.workspaceId });
     },
   };
+  const exportDatasetArchive = async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string,
+    path: string, overwrite: boolean | undefined, signal: AbortSignal, authorize: () => void) => {
+    const local = await datasetForWorkspace(workspace, signal);
+    const transfer = local.transferStatus(datasetId);
+    if (transfer) {
+      if (transfer.state !== "imported") throw new Error("Finish sharing this Collection before exporting it.");
+      const remote = await remoteForWorkspace(workspace);
+      const archive = await openRemoteDatasetRecoveryExport({ workspaceId: workspace.workspaceId, datasetId,
+        origin: transfer.targetOrigin, ...remote, currentCredentialGeneration: () => credentialCacheGeneration,
+        signal, assertCurrent: authorize, maxBytes: 1024 * 1024 * 1024 + 2 * 1024 * 1024,
+        relayResponse: relayShareResponseWithCredentials });
+      try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream, maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+      finally { await archive.dispose(); }
+    }
+    const archive = await local.prepareExport(datasetId, { signal });
+    try { return (await writeDatasetRecoveryExport({ path, overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
+    finally { await archive.dispose(); }
+  };
   const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
     ...datasetDependencies,
     chooseRecoveryFile: async (_workspace, signal) => {
@@ -4237,11 +4256,7 @@ function registerIpcHandlers(): void {
         filters: [{ name: "Collection recovery", extensions: ["dohc-recovery"] }] });
       signal.throwIfAborted(); authorize();
       if (chosen.canceled || !chosen.filePath) return null;
-      const local = await datasetForWorkspace(workspace, signal);
-      if (local.transferStatus(input.datasetId)) throw new Error("Export this Collection from its shared authority.");
-      const archive = await local.prepareExport(input.datasetId, { signal });
-      try { return (await writeDatasetRecoveryExport({ path: chosen.filePath, overwrite: true, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
-      finally { await archive.dispose(); }
+      return exportDatasetArchive(workspace, input.datasetId, chosen.filePath, true, signal, authorize);
     },
     withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
   });
@@ -4253,11 +4268,7 @@ function registerIpcHandlers(): void {
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
     exportArchive: async (workspace, input, signal, authorize) => {
       if (!input.savePath) throw new Error("Choose an absolute recovery export path.");
-      const local = await datasetForWorkspace(workspace, signal);
-      if (local.transferStatus(input.datasetId)) throw new Error("Export this Collection from its shared authority.");
-      const archive = await local.prepareExport(input.datasetId, { signal });
-      try { return (await writeDatasetRecoveryExport({ path: input.savePath, overwrite: input.overwrite, stream: archive.stream(), maxBytes: archive.maxBytes, signal, authorize })).savedPath; }
-      finally { await archive.dispose(); }
+      return exportDatasetArchive(workspace, input.datasetId, input.savePath, input.overwrite, signal, authorize);
     },
   });
   datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
