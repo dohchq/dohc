@@ -103,6 +103,8 @@ it("shares fundraiser records and rules across the public app, admin app, and Co
   const statusField = f.field("registrations", "status");
   const edited = await f.result("editRegistrationStatus", { id: saved.id, expectedVersion: 1, values: { [statusField]: "rejected" } }, "owner");
   expect(edited).toEqual({ id: saved.id, version: 2, priorValues: { [statusField]: "pending_verification" } });
+  expect(f.host.history("owner", f.scope).entries[0]!.undo).toMatchObject({ operationId: f.operation("editRegistrationStatus").operationId,
+    recordId: saved.id, expectedVersion: 2, fields: [{ fieldId: statusField, value: "pending_verification" }] });
   expect((await f.result("listPublicSessions", {}, "friend", "form") as any[]).map(row => row.available)).toEqual([36, 36]);
   await expect(f.call("setPlayerReclub", { attendeeId: player.id, synced: false }, "helper", "admin")).rejects.toMatchObject({ refusal: { code: "not_found" } });
   await f.result("editRegistrationStatus", { id: saved.id, expectedVersion: 2, values: edited.priorValues }, "owner");
@@ -147,8 +149,10 @@ it("uses the same dataset host for stock reservations, Collection status edits, 
   const status = f.field("orders", "status");
   const edit = (value: string, version: number) => f.result("editOrderStatus", { id: first.id, expectedVersion: version, values: { [status]: value } }, "owner");
   await edit("cancelled", 1);
+  const undo = f.host.history("owner", f.scope).entries[0]!.undo!;
+  expect(undo).toMatchObject({ operationId: f.operation("editOrderStatus").operationId, recordId: first.id, expectedVersion: 2 });
   const second = await f.result("placeOrder", input, "friend", "form");
-  await expect(edit("confirmed", 2)).rejects.toMatchObject({ refusal: { code: "stock_unavailable" } });
+  await expect(f.call("editOrderStatus", { id: undo.recordId, expectedVersion: undo.expectedVersion, values: Object.fromEntries(undo.fields.map(field => [field.fieldId, field.value])) }, "owner")).rejects.toMatchObject({ refusal: { code: "stock_unavailable" } });
   await f.result("setStatus", { id: second.id, expectedVersion: 1, status: "cancelled" }, "helper", "admin");
   expect(await edit("confirmed", 2)).toMatchObject({ id: first.id, version: 3, priorValues: { [status]: "cancelled" } });
   const page = await f.result("tableOrders", { search: "First", limit: 1 }, "owner");

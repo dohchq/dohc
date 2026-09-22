@@ -54,7 +54,7 @@ type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: strin
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
 
 function undoFromReceipt(change: Mutation, raw: AppBackendJson): Undo | null {
-  if (change.operation.kind !== "edit" || change.undo) return null;
+  if (change.operation.kind !== "edit" || !change.operation.reversible || change.undo) return null;
   let result: Record<string, AppBackendJson>;
   try { result = object(parseAppBackendJson(raw)); } catch { return null; }
   const priorRaw = result.priorValues;

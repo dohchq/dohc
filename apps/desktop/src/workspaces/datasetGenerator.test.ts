@@ -40,6 +40,7 @@ async function runtime(definition = fixture()) {
 describe("initial dataset source", { timeout: 30_000 }, () => {
   it("keeps field identity through display renames and requires authored actions", () => {
     const definition = fixture(), first = generateDatasetSources(definition);
+    expect(first.definition.operations.find(operation => operation.kind === "edit")!.reversible).toBe(true);
     definition.tables[0].fields[1].name = 'Name "; DROP TABLE registrations; --';
     expect(generateDatasetSources(definition).files[definition.schemaPath]).toEqual(first.files[definition.schemaPath]);
     expect(Object.keys(first.files)).toEqual(["data/registrations/dataset.json", definition.schemaPath, definition.operationsPath]);

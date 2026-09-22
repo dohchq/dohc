@@ -34,6 +34,15 @@ function binding(rev = revision()): AppDatasetBinding {
 }
 
 describe("dataset publication binding", () => {
+  it("accepts explicit reversible edits and rejects reversal on other operation kinds", () => {
+    const value = definition();
+    value.operations[0] = { ...value.operations[0]!, kind: "edit", reversible: true };
+    expect(parseDatasetDefinition(value).operations[0]!.reversible).toBe(true);
+    for (const kind of ["read", "create", "delete", "action"] as const) {
+      expect(() => parseDatasetDefinition({ ...value, operations: [{ ...value.operations[0], kind }] })).toThrow();
+    }
+    expect(() => parseDatasetDefinition({ ...value, operations: [{ ...value.operations[0], reversible: false }] })).toThrow();
+  });
   it("accepts archived owner metadata with no runnable actions but still validates its fields", () => {
     const approved = revision();
     const archived = { datasetId: approved.datasetId, name: approved.definition.name, revision: 1, revisionSha256: approved.revisionSha256,

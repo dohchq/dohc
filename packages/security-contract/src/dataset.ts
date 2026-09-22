@@ -50,6 +50,8 @@ export interface DatasetOperation {
   readOnly: boolean;
   /** Declared readable or writable fields, according to kind; never a SQL grant. */
   fieldIds: string[];
+  /** The edit accepts its receipt's priorValues under the same record-version guard. */
+  reversible?: true;
 }
 /** Source-visible draft metadata. Parsing or sharing it grants no authority. */
 export interface DatasetDefinition {
@@ -204,7 +206,7 @@ function table(value: unknown): DatasetTable {
   return result;
 }
 function operation(value: unknown): DatasetOperation {
-  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"]);
+  const row = record(value, ["operationId", "name", "label", "tableId", "kind", "access", "readOnly", "fieldIds"], ["reversible"]);
   const name = text(row.name, 64);
   if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !operationKinds.has(row.kind as DatasetOperationKind) || !["link", "helper", "owner"].includes(row.access as string)) fail();
   const result: DatasetOperation = { operationId: uuid(row.operationId), name, label: text(row.label), tableId: uuid(row.tableId),
@@ -212,6 +214,10 @@ function operation(value: unknown): DatasetOperation {
     fieldIds: boundedArray(row.fieldIds, DATASET_MAX_FIELDS).map(uuid) };
   if ((result.kind === "read" && !result.readOnly) || (["create", "edit", "delete"].includes(result.kind) && result.readOnly)) fail();
   if (result.kind === "delete" && result.fieldIds.length) fail();
+  if (Object.hasOwn(row, "reversible")) {
+    if (row.reversible !== true || result.kind !== "edit" || result.readOnly) fail();
+    result.reversible = true;
+  }
   unique(result.fieldIds);
   return result;
 }

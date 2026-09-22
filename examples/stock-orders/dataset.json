@@ -282,6 +282,7 @@
       "label": "Change status",
       "tableId": "f0020000-0000-4000-8000-000000000007",
       "kind": "edit",
+      "reversible": true,
       "access": "owner",
       "readOnly": false,
       "fieldIds": [

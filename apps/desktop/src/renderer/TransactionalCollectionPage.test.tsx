@@ -16,7 +16,7 @@ function dataset(): TransactionalDatasetDescription {
     { fieldId: secret, name: "Private note", type: "text", required: false, unique: false },
   ] }], operations: [
     { operationId: read, name: "list", label: "Read", kind: "read", access: "owner", readOnly: true, tableId: id(2), fieldIds: [name, amount, status] },
-    { operationId: edit, name: "edit", label: "Edit", kind: "edit", access: "owner", readOnly: false, tableId: id(2), fieldIds: [name, amount] },
+    { operationId: edit, name: "edit", label: "Edit", kind: "edit", access: "owner", readOnly: false, reversible: true, tableId: id(2), fieldIds: [name, amount] },
     { operationId: create, name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, tableId: id(2), fieldIds: [name, amount, status] },
     { operationId: remove, name: "delete", label: "Delete", kind: "delete", access: "owner", readOnly: false, tableId: id(2), fieldIds: [] },
   ] };

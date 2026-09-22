@@ -120,9 +120,12 @@ export const DatasetInvocationResult = z.object({
   }), revision: z.number().int().nonnegative(), replayed: z.boolean(), copy: DatasetCopyStatus.optional(),
 }).strict();
 export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
+export const DatasetHistoryUndo = z.object({ operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
+  recordId: z.union([z.string().min(1).max(512), z.number().int().safe()]), expectedVersion: z.number().int().positive().safe(),
+  fields: z.array(z.object({ fieldId: identity, name: z.string().min(1).max(128), value: json }).strict()).min(1).max(128) }).strict();
 export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
   entries: z.array(z.object({ revision: z.number().int().positive(), operation: z.string().min(1).max(64), callerReference: sha256,
-    recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative() }).strict()).max(100),
+    recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative(), undo: DatasetHistoryUndo.optional() }).strict()).max(100),
   nextBeforeRevision: z.number().int().positive().nullable() }).strict();
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {

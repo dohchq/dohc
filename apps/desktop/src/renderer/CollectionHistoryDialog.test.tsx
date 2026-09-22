@@ -7,8 +7,35 @@ import { CollectionHistoryDialog, type CollectionHistoryDialogProps } from "./Co
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
 const entry = (revision: number) => ({ revision, operation: "submit", callerReference: "a".repeat(64), recordedAtMs: 1000, approvedRevisionHash: "b".repeat(64), changesetBytes: 80, attachmentCount: 1 });
+const reversal = { operationId: "00000000-0000-4000-8000-000000000002", revision: 1, revisionSha256: "b".repeat(64), recordId: "record", expectedVersion: 3,
+  fields: [{ fieldId: "00000000-0000-4000-8000-000000000003", name: "Name", value: "Alice" }] };
 afterEach(cleanup);
 describe("CollectionHistoryDialog", () => {
+  it("shows prior values and reverses with the saved record version through the approved operation", async () => {
+    const onUndo = vi.fn(async () => {}), onChanged = vi.fn();
+    const onLoad = vi.fn(async () => ({ datasetId, headRevision: 3, entries: [{ ...entry(3), undo: reversal }], nextBeforeRevision: null }));
+    render(<CollectionHistoryDialog workspaceId="a" datasetId={datasetId} name="Fundraiser" onLoad={onLoad} onUndo={onUndo} onChanged={onChanged} onClose={vi.fn()} onError={vi.fn()} />);
+    const prior = await screen.findByText('"Alice"'); expect(prior).toBeTruthy();
+    fireEvent.click(screen.getByText("submit"));
+    fireEvent.click(screen.getByRole("button", { name: "Undo edit" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    expect(onUndo).toHaveBeenCalledWith({ workspaceId: "a", datasetId, revision: 1, revisionSha256: reversal.revisionSha256, operationId: reversal.operationId,
+      idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 3, values: { [reversal.fields[0]!.fieldId]: "Alice" } } }, expect.any(AbortSignal));
+    expect(onLoad).toHaveBeenCalledTimes(2);
+  });
+  it("keeps the same undo request after a lost reply and leaves refused prior values visible", async () => {
+    const onUndo = vi.fn().mockRejectedValueOnce(Error("Offline")).mockRejectedValueOnce(Object.assign(Error("Record changed"), { code: "operation_refused" }));
+    const onError = vi.fn();
+    const onLoad = vi.fn(async () => ({ datasetId, headRevision: 3, entries: [{ ...entry(3), undo: reversal }], nextBeforeRevision: null }));
+    render(<CollectionHistoryDialog workspaceId="a" datasetId={datasetId} name="Fundraiser" onLoad={onLoad} onUndo={onUndo} onClose={vi.fn()} onError={onError} />);
+    fireEvent.click(await screen.findByText("submit")); fireEvent.click(screen.getByRole("button", { name: "Undo edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(onUndo.mock.calls[1]![0]).toBe(onUndo.mock.calls[0]![0]);
+    expect(onError.mock.calls[1]![2]).toBeNull();
+    expect(screen.queryByText("Undo not confirmed")).toBeNull();
+    expect(screen.getByText('"Alice"')).toBeTruthy();
+  });
   it("shows saved-operation details and pages by revision", async () => {
     const onLoad = vi.fn<CollectionHistoryDialogProps["onLoad"]>().mockResolvedValueOnce({ datasetId, headRevision: 3, entries: [entry(3), entry(2)], nextBeforeRevision: 2 }).mockResolvedValueOnce({ datasetId, headRevision: 3, entries: [entry(1)], nextBeforeRevision: null });
     render(<CollectionHistoryDialog workspaceId="a" datasetId={datasetId} name="Fundraiser" onLoad={onLoad} onClose={vi.fn()} onError={vi.fn()} />);

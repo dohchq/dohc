@@ -214,7 +214,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       }} />}
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
-    {viewingHistory && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+    {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+      onUndo={invoke} onChanged={() => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); }}
       onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
         const result = await bridge().dataset({ ...input, action: "history" });

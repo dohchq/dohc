@@ -122,6 +122,34 @@ it("pages owner-only saved-operation metadata without receipts, payloads, or pri
   expect(() => f.host.history("owner", { ...scope, limit: 101 })).toThrow("Invalid");
   expect(() => f.host.history("owner", { ...scope, datasetId: id(99) })).toThrow("not permitted");
 });
+it("recovers an explicitly reversible edit from durable history and refuses undo after a later edit", async () => {
+  const f = await fixture();
+  const reversible = structuredClone(definition);
+  reversible.operations.find(operation => operation.kind === "edit")!.reversible = true;
+  const sql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL,version INTEGER NOT NULL);";
+  const source = `globalThis.operations={
+    create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?,1)',['record',input.value,'private']);return {id:'record',version:1};},
+    edit(ctx,input){const row=ctx.db.query('SELECT value,version FROM items WHERE id=?',[input.id])[0];
+      if(!row||row.version!==input.expectedVersion)ctx.refuse('conflict','The record changed.');
+      ctx.db.execute('UPDATE items SET value=?,version=version+1 WHERE id=?',[input.values['${id(4)}'],input.id]);
+      return {id:input.id,version:row.version+1,priorValues:{'${id(4)}':row.value}};}
+  };`;
+  const revision = describeDatasetRevision({ definition: reversible, revision: 1, schemaSql: sql, operationSource: source });
+  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: sql, operationSource: source });
+  const call = (operationId: string, input: import("./protocol.js").JsonValue, idempotencyKey: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey });
+  await call(id(6), { value: "Alice" }, "create");
+  await call(id(8), { id: "record", expectedVersion: 1, values: { [id(4)]: "Alicia" } }, "edit");
+  const reopened = createDatasetHost({ db: f.db, transaction: f.transaction, journal: f.journal, supervisor: f.supervisor,
+    resolveAuthority() { return { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }; }, accountCreation() {} });
+  const history = reopened.history("owner", scope);
+  expect(history.entries[1]!.undo).toBeUndefined();
+  const undo = history.entries[0]!.undo!;
+  expect(undo).toMatchObject({ recordId: "record", expectedVersion: 2, fields: [{ fieldId: id(4), name: "Value", value: "Alice" }] });
+  expect(JSON.stringify(undo)).not.toContain("private");
+  const input = { id: undo.recordId, expectedVersion: undo.expectedVersion, values: Object.fromEntries(undo.fields.map(field => [field.fieldId, field.value])) };
+  await call(undo.operationId, input, "undo");
+  await expect(call(undo.operationId, input, "stale-undo")).rejects.toMatchObject({ refusal: { code: "conflict" } });
+});
 it("archives and restores the same records without releasing storage or reactivating a transferred host", async () => {
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "retained" });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
