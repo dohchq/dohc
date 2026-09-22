@@ -18,6 +18,13 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         if (denied) throw Error("This Collection copy is no longer available.");
       };
       const selected = (datasetId: string) => { authorize(); if (datasetId !== options.scope.datasetId) throw Error("This copy belongs to another Collection."); };
+      const describe = (definitionJson: string): DatasetDescription => {
+        const approved = parseDatasetRevision(JSON.parse(definitionJson));
+        return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
+          revisionSha256: approved.revisionSha256,
+          tables: approved.definition.tables.map(table => ({ tableId: table.tableId, name: table.name,
+            fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })), operations: approved.definition.operations };
+      };
       const capture = async () => {
         authorize(); let offline = false;
         try { await replica.catchUp(source, signal); }
@@ -28,17 +35,22 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         }
         authorize(); const state = replica.state();
         if (!state) throw Error("Download this Collection before opening it offline.");
-        const approved = parseDatasetRevision(JSON.parse(state.checkpoint.definitionJson));
-        const dataset: DatasetDescription = { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
-          revisionSha256: approved.revisionSha256,
-          tables: approved.definition.tables.map(table => ({ tableId: table.tableId, name: table.name,
-            fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })), operations: approved.definition.operations };
-        return { dataset, copy: { offline, savedAtMs: state.savedAtMs } };
+        return { dataset: describe(state.checkpoint.definitionJson), copy: { offline, savedAtMs: state.savedAtMs } };
       };
       return {
         ...remote,
         async inspect(datasetId) { selected(datasetId); return capture(); },
-        async describe(datasetId) { selected(datasetId); return (await capture()).dataset; },
+        async describe(datasetId) {
+          selected(datasetId);
+          // Sidebar discovery reads bounded metadata, never every Collection's database bytes.
+          try { const captured = await source.capture(signal); authorize(); return describe(captured.checkpoint.definitionJson); }
+          catch (error) {
+            if (denied) { await replica.revoke(); throw error; }
+            authorize(); if (!(error instanceof DatasetCopyOfflineError)) throw error;
+            const saved = replica.state(); if (!saved) throw error;
+            return describe(saved.checkpoint.definitionJson);
+          }
+        },
         async invoke(input) {
           selected(input.datasetId);
           const state = await capture();
