@@ -62,8 +62,12 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
             fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })), operations: approved.definition.operations };
       };
       const capture = async () => {
-        authorize(); let offline = false;
-        try { await replica.catchUp(source, signal); }
+        authorize(); let offline = false; const priorArchived = archived;
+        try {
+          await replica.catchUp(source, signal);
+          // The host refuses replica capture while archived; a successful capture confirms restoration.
+          if (priorArchived) await enqueueMetadata(async () => { authorize(); if (archived === priorArchived) await clearArchive(); });
+        }
         catch (error) {
           if (denied) { await revoke(); throw error; }
           authorize(); if (!(error instanceof DatasetCopyOfflineError)) throw error;
