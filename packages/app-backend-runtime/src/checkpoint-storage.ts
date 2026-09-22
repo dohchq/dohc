@@ -16,10 +16,13 @@ type Authorize = () => unknown;
 type StageRow = { stage_id: string; workspace_id: string; dataset_id: string; byte_length: number; sha256: string; state: number; reserved_bytes: number; next_index: number };
 export const CHECKPOINT_CHUNK_BYTES = 1024 * 1024;
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+function synchronous(fn: Function) {
+  if (typeof fn !== "function" || fn.constructor.name === "AsyncFunction") throw new Error("Checkpoint callbacks must be synchronous.");
+}
 function callback<T>(fn: () => T): T {
-  if (fn.constructor.name === "AsyncFunction") throw new Error("Checkpoint callbacks must be synchronous.");
+  synchronous(fn);
   const result = fn();
-  if (result && typeof result === "object" && "then" in result) throw new Error("Checkpoint callbacks must be synchronous.");
+  if (result && (typeof result === "object" || typeof result === "function") && "then" in result) throw new Error("Checkpoint callbacks must be synchronous.");
   return result;
 }
 function validText(value: string) { if (typeof value !== "string" || !value || value.includes("\0") || Buffer.byteLength(value) > 4096) throw new Error("Invalid checkpoint identity."); return value; }
@@ -30,7 +33,8 @@ function manifest(row: StageRow): CheckpointStage {
 
 /** Staged reservations survive restart. The owner must discard abandoned stages through the same quota transaction. */
 export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: () => T) => T, maximumBytes: number) {
-  transaction(() => db.exec(`
+  synchronous(transaction);
+  callback(() => transaction(() => db.exec(`
     CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoints (
       stage_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,byte_length INTEGER NOT NULL CHECK(byte_length>=0),
       sha256 TEXT NOT NULL,state INTEGER NOT NULL CHECK(state IN(0,1,2)),reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>=0),
@@ -38,7 +42,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     CREATE INDEX IF NOT EXISTS dohc_dataset_checkpoints_scope ON dohc_dataset_checkpoints(workspace_id,dataset_id,state,stage_id);
     CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_chunks (
       stage_id TEXT NOT NULL,chunk_index INTEGER NOT NULL CHECK(chunk_index>=0),bytes BLOB NOT NULL CHECK(length(bytes)>0 AND length(bytes)<=1048576),
-      sha256 TEXT NOT NULL,PRIMARY KEY(stage_id,chunk_index),FOREIGN KEY(stage_id) REFERENCES dohc_dataset_checkpoints(stage_id)) STRICT;`));
+      sha256 TEXT NOT NULL,PRIMARY KEY(stage_id,chunk_index),FOREIGN KEY(stage_id) REFERENCES dohc_dataset_checkpoints(stage_id)) STRICT;`)));
   const tx = <T>(work: () => T) => callback(() => transaction(() => callback(work)));
   function validateRow(value: StageRow | undefined): StageRow {
     if (!value || !Number.isSafeInteger(value.byte_length) || value.byte_length < 0 || value.byte_length > maximumBytes || !/^[a-f0-9]{64}$/.test(value.sha256)
@@ -62,6 +66,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     return item.bytes;
   }
   function stageCheckpoint(input: { scope: DatasetScope; expectedBytes: number; sha256: string; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): CheckpointStage {
+    if (input.account) synchronous(input.account);
     const key = Object.freeze({ workspaceId: validText(input.scope.workspaceId), datasetId: validText(input.scope.datasetId) });
     if (!Number.isSafeInteger(input.expectedBytes) || input.expectedBytes < 0 || input.expectedBytes > maximumBytes || !/^[a-f0-9]{64}$/.test(input.sha256)) throw new Error("Invalid checkpoint size or digest.");
     const value: StageRow = { stage_id: randomUUID(), workspace_id: key.workspaceId, dataset_id: key.datasetId, byte_length: input.expectedBytes,
@@ -102,6 +107,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
   return {
     stageCheckpoint, appendCheckpointChunk, sealCheckpoint,
     discardCheckpoint(input: { stage: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }) {
+      if (input.account) synchronous(input.account);
       const stage = structuredClone(input.stage);
       tx(() => {
         callback(input.authorize); const value = row(stage);

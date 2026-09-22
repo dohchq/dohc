@@ -115,3 +115,13 @@ it("rechecks authorization on each chunk and detects persisted chunk corruption"
   f.db.exec("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(100)");
   expect(() => f.journal.exportBlob({ scope, record, offset: 0, authorize })).toThrow("integrity");
 });
+
+it("does not run asynchronous staging accounting or retain thenable side effects", () => {
+  const f = fixture(); let ran = false;
+  const input = { scope, expectedBytes: 100, sha256: hash(new Uint8Array(100)), authorize };
+  expect(() => f.journal.stageCheckpoint({ ...input, account: async () => { ran = true; } })).toThrow("synchronous");
+  expect(ran).toBe(false);
+  expect(() => f.journal.stageCheckpoint({ ...input, account: allocation => { f.account(allocation); return { then() {} }; } })).toThrow("synchronous");
+  expect(f.balance()).toBe(0);
+  expect(f.journal.checkpointStages({ workspaceId: "w", authorize })).toEqual([]);
+});
