@@ -192,7 +192,8 @@ The child exits after that close message.
 ## Retention and startup maintenance
 
 Local and relay hosts keep one replaceable materialization checkpoint per dataset to reduce worker replay.
-The supervisor attempts a snapshot after 128 committed events, and before its 30-second idle eviction when changes remain uncached.
+The supervisor attempts a snapshot after at least 128 uncached committed events.
+Its 30-second idle eviction uses the same threshold; a smaller tail replays from retained history when the worker reopens.
 The triggering operation returns before maintenance begins. The dataset's lane stays serialized while the snapshot is prepared.
 Other datasets keep their own lanes; synchronous storage work still uses the host process.
 
