@@ -338,6 +338,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       restore(input: { datasetId: string }) { assertCurrent(); return host.restoreDataset(owner, { workspaceId, datasetId: input.datasetId }); },
       pendingAttempts(input: { datasetId: string; after?: number; limit?: number }) { assertCurrent(); return host.pendingAttempts(owner, { workspaceId, ...input }); },
       reconcileAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.reconcileAttempt(owner, { workspaceId, ...input }); },
+      cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },

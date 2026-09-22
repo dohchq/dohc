@@ -43,6 +43,15 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
 });
 
+it("routes explicit cancellation to the current host and rejects stale completion", async () => {
+  const remote = { cancelAttempt: vi.fn(async () => ({ cancelled: true })) } as unknown as OwnerDatasetData;
+  const f = fixture(remote), request = { workspaceId: "workspace", datasetId, action: "cancelAttempt", reference: "a".repeat(64), acknowledge: true };
+  expect(await f.handler("window", request)).toEqual({ kind: "attempt-cancelled", cancelled: true });
+  await expect(f.handler("window", { ...request, acknowledge: false })).rejects.toThrow();
+  vi.mocked(remote.cancelAttempt!).mockImplementation(async () => { f.stale(); return { cancelled: true }; });
+  await expect(f.handler("window", request)).rejects.toThrow("stale workspace");
+});
+
 it("routes lifecycle changes to current authority and refuses shared recipients", async () => {
   const remote = { archive: vi.fn(async () => ({ archived: true, generation: 1 })), restore: vi.fn(async () => ({ archived: false, generation: 2 })), lifecycle: vi.fn(async () => ({ archived: false, generation: 0, reason: "", apps: [], nextCursor: null })) } as unknown as OwnerDatasetData;
   const f = fixture(remote);

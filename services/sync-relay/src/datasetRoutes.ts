@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -118,10 +118,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
-        if (route.action === "reconcile-attempt") {
+        if (route.action === "reconcile-attempt" || route.action === "cancel-attempt") {
           const body = record(raw, ["reference", "acknowledge"]);
           if (body.acknowledge !== true) throw badRequest("Attempt reconciliation requires acknowledgment.");
-          return host.reconcileAttempt(auth, {...scope, reference: digest(body.reference), acknowledge: true});
+          const input = {...scope, reference: digest(body.reference), acknowledge: true as const};
+          return route.action === "cancel-attempt" ? host.cancelAttempt(auth, input) : host.reconcileAttempt(auth, input);
         }
         if (route.action === "archive" || route.action === "restore") {
           record(raw, []);

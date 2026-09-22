@@ -31,6 +31,14 @@ function fixture() {
 }
 
 describe("remote Collection authority", () => {
+  it("sends explicit cancellation and requires the dedicated acknowledgement", async () => {
+    const f = fixture(), value = { datasetId: id(1), reference: "a".repeat(64), acknowledge: true as const };
+    f.relay.mockResolvedValue({ cancelled: true });
+    expect(await f.data.cancelAttempt!(value)).toEqual({ cancelled: true });
+    expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/cancel-attempt`);
+    expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({ reference: value.reference, acknowledge: true });
+    f.relay.mockResolvedValue({ cleared: true }); await expect(f.data.cancelAttempt!(value)).rejects.toThrow();
+  });
   it("sends captured migration bytes and validates the confirmed cursor", async () => {
     const f = fixture();
     const next = describeDatasetRevision({ definition: { ...definition, name: "Renamed" }, revision: 2, schemaSql: "SQL", operationSource: "RULES" });

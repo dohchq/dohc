@@ -22,6 +22,7 @@ export interface OwnerDatasetData {
   restore?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
   pendingAttempts?(input: { datasetId: string; after?: number; limit?: number }): Promise<DatasetPendingAttemptsPage>;
   reconcileAttempt?(input: { datasetId: string; reference: string; acknowledge: true }): Promise<{ cleared: true }>;
+  cancelAttempt?(input: { datasetId: string; reference: string; acknowledge: true }): Promise<{ cancelled: true }>;
   approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
   invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
   upload(input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; replayed: boolean }>;
@@ -70,6 +71,7 @@ export function createRemoteDatasetData(input: {
       return result;
     },
     async reconcileAttempt(value) { return z.object({ cleared: z.literal(true) }).strict().parse(await request(`${path(value.datasetId)}/reconcile-attempt`, { reference: value.reference, acknowledge: value.acknowledge })); },
+    async cancelAttempt(value) { return z.object({ cancelled: z.literal(true) }).strict().parse(await request(`${path(value.datasetId)}/cancel-attempt`, { reference: value.reference, acknowledge: value.acknowledge })); },
     async permissions(value) {
       const query = new URLSearchParams();
       if (value.after) query.set("after", value.after);
@@ -230,7 +232,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "migrate" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "pendingAttempts" | "reconcileAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "migrate" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "pendingAttempts" | "reconcileAttempt" | "cancelAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -264,6 +266,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     restore: async value => { const authority = await target(value.datasetId); if (!authority.restore) throw new Error("Collection restore controls are unavailable."); return authority.restore(value); },
     pendingAttempts: async value => { const authority = await target(value.datasetId); if (!authority.pendingAttempts) throw new Error("Pending submission review is unavailable."); return authority.pendingAttempts(value); },
     reconcileAttempt: async value => { const authority = await target(value.datasetId); if (!authority.reconcileAttempt) throw new Error("Pending submission review is unavailable."); return authority.reconcileAttempt(value); },
+    cancelAttempt: async value => { const authority = await target(value.datasetId); if (!authority.cancelAttempt) throw new Error("Pending submission cancellation is unavailable."); return authority.cancelAttempt(value); },
     inspect: async (datasetId, options) => {
       const authority = await target(datasetId);
       return "inspect" in authority && authority.inspect ? authority.inspect(datasetId, options) : { dataset: await authority.describe(datasetId, options) };

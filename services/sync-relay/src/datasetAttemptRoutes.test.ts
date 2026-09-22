@@ -15,13 +15,17 @@ function setup() {
     if (auth.userId !== "owner") throw new DatasetHostError("not_authorized", "Unavailable.");
     return {cleared: true};
   });
-  const handler = createSyncRelayHandler({storage, datasetHost: {pendingAttempts, reconcileAttempt} as unknown as RelayDatasetHost,
+  const cancelAttempt = vi.fn((auth: {userId: string}) => {
+    if (auth.userId !== "owner") throw new DatasetHostError("not_authorized", "Unavailable.");
+    return {cancelled: true};
+  });
+  const handler = createSyncRelayHandler({storage, datasetHost: {pendingAttempts, reconcileAttempt, cancelAttempt} as unknown as RelayDatasetHost,
     nowMs: () => 10, resolveActor(request, workspaceId) {return {workspaceId, userId: request.headers.get("authorization")!.slice(7)};}});
   const request = (action: string, body?: unknown, userId = "owner") => handler(new Request(`https://relay/sync/w/datasets/${datasetId}/${action}`, {
     method: body === undefined ? "GET" : "POST", headers: {authorization: `Bearer ${userId}`, "content-type": "application/json"},
     ...(body === undefined ? {} : {body: JSON.stringify(body)}),
   }));
-  return {pendingAttempts, reconcileAttempt, request};
+  return {pendingAttempts, reconcileAttempt, cancelAttempt, request};
 }
 
 it("routes bounded pending attempt pages and explicit reconciliation with verified identity", async () => {
@@ -32,6 +36,17 @@ it("routes bounded pending attempt pages and explicit reconciliation with verifi
   expect(f.reconcileAttempt).toHaveBeenLastCalledWith({kind: "named", workspaceId: "w", userId: "owner"}, {workspaceId: "w", datasetId, reference, acknowledge: true});
   expect((await f.request("pending-attempts", undefined, "helper")).status).toBe(404);
   expect((await f.request("reconcile-attempt", {reference, acknowledge: true}, "helper")).status).toBe(404);
+});
+
+it("routes cancellation separately and refuses malformed acknowledgement or non-owner callers", async () => {
+  const f = setup();
+  expect(await (await f.request("cancel-attempt", {reference, acknowledge: true})).json()).toEqual({cancelled: true});
+  expect(f.cancelAttempt).toHaveBeenLastCalledWith({kind: "named", workspaceId: "w", userId: "owner"}, {workspaceId: "w", datasetId, reference, acknowledge: true});
+  expect(f.reconcileAttempt).not.toHaveBeenCalled();
+  expect((await f.request("cancel-attempt", {reference, acknowledge: true}, "helper")).status).toBe(404);
+  expect((await f.request("cancel-attempt")).status).toBe(405);
+  for (const body of [{reference}, {reference, acknowledge: false}, {reference, acknowledge: "true"}, {reference, acknowledge: true, userId: "owner"}]) expect((await f.request("cancel-attempt", body)).status).toBe(400);
+  expect((await f.request("cancel-attempt?after=0", {reference, acknowledge: true})).status).toBe(400);
 });
 
 it("rejects malformed pending cursors and reconciliation authority before calling the host", async () => {

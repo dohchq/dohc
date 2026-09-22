@@ -178,7 +178,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     if (options.argv.length === 2 && options.argv[0] === "dataset" && ["--help", "-h"].includes(options.argv[1]!)) return {
       exitCode: 0, stderr: "", stdout: [
         "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
-        "Actions: list, describe, history, permissions, setGrant, removeGrant, lifecycle, archive, restore, pendingAttempts, reconcileAttempt, create, prepare, approve, discard, invoke, export",
+        "Actions: list, describe, history, permissions, setGrant, removeGrant, lifecycle, archive, restore, pendingAttempts, reconcileAttempt, cancelAttempt, create, prepare, approve, discard, invoke, export",
         "Source actions: prepareMigration, prepareSchemaChange, approveMigration, discardMigration, createForm",
         "File actions: upload, file",
         "Recovery actions: prepareRecovery, claimRecovery, discardRecovery",

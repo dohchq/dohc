@@ -54,3 +54,12 @@ it("does not read a stale local copy when shared authority is offline", async ()
   await expect(f.data.list({})).rejects.toThrow("offline");
   expect(f.local.describe).not.toHaveBeenCalled();
 });
+
+it("cancels only through the transferred authority and never falls back locally", async () => {
+  const f = fixture(); f.remote.cancelAttempt = vi.fn(async () => ({ cancelled: true })); f.local.cancelAttempt = vi.fn();
+  const input = { datasetId: remoteId, reference: "a".repeat(64), acknowledge: true as const };
+  expect(await f.data.cancelAttempt!(input)).toEqual({ cancelled: true });
+  vi.mocked(f.remote.cancelAttempt).mockRejectedValue(Error("offline"));
+  await expect(f.data.cancelAttempt!(input)).rejects.toThrow("offline");
+  expect(f.local.cancelAttempt).not.toHaveBeenCalled();
+});
