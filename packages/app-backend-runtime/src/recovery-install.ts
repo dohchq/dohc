@@ -89,6 +89,23 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
   }
   return {
     discard,
+    claim(context: Context, input: DatasetScope & { transferId: string; manifestSha256: string; sourceCursor: DatasetCursor; authorize(): void }): RecoveryImportReceipt {
+      const row = tx(() => find(input, input.transferId, input.authorize));
+      if (!row || (row.phase !== "installed" && row.phase !== "claimed") || row.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(row.source_json)), input.sourceCursor)) throw new Error("Recovery transfer is not installed with this identity.");
+      if (row.phase === "claimed") return receipt(row);
+      const head = JSON.parse(String(row.head_json)) as ValidatedDatasetRecovery["headCheckpoint"] & { stage: CheckpointStage; sourceState: string };
+      if (head.sourceState !== "fenced") throw new Error("Transfer requires a fenced source dataset.");
+      journal.claimInactiveCheckpoint({ expected: input.sourceCursor, hostEpoch: randomUUID(), approvedRevisionHash: input.sourceCursor.approvedRevisionHash,
+        source: head.source, schemaSql: head.schemaSql, definitionJson: head.definitionJson, capacityBytes: head.capacityBytes, checkpoint: head.stage, authorize: input.authorize,
+        account(allocation) {
+          const current = find(input, input.transferId, input.authorize);
+          if (!current || current.phase !== "installed" || current.manifest_hash !== input.manifestSha256) throw new Error("Recovery transfer claim changed.");
+          account(context, input, allocation.bytes - allocation.stagedCreditBytes, allocation.capacityDeltaBytes);
+          db.prepare("UPDATE dohc_dataset_imports SET phase='claimed',target_json=?,head_json=NULL WHERE import_id=?").run(JSON.stringify(allocation.cursor), input.transferId);
+          db.prepare("DELETE FROM dohc_dataset_import_checkpoints WHERE import_id=?").run(input.transferId);
+        } });
+      return tx(() => { const claimed = find(input, input.transferId, input.authorize); if (!claimed || claimed.phase !== "claimed") throw new Error("Recovery claim acknowledgement is missing."); return receipt(claimed); });
+    },
     status(input: DatasetScope & { transferId: string; authorize(): void }): RecoveryImportReceipt | null {
       return tx(() => { const row = find(input, input.transferId, input.authorize); return row && (row.phase === "installed" || row.phase === "claimed") ? receipt(row) : null; });
     },
@@ -129,6 +146,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       try {
         let count = 0;
         for (const item of recovery.records()) {
+          if (item.record.kind === "checkpoint" && same(item.record.cursor, recovery.manifest.checkpoint)) continue;
           authorize(); const body = JSON.stringify(item.record);
           let stage: CheckpointStage | undefined, blob: Uint8Array | null = null;
           const record = item.record;
@@ -148,7 +166,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
         if (current.record.kind !== "checkpoint") throw new Error("Recovery checkpoint is missing.");
         const currentStage = await checkpoint(current.blob, current.record.sha256, "current");
         const headStage = await checkpoint(recovery.headCheckpoint.blob, recovery.headCheckpoint.sha256, "head");
-        const headJson = JSON.stringify({ ...recovery.headCheckpoint, blob: undefined, stage: headStage });
+        const headJson = JSON.stringify({ ...recovery.headCheckpoint, blob: undefined, stage: headStage, sourceState: recovery.manifest.sourceState });
         tx(() => { authorize(); retain(Buffer.byteLength(headJson) + Buffer.byteLength(JSON.stringify(recovery.catalog)) + 1024);
           db.prepare("UPDATE dohc_dataset_imports SET head_json=? WHERE import_id=?").run(headJson, importId); });
         for (const metadata of recovery.metadata()) {
@@ -180,7 +198,6 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           db.prepare(`INSERT INTO dohc_dataset_bindings SELECT ?,?,json_extract(body,'$.appId'),json_extract(body,'$.bindingJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='binding'`).run(scope.workspaceId, scope.datasetId, importId);
           db.prepare(`INSERT INTO dohc_dataset_data_grants SELECT ?,?,json_extract(body,'$.principalKey'),json_extract(body,'$.grantJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='grant'`).run(scope.workspaceId, scope.datasetId, importId);
           if (options.commitAttachments) sync(() => options.commitAttachments!(context, { ...scope, importId }));
-          journal.head(scope, input.authorize);
           db.prepare("UPDATE dohc_dataset_imports SET phase='installed' WHERE import_id=?").run(importId);
           db.prepare("DELETE FROM dohc_dataset_import_records WHERE import_id=?").run(importId);
           db.prepare("DELETE FROM dohc_dataset_import_metadata WHERE import_id=?").run(importId);

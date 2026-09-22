@@ -8,7 +8,10 @@ import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./j
 import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } from "./supervisor.js";
 import type { JsonValue } from "./protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
-import type { RecoveryLimits } from "./recovery.js";
+import { stageDatasetRecovery, type RecoveryLimits } from "./recovery.js";
+import { validateDatasetRecovery } from "./recovery-import.js";
+import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery-install.js";
+import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
@@ -53,6 +56,7 @@ export interface DatasetHostOptions<Context> {
     limits: RecoveryLimits;
     captureAttachments?(context: Context, scope: DatasetScope, cursor: DatasetCursor): RecoveryAttachment[];
     openAttachment?(context: Context, scope: DatasetScope, file: RecoveryAttachment): AsyncIterable<Uint8Array>;
+    install?: Omit<RecoveryInstallOptions<Context>, "db" | "transaction" | "journal">;
   };
 }
 export interface ActivateDatasetInput {
@@ -205,6 +209,39 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }) })), operations };
   }
   const host = {
+    recoveryStatus(context: Context, raw: DatasetScope & { transferId: string }) {
+      const key = scope(raw), recovery = options.recovery;
+      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
+      return installer.status({ ...key, transferId: raw.transferId, authorize: () => { owner(context, key); } });
+    },
+    async discardRecovery(context: Context, raw: DatasetScope & { transferId: string }) {
+      const key = scope(raw), recovery = options.recovery;
+      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
+      await installer.discard(context, { ...key, transferId: raw.transferId, authorize: () => { owner(context, key); } });
+    },
+    async importRecovery(context: Context, raw: DatasetScope & { transferId: string; sourceCursor: DatasetCursor; manifestSha256: string; stream: AsyncIterable<Uint8Array>; activate?: boolean; signal?: AbortSignal }) {
+      const key = scope(raw), recovery = options.recovery;
+      if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
+      const sourceCursor = structuredClone(raw.sourceCursor), manifestSha256 = raw.manifestSha256, transferId = text(raw.transferId), activate = raw.activate === true;
+      if (sourceCursor.workspaceId !== key.workspaceId || sourceCursor.datasetId !== key.datasetId) throw new DatasetHostError("invalid", "Recovery dataset differs from the requested dataset.");
+      const ownerToken = JSON.stringify(owner(context, key)), authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
+      const prior = installer.status({ ...key, transferId, authorize });
+      if (prior) {
+        if (prior.manifestSha256 !== manifestSha256 || !equalRecoveryCursor(prior.sourceCursor, sourceCursor)) throw new DatasetHostError("conflict", "Recovery transfer differs from its saved receipt.");
+        return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : prior;
+      }
+      const staged = await stageDatasetRecovery({ stream: raw.stream, stagingParent: recovery.directory, expectedManifestSha256: manifestSha256, limits: recovery.limits, signal: raw.signal, authorize });
+      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.runtime, compileOperations: options.compileOperations });
+      try {
+        if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "Recovery source cursor differs.");
+        if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "Transfer requires a fenced source dataset.");
+        const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize });
+        return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
+      } finally { await validated.dispose(); }
+    },
     async exportRecovery(context: Context, raw: DatasetScope & { signal?: AbortSignal }) {
       const key=scope(raw),recovery=options.recovery;
       if(!recovery)throw new DatasetHostError("invalid","Dataset recovery storage is not configured.");

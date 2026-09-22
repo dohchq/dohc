@@ -75,7 +75,8 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     const files=options.attachments ? sync(()=>options.attachments!.capture(cursor)) : [];
     if(!Array.isArray(files)||files.length>4096)throw new Error("Dataset export attachment count exceeds its bound.");
     const attachments=files.map(file=>({...file}));
-    return { revision, revisionJson, artifactsJson, bindings, grants, attachments };
+    const sourceState = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)?.active === 1 ? "active" as const : "fenced" as const;
+    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState };
   } });
   if (pinned.captured.revision.revisionSha256 !== pinned.cursor.approvedRevisionHash) throw new Error("Dataset catalog and journal approval differ.");
   const attachments = pinned.captured.attachments;
@@ -128,7 +129,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     if(pinned.cursor.revision>pinned.checkpoint.cursor.revision)await save({id:"events",kind:"events",afterRevision:pinned.checkpoint.cursor.revision,throughRevision:pinned.cursor.revision},records(pinned.checkpoint.cursor.revision,pinned.cursor.revision));
     if([...attachedReferences].some(fileId=>!seen.has(fileId))||attachments.some(file=>!attachedReferences.has(file.fileId)))throw new Error("Dataset export attachment inventory does not match its committed history.");
     for(const file of attachments){const saved=await save({id:`attachment:${file.fileId}`,kind:"attachment"},options.attachments!.open(file));if(saved.byteLength!==file.byteLength||saved.sha256!==file.sha256)throw new Error("Dataset export attachment hash differs.");}
-    const manifest:DatasetRecoveryManifest={format:"dohc-dataset-recovery-v1",cursor:pinned.cursor,checkpoint:pinned.checkpoint.cursor,entries};encodeRecoveryManifest(manifest,options.limits);authorize();
+    const manifest:DatasetRecoveryManifest={format:"dohc-dataset-recovery-v1",sourceState:pinned.captured.sourceState,cursor:pinned.cursor,checkpoint:pinned.checkpoint.cursor,entries};encodeRecoveryManifest(manifest,options.limits);authorize();
     return {manifest,directory,dispose,stream(){if(disposed)throw new Error("Dataset export was disposed.");return writeDatasetRecovery({manifest,limits:options.limits,signal:options.signal,authorize,
       open(entry){return createReadStream(paths.get(entry.id)!,{highWaterMark:RECOVERY_CHUNK_BYTES});}});}};
   }catch(error){await dispose();throw error;}

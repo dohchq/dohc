@@ -11,6 +11,7 @@ import { prepareDatasetRecoveryExport } from "./recovery-export";
 import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecovery } from "./recovery";
 import { validateDatasetRecovery, readValidatedBlob } from "./recovery-import";
 import { parseRecoveryJournalRecord } from "./recovery-record";
+import { createRecoveryInstaller } from "./recovery-install";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -55,6 +56,63 @@ async function fixture(){
 async function alter(staged:StagedDatasetRecovery,id:string,change:(bytes:Buffer)=>Buffer){
   const file=staged.files.find(f=>f.entry.id===id)!;const bytes=change(await readFile(file.path));await writeFile(file.path,bytes);file.entry.byteLength=bytes.length;file.entry.sha256=hash(bytes);
 }
+function target(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Parameters<typeof createRecoveryInstaller>[0]> = {}) {
+  const db = new DatabaseSync(join(f.directory, "target.sqlite"));
+  const transaction = <T>(run: () => T) => { db.exec("BEGIN IMMEDIATE"); try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
+  const journal = createDatasetJournal({ db, transaction });
+  for (const table of ["catalog", "catalog_history", "bindings", "data_grants"]) db.exec(String(f.db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(`dohc_dataset_${table}`)!.sql));
+  db.exec("CREATE TABLE usage(bytes INTEGER); INSERT INTO usage VALUES(0)");
+  const installer = createRecoveryInstaller({ db, transaction, journal, account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); }, ...options });
+  cleanups.push(async () => { db.close(); });
+  return { db, journal, installer };
+}
+
+it("installs validated histories and retry receipts inactive with a durable import receipt", async () => {
+  const f = await fixture(); f.add("first"); await f.migrate(); f.add("tail");
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
+  try {
+    const input = { transferId: "transfer-1", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize };
+    const installed = await t.installer.install({}, input);
+    expect(installed.sourceCursor).toEqual(f.head()); expect(installed.targetCursor).toBeUndefined();
+    expect(t.journal.head(f.scope, f.authorize)).toMatchObject({ active: false, cursor: f.head() });
+    expect(t.db.prepare("SELECT revision,result_json FROM dohc_dataset_receipts WHERE idempotency_key='first'").get()).toMatchObject({ revision: 1, result_json: JSON.stringify({ value: "first" }) });
+    expect(t.journal.exportPage({ scope: f.scope, through: f.head(), afterRevision: -1, authorize: f.authorize }).map(item => [item.kind, item.cursor.revision])).toEqual([["checkpoint", 0], ["event", 1], ["checkpoint", 2], ["event", 3]]);
+    const usage = t.db.prepare("SELECT bytes FROM usage").get()!.bytes;
+    expect(await t.installer.install({}, input)).toEqual(installed);
+    expect(t.db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(usage);
+    expect(t.installer.status({ ...f.scope, transferId: input.transferId, authorize: f.authorize })).toEqual(installed);
+  } finally { await valid.dispose(); }
+});
+
+it("rolls back installation and releases every staging reservation on final quota refusal", async () => {
+  const f = await fixture(); f.add("first");
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize });
+  const t = target(f, { account(_context, allocation) { if (allocation.capacityDeltaBytes) throw Error("quota refusal"); t.db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); } });
+  try {
+    await expect(t.installer.install({}, { transferId: "transfer-1", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize })).rejects.toThrow("quota refusal");
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_journals").get()!.n).toBe(0);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n).toBe(0);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n).toBe(0);
+    expect(t.db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(0);
+  } finally { await valid.dispose(); }
+});
+
+it("claims a fenced import once with a fresh epoch and preserves retries across installer restart", async () => {
+  const f = await fixture(); f.add("first"); f.journal.fence({ expected: f.head(), authorize: f.authorize });
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
+  try {
+    const input = { transferId: "transfer-claim", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize };
+    expect(valid.manifest.sourceState).toBe("fenced"); await t.installer.install({}, input);
+    const claim = { ...f.scope, transferId: input.transferId, manifestSha256: input.manifestSha256, sourceCursor: f.head(), authorize: f.authorize };
+    const claimed = t.installer.claim({}, claim);
+    expect(claimed.targetCursor).toMatchObject({ revision: f.head().revision + 1, approvedRevisionHash: f.head().approvedRevisionHash });
+    expect(claimed.targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
+    expect(t.journal.head(f.scope, f.authorize).active).toBe(true);
+    expect(t.journal.receipt({ scope: f.scope, callerKey: "owner", idempotencyKey: "first", payloadSha256: hash("first"), authorize: f.authorize })).toMatchObject({ revision: 1 });
+    expect(t.installer.claim({}, claim)).toEqual(claimed);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_import_checkpoints").get()!.n).toBe(0);
+  } finally { await valid.dispose(); }
+});
 function changeHistory(bytes:Buffer,change:(record:any)=>void){
   const result:Buffer[]=[bytes.subarray(0,8)];let offset=8;
   while(offset<bytes.length){const size=bytes.readUInt32BE(offset);offset+=4;const record=JSON.parse(bytes.subarray(offset,offset+size).toString());offset+=size;

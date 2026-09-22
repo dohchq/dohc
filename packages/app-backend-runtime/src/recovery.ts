@@ -20,6 +20,7 @@ export interface RecoveryEntry {
 }
 export interface DatasetRecoveryManifest {
   format: "dohc-dataset-recovery-v1";
+  sourceState: "active" | "fenced";
   cursor: DatasetCursor;
   checkpoint: DatasetCursor;
   /** History includes prior checkpoint transitions, operations, and their durable receipt data. */
@@ -77,7 +78,8 @@ function limits(value: RecoveryLimits) {
 }
 function manifest(value: unknown, bounds: RecoveryLimits): DatasetRecoveryManifest {
   const max = limits(bounds), m = record(value);
-  keys(m, ["format", "cursor", "checkpoint", "entries"]);
+  keys(m, ["format", "sourceState", "cursor", "checkpoint", "entries"]);
+  if (m.sourceState !== "active" && m.sourceState !== "fenced") fail("source state is missing.");
   if (m.format !== "dohc-dataset-recovery-v1") fail("unsupported format.");
   const head = cursor(m.cursor), checkpoint = cursor(m.checkpoint);
   if (head.workspaceId !== checkpoint.workspaceId || head.datasetId !== checkpoint.datasetId || head.hostEpoch !== checkpoint.hostEpoch ||
@@ -110,7 +112,7 @@ function manifest(value: unknown, bounds: RecoveryLimits): DatasetRecoveryManife
     return entry;
   });
   if (checkpoints !== 1 || histories !== 1 || roles.size !== 3 || lastRevision !== head.revision) fail("incomplete recovery manifest.");
-  return { format: "dohc-dataset-recovery-v1", cursor: head, checkpoint, entries };
+  return { format: "dohc-dataset-recovery-v1", sourceState: m.sourceState, cursor: head, checkpoint, entries };
 }
 
 /** Canonical header bytes let the authenticated host bind a transfer before accepting its contents. */
