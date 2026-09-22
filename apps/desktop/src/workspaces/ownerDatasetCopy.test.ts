@@ -32,7 +32,11 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await host.activate(actor,{workspaceId:"w",revision,schemaSql,operationSource});
     await invoke({...pinned,operationId:id(5),input:{name:"Mom"},idempotencyKey:"first"});
     expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries"); expect(blob).not.toHaveBeenCalled();
-    archived=true; expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true}}); expect(blob).not.toHaveBeenCalled(); archived=false;
+    archived=true; expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true}}); expect(blob).not.toHaveBeenCalled();
+    await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
+    expect(await copy.data(remote,source,signal).inspect!(id(1))).toMatchObject({dataset:{archived:true},copy:{offline:true}});
+    await expect(copy.data(remote,source,signal).invoke({...pinned,operationId:id(6),input:{},idempotencyKey:"archived"})).rejects.toThrow(/archived/);
+    offline=false;archived=false;
     const inspect=await copy.data(remote,source,signal).inspect!(id(1)); expect(inspect.copy?.offline).toBe(false);
     expect(inspect.dataset.tables[0]!.fields[0]).not.toHaveProperty("sqlColumn");
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
@@ -44,7 +48,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     offline=false; await invoke({...pinned,operationId:id(5),input:{name:"Friend"},idempotencyKey:"second"});
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"},{id:2,name:"Friend"}],copy:{offline:false}});
     denied=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow("revoked");
-    offline=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow(/no longer available/);
+    offline=true; await expect(copy.data(remote,source,signal).invoke(read)).rejects.toThrow(/unavailable/);
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 }, 15_000);
 
