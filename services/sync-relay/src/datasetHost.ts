@@ -245,6 +245,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       },
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
       lifecycle: host.lifecycle, archiveDataset: host.archiveDataset, restoreDataset: host.restoreDataset,
+      pendingAttempts: host.pendingAttempts, reconcileAttempt: host.reconcileAttempt,
       exportRecovery: host.exportRecovery, recoveryImportStatus: host.recoveryStatus,
       async importRecovery(auth: AppBackendAuth, input: Parameters<typeof host.importRecovery>[1]) {
         try {return await host.importRecovery(auth, input);}

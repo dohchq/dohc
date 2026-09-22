@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,13 +88,13 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
       } finally {release();}
     }
-    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
     const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"]
       : route.action === "list" ? ["after", "limit", "includeArchived"]
       : route.action === "describe" ? ["includeArchived"]
-      : route.action === "permissions" || route.action === "lifecycle" ? ["after", "limit"] : [];
+      : route.action === "permissions" || route.action === "lifecycle" || route.action === "pending-attempts" ? ["after", "limit"] : [];
     if ([...query.keys()].some(key => !allowedQuery.includes(key)) || allowedQuery.some(key => query.getAll(key).length > 1) ||
       (query.has("includeArchived") && !["true", "false"].includes(query.get("includeArchived")!))) throw badRequest("Invalid dataset query.");
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
@@ -105,6 +105,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
       return await response(async () => {
         signal.throwIfAborted();
         const page = {after: query.has("after") ? text(query.get("after")) : undefined, limit: query.has("limit") ? positive(Number(query.get("limit"))) : undefined};
+        if (route.action === "pending-attempts") {
+          if (page.after !== undefined && (!/^(0|[1-9][0-9]*)$/.test(page.after) || !Number.isSafeInteger(Number(page.after)))) throw badRequest("Invalid pending attempt cursor.");
+          if (page.limit !== undefined && page.limit > 100) throw badRequest("Invalid pending attempt page size.");
+          return host.pendingAttempts(auth, {...scope, after: page.after === undefined ? undefined : Number(page.after), limit: page.limit});
+        }
         const includeArchived = query.get("includeArchived") === "true";
         if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page, includeArchived});
         if (route.action === "describe") return host.describe(auth, {...scope, includeArchived});
@@ -113,6 +118,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "migrate" ? 1024 * 1024 : 128 * 1024);
+        if (route.action === "reconcile-attempt") {
+          const body = record(raw, ["reference", "acknowledge"]);
+          if (body.acknowledge !== true) throw badRequest("Attempt reconciliation requires acknowledgment.");
+          return host.reconcileAttempt(auth, {...scope, reference: digest(body.reference), acknowledge: true});
+        }
         if (route.action === "archive" || route.action === "restore") {
           record(raw, []);
           return route.action === "archive" ? host.archiveDataset(auth, scope) : host.restoreDataset(auth, scope);
