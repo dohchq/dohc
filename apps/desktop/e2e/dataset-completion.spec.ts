@@ -350,7 +350,15 @@ test("@dataset-completion board and calendar page all records and save governed 
     const calendarRow = event.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' rbc-month-row ')]");
     // Drop onto a different day of the same visible week; calendar applies its date field operation.
     const originalDay = new Date(today.getFullYear(), today.getMonth(), 10).getDay();
-    await event.dragTo(calendarRow.locator(".rbc-day-bg").nth((originalDay + 1) % 7));
+    const eventBox = await event.boundingBox();
+    const dayBox = await calendarRow.locator(".rbc-day-bg").nth((originalDay + 1) % 7).boundingBox();
+    if (!eventBox || !dayBox) throw Error("The calendar event and destination day must be visible.");
+    // The date background sits beneath the calendar row. Move the real pointer to
+    // its coordinates so the calendar's foreground drag surface receives the drop.
+    await page.mouse.move(eventBox.x + eventBox.width / 2, eventBox.y + eventBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dayBox.x + dayBox.width / 2, dayBox.y + dayBox.height / 2, { steps: 20 });
+    await page.mouse.up();
     await expect.poll(async () => {
       const result = await readTask("Task 050");
       if (result.kind !== "invoked") return null;
