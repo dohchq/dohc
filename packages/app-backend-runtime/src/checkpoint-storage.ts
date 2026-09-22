@@ -123,6 +123,12 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
   }
   return {
     stageCheckpoint, appendCheckpointChunk, sealCheckpoint,
+    /** Called only inside the journal's authorized permanent-deletion transaction. */
+    destroy(key: DatasetScope) {
+      db.prepare(`DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN
+        (SELECT stage_id FROM dohc_dataset_checkpoints WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
+      db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
+    },
     discardCheckpoint(input: { stage: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }) {
       if (input.account) synchronous(input.account);
       const stage = structuredClone(input.stage);

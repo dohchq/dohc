@@ -115,6 +115,86 @@ it("fences the old host durably without deleting recovery data",()=>{
 it("rejects stale transfer fences",()=>{
   const f=fixture();f.journal.commitOperation(f.prepare());expect(()=>f.journal.fence({expected:f.initial,authorize:f.authorize})).toThrow("cursor changed");expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
 });
+it("permanently deletes journal history and every checkpoint while preserving other scopes",()=>{
+  const f=fixture();f.db.exec("PRAGMA foreign_keys=ON");
+  const otherScope={...f.scope,workspaceId:"another-workspace"};
+  const other=f.journal.initialize({...f.initialization,scope:otherScope});
+  const committed=f.journal.commitOperation(f.prepare());if(committed.kind!=="committed")throw Error();
+  const expected=f.journal.transitionCheckpoint({...f.initialization,expected:committed.event.cursor});
+  const staged=f.journal.stageCheckpoint({scope:f.scope,expectedBytes:3,sha256:digest(new Uint8Array([1,2,3])),authorize:f.authorize});
+  f.journal.appendCheckpointChunk({stage:staged,index:0,bytes:new Uint8Array([1,2,3]),authorize:f.authorize});
+  f.journal.destroy({expected,authorize:f.authorize,cleanup(){
+    expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events WHERE workspace_id=?").get(f.scope.workspaceId)!.n).toBe(1);
+    expect(f.db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=?").get(f.scope.workspaceId)!.active).toBe(0);
+    f.db.exec("UPDATE accounting SET bytes=123; DELETE FROM uploads");
+  }});
+  f.reopen();
+  for(const table of ["dohc_dataset_journals","dohc_dataset_events","dohc_dataset_receipts","dohc_dataset_checkpoint_history","dohc_dataset_checkpoints"])
+    expect(f.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE workspace_id=? AND dataset_id=?`).get(f.scope.workspaceId,f.scope.datasetId)!.n).toBe(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoint_chunks WHERE stage_id NOT IN (SELECT stage_id FROM dohc_dataset_checkpoints)").get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT * FROM dohc_dataset_deletions").all()).toEqual([{
+    workspace_id:expected.workspaceId,dataset_id:expected.datasetId,host_epoch:expected.hostEpoch,
+    approved_revision_hash:expected.approvedRevisionHash,revision:expected.revision,digest:expected.digest,deleted_at_ms:123,
+  }]);
+  expect(f.journal.head(otherScope,f.authorize).cursor).toEqual(other);
+  expect(f.journal.checkpoint({scope:otherScope,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(123);
+});
+it("blocks old operations, stages, initialization and authority claims after deletion and restart",()=>{
+  const f=fixture(),operation=f.prepare();
+  f.journal.commitOperation(operation);
+  const expected=f.journal.head(f.scope,f.authorize).cursor;
+  f.journal.destroy({expected,authorize:f.authorize});f.reopen();
+  const transition={...f.initialization,expected,hostEpoch:"new-host"};
+  for(const revive of [
+    ()=>f.journal.assertNotDeleted(f.scope,f.authorize),
+    ()=>f.journal.initialize(f.initialization),
+    ()=>f.journal.commitOperation(operation),
+    ()=>f.journal.receipt({...operation,scope:f.scope}),
+    ()=>f.journal.stageCheckpoint({scope:f.scope,expectedBytes:0,sha256:digest(new Uint8Array()),authorize:f.authorize}),
+    ()=>f.journal.transitionCheckpoint(transition),
+    ()=>f.journal.claimInactiveCheckpoint(transition),
+    ()=>f.journal.destroy({expected,authorize:f.authorize}),
+  ])expect(revive).toThrow("permanently deleted");
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoints").get()!.n).toBe(0);
+});
+it("rejects stale deletion and refuses deleting a transferred authority",()=>{
+  const f=fixture(),cleanup=vi.fn();f.journal.commitOperation(f.prepare());
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup})).toThrow("cursor changed");
+  const expected=f.journal.head(f.scope,f.authorize).cursor;
+  f.journal.fence({expected,authorize:f.authorize});
+  expect(()=>f.journal.destroy({expected,authorize:f.authorize,cleanup})).toThrow("fenced");
+  expect(cleanup).not.toHaveBeenCalled();expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_deletions").get()!.n).toBe(0);
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(expected);
+});
+it("rolls back the fence, tombstone and private cleanup if deletion fails",()=>{
+  const f=fixture();
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup(){
+    f.db.exec("UPDATE accounting SET bytes=999; DELETE FROM uploads");throw Error("cleanup failed");
+  }})).toThrow("cleanup failed");
+  f.reopen();expect(f.journal.head(f.scope,f.authorize)).toMatchObject({active:true,cursor:f.initial});
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM uploads").get()!.n).toBe(1);
+  f.journal.assertNotDeleted(f.scope,f.authorize);
+});
+it.each(["before","after"] as const)("persists all or none of a deletion when acknowledgment fails %s commit",fault=>{
+  const f=fixture();f.fault(fault);
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup(){f.db.exec("DELETE FROM uploads");}})).toThrow(fault==="before"?"power loss":"acknowledgment");
+  f.reopen();
+  if(fault==="before")expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
+  else expect(()=>f.journal.head(f.scope,f.authorize)).toThrow("permanently deleted");
+  expect(f.db.prepare("SELECT count(*) AS n FROM uploads").get()!.n).toBe(fault==="before"?1:0);
+});
+it("requires synchronous authorized deletion and rolls back revoked cleanup",()=>{
+  const f=fixture();
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:async()=>{}})).toThrow("synchronous");
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:()=>({then(){}})})).toThrow("synchronous");
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:()=>f.revoke()})).toThrow("denied");
+  expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
+  f.revoke();
+  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize})).toThrow("denied");
+  expect(()=>f.journal.assertNotDeleted(f.scope,f.authorize)).toThrow("denied");
+});
 it.each(["result","changeset","receipt","gap","tail","checkpoint","definition"])("detects persisted %s damage",kind=>{
   const f=fixture();let head=f.initial;
   for(let n=0;n<3;n++){const result=f.journal.commitOperation(f.prepare(head,`order-${n}`));if(result.kind==="committed")head=result.event.cursor;}

@@ -95,6 +95,10 @@ export type JournalExportRecord =
       definitionJson: string; capacityBytes: number; byteLength: number; sha256: string };
 export interface JournalExportCapture<T> { cursor: DatasetCursor; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }>; captured: T }
 export interface DatasetJournal {
+  /** Reject admission for a permanently deleted dataset, including after restart. */
+  assertNotDeleted(scope: DatasetScope, authorize: Authorize): void;
+  /** The cleanup callback runs inside the deletion transaction, before private data is removed. */
+  destroy(input: { expected: DatasetCursor; authorize: Authorize; cleanup?: () => unknown }): void;
   stageCheckpoint(input: { scope: DatasetScope; expectedBytes: number; sha256: string; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): CheckpointStage;
   appendCheckpointChunk(input: { stage: CheckpointStage; index: number; bytes: Uint8Array; authorize: Authorize }): void;
   sealCheckpoint(input: { stage: CheckpointStage; authorize: Authorize }): CheckpointStage;
@@ -183,6 +187,10 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
   const tx=<T>(run:()=>T):T=>callback(()=>transaction(()=>callback(run)));
   const checkpoints = createCheckpointStorage(db, transaction, maxCheckpoint);
   tx(()=>db.exec(`
+    CREATE TABLE IF NOT EXISTS dohc_dataset_deletions (
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,host_epoch TEXT NOT NULL,approved_revision_hash TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK(revision>=0),digest TEXT NOT NULL,deleted_at_ms INTEGER NOT NULL CHECK(deleted_at_ms>=0),
+      PRIMARY KEY(workspace_id,dataset_id)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_journals (
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,host_epoch TEXT NOT NULL,approved_revision_hash TEXT NOT NULL,
       source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),digest TEXT NOT NULL,
@@ -206,7 +214,12 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       cursor_json TEXT NOT NULL,previous_json TEXT,source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,
       capacity_bytes INTEGER NOT NULL,checkpoint_id TEXT NOT NULL,checkpoint_sha256 TEXT NOT NULL,
       PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`));
+  function notDeleted(key: DatasetScope): void {
+    if(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId))
+      throw new JournalError("inactive","Dataset was permanently deleted.");
+  }
   function storedHead(key: DatasetScope): StoredHead {
+    notDeleted(key);
     const row=db.prepare(`SELECT workspace_id,dataset_id,host_epoch,approved_revision_hash,source,schema_sql,definition_json,revision,digest,active,
       capacity_bytes,checkpoint_id,checkpoint_sha256,checkpoint_revision,checkpoint_digest,checkpoint_previous_json FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).get(key.workspaceId,key.datasetId);
     if(!row) throw new JournalError("conflict","Dataset is not initialized.");
@@ -290,7 +303,29 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     return {...event,kind:"event",byteLength:integer(Number(row.byte_length),0,maxEvent)};
   }
   return {
-    stageCheckpoint: checkpoints.stageCheckpoint,
+    assertNotDeleted(value,authorize) {
+      const key=scope(value);
+      callback(authorize);notDeleted(key);
+    },
+    destroy(input) {
+      const expected=cursor(input.expected),authorize=input.authorize,cleanup=input.cleanup;
+      synchronous(authorize);if(cleanup)synchronous(cleanup);
+      tx(()=>{
+        callback(authorize);const h=storedHead(expected);active(h);assertCursor(expected,h.cursor);
+        db.prepare("INSERT INTO dohc_dataset_deletions VALUES(?,?,?,?,?,?,?)")
+          .run(expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest,integer(now()));
+        db.prepare("UPDATE dohc_dataset_journals SET active=0 WHERE workspace_id=? AND dataset_id=?").run(expected.workspaceId,expected.datasetId);
+        if(cleanup)callback(cleanup);
+        callback(authorize);
+        checkpoints.destroy(expected);
+        for(const table of ["dohc_dataset_receipts","dohc_dataset_events","dohc_dataset_checkpoint_history","dohc_dataset_journals"])
+          db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(expected.workspaceId,expected.datasetId);
+      });
+    },
+    stageCheckpoint(input) {
+      const key=scope(input.scope),authorize=input.authorize;
+      return checkpoints.stageCheckpoint({...input,scope:key,authorize:()=>{callback(authorize);notDeleted(key);}});
+    },
     appendCheckpointChunk: checkpoints.appendCheckpointChunk,
     sealCheckpoint: checkpoints.sealCheckpoint,
     discardCheckpoint: checkpoints.discardCheckpoint,
@@ -343,7 +378,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       const authorize=input.authorize,account=input.account;
       synchronous(authorize);if(account)synchronous(account);
       return tx(()=>{
-        callback(authorize);
+        callback(authorize);notDeleted(key);
         const resolved=checkpoints.resolve(key,checkpoint),checkpointSha256=resolved.sha256;
         if(resolved.expectedBytes>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
         const initial=cursor({...key,hostEpoch,approvedRevisionHash,revision:0,digest:checkpointHash({...key,hostEpoch,approvedRevisionHash,revision:0},checkpointSha256,source,schemaSql,definitionJson,capacityBytes,null)});
@@ -355,7 +390,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         }
         if(resolved.stagedCreditBytes&&!account)invalid("Staged checkpoint activation requires quota accounting.");
         if(account)callback(()=>account(Object.freeze({bytes:capacityBytes+resolved.storageBytes+Buffer.byteLength(JSON.stringify([initial,source,schemaSql,definitionJson]))+512,capacityBytes,stagedCreditBytes:resolved.stagedCreditBytes})));
-        callback(authorize);
+        callback(authorize);notDeleted(key);
         const checkpointId=checkpoints.activate(key,checkpoint);
         db.prepare("INSERT INTO dohc_dataset_journals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
           .run(key.workspaceId,key.datasetId,hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,0,initial.digest,1,capacityBytes,checkpointId,checkpointSha256,0,initial.digest,null);
