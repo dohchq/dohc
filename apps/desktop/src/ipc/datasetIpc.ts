@@ -9,6 +9,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
+import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
@@ -72,7 +73,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
@@ -201,12 +202,14 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "form-created" as const, appRoot: input.appRoot, paths: Object.keys(files) };
       }
       if (input.action === "discard") { host.discard(input.preparationId); return { kind: "discarded" as const }; }
-      if (input.action === "prepareSchemaChange") {
+      if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
         const approved = await data.approvedArtifacts(input.datasetId);
         current();
         if (!approved.active) throw new Error("This Collection is unavailable. Reconnect to its host and try again.");
         if (approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("Collection rules changed. Refresh the Collection before changing fields.");
-        const generated = generateDatasetSchemaChange({ ...approved, change: input.change });
+        const generated = input.action === "prepareSchemaChange"
+          ? generateDatasetSchemaChange({ ...approved, change: input.change })
+          : generateDatasetRelationChoices({ ...approved, tableId: input.tableId, fieldId: input.fieldId, labelFieldId: input.labelFieldId });
         const expected = describeDatasetRevision({ definition: generated.definition, revision: input.revision + 1,
           schemaSql: generated.schemaSql, operationSource: generated.operationSource });
         await dependencies.createSources(operation.workspace, generated.files, operation.signal);
