@@ -25,7 +25,7 @@ export type CollectionResourceError = (fallback: string, error: unknown, retry: 
 export function downloadCollectionFile(expectedId: string, response: { file: AppBackendFile; bytesBase64: string }): void {
   const file = parseAppBackendFile(response.file);
   if (file.fileId !== expectedId || typeof response.bytesBase64 !== "string" || response.bytesBase64.length > Math.ceil(APP_BACKEND_UPLOAD_BYTES / 3) * 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(response.bytesBase64)) throw new Error("The collection returned an invalid file.");
+      response.bytesBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(response.bytesBase64)) throw new Error("The collection returned an invalid file.");
   const bytes = Uint8Array.from(atob(response.bytesBase64), char => char.charCodeAt(0));
   if (bytes.byteLength !== file.byteLength) throw new Error("The collection returned an incomplete file.");
   const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));

@@ -87,6 +87,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [undo, setUndo] = useState<Undo | null>(null);
   const [resourceBusy, setResourceBusy] = useState(false);
   const resourceLock = useRef(false);
+  const pendingResources = useRef(new Set<string>());
   const alive = useRef(true), sequence = useRef(0), active = useRef<AbortController | null>(null);
   const mutation = useRef<Mutation | null>(null), locked = useRef(false);
   const trigger = useRef<HTMLElement | null>(null);
@@ -202,7 +203,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {editor ? <form aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
       <div className="flex flex-wrap gap-3">{editorFields.map(field => {
         const input = { field, value: draft[field.fieldId] ?? null, disabled, onChange: (value: AppBackendJson) => { setDraft(current => ({ ...current, [field.fieldId]: value })); setInvalid(null); } };
-        return <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => { resourceLock.current = value; setResourceBusy(value); }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />}</div>;
+        return <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => {
+          if (value) pendingResources.current.add(field.fieldId); else pendingResources.current.delete(field.fieldId);
+          resourceLock.current = pendingResources.current.size > 0; setResourceBusy(resourceLock.current);
+        }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />}</div>;
       })}</div>
       {invalid ? <p role="alert" className="text-[12px] text-danger">{invalid}</p> : null}<div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}
