@@ -1,9 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
-import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput } from "./journal.js";
+import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput, CheckpointStage, CheckpointStageAllocation } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import { acquireSupervisorOwnership } from "./worker-ownership.js";
 
@@ -37,6 +37,8 @@ export interface DatasetMigration extends DatasetAccess {
   /** Current owner membership and immutable approval; the journal checks the old cursor. */
   authorize(): void;
   account?: TransitionCheckpointInput["account"];
+  /** Reserve and release checkpoint staging bytes in the authoritative host transaction. */
+  accountStage?: (allocation: Readonly<CheckpointStageAllocation>) => unknown;
 }
 export interface DatasetInvocationResult { result: JsonValue; revision: number; replayed: boolean }
 export interface DatasetSupervisorOptions {
@@ -113,11 +115,25 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try {
       const current = head(input);
       if (!current.active) throw new Error("Dataset authority was transferred.");
-      const checkpoint = options.journal.checkpoint({ scope: input.scope, authorize: () => standing(input) });
-      if (!sameAuthority(checkpoint.cursor, current.cursor) || digest(checkpoint.bytes) !== checkpoint.sha256) throw new Error("Dataset checkpoint is invalid.");
+      const checkpoint = options.journal.captureExport({ scope: input.scope, authorize: () => standing(input), capture: () => null }).checkpoint;
+      if (!sameAuthority(checkpoint.cursor, current.cursor)) throw new Error("Dataset checkpoint is invalid.");
       directory = await ownership.createDirectory();
       const checkpointPath = join(directory, "checkpoint.sqlite");
-      await writeFile(checkpointPath, checkpoint.bytes, { flag: "wx", mode: 0o600 });
+      const file=await open(checkpointPath,"wx",0o600),hash=createHash("sha256");
+      try {
+        for(let offset=0;offset<checkpoint.byteLength;) {
+          const bytes=options.journal.exportBlob({scope:input.scope,record:checkpoint,offset,length:Math.min(1024*1024,checkpoint.byteLength-offset),authorize:()=>standing(input)});
+          if(!bytes.byteLength||bytes.byteLength>Math.min(1024*1024,checkpoint.byteLength-offset))throw new Error("Dataset checkpoint range is invalid.");
+          hash.update(bytes);
+          for(let written=0;written<bytes.byteLength;) {
+            const result=await file.write(bytes,written,bytes.byteLength-written,offset+written);
+            if(!result.bytesWritten)throw new Error("Dataset checkpoint write made no progress.");
+            written+=result.bytesWritten;
+          }
+          offset+=bytes.byteLength;
+        }
+        if(hash.digest("hex")!==checkpoint.sha256)throw new Error("Dataset checkpoint is invalid.");
+      }finally{await file.close();}
       standing(input);
       const runtime = await openPersistentAppBackend({ directory, checkpointPath, schemaSql: current.schemaSql, tables: input.tables,
         ownership:{root:ownership.root,session:ownership.session},
@@ -207,9 +223,10 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
 
   async function migrate(lane: Lane, input: DatasetMigration): Promise<DatasetCursor> {
+    if(input.account&&!input.accountStage)throw new Error("Dataset migration requires checkpoint staging quota accounting.");
     const captured=head(input);
     if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed after the migration was approved. Preview it again.");
-    let worker:Worker|undefined;
+    let worker:Worker|undefined,stage:CheckpointStage|undefined;
     const abort=()=>{void worker?.runtime.abort("Dataset migration was cancelled.").catch(()=>{});};
     try {
       worker=await recover(lane,input);standing(input);
@@ -219,18 +236,42 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("Migration checkpoint differs from its source dataset.");
       const info=await lstat(path);
       if(!info.isFile()||info.size<100||info.size>captured.capacityBytes)throw new Error("Migration checkpoint exceeds its storage reservation.");
-      const checkpoint=await readFile(path);standing(input);
+      const file=await open(path,"r");
+      try {
+        const hash=createHash("sha256"),buffer=Buffer.alloc(1024*1024);
+        for(let offset=0;offset<info.size;) {
+          standing(input);const read=await file.read(buffer,0,Math.min(buffer.byteLength,info.size-offset),offset);
+          if(!read.bytesRead)throw new Error("Migration checkpoint is truncated.");
+          hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;
+        }
+        stage=options.journal.stageCheckpoint({scope:input.scope,expectedBytes:info.size,sha256:hash.digest("hex"),authorize:()=>standing(input),account:input.accountStage});
+        for(let index=0,offset=0;offset<info.size;index++) {
+          const length=Math.min(buffer.byteLength,info.size-offset);let readBytes=0;
+          while(readBytes<length) {
+            standing(input);const read=await file.read(buffer,readBytes,length-readBytes,offset+readBytes);
+            if(!read.bytesRead)throw new Error("Migration checkpoint is truncated.");readBytes+=read.bytesRead;
+          }
+          options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize:()=>standing(input)});offset+=length;
+        }
+        stage=options.journal.sealCheckpoint({stage,authorize:()=>standing(input)});
+      }finally{await file.close();}
+      standing(input);
       const current=head(input);
       if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("Dataset changed during migration. Preview it again.");
       const committed=options.journal.transitionCheckpoint({expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
         approvedRevisionHash:input.approvedRevisionHash,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,
-        checkpoint,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
+        checkpoint:stage,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
+      stage=undefined;
       await stopWorker(lane);
       const after=head(input);
       if(!after.active||!sameCursor(after.cursor,committed))throw new Error("Dataset approval changed after migration. Reload it.");
       return committed;
     } catch(error) {
       // An uncertain journal commit is resolved on the next recovery, never rerun here.
+      if(stage) {
+        // Revocation preserves the reservation for owner cleanup instead of bypassing authority.
+        try{options.journal.discardCheckpoint({stage,authorize:()=>standing(input),account:input.accountStage});}catch{}
+      }
       await stopWorker(lane);standing(input);throw error;
     } finally {input.signal?.removeEventListener("abort",abort);}
   }

@@ -78,6 +78,55 @@ it("serializes concurrent writes and reuses a worker without copying the databas
   expect((await f.invoke({}, { readOnly: true })).result).toHaveLength(12);
 });
 
+it("materializes large checkpoints through bounded verified ranges",async()=>{
+  const lengths:number[]=[];
+  const f=await fixture({schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1500) INSERT INTO items SELECT CAST(i AS TEXT),printf('%01024d',i) FROM n;",
+    source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT count(*) AS count FROM items')}}",
+    transform:journal=>({...journal,checkpoint(){throw Error("Unbounded checkpoint read");},exportBlob(input){const bytes=journal.exportBlob(input);lengths.push(bytes.byteLength);return bytes;}}),
+  });
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{count:1500}]);
+  expect(lengths.length).toBeGreaterThan(1);expect(Math.max(...lengths)).toBeLessThanOrEqual(1024*1024);
+});
+
+it("stages migration chunks with quota credit and leaves no unused stage",async()=>{
+  const chunks:number[]=[];let reserved=0,credited=0;
+  const f=await fixture({schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1500) INSERT INTO items SELECT CAST(i AS TEXT),printf('%01024d',i) FROM n;",
+    transform:journal=>({...journal,appendCheckpointChunk(input){chunks.push(input.bytes.byteLength);journal.appendCheckpointChunk(input);}}),
+  });
+  await f.supervisor.migrate(migration(f,{schemaSql,migrationSql:'SELECT 1;',source,
+    accountStage:allocation=>{reserved+=allocation.bytes;},account:allocation=>{credited=allocation.stagedCreditBytes;},
+  }));
+  expect(chunks.length).toBeGreaterThan(1);expect(Math.max(...chunks)).toBeLessThanOrEqual(1024*1024);
+  expect(reserved).toBeGreaterThan(1024*1024);expect(credited).toBe(reserved);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+});
+
+it("returns a staged reservation when migration activation fails",async()=>{
+  let reserved=0;
+  const f=await fixture();
+  await expect(f.supervisor.migrate(migration(f,{accountStage:allocation=>{reserved+=allocation.bytes;},account(){throw Error('quota full');}}))).rejects.toThrow('quota full');
+  expect(reserved).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+});
+
+it("rejects corrupted checkpoint ranges before starting a worker",async()=>{
+  let launches=0;
+  const f=await fixture({launch:launcher((_command,controls)=>{launches++;controls.deliver();}),
+    transform:journal=>({...journal,exportBlob(input){const bytes=journal.exportBlob(input);bytes[bytes.length-1]^=1;return bytes;}}),
+  });
+  await expect(f.invoke({}, {readOnly:true})).rejects.toThrow('checkpoint is invalid');expect(launches).toBe(0);
+});
+
+it("preserves a revoked migration stage for authorized owner cleanup",async()=>{
+  let reserved=0;
+  const f=await fixture({transform:journal=>({...journal,sealCheckpoint(input){const result=journal.sealCheckpoint(input);revoke();return result;}})});
+  const revoke=()=>f.db.exec('UPDATE grants SET allowed=0');
+  await expect(f.supervisor.migrate(migration(f,{accountStage:allocation=>{reserved+=allocation.bytes;},account(){}}))).rejects.toThrow('denied');
+  expect(reserved).toBeGreaterThan(0);f.db.exec('UPDATE grants SET allowed=1');
+  const stages=f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize});expect(stages).toHaveLength(1);
+  f.journal.discardCheckpoint({stage:stages[0],authorize:f.authorize,account:allocation=>{reserved+=allocation.bytes;}});expect(reserved).toBe(0);
+});
+
 it("journals only operations whose deferred foreign keys can commit",async()=>{
   const f=await fixture({tables:["items","parents"],
     schemaSql:"CREATE TABLE parents(id TEXT PRIMARY KEY NOT NULL); CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,parent_id TEXT NOT NULL REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);",
@@ -128,7 +177,7 @@ it("refuses migration after another queued write advances the approved preview",
 });
 it("keeps the previous schema and quota after catalog activation fails",async()=>{
   const f=await fixture();await f.invoke({id:"before",value:"saved"});
-  await expect(f.supervisor.migrate(migration(f,{account:()=>{f.db.exec("UPDATE files SET attached=1");throw Error("quota full");}}))).rejects.toThrow("quota full");
+  await expect(f.supervisor.migrate(migration(f,{accountStage:()=>{},account:()=>{f.db.exec("UPDATE files SET attached=1");throw Error("quota full");}}))).rejects.toThrow("quota full");
   expect(f.db.prepare("SELECT attached FROM files").get()!.attached).toBe(0);
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved"}]);
 });
