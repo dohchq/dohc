@@ -4174,6 +4174,7 @@ function registerIpcHandlers(): void {
     });
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
+    currentCredentialGeneration: () => credentialCacheGeneration,
     namedDataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await warmCredentialCache();
       const credentials = requireCredentials(cachedCredentials), credentialGeneration = credentialCacheGeneration;
