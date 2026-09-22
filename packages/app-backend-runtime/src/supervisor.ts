@@ -1,10 +1,11 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
+import { acquireSupervisorOwnership } from "./worker-ownership.js";
 
 interface DatasetAccess {
   scope: DatasetScope;
@@ -69,14 +70,13 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   await mkdir(options.directory, { recursive: true });
   const root = await realpath(options.directory);
+  const ownership=await acquireSupervisorOwnership(root);
   const lanes = new Map<string, Lane>();
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0;
   const now = options.nowMs ?? Date.now;
 
   async function removeDirectory(path: string): Promise<void> {
-    const rel = relative(root, path);
-    if (!rel || rel.startsWith("..") || rel.includes("/") || rel.includes("\\") || !rel.startsWith("worker-")) throw new Error("Invalid dataset worker cleanup path.");
-    await rm(path, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+    await ownership.removeDirectory(path);
   }
   async function stopWorker(lane: Lane): Promise<void> {
     if (lane.stopping) return lane.stopping;
@@ -115,11 +115,12 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if (!current.active) throw new Error("Dataset authority was transferred.");
       const checkpoint = options.journal.checkpoint({ scope: input.scope, authorize: () => standing(input) });
       if (!sameAuthority(checkpoint.cursor, current.cursor) || digest(checkpoint.bytes) !== checkpoint.sha256) throw new Error("Dataset checkpoint is invalid.");
-      directory = await mkdtemp(join(root, "worker-"));
+      directory = await ownership.createDirectory();
       const checkpointPath = join(directory, "checkpoint.sqlite");
       await writeFile(checkpointPath, checkpoint.bytes, { flag: "wx", mode: 0o600 });
       standing(input);
       const runtime = await openPersistentAppBackend({ directory, checkpointPath, schemaSql: current.schemaSql, tables: input.tables,
+        ownership:{root:ownership.root,session:ownership.session},
         scope: { workspaceId: current.cursor.workspaceId, datasetId: current.cursor.datasetId, hostEpoch: current.cursor.hostEpoch,
           approvedRevisionHash: current.cursor.approvedRevisionHash }, cursor: { revision: checkpoint.cursor.revision, digest: checkpoint.cursor.digest },
         databaseBytes: current.capacityBytes }, options.runtime);
@@ -327,8 +328,10 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         if (lane.active && lane.worker) void lane.worker.runtime.abort("Dataset host closed.").catch(() => {});
         for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("Dataset host closed.")); }
       }
-      await Promise.all([...lanes.values()].map(async lane => { await lane.done; await stopWorker(lane); }));
-      lanes.clear();
+      const results=await Promise.allSettled([...lanes.values()].map(async lane => { await lane.done; await stopWorker(lane); }));
+      lanes.clear();ownership.close();
+      const failed=results.find((result):result is PromiseRejectedResult=>result.status==="rejected");
+      if(failed)throw failed.reason;
     },
   };
 }
