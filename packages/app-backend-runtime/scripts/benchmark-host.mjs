@@ -9,6 +9,7 @@ import { build } from 'esbuild';
 import { createDatasetHost } from '../dist/dataset-host.mjs';
 import { createDatasetJournal } from '../dist/journal.mjs';
 import { createDatasetSupervisor } from '../dist/supervisor.mjs';
+import { isExpectedOverload, summarizeBenchmark } from './benchmark-summary.mjs';
 
 // Run after the package build. Evidence and databases remain in the supplied directory.
 const output = resolve(process.argv[2] ?? 'dataset-host-benchmark');
@@ -112,7 +113,9 @@ async function stage(label,count,call,concurrent=false,before) {
   const samples=[],failures=[];const start=performance.now();
   const one=async index=>{if(before)await before(index);const begin=performance.now();try{await call(index);samples.push(performance.now()-begin);}catch(error){failures.push({index,ms:performance.now()-begin,name:error.name,code:error.code,message:error.message});}};
   if(concurrent)await Promise.all(Array.from({length:count},(_,index)=>one(index)));else for(let i=0;i<count;i++)await one(i);
-  const record={label,attempts:count,elapsedMs:performance.now()-start,...statistics(samples),failures,samples,transactions:statistics(transactionSamples)};
+  const acceptedFailures=failures.filter(failure=>isExpectedOverload(label,failure));
+  const unexpectedFailures=failures.filter(failure=>!acceptedFailures.includes(failure));
+  const record={label,attempts:count,elapsedMs:performance.now()-start,...statistics(samples),failures,acceptedFailures,unexpectedFailures,samples,transactions:statistics(transactionSamples)};
   evidence.stages.push(record);console.log(JSON.stringify({...record,samples:undefined}));await persist();return record;
 }
 async function create(index,rows,width) {
@@ -174,4 +177,11 @@ try {
   evidence.soak={requestedSeconds:soakSeconds,actualSeconds:(performance.now()-soakStart)/1000,cycles:cycle};
   evidence.storage={accountedBytes:Number(db.prepare('SELECT bytes FROM accounting').get().bytes),authorityBytes:(await stat(join(output,'authority.sqlite'))).size,walBytes:await stat(join(output,'authority.sqlite-wal')).then(s=>s.size,()=>0),history:db.prepare('SELECT count(*) AS events,sum(storage_bytes) AS bytes FROM dohc_dataset_events').get()};
 } catch(error) { evidence.errors.push({name:error.name,message:error.message,stack:error.stack});process.exitCode=1;console.error(error); }
-finally {if(supervisor)await supervisor.close();db.close();evidence.completedAt=new Date().toISOString();evidence.remainingOwnedPids=[...alive];await persist();}
+finally {
+  try {if(supervisor)await supervisor.close();}catch(error){evidence.errors.push({name:error.name,message:error.message,phase:'close'});}
+  try {db.close();}catch(error){evidence.errors.push({name:error.name,message:error.message,phase:'database-close'});}
+  evidence.completedAt=new Date().toISOString();evidence.remainingOwnedPids=[...alive];
+  evidence.verdict=summarizeBenchmark(evidence);
+  if(!evidence.verdict.passed)process.exitCode=1;
+  await persist();await writeFile(join(output,'summary.json'),JSON.stringify(evidence.verdict,null,2));
+}
