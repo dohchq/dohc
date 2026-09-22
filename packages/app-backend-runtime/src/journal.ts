@@ -326,15 +326,18 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     checkpoints.removeMaterialization(key,String(row.checkpoint_id));
     db.prepare("DELETE FROM dohc_dataset_materializations WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
   }
+  function assertCommittedPrefix(expected:DatasetCursor,h:StoredHead):void {
+    if(!sameIdentity(expected,h.cursor)||expected.revision<h.checkpointCursor.revision||expected.revision>h.cursor.revision)
+      throw new JournalError("conflict","Materialization cursor changed authority or checkpoint.");
+    assertCursor(expected,expected.revision===h.checkpointCursor.revision?h.checkpointCursor:exportRecord(expected,expected.revision).cursor);
+  }
   function readMaterialization(key: DatasetScope, h: StoredHead): JournalMaterialization | null {
     const row=materializationRow(key);
     if(!row)return null;
     // Cache damage is recoverable. Authorization and authority checks happen outside this fallback.
     try {
       const current=cursor(JSON.parse(String(row.cursor_json))),checkpointId=text(String(row.checkpoint_id),256);
-      if(!sameIdentity(current,h.cursor)||current.revision<h.checkpointCursor.revision||current.revision>h.cursor.revision)return null;
-      const canonical=current.revision===h.checkpointCursor.revision?h.checkpointCursor:exportRecord(key,current.revision).cursor;
-      if(!sameCursor(current,canonical))return null;
+      assertCommittedPrefix(current,h);
       const manifest=checkpoints.info(key,checkpointId),byteLength=integer(Number(row.byte_length),0,h.capacityBytes),sha256=digest(String(row.sha256));
       if(manifest.expectedBytes!==byteLength||manifest.sha256!==sha256)return null;
       return {cursor:current,checkpointId,byteLength,sha256};
@@ -360,14 +363,18 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       if(checkpoint instanceof Uint8Array)invalid("Materialization requires a sealed checkpoint stage.");
       synchronous(authorize);if(account)synchronous(account);
       return tx(()=>{
-        callback(authorize);const h=storedHead(expected);active(h);assertCursor(expected,h.cursor);
+        callback(authorize);const h=storedHead(expected);active(h);assertCommittedPrefix(expected,h);
+        const previous=readMaterialization(expected,h);
+        if(previous&&previous.cursor.revision>expected.revision)throw new JournalError("conflict","A newer materialization is already installed.");
         const resolved=checkpoints.resolve(expected,checkpoint,true);
         if(resolved.expectedBytes>h.capacityBytes)invalid("Materialization exceeds reserved capacity.");
         const releasedBytes=materializationRelease(expected);
         const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify(expected))+512;
         if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Materialization replacement requires quota accounting.");
         if(account)callback(()=>account(Object.freeze({bytes,stagedCreditBytes:resolved.stagedCreditBytes,releasedBytes})));
-        callback(authorize);const current=storedHead(expected);active(current);assertCursor(expected,current.cursor);
+        callback(authorize);const current=storedHead(expected);active(current);assertCommittedPrefix(expected,current);
+        const newer=readMaterialization(expected,current);
+        if(newer&&newer.cursor.revision>expected.revision)throw new JournalError("conflict","A newer materialization is already installed.");
         removeMaterialization(expected);
         const checkpointId=checkpoints.activate(expected,checkpoint);
         db.prepare("INSERT INTO dohc_dataset_materializations VALUES(?,?,?,?,?,?,?)")

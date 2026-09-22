@@ -129,6 +129,7 @@ describe("persistent dataset worker",()=>{
       const prepared=await worker.prepare(operation(initial,{id:1,value:"saved"}));
       expect(prepared.result).toEqual([{id:1,value:"saved"}]);
       await expect(worker.prepare(operation())).rejects.toMatchObject({code:"pending_operation"});
+      await expect(worker.snapshot(join(root,"pending.sqlite"))).rejects.toMatchObject({code:"pending_operation"});
       const committed=event(prepared);
       await expect(worker.finalize({...committed,previousDigest:hash("wrong")})).rejects.toMatchObject({code:"stale_revision"});
       await expect(worker.finalize({...committed,changesetSha256:hash("wrong")})).rejects.toMatchObject({code:"invalid_input"});

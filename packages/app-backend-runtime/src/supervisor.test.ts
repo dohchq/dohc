@@ -371,6 +371,7 @@ it("recovers from a materialization cache and replays only its tail while retain
   const f=await fixture({launch,maintenanceStorage:storage,materializationEvents:2});
   for(let n=1;n<=3;n++)await f.invoke({id:String(n),value:"saved"},{idempotencyKey:String(n)});
   await f.invoke({}, {readOnly:true});
+  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0));
   const cached=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
   expect(cached.cursor.revision).toBe(2);
   expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(3);
@@ -387,7 +388,45 @@ it("recovers from a materialization cache and replays only its tail while retain
   expect(await reopened.invoke({...input,input:original,idempotencyKey:"1",payloadSha256:hash(JSON.stringify(original)),readOnly:false})).toMatchObject({revision:1,replayed:true});
 });
 
-it("acknowledges a committed write before cache maintenance and serializes later work",async()=>{
+it("serves committed reads and writes while a captured cache is being sealed",async()=>{
+  let entered!:()=>void,release!:()=>void,installed!:()=>void;
+  const sealing=new Promise<void>(resolve=>entered=resolve),resume=new Promise<void>(resolve=>release=resolve),cached=new Promise<void>(resolve=>installed=resolve);
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},transform:journal=>({...journal,
+    async sealMaterializationCheckpoint(input){entered();await resume;return journal.sealMaterializationCheckpoint(input);},
+    cacheMaterialization(input){const result=journal.cacheMaterialization(input);installed();return result;},
+  })});
+  await f.invoke({id:"one",value:"saved"});await sealing;
+  let result:unknown;
+  const foreground=(async()=>{await f.invoke({id:"two",value:"new"},{idempotencyKey:"second"});result=(await f.invoke({}, {readOnly:true})).result;})();
+  try{await vi.waitFor(()=>expect(result).toEqual([{id:"one",value:"saved"},{id:"two",value:"new"}]),{timeout:1000});}
+  finally{release();await foreground;}
+  await cached;
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(1);
+  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(2);
+  expect((await f.invoke({id:"one",value:"saved"})).replayed).toBe(true);
+});
+
+it.each(["close","retire"] as const)("drains captured maintenance on %s and refunds its independent files",async(kind)=>{
+  let entered!:()=>void,release!:()=>void,reserved=0;
+  const sealing=new Promise<void>(resolve=>entered=resolve),resume=new Promise<void>(resolve=>release=resolve);
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account({bytes}){reserved+=bytes;}},transform:journal=>({...journal,
+    async sealMaterializationCheckpoint(input){entered();await resume;return journal.sealMaterializationCheckpoint(input);},
+  })});
+  await f.invoke({id:"one",value:"saved"});await sealing;
+  expect(reserved).toBeGreaterThan(0);
+  expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toHaveLength(2);
+  let completed=false;
+  const ending=(kind==="close"?f.supervisor.close():f.supervisor.retire(f.scope)).then(()=>{completed=true;});
+  try{await new Promise<void>(resolve=>setImmediate(resolve));expect(completed).toBe(false);}
+  finally{release();await ending;}
+  expect(reserved).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toHaveLength(0);
+  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(1);
+});
+
+it("acknowledges a committed write before cache maintenance and serializes snapshot capture",async()=>{
   let release:(()=>void)|undefined;
   const storage={authorize(){},account(){}};
   const f=await fixture({materializationEvents:1,maintenanceStorage:storage,launch:launcher((command,controls)=>{
@@ -443,6 +482,7 @@ it.each(["chunk", "full hash", "missing marker", "wrong marker", "schema"])("fal
   const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}}});
   await f.invoke({id:"one",value:"saved"});
   await f.invoke({}, {readOnly:true});
+  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull());
   const cache=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
   await f.supervisor.close();
   const bytes=f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})!;
@@ -501,7 +541,7 @@ it("refuses cache installation after authority transfers during the snapshot",as
   const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("transferred");
   release!();await check;
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
-  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0));
   expect(errors.length).toBeGreaterThan(0);
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
 });
@@ -513,7 +553,8 @@ it("stages and restores a large materialization through bounded chunks",async()=
     schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1500) INSERT INTO items SELECT CAST(i AS TEXT),printf('%01024d',i) FROM n;",
     source:"globalThis.operations={run(ctx,input){if(input.id)ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,'saved']);return ctx.db.query('SELECT count(*) AS count FROM items')}}",
     transform:journal=>({...journal,appendCheckpointChunk(input){staged.push(input.bytes.byteLength);return journal.appendCheckpointChunk(input);}})});
-  await f.invoke({id:"new"});await f.invoke({}, {readOnly:true});await f.supervisor.close();
+  await f.invoke({id:"new"});await f.invoke({}, {readOnly:true});
+  await vi.waitFor(()=>expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).not.toBeNull());await f.supervisor.close();
   const journal={...f.journal,materializationBlob(input:Parameters<DatasetJournal["materializationBlob"]>[0]){const bytes=f.journal.materializationBlob(input);if(bytes)restored.push(bytes.byteLength);return bytes;}};
   const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,"workers")});cleanups.push(()=>reopened.close());
   expect((await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize})).result).toEqual([{count:1501}]);
