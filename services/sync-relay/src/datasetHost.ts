@@ -243,7 +243,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         return host.migrate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
-      exportRecovery: host.exportRecovery, importRecovery: host.importRecovery, recoveryImportStatus: host.recoveryStatus,
+      exportRecovery: host.exportRecovery, recoveryImportStatus: host.recoveryStatus,
+      async importRecovery(auth: AppBackendAuth, input: Parameters<typeof host.importRecovery>[1]) {
+        try {return await host.importRecovery(auth, input);}
+        finally {
+          if (!storage.unavailable.aborted) storage.tx(() => {
+            storage.db.prepare(`DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=? AND storage_bytes=0
+              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?)
+              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`)
+              .run(input.workspaceId, input.datasetId, input.workspaceId, input.datasetId, input.workspaceId, input.datasetId);
+          });
+        }
+      },
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },

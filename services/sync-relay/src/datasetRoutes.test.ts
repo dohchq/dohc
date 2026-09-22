@@ -318,6 +318,12 @@ it("imports a fenced dataset and its receipt over HTTP with a durable retry rece
     const request = () => new Request(url, {method: "POST", headers: {authorization: "Bearer owner", "content-type": "application/octet-stream",
       "x-dohc-dataset-manifest-sha256": manifestSha256, "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body});
     expect(await (await target.handler(new Request(url, {headers: {authorization: "Bearer owner"}}))).json()).toBeNull();
+    const before = Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
+    target.storage.tx(() => target.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='w'").run(target.storage.options.workspaceQuotaBytes - 50_000));
+    expect((await target.handler(request())).status).toBe(413);
+    expect(target.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_usage").get()!.n).toBe(0);
+    expect(target.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_import_files").get()!.n).toBe(0);
+    target.storage.tx(() => target.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='w'").run(before));
     const response = await target.handler(request()); expect(response.status).toBe(200);
     const receipt = await response.json(); expect(receipt).toMatchObject({transferId, manifestSha256, sourceCursor: cursor, targetCursor: {revision: cursor.revision + 1}});
     const usage = target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes;
