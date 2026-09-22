@@ -114,6 +114,37 @@ it("creates standalone data on the relay connection and recovers app writes afte
   expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_events").get()?.n).toBe(1);
 });
 
+it("charges only the current replay cache and retains retries across relay restart", async () => {
+  const f = await fixture(true); await f.activate();
+  const db = f.storage.db;
+  const usage = () => Number(db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
+    .get(scope.workspaceId, scope.datasetId)!.storage_bytes);
+  const baseline = usage(), workspaceBaseline = workspaceUsageBytes(f.storage, "w");
+  let previousCheckpoint: string | undefined;
+  for (let batch = 0; batch < 2; batch++) {
+    for (let index = batch * 128; index < (batch + 1) * 128; index++) {
+      await f.invoke(owner, id(5), {name: `Person ${index}`}, undefined, `cache-${index}`);
+    }
+    expect((await f.invoke(owner, id(6))).result).toHaveLength((batch + 1) * 128);
+    const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
+    expect(caches).toHaveLength(1);
+    expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);
+    expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+    const added = Number(db.prepare("SELECT sum(storage_bytes) bytes FROM dohc_dataset_events").get()!.bytes) + Number(caches[0].storage_bytes);
+    expect(usage()).toBe(baseline + added);
+    expect(workspaceUsageBytes(f.storage, "w")).toBe(workspaceBaseline + added);
+    if (previousCheckpoint) expect(db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=?").get(previousCheckpoint)).toBeUndefined();
+    previousCheckpoint = String(caches[0].checkpoint_id);
+  }
+  const beforeRestart = usage();
+  await f.reopen();
+  expect((await f.invoke(owner, id(6))).result).toHaveLength(256);
+  expect(await f.invoke(owner, id(5), {name: "Person 0"}, undefined, "cache-0"))
+    .toMatchObject({revision: 1, replayed: true, result: {accepted: true}});
+  expect(usage()).toBe(beforeRestart);
+  expect(db.prepare("SELECT checkpoint_id FROM dohc_dataset_materializations").get()!.checkpoint_id).toBe(previousCheckpoint);
+}, 20_000);
+
 it("keeps public submission separate from discovery and rejects forged cross-workspace bindings", async () => {
   const f = await fixture(); await f.activate();
   const publicationId = f.publish(), link = f.link("friend");

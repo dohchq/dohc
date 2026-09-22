@@ -164,7 +164,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("Invalid Collection worker directory.");
     let resources:Resources|undefined;
     supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers,
-      migrationStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
+      maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
     resources = options.resources?.({ db, transaction });
     createRecoveryInstaller({ db, transaction, journal });
     // The supervisor owns this workspace's fixed worker directory before any caller can stage work.

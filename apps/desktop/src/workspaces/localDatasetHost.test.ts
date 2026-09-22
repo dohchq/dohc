@@ -96,6 +96,38 @@ afterEach(async () => {
 });
 
 describe("local dataset owner adapter", () => {
+  it("accounts one replaceable replay cache and recovers records and retries after restart", async () => {
+    const first = await open(), approved = await activate(first.host);
+    const db = new DatabaseSync(join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+    const budget = () => Number(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes);
+    const baseline = budget();
+    let previousCheckpoint: string | undefined;
+    const initial = call(approved, id(6), "cache-0", {name: "Item 0"});
+    try {
+      for (let batch = 0; batch < 2; batch++) {
+        for (let index = batch * 128; index < (batch + 1) * 128; index++) {
+          await first.host.action(call(approved, id(6), `cache-${index}`, {name: `Item ${index}`}));
+        }
+        // The read follows the maintenance job in this dataset's queue.
+        expect((await first.host.query(call(approved, id(5)))).result).toHaveLength((batch + 1) * 128);
+        const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
+        expect(caches).toHaveLength(1);
+        expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);
+        expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+        const events = Number(db.prepare("SELECT sum(storage_bytes) bytes FROM dohc_dataset_events").get()!.bytes);
+        expect(budget()).toBe(baseline + events + Number(caches[0].storage_bytes));
+        expect(db.prepare("SELECT bytes FROM local_dataset_usage WHERE dataset_id=?").get(id(1))!.bytes).toBe(budget());
+        if (previousCheckpoint) expect(db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=?").get(previousCheckpoint)).toBeUndefined();
+        previousCheckpoint = String(caches[0].checkpoint_id);
+      }
+      await first.host.close();
+      const restarted = await open({workspaceRoot: first.workspaceRoot});
+      expect((await restarted.host.query(call(approved, id(5)))).result).toHaveLength(256);
+      expect(await restarted.host.action(initial)).toMatchObject({revision: 1, replayed: true, result: {name: "Item 0"}});
+      expect(db.prepare("SELECT checkpoint_id FROM dohc_dataset_materializations").get()!.checkpoint_id).toBe(previousCheckpoint);
+    } finally { db.close(); }
+  });
+
   it("refunds only the deleted Collection and preserves another Collection across restart", async () => {
     const first = await open(); await activate(first.host);
     const secondSources = sources();
