@@ -78,7 +78,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       const result = await bridge().dataset({ workspaceId, datasetId, action: "restore" });
       if (sequence !== request.current) return;
       if (result.kind !== "lifecycle-updated" || result.archived) throw Error("dohc could not confirm the restore. Refresh the Collection.");
-      onLifecycleChanged?.(); await refresh();
+      setRestoring(false); onLifecycleChanged?.(); await refresh();
     } catch (error) { if (sequence === request.current) onError("Could not restore this Collection.", error, () => { void restore(); }); }
     finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
   }
