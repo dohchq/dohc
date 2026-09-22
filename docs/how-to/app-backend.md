@@ -228,10 +228,11 @@ Take the before and after hashes from the selected history entry. Approve throug
 A named collaborator can reopen saved read pages on the same device without reaching the sharing server.
 While connected, open the Collection and each required view or page first.
 The device saves only successful results from permitted read actions, scoped to that account, workspace, and share.
+Saving happens in the background. Online responses do not confirm an offline save; a failed save leaves that page unavailable offline.
 This is a saved-page cache, not a complete dataset snapshot. Older pages can leave the cache as space fills.
 
 Offline reads require the same action, revision, filters, and page request that the device saved.
-A different search, page, or date range may require reconnecting. The interface identifies saved pages and their save time.
+A different search, page, or date range may require reconnecting. Offline views identify saved pages and their save time.
 Connect to change records, upload files, or open attachments. Attachment bytes are not saved for collaborators.
 
 Known revocation, changed permissions, account changes, or a narrower local share remove the affected saved pages.
