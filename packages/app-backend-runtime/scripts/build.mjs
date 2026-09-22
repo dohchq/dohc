@@ -8,6 +8,7 @@ await build({
     child: fileURLToPath(new URL("../src/child.ts", import.meta.url)),
     persistent: fileURLToPath(new URL("../src/persistent.ts", import.meta.url)),
     journal: fileURLToPath(new URL("../src/journal.ts", import.meta.url)),
+    recovery: fileURLToPath(new URL("../src/recovery.ts", import.meta.url)),
     supervisor: fileURLToPath(new URL("../src/supervisor.ts", import.meta.url)),
     "persistent-child": fileURLToPath(new URL("../src/persistent-child.ts", import.meta.url)),
   },
