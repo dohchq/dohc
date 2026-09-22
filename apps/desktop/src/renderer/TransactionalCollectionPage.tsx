@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
+import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
@@ -21,6 +22,8 @@ export interface TransactionalInvoke {
   idempotencyKey: string;
 }
 export interface TransactionalCollectionPageProps extends CollectionResources {
+  copy?: DatasetCopyStatus;
+  onRefresh?(): void;
   workspaceId: string;
   dataset: TransactionalDatasetDescription;
   tableId: string;
@@ -72,7 +75,7 @@ export function TransactionalCollectionPage(props: TransactionalCollectionPagePr
 function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const { workspaceId, dataset, tableId, invoke, onError, onNotice, confirmDelete, onCustomAction } = props;
   const table = dataset.tables.find(table => table.tableId === tableId);
-  const operations = dataset.operations.filter(operation => operation.tableId === tableId);
+  const operations = dataset.operations.filter(operation => operation.tableId === tableId && (!props.copy?.offline || operation.readOnly));
   const read = operations.find(operation => operation.kind === "read" && operation.readOnly);
   const create = operations.find(operation => operation.kind === "create" && !operation.readOnly);
   const remove = operations.find(operation => operation.kind === "delete" && !operation.readOnly);
@@ -127,6 +130,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
 
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
   async function execute(change: Mutation): Promise<void> {
+    if (props.copy?.offline) return;
     if (!alive.current || locked.current || (mutation.current && mutation.current !== change)) return;
     mutation.current = change; setPending(change); locked.current = true; setBusy(true);
     const abort = new AbortController(); active.current = abort;
@@ -188,13 +192,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       {props.onTransferCsv ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onTransferCsv}>Import or export CSV</SecondaryButton> : null}
       {props.onHistory ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onHistory}>History</SecondaryButton> : null}
       {props.onArchive ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onArchive}>Archive</SecondaryButton> : null}
-      {undo ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
+      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
       {canCreate ? <PrimaryButton disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
     </div></header>
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
       <input aria-label="Search collection" type="search" maxLength={200} className={inputClass} value={search} disabled={disabled || editor !== null} onChange={event => setSearch(event.target.value)} />
-      <SecondaryButton type="submit" disabled={disabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={disabled || editor !== null} onClick={() => void load(query)}>Refresh</SecondaryButton>
+      <SecondaryButton type="submit" disabled={disabled || editor !== null}>Search</SecondaryButton><SecondaryButton disabled={disabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}>Refresh</SecondaryButton>
+      {props.copy ? <span role="status" className="self-center text-[12px] text-muted">{props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     </form>
     {pending && !busy ? <div className="flex items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}

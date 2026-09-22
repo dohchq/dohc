@@ -12,6 +12,7 @@ import { credentialScopedOperation } from "./credentialScopedOperation";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 
 export interface OwnerDatasetData {
+  inspect?(datasetId: string, options?: { includeArchived?: boolean }): Promise<{ dataset: DatasetDescription; copy?: import("@dohc/cli/dataset").DatasetCopyStatus }>;
   history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
   list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
@@ -203,7 +204,7 @@ export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, 
 export interface DatasetAuthorityRoute {
   /** Returns the durable local transfer marker; absent means this dataset is local. */
   status(datasetId: string): Promise<import("./localDatasetTransfer").DatasetTransferStatus | null>;
-  remote(origin: string): Promise<OwnerDatasetData>;
+  remote(origin: string, datasetId: string): Promise<OwnerDatasetData>;
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
@@ -212,7 +213,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     const marker = await route.status(datasetId);
     if (!marker) return local;
     if (marker.state !== "imported" || !marker.receipt) throw new Error("This Collection is transferring. Wait for its shared authority to confirm, then retry.");
-    return route.remote(marker.targetOrigin);
+    return route.remote(marker.targetOrigin, datasetId);
   };
   return {
     async list(page) {
@@ -241,6 +242,10 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     restore: async value => { const authority = await target(value.datasetId); if (!authority.restore) throw new Error("Collection restore controls are unavailable."); return authority.restore(value); },
     pendingAttempts: async value => { const authority = await target(value.datasetId); if (!authority.pendingAttempts) throw new Error("Pending submission review is unavailable."); return authority.pendingAttempts(value); },
     reconcileAttempt: async value => { const authority = await target(value.datasetId); if (!authority.reconcileAttempt) throw new Error("Pending submission review is unavailable."); return authority.reconcileAttempt(value); },
+    inspect: async (datasetId, options) => {
+      const authority = await target(datasetId);
+      return "inspect" in authority && authority.inspect ? authority.inspect(datasetId, options) : { dataset: await authority.describe(datasetId, options) };
+    },
     history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
     invoke: async value => (await target(value.datasetId)).invoke(value),

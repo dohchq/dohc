@@ -31,6 +31,16 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("shows saved offline records without mutation controls and refreshes the copy", async () => {
+    const onRefresh = vi.fn();
+    setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000 }, onRefresh, confirmDelete: async () => true });
+    await screen.findByText("Alice");
+    expect(screen.getByText(/Offline copy · Read-only/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit Name for record 1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete record 1" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" })); expect(onRefresh).toHaveBeenCalledOnce();
+  });
   it("creates records with a staged attachment and locks saving until upload completes", async () => {
     const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
     const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();

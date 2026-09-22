@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import { bridge } from "./bridge";
 import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { CollectionActionDialog } from "./CollectionActionDialog";
@@ -29,6 +30,7 @@ export function ConnectedTransactionalCollection(props: ConnectedTransactionalCo
 }
 function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
+  const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
@@ -52,6 +54,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       setDataset(result.dataset);
+      setCopy(result.copy);
+      setRecordsVersion(value => value + 1);
     } catch (error) {
       if (sequence !== request.current) return;
       setDataset(null);
@@ -60,11 +64,13 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   }, [workspaceId, datasetId, onError, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
   const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
+    const sequence = request.current;
     signal.throwIfAborted();
     const result = await bridge().dataset({ ...input, action: "invoke" });
     signal.throwIfAborted();
     if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
     if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
+    if (sequence === request.current) setCopy(result.copy);
     return result;
   };
   if (!dataset) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
@@ -84,13 +90,15 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   }
   if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{owner && <SecondaryButton disabled={restoring} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}</div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
-    onArchive={owner ? () => setArchiving(true) : undefined}
-    onCreateForm={owner ? () => setCreatingForm(true) : undefined}
-    onTransferCsv={owner ? () => setTransferringCsv(true) : undefined}
-    onHistory={owner ? () => setViewingHistory(true) : undefined}
-    onReviewSchema={owner ? () => setEditingFields(true) : undefined}
-    onManageAccess={owner ? () => setManagingAccess(true) : undefined}
-    onExportRecovery={owner ? () => setExportingRecovery(true) : undefined}
+    copy={copy}
+    onRefresh={() => { void refresh(); }}
+    onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}
+    onCreateForm={owner && !copy?.offline ? () => setCreatingForm(true) : undefined}
+    onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
+    onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
+    onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+    onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
+    onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
     onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {

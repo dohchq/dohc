@@ -88,11 +88,13 @@ export const DatasetMigrationPreparation = z.object({ preparationId: identity, p
   sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
   migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
+export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative() }).strict();
+export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;
 export const DatasetInvocationResult = z.object({
   result: z.unknown().transform((value, context) => {
     try { return parseAppBackendJson(value, 256 * 1024); }
     catch { context.addIssue({ code: "custom", message: "Invalid Collection result." }); return z.NEVER; }
-  }), revision: z.number().int().nonnegative(), replayed: z.boolean(),
+  }), revision: z.number().int().nonnegative(), replayed: z.boolean(), copy: DatasetCopyStatus.optional(),
 }).strict();
 export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
 export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
@@ -111,7 +113,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("attempt-reconciled"), cleared: z.literal(true) }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
-  z.object({ kind: z.literal("description"), dataset: description }).strict(),
+  z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
   z.object({ kind: z.literal("exported"), savedPath: z.string().min(1).max(4096).nullable() }).strict(),

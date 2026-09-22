@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 import type { DatasetCursor, DatasetScope, JournalExportRecord } from "./journal.js";
 import { equalRecoveryCursor, parseRecoveryCursor, parseRecoveryJournalRecord } from "./recovery-record.js";
+export { equalRecoveryCursor, parseRecoveryCursor, parseRecoveryJournalRecord } from "./recovery-record.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import type { JsonValue } from "./protocol.js";
 import type { DatasetReplicaCapture, DatasetReplicaPage } from "./replica-host.js";

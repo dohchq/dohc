@@ -73,7 +73,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
       }
       if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current(); return { kind: "list" as const, ...result }; }
-      if (input.action === "describe") { const dataset = await data.describe(input.datasetId, { includeArchived: input.includeArchived }); current(); return { kind: "description" as const, dataset }; }
+      if (input.action === "describe") {
+        const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };
+        current(); return { kind: "description" as const, ...result };
+      }
       if (input.action === "upload") {
         const description = await data.describe(input.datasetId);
         current();
