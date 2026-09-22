@@ -30,8 +30,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
   /** May resolve local approved rules before an explicit authority transfer at publication. */
   resolveDatasetRevision?(workspace: Workspace, binding: AppDatasetBinding, signal: AbortSignal): Promise<DatasetRevision>;
-  activateBackend?(workspace: Workspace, input: { publicationId: string; authorityRevision: number; candidate: AppPublicationCandidate; initialize: boolean },
-    request: (action: "activate" | "restore" | "describe", body: unknown) => Promise<unknown>, signal: AbortSignal): Promise<void>;
+
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
@@ -151,22 +150,6 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
               if (error instanceof Error && error.name === "AbortError") throw error;
               throw new Error(`The app is published. ${error instanceof Error ? error.message : "Collection access could not be confirmed."} Reload the publications before trying again.`);
             }
-          }
-          if (capability.kind === "app-backend") {
-            if (dependencies.activateBackend) {
-              await dependencies.activateBackend(operation.workspace, { publicationId: published.publicationId,
-                authorityRevision: published.authorityRevision, candidate, initialize: input.initialize !== false },
-                (action, body) => session.run(() => dependencies.relayJson(remote.credentials,
-                  `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/${action}`,
-                  { method: "POST", signal: operation.signal, body: JSON.stringify(body) })), operation.signal);
-              session.assertCurrent(); operation.signal.throwIfAborted();
-              return published;
-            }
-            if (input.initialize === false) return published;
-            await session.run(() => dependencies.relayJson(remote.credentials,
-              `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${published.publicationId}/backend/activate`,
-              { method: "POST", signal: operation.signal, body: JSON.stringify({ authorityRevision: published.authorityRevision }) }));
-            return published;
           }
           try {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,

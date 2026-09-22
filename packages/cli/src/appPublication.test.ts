@@ -15,7 +15,7 @@ describe("owner publication review contract", () => {
     expect(OwnerAppPublicationResult.parse({ ...prepared, capabilities: [datasetCapability] })).toMatchObject({ capabilities: [datasetCapability] });
     const publication = { publicationId: "b".repeat(64), authorityRevision: 1, appRoot: "app", sourceRevision: "c".repeat(64), active: true, datasetCapability };
     expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [publication] })).toEqual({ kind: "localListed", publications: [publication] });
-    const shared = { ...publication, shareId: "share", grantId: "grant", linkCurrent: true, manifestUnavailable: false, collectionCapability: null, backendCapability: null };
+    const shared = { ...publication, shareId: "share", grantId: "grant", linkCurrent: true, manifestUnavailable: false, collectionCapability: null };
     expect(OwnerAppPublicationResult.parse({ kind: "listed", publications: [shared], nextCursor: null })).toEqual({ kind: "listed", publications: [shared], nextCursor: null });
     expect(OwnerAppPublicationResult.safeParse({ ...prepared, capabilities: [{ ...datasetCapability, source: "replace rules" }] }).success).toBe(false);
   });
@@ -32,7 +32,7 @@ describe("owner publication review contract", () => {
     const list = (publication: unknown) => ({kind:"listed",publications:[publication],nextCursor:null});
     expect(OwnerAppPublicationResult.safeParse(list(row)).success).toBe(false);
     for (const collectionCapability of [null, capability, "unavailable"]) {
-      const value = list({...row,collectionCapability,datasetCapability:null,backendCapability:null});
+      const value = list({...row,collectionCapability,datasetCapability:null});
       expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
     }
   });
