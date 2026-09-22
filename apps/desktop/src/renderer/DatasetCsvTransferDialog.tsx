@@ -28,6 +28,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const [csv, setCsv] = useState<CsvTable | null>(null), [mapping, setMapping] = useState<Array<string | null>>([]), [draft, setDraft] = useState("");
   const [plan, setPlan] = useState<CsvImportPlan | null>(null), [busy, setBusy] = useState(false), [invalid, setInvalid] = useState<string | null>(null), [raw, setRaw] = useState(false);
   const [exported, setExported] = useState<number | null>(null);
+  const importPlan = useRef<CsvImportPlan | null>(null);
   const alive = useRef(true), locked = useRef(false), active = useRef<AbortController | null>(null);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; active.current?.abort(); }; }, []);
   const create = creates.find(operation => operation.operationId === createId), read = reads.find(operation => operation.operationId === readId);
@@ -42,7 +43,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const baseName = (table?.name ?? "Collection").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").slice(0, 100) || "Collection";
   function parse(text: string) {
     try {
-      const parsed = parseDatasetCsv(text); setCsv(parsed); setInvalid(null); setPlan(null);
+      const parsed = parseDatasetCsv(text); setCsv(parsed); setInvalid(null); setPlan(null); importPlan.current = null;
       const used = new Set<string>();
       setMapping(parsed.headers.map(header => { const field = table?.fields.find(field => create?.fieldIds.includes(field.fieldId) && (field.fieldId === header || field.name === header) && !used.has(field.fieldId)); if (field) used.add(field.fieldId); return field?.fieldId ?? null; }));
     } catch (error) { setInvalid(error instanceof Error ? error.message : "Check the CSV file."); setCsv(null); }
@@ -57,11 +58,12 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   const saveReport = (captured: CsvImportPlan, signal: AbortSignal) => props.onSave({ name: `${baseName}-import.json`, content: JSON.stringify(captured, null, 2), contentType: "application/json" }, signal);
   async function importRows(signal: AbortSignal) {
     if (!create || !preview.value && !plan) return;
-    const captured = plan ?? createCsvImportPlan(scope(create.operationId), preview.value!);
-    if (!plan) { await saveReport(captured, signal); signal.throwIfAborted(); if (!alive.current) return; setPlan(captured); }
-    const result = await runCsvImport(captured, props.invoke, signal, checkpoint => { if (alive.current && !signal.aborted) setPlan(checkpoint); });
+    const captured = importPlan.current ?? plan ?? createCsvImportPlan(scope(create.operationId), preview.value!);
+    if (!importPlan.current && !plan) { await saveReport(captured, signal); signal.throwIfAborted(); if (!alive.current) return; setPlan(captured); }
+    importPlan.current = captured;
+    const result = await runCsvImport(captured, props.invoke, signal, checkpoint => { if (alive.current && !signal.aborted) { importPlan.current = checkpoint; setPlan(checkpoint); } });
     if (!alive.current || signal.aborted) return;
-    setPlan(result); props.onImported?.();
+    importPlan.current = result; setPlan(result); props.onImported?.();
   }
   const pending = plan?.rows.some(row => row.outcome === "pending" || row.outcome === "uncertain");
   return <Overlay onClose={busy ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Import or export Collection", className: "dohc-elevated dohc-pop-in flex max-h-[90vh] w-[min(760px,92vw)] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink" }}>
