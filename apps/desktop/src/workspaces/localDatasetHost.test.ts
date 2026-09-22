@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -148,7 +149,7 @@ describe("local dataset owner adapter", () => {
       } finally { await staged.dispose(); }
     } finally { await archive.dispose(); }
   });
-  it("moves actual local records and attachments to the relay and recovers a lost response after both hosts restart", async () => {
+  it("restores a backup to local authority then transfers records and attachments to the relay through response loss", async () => {
     const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
     const compileOperations = async (source:string,path:string) => {
       const bytes=Buffer.from(source),built=await compileClosedApp({entryPath:path,inputs:[{path,bytes,sha256:digest(bytes)}],packageMap:{},bounds:{maxInputFiles:1,maxInputBytes:256*1024,maxOutputBytes:256*1024}});
@@ -169,10 +170,22 @@ describe("local dataset owner adapter", () => {
     };
     const target=()=>createRemoteDatasetTransferTarget({workspaceId:"w",datasetId:id(1),origin:"https://relay",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayStream:transport});
     try{
-      const local=await open(),approved=await activate(local.host);
+      let local=await open(); const approved=await activate(local.host);
       const bytesBase64=Buffer.from("%PDF-transfer-actual-file").toString("base64"),upload={datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"receipt",name:"receipt.pdf",contentType:"application/pdf",bytesBase64};
       const file=await local.host.upload(upload),mutation=call(approved,id(6),"before-transfer",{name:"First",fileId:file.file.fileId});
       await local.host.action(mutation);
+      await local.host.close();
+      const oldStore=new DatabaseSync(join(local.workspaceRoot,".dohc","datasets","state.sqlite"));
+      oldStore.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("w",id(1),"old-helper",JSON.stringify({revision:1,revisionSha256:approved.revision.revisionSha256,operationIds:[id(5)],discover:true}),"old-grant-token");
+      oldStore.close();
+      const oldHost=(await open({workspaceRoot:local.workspaceRoot})).host;
+      const archive=await oldHost.prepareExport(id(1)),sourcePath=join(local.workspaceRoot,"before-recovery.dohc-recovery");
+      await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),maxBytes:archive.maxBytes,signal:controller.signal,authorize(){}});await archive.dispose();await oldHost.close();
+      local=await open();
+      const recovery=await local.host.prepareRecovery({sourcePath});
+      expect(local.host.list().datasets).toEqual([]);
+      await local.host.claimRecovery({...recovery,oldHostStopped:true});
+      expect((await local.host.invoke(mutation)).replayed).toBe(true);
       await expect(local.host.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()})).rejects.toThrow("lost import response");
       expect(local.host.transferStatus(id(1))?.state).toBe("ready");
       await expect(local.host.action(call(approved,id(6),"forbidden",{name:"forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
@@ -182,6 +195,7 @@ describe("local dataset owner adapter", () => {
       const completed=await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay",target:target()});
       expect(completed.state).toBe("imported");expect(posted).toBe(1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
+      expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
       const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
       expect((await routed.invoke(call(approved,id(5)))).result).toMatchObject([{name:"First"}]);
       expect(await routed.file({...upload,workspaceId:"w",action:"file",fileId:file.file.fileId})).toEqual({file:file.file,bytesBase64});
