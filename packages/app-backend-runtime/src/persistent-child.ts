@@ -67,7 +67,7 @@ function initialize(input:OpenRequest):DatasetCursor {
     copyFileSync(config.checkpointPath,path,fsConstants.COPYFILE_EXCL);
   } else { closeSync(openSync(path,"wx",0o600)); }
   db=new DatabaseSync(path,databaseOptions);
-  db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0;");
+  db.exec("PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA hard_heap_limit=67108864; PRAGMA busy_timeout=0; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
   const pageSize=Number(db.prepare("PRAGMA page_size").get()!.page_size);
   db.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
   if (!config.checkpointPath) {
@@ -85,7 +85,6 @@ function initialize(input:OpenRequest):DatasetCursor {
     db.exec(markerSchema);
     db.prepare(`INSERT INTO ${marker} VALUES(1,?,?,?)`).run(JSON.stringify(config.scope),config.cursor.revision,config.cursor.digest);
   }
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
   cursor={...config.cursor};
   return cursor;
 }
@@ -194,9 +193,10 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     }
   }
   noLinks(command.path,true);
-  // SQLite refuses a nonempty destination; reserve exclusively so no existing file is touched.
-  closeSync(openSync(command.path,"wx",0o600));
-  db.prepare("VACUUM INTO ?").run(command.path);
+  // This connection and its IPC lane are idle and exclusive until the copy completes.
+  const checkpoint=db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").all()[0]!;
+  if(checkpoint.busy!==0||checkpoint.log!==0||checkpoint.checkpointed!==0)reject("invalid_checkpoint","The worker WAL could not be fully checkpointed.");
+  copyFileSync(join(config.directory,"app.sqlite"),command.path,fsConstants.COPYFILE_EXCL);
   return {path:command.path,cursor:{...cursor}};
 }
 

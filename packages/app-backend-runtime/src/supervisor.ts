@@ -118,6 +118,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   const lanes = new Map<string, Lane>();
   const blockedMaintenance = new Set<string>();
   const maintenanceWarnings = new Set<string>();
+  const maintenance = new Map<string,{cancel:AbortController;done:Promise<void>}>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
   let preparingCandidates = 0;
@@ -132,29 +133,38 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
   async function maintainMaterialization(lane:Lane):Promise<void> {
     const storage=options.maintenanceStorage,worker=lane.worker;
-    if(!storage||!worker||closed||blockedMaintenance.has(JSON.stringify(lane.scope)))return;
+    const key=JSON.stringify(lane.scope);
+    if(!storage||!worker||closed||maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key))return;
+    const expected={...worker.cursor},cancel=new AbortController();
     const reservations:CheckpointStage[]=[];
-    let path:string|undefined;
+    let path:string|undefined,directory:string|undefined,captured=false;
+    let releaseCapture!:()=>void;
+    const captureReady=new Promise<void>(resolve=>releaseCapture=resolve);
     const authorize=()=>{
       if(closed)throw new Error("Dataset host is closed.");
+      cancel.signal.throwIfAborted();lane.lifecycle.signal.throwIfAborted();
       storage.authorize();
     };
+    const done=Promise.resolve().then(async()=>{
     try {
       authorize();
       const current=options.journal.head(lane.scope,storage.authorize);
-      if(!current.active||!sameCursor(current.cursor,worker.cursor))throw new Error("Dataset changed during materialization maintenance.");
+      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("Dataset changed during materialization maintenance.");
       const previous=options.journal.materialization({scope:lane.scope,authorize});
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
-      if(worker.cursor.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0))return;
-      lane.nextMaterializationRevision=worker.cursor.revision+materializationEvents;
+      if(expected.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0))return;
+      lane.nextMaterializationRevision=expected.revision+materializationEvents;
       // Account the physical snapshot before SQLite creates it, including its overlap with chunk staging.
       reservations.push(options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:current.capacityBytes,
         sha256:digest(`materialization-reservation-${randomUUID()}`),authorize,account:storage.account}));
-      path=join(worker.directory,`materialization-${randomUUID()}.sqlite`);
+      directory=await ownership.createDirectory();authorize();
+      path=join(directory,"materialization.sqlite");
       const snapshot=await worker.runtime.snapshot(path);
-      if(snapshot.path!==path||snapshot.cursor.revision!==worker.cursor.revision||snapshot.cursor.digest!==worker.cursor.digest)throw new Error("Materialization cursor differs from its committed worker.");
+      if(snapshot.path!==path||snapshot.cursor.revision!==expected.revision||snapshot.cursor.digest!==expected.digest)throw new Error("Materialization cursor differs from its committed worker.");
       const info=await lstat(path);
       if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>current.capacityBytes)throw new Error("Materialization exceeds its reserved capacity.");
+      // The immutable snapshot owns its cursor and directory. Later operations can use the worker.
+      captured=true;releaseCapture();
       const file=await open(path,"r"),buffer=Buffer.alloc(1024*1024),hash=createHash("sha256");
       try {
         for(let offset=0;offset<info.size;) {
@@ -173,25 +183,33 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize});offset+=length;
         }
         stage=await options.journal.sealMaterializationCheckpoint({stage,authorize});
-        options.journal.cacheMaterialization({expected:worker.cursor,checkpoint:stage,authorize,account:allocation=>storage.account({
+        options.journal.cacheMaterialization({expected,checkpoint:stage,authorize,account:allocation=>storage.account({
           scope:lane.scope,stage,bytes:allocation.bytes-allocation.stagedCreditBytes-allocation.releasedBytes})});
         maintenanceWarnings.delete(JSON.stringify(lane.scope));
         reservations.pop();
       } finally {await file.close();}
     } catch(error) {
-      reportMaintenanceError(lane.scope,error);
-      if(path)try{await stopWorker(lane);}catch(stopError){reportMaintenanceError(lane.scope,stopError);}
+      if(!cancel.signal.aborted&&!closed)reportMaintenanceError(lane.scope,error);
+      if(path&&!captured)try{await stopWorker(lane);}catch(stopError){reportMaintenanceError(lane.scope,stopError);}
     }
     finally {
       let removed=true;
-      if(path)try{await rm(path,{force:true});}catch(error){removed=false;blockedMaintenance.add(JSON.stringify(lane.scope));reportMaintenanceError(lane.scope,error);}
+      if(directory)try{await removeDirectory(directory);}catch(error){removed=false;blockedMaintenance.add(key);reportMaintenanceError(lane.scope,error);}
       // If a file cannot be removed, retain its reservation until exclusive startup reclaims both.
       for(let index=reservations.length-1;index>=0;index--) {
         if(index===0&&!removed)continue;
         try{options.journal.discardCheckpoint({stage:reservations[index]!,...storage});}
         catch(error){blockedMaintenance.add(JSON.stringify(lane.scope));reportMaintenanceError(lane.scope,error);}
       }
+      maintenance.delete(key);releaseCapture();
     }
+    });
+    maintenance.set(key,{cancel,done});
+    await captureReady;
+  }
+  async function cancelMaintenance(scope:DatasetScope):Promise<void> {
+    const task=maintenance.get(JSON.stringify(scope));
+    if(task){task.cancel.abort(new Error("Dataset maintenance was cancelled."));await task.done;}
   }
 
   async function dropCandidate(candidate: Candidate) {
@@ -481,6 +499,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
 
   async function migrate(lane: Lane, input: DatasetMigration, candidatePath?:string, checkpointSha256?:string): Promise<DatasetCursor> {
+    await cancelMaintenance(lane.scope);
     if(input.account&&!input.accountStage)throw new Error("Dataset migration requires checkpoint staging quota accounting.");
     const captured=head(input);
     if(!captured.active||!sameCursor(captured.cursor,input.expected))throw new Error("Dataset changed after the migration was approved. Preview it again.");
@@ -592,7 +611,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         const result = await job.work();
         if(options.maintenanceStorage&&lane.worker&&!blockedMaintenance.has(JSON.stringify(lane.scope))&&lane.worker.cursor.revision>=(lane.nextMaterializationRevision??materializationEvents)) {
           job.resolve(result);
-          // Respond first; keep this lane serialized while a bounded cache is prepared.
+          // Capture an immutable cache, then let foreground work continue during its staging.
           lane.idleWork=(async()=>{
             try {await new Promise<void>(resolve=>setImmediate(resolve));await maintainMaterialization(lane);}
             finally {lane.idleWork=undefined;}
@@ -668,8 +687,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     /** Called after the authority has durably deleted the dataset. */
     async retire(raw: DatasetScope): Promise<void> {
       const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
+      if(lane)lane.lifecycle.abort(new Error("Dataset was permanently deleted."));
+      await cancelMaintenance(scope);
       if (!lane) {await retireMigrationCandidates(scope);return;}
-      lane.lifecycle.abort(new Error("Dataset was permanently deleted."));
       if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
       for (const job of lane.queue.splice(0)) {
         queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout);
@@ -691,6 +711,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         for (const job of lane.queue.splice(0)) { queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout); job.signal?.removeEventListener("abort", job.abort); job.reject(new Error("Dataset host closed.")); }
       }
       const results=await Promise.allSettled([...lanes.values()].map(async lane => { await lane.done; await stopWorker(lane); }));
+      for(const task of maintenance.values())task.cancel.abort(new Error("Dataset host closed."));
+      await Promise.all([...maintenance.values()].map(task=>task.done));
       const candidateResults=await Promise.allSettled([...candidates.values()].map(dropCandidate));
       const cleanupResults=await Promise.allSettled([...candidateCleanup]);
       lanes.clear();ownership.close();

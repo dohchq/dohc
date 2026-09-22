@@ -100,13 +100,24 @@ it.each(["before","after"] as const)("keeps cache install and accounting atomic 
     f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)});
   } else expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow("already active");
 });
-it("rejects stale or revoked cache installation without consuming its stage",()=>{
+it("rejects forged or revoked cache installation without consuming its stage",()=>{
   const f=fixture(),checkpoint=materializationStage(f),account=cacheAccount(f);
   const write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
-  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account})).toThrow("cursor changed");
+  expect(()=>f.journal.cacheMaterialization({expected:{...f.initial,digest:digest('forged')},checkpoint,authorize:f.authorize,account})).toThrow("cursor changed");
   expect(()=>f.journal.cacheMaterialization({expected:write.event.cursor,checkpoint,authorize:f.authorize,account:()=>f.revoke()})).toThrow("denied");
   expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
   expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(1);
+});
+it("installs a committed prefix and refuses older caches or different authority",()=>{
+  const f=fixture(),account=cacheAccount(f),firstStage=materializationStage(f);
+  const write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
+  expect(f.journal.cacheMaterialization({expected:f.initial,checkpoint:firstStage,authorize:f.authorize,account}).cursor).toEqual(f.initial);
+  const newerStage=materializationStage(f);f.journal.cacheMaterialization({expected:write.event.cursor,checkpoint:newerStage,authorize:f.authorize,account});
+  const oldStage=materializationStage(f);
+  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint:oldStage,authorize:f.authorize,account})).toThrow("newer materialization");
+  for(const expected of [{...write.event.cursor,hostEpoch:'different'},{...write.event.cursor,approvedRevisionHash:digest('changed-schema')}])
+    expect(()=>f.journal.cacheMaterialization({expected,checkpoint:oldStage,authorize:f.authorize,account})).toThrow("authority or checkpoint");
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor).toEqual(write.event.cursor);
 });
 it("rolls back replacement and quota changes if accounting refuses the cache",()=>{
   const f=fixture(),account=cacheAccount(f),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
