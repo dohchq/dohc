@@ -61,10 +61,17 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       });
       const describe = (definitionJson: string): DatasetDescription => {
         const approved = parseDatasetRevision(JSON.parse(definitionJson));
-        return { datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
+        // Match the authority's description projection: schema-only fields are not Collection controls.
+        const operations = approved.definition.operations;
+        const fields = new Set(operations.flatMap(operation => operation.fieldIds));
+        const tables = new Set(operations.map(operation => operation.tableId));
+        return parseDatasetDescription({ datasetId: approved.datasetId, name: approved.definition.name, revision: approved.revision,
           revisionSha256: approved.revisionSha256,
-          tables: approved.definition.tables.map(table => ({ tableId: table.tableId, name: table.name,
-            fields: table.fields.map(({ sqlColumn: _column, ...field }) => field) })), operations: approved.definition.operations };
+          tables: approved.definition.tables.filter(table => tables.has(table.tableId)).map(table => ({ tableId: table.tableId, name: table.name,
+            fields: table.fields.filter(field => fields.has(field.fieldId)).map(({ sqlColumn: _column, ...field }) => {
+              if (field.relation && !fields.has(field.relation.fieldId)) delete field.relation;
+              return field;
+            }) })), operations });
       };
       const capture = async () => {
         authorize(); let offline = false; const priorArchived = archived;

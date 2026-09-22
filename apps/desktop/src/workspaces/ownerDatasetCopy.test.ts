@@ -9,6 +9,7 @@ import type { DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
 import type { OwnerDatasetData } from "./remoteDataset";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
+import { DatasetResult } from "@dohc/cli/dataset";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 
 it("persists real owner reads across restart, catches up, and refuses offline writes and revoked access", async () => {
@@ -17,7 +18,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   const actor = {kind:"named" as const,workspaceId:"w",userId:"owner"}, scope = {workspaceId:"w",datasetId:id(1)};
   const definition: DatasetDefinition = {formatVersion:1,datasetId:id(1),name:"Entries",schemaPath:"schema.sql",operationsPath:"actions.js",
     tables:[{tableId:id(2),name:"Entries",sqlName:"entries",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true},{fieldId:id(4),name:"Name",sqlColumn:"name",type:"text",required:true,unique:false}]}],
-    operations:[{operationId:id(5),name:"add",label:"Add",kind:"create",tableId:id(2),access:"owner",readOnly:false,fieldIds:[id(4)]},{operationId:id(6),name:"read",label:"Read",kind:"read",tableId:id(2),access:"owner",readOnly:true,fieldIds:[id(3),id(4)]}]};
+    operations:[{operationId:id(5),name:"add",label:"Add",kind:"create",tableId:id(2),access:"owner",readOnly:false,fieldIds:[id(4)]},{operationId:id(6),name:"read",label:"Read",kind:"read",tableId:id(2),access:"owner",readOnly:true,fieldIds:[id(4)]}]};
   const schemaSql="CREATE TABLE entries(id INTEGER PRIMARY KEY,name TEXT NOT NULL);", operationSource="globalThis.operations={add(ctx,input){ctx.db.execute('INSERT INTO entries(name) VALUES(?)',[input.name]);return null;},read(ctx){return ctx.db.query('SELECT * FROM entries ORDER BY id');}};";
   const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource});
   const options={directory:join(directory,"copy"),scope,ownerKey:"owner",origin:"https://relay",assertOwner(){}};
@@ -38,9 +39,15 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await expect(copy.data(remote,source,signal).invoke({...pinned,operationId:id(6),input:{},idempotencyKey:"archived"})).rejects.toThrow(/archived/);
     offline=false;archived=false;
     const inspect=await copy.data(remote,source,signal).inspect!(id(1)); expect(inspect.copy?.offline).toBe(false);
+    expect(() => DatasetResult.parse({kind:"description",...inspect})).not.toThrow();
+    expect(inspect.dataset.tables[0]!.fields.map(field=>field.fieldId)).toEqual([id(4)]);
+    const {archived:_archived,...authorityDescription}=await remote.describe(id(1));
+    expect(inspect.dataset).toEqual(authorityDescription);
     expect(inspect.dataset.tables[0]!.fields[0]).not.toHaveProperty("sqlColumn");
     await copy.close(); copy=await createOwnerDatasetCopy(options); offline=true;
     expect((await copy.data(remote,source,signal).describe(id(1))).name).toBe("Entries");
+    const offlineDescription=await copy.data(remote,source,signal).inspect!(id(1));
+    expect(DatasetResult.parse({kind:"description",...offlineDescription})).toMatchObject({dataset:inspect.dataset,copy:{offline:true}});
     const read={...pinned,operationId:id(6),input:{},idempotencyKey:"read"};
     expect(await copy.data(remote,source,signal).invoke(read)).toMatchObject({result:[{id:1,name:"Mom"}],copy:{offline:true}});
     await expect(copy.data(remote,source,signal).invoke({...read,operationId:id(5)})).rejects.toThrow(/read-only/);
