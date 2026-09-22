@@ -10,15 +10,15 @@ export function parseDatasetAttemptRequest(value: unknown): DatasetAttemptReques
   if (!isRecord(value)) throw new Error("Invalid pending submission request.");
   const keys = Object.keys(value).sort().join();
   if (value.action === "get" && keys === "action") return { action: "get" };
-  if (value.action === "clear" && keys === "action,token" && typeof value.token === "string" && tokenPattern.test(value.token)) return { action: "clear", token: value.token };
-  if (value.action === "save" && keys === "action,idempotencyKey,input" && typeof value.idempotencyKey === "string" && keyPattern.test(value.idempotencyKey)) return { action: "save", idempotencyKey: value.idempotencyKey, input: parseAppBackendJson(value.input, APP_BACKEND_INPUT_BYTES) };
+  if (value.action === "clear" && keys === "action,token" && typeof value.token === "string" && value.token.length === 43 && tokenPattern.test(value.token)) return { action: "clear", token: value.token };
+  if (value.action === "save" && keys === "action,idempotencyKey,input" && typeof value.idempotencyKey === "string" && !/[\r\n]/.test(value.idempotencyKey) && keyPattern.test(value.idempotencyKey)) return { action: "save", idempotencyKey: value.idempotencyKey, input: parseAppBackendJson(value.input, APP_BACKEND_INPUT_BYTES) };
   throw new Error("Invalid pending submission request.");
 }
 export function parseDatasetAttemptResult(value: unknown): DatasetAttemptResult {
   if (!isRecord(value) || Object.keys(value).join() !== "attempt") throw new Error("Invalid pending submission result.");
   if (value.attempt === null) return { attempt: null };
   const row = value.attempt;
-  if (!isRecord(row) || Object.keys(row).sort().join() !== "idempotencyKey,input,token" || typeof row.token !== "string" || !tokenPattern.test(row.token)) throw new Error("Invalid pending submission result.");
+  if (!isRecord(row) || Object.keys(row).sort().join() !== "idempotencyKey,input,token" || typeof row.token !== "string" || (row.token.length !== 43 || !tokenPattern.test(row.token))) throw new Error("Invalid pending submission result.");
   const input = parseDatasetAttemptRequest({ action: "save", idempotencyKey: row.idempotencyKey, input: row.input });
   if (input.action !== "save") throw new Error("Invalid pending submission result.");
   return { attempt: { token: row.token, idempotencyKey: input.idempotencyKey, input: input.input } };

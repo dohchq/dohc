@@ -126,7 +126,7 @@ const receiveChannel = event => {
       for (const { field, control } of controls) {
         const value = attempt.values[field.fieldId];
         if (value === undefined || value === null) continue;
-        if (field.type === "attachment") { control.disabled = true; continue; }
+        if (field.type === "attachment") continue;
         if (field.type === "checkbox") control.checked = value === true;
         else if (field.type === "multi-select") { for (const option of control.options) option.selected = Array.isArray(value) && value.includes(option.value); }
         else if (field.type === "select") control.value = String(value);
