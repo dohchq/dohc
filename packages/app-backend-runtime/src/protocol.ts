@@ -64,6 +64,15 @@ export class AppBackendRuntimeError extends Error {
   }
 }
 
+/** Public package entrypoints can contain separate bundled copies of the error class. */
+export function isAppBackendRuntimeError(error:unknown):error is AppBackendRuntimeError {
+  if(!(error instanceof Error)) return false;
+  const value=error as Partial<AppBackendRuntimeError>;
+  return value.name==="AppBackendRuntimeError" && value.code==="operation_refused" &&
+    typeof value.refusal?.code==="string" && /^[a-z][a-z0-9_]{0,63}$/.test(value.refusal.code) &&
+    typeof value.refusal.message==="string" && Buffer.byteLength(value.refusal.message)<=1024;
+}
+
 export interface InitializeAppDatabaseInput {
   schemaSql: string;
   tables: string[];

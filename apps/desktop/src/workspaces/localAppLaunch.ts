@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createAppDocument } from "@dohc/app-browser/document";
 import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
-import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES,
   parseAppBackendInvokeRequest, parseAppBackendUploadRequest, parseAppBackendRefusal } from "@dohc/security-contract/app-backend";
@@ -124,7 +124,7 @@ export async function createLocalAppLaunchHost(options: { backend: Backend; life
             return reply(response, 200, result);
           } catch (error) {
             if (!response.headersSent && !response.destroyed) {
-              if (error instanceof AppBackendRuntimeError) {
+              if (isAppBackendRuntimeError(error)) {
                 try { activeSignal.throwIfAborted(); current(); return reply(response, 409, parseAppBackendRefusal(error.refusal)); } catch {}
               }
               reply(response, error instanceof RangeError ? 413 : 404);

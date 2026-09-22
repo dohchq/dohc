@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
+import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, CommitOperationInput, TransitionCheckpointInput } from "./journal.js";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
@@ -193,7 +193,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       currentAuthority();
       return { result: JSON.parse(committed.receipt.resultJson), revision: committed.receipt.revision, replayed: committed.kind === "replayed" };
     } catch (error) {
-      if (error instanceof AppBackendRuntimeError) {
+      if (isAppBackendRuntimeError(error)) {
         try { currentAuthority(); } catch (authorityError) { await stopWorker(lane); throw authorityError; }
         throw error;
       }

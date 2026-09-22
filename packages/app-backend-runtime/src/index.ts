@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.js";
 import type { AppOperationResult, AppRuntimeChild, AppRuntimeLauncher, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
 export type { AppOperationResult, AppOperationFile, AppOperationRefusal, AppRuntimeChild, AppRuntimeLaunchOptions, AppRuntimeLauncher, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput, JsonValue, RuntimeLimits } from "./protocol.js";
-export { AppBackendRuntimeError } from "./protocol.js";
+export { AppBackendRuntimeError, isAppBackendRuntimeError } from "./protocol.js";
 
 let active = 0;
 const MAX_ACTIVE = 8;
