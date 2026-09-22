@@ -10,6 +10,34 @@ Create a transactional Collection in the Data section, then choose **Create form
 Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
 
+Forms support multiple file fields and the full 128-field table envelope, without a separate form-field ceiling.
+Each file can contain up to 5 MiB. The form uploads files sequentially with separate retry identities.
+One response can attach up to 32 files, matching the operation's file-metadata admission bound.
+Forms can have more optional file controls, but cannot require more files than an operation accepts.
+The form checks the selected file count before uploading anything.
+The combined response, including file references, must fit the 64 KiB operation input limit.
+The form checks this bound before uploading. It stores the completed response before invoking its create action.
+After an uncertain submission or reload, retrying uses that same stored response and request identity.
+
+The 128-field limit bounds table metadata, validation, generated controls, and operation field grants.
+It is the current tested product envelope, not a SQLite column limit or an unlimited-capacity claim.
+Dataset descriptors also remain bounded to 256 KiB, and generated operation source must fit its existing compilation limit.
+Larger answers can exhaust the input bound before all fields reach their individual text limits.
+
+For a related-record field, choose an approved public read action and its label under **Public choices**.
+The action must belong to the relation's target table and declare only its key and label fields.
+This grants the complete action, including its actual returned output. Declared fields do not enforce output filtering on authored code.
+Choose **Review action source** before sharing; never expose a private read action as a shortcut.
+The picker reads choices when opened, searches the selected action, and pages without a total count.
+Relations currently connect tables within one dataset. Separate datasets do not receive implicit access to each other.
+
+If no suitable action exists, expand **Create public choices**, select a public label, and choose **Review public choices**.
+This prepares a read action that returns every target record's key and selected label, with no other fields.
+Search matches only the selected label. An empty label displays the key.
+Review and approve the change, then reopen **Create form** and select the new action.
+The new action preserves existing custom source and records. Existing apps require review for the changed executable revision.
+Creating the action does not publish an app or add the action to existing app grants.
+
 Creating and compiling Collection actions currently requires the Windows x64 desktop build.
 The relay's Node runtime portability does not establish desktop creation support on other platforms.
 
@@ -100,7 +128,17 @@ It does not supply owner credentials. The frontend can use ordinary networking, 
 
 ## Manage the same records
 
-Use the Collection table for permitted reads and edits, or invoke an approved operation:
+Choose **Table**, **Board**, or **Calendar** in the Collection's layout control.
+For a board, choose **Group board by**. For a calendar, choose **Calendar date**.
+Use **Create view** to save a layout with filters and sorting.
+Boards page through groups and their records. Calendars request the visible date range.
+Moving a card or date invokes the permitted edit operation with the record's current version.
+Read-only access cannot move records. A refused move leaves the saved record unchanged.
+
+Generated read actions support these layouts. Custom actions must support the requested grouping or date range.
+If a custom action refuses a view, update its source and review the change before reopening that view.
+
+Use the Collection controls for permitted reads and edits, or invoke an approved operation:
 
 ```sh
 dohc dataset invoke '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revision":1,"revisionSha256":"REVISION_SHA256","operationId":"OPERATION_ID","idempotencyKey":"REQUEST_ID","input":{}}'
@@ -110,7 +148,7 @@ dohc dataset permissions '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID"
 
 Generate a fresh retry key for each intended change. Keep the same key and exact input after a lost response.
 Changed input under the same key refuses. Revoked access cannot be recovered through a saved result.
-History shows saved-operation metadata to the owner.
+History shows saved record operations and field or rule revisions to the owner.
 For eligible reversible edits under the current approved rules, it also shows previous values for the operation's declared fields.
 Other input and result fields remain excluded. Choose **Undo edit** to restore the shown values if the record has not changed.
 
@@ -121,6 +159,15 @@ Run `dohc dataset --help` for the supported command fields.
 ## Change fields and rules
 
 Use **Fields and names** to add fields or rename fields, tables, and the Collection.
+Renaming keeps authored operation source intact. Adding a field does not expand public or collaborator access.
+For custom operations, update their source explicitly before using a new field.
+
+Choose **Change field type or requirement** to review supported conversions on generated Collections.
+Text-to-number conversions must preserve the original value. Conflicting values stop preparation instead of losing information.
+Fix those records and prepare again. Required fields must have values; newly added required fields need a default.
+For fields governed by custom rules, the error names the affected actions and source file.
+Choose **Review source change** to review the corresponding rule and schema edits.
+
 For custom schema or rule changes, prepare the new dataset descriptor and a migration SQL file:
 
 ```sh
@@ -148,8 +195,48 @@ Reviews expire after ten minutes. Each dataset can retain one review, with at mo
 Rows above 128 KiB or encoded changes above 256 KiB refuse preparation without truncation.
 Checkpoint and report storage must each fit the dataset capacity. See the [migration limits](../../packages/app-backend-runtime/README.md#approved-schema-transitions).
 
-App bindings and data grants remain tied to their approved revision.
-Review and approve access to the new revision before using those apps or grants again.
+Changes limited to display names or source locations keep existing shared apps and collaborator access working.
+Changes to executable rules, field structure, or permissions need renewed app and collaborator approval.
+Review the affected access before using those apps or grants again.
+
+## Reverse a saved change
+
+Open **History**, expand a **Fields and rules** entry, then choose **Compare change**.
+Compare the saved fields, actions, schema, and operation source before and after that change.
+The source paths and SHA-256 hashes identify the approved bytes, even if workspace files have since changed.
+Choose **Open current rules file** or **Open current schema file** to open its workspace source.
+Use that file's History to inspect its file changes. Restoring a file does not activate Collection rules or permissions.
+
+Choose **Review reversal** to prepare a new revision against the current records.
+The reversal targets the selected change and preserves unrelated later names, rules, records, and current access.
+If the same rules or names changed again, resolve the conflict before approving.
+Structural changes need **Fields and names** or **Review source migration**; dohc does not infer an inverse for arbitrary SQL.
+Review the resulting change, then choose **Approve change**.
+If records changed after preparation, prepare a new review. Accepted registrations are never replaced with an older database copy.
+
+Agents use the same immutable source and review path:
+
+```sh
+dohc dataset historyRevision '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revisionSha256":"SAVED_REVISION_SHA256"}'
+dohc dataset prepareHistoryRestore '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","revision":3,"revisionSha256":"CURRENT_REVISION_SHA256","targetRevisionSha256":"BEFORE_REVISION_SHA256","changedRevisionSha256":"AFTER_REVISION_SHA256"}'
+```
+
+Take the before and after hashes from the selected history entry. Approve through `dataset approveMigration` as above.
+
+## Read shared records offline
+
+A named collaborator can reopen saved read pages on the same device without reaching the sharing server.
+While connected, open the Collection and each required view or page first.
+The device saves only successful results from permitted read actions, scoped to that account, workspace, and share.
+This is a saved-page cache, not a complete dataset snapshot. Older pages can leave the cache as space fills.
+
+Offline reads require the same action, revision, filters, and page request that the device saved.
+A different search, page, or date range may require reconnecting. The interface identifies saved pages and their save time.
+Connect to change records, upload files, or open attachments. Attachment bytes are not saved for collaborators.
+
+Known revocation, changed permissions, account changes, or a narrower local share remove the affected saved pages.
+A disconnected device cannot learn about remote revocation until it reconnects.
+Revoking access cannot erase information that someone already downloaded outside dohc.
 
 ## Archive or delete a Collection
 
