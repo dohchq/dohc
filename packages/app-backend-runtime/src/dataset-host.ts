@@ -4,8 +4,8 @@ import { effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, 
 export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
-import type { DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
-import type { DatasetInvocation, DatasetInvocationResult } from "./supervisor.js";
+import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
+import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } from "./supervisor.js";
 import type { JsonValue } from "./protocol.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
@@ -18,12 +18,12 @@ export interface DatasetAuthority {
   /** Host permission/publication generation; changes invalidate in-flight work. */
   authorityToken?: string;
 }
-export interface DatasetDataGrant { operationIds: string[]; discover: boolean }
+export interface DatasetDataGrant { operationIds: string[]; discover: boolean; revision: number; revisionSha256: string }
 export interface DatasetHostOptions<Context> {
   db: JournalDb;
   transaction: <T>(run: () => T) => T;
   journal: DatasetJournal;
-  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult> };
+  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>; migrate(input: DatasetMigration): Promise<DatasetCursor> };
   /** Synchronous. Validate current workspace membership or current app credential here. */
   /** datasetId is absent only for workspace catalog discovery. */
   resolveAuthority(context: Context, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority;
@@ -34,6 +34,8 @@ export interface DatasetHostOptions<Context> {
   accountCreation?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number }): void;
   /** Signed retained-byte delta; runs in the binding or grant transaction. */
   accountMetadata?(context: Context, allocation: DatasetScope & { bytes: number }): void;
+  /** Checkpoint retention and signed catalog replacement delta, in the transition transaction. */
+  accountMigration?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number; capacityDeltaBytes: number }): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
 }
@@ -54,7 +56,11 @@ export interface InvokeDatasetInput extends DatasetScope {
   access?: DatasetAccess;
   signal?: AbortSignal;
 }
-type StoredGrant = DatasetDataGrant & { token: string };
+export interface MigrateDatasetInput extends Omit<ActivateDatasetInput, "capacityBytes"> {
+  expected: DatasetCursor;
+  migrationSql: string;
+}
+type StoredGrant = DatasetDataGrant;
 type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function text(value: string, maximum = 256): string {
@@ -118,6 +124,17 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (!value || typeof value.schemaSql !== "string" || typeof value.operationSource !== "string") throw new Error("Dataset artifacts are corrupt.");
     return value;
   }
+  async function compile(source: string, path: string): Promise<string> {
+    if (path.endsWith(".ts") && !options.compileOperations) throw new Error("TypeScript dataset operations require the configured host compiler.");
+    const result = options.compileOperations ? await options.compileOperations(source, path) : source;
+    if (typeof result !== "string" || !result.length || Buffer.byteLength(result) > 256 * 1024 || result.includes("\0")) throw new Error("Compiled dataset operations exceed the host limit.");
+    return result;
+  }
+  function currentGrant(value: unknown, approved: DatasetRevision): StoredGrant {
+    const grant = value as StoredGrant;
+    if (grant.revision !== approved.revision || grant.revisionSha256 !== approved.revisionSha256) throw new Error("Dataset data grant needs approval for the current revision.");
+    return grant;
+  }
   function permissions(context: Context, key: DatasetScope, through: DatasetAccess): Permission {
     const verified = authority(context, key, through), approved = revision(key);
     let operations = approved.definition.operations, token = "owner", discover = true;
@@ -127,7 +144,11 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       let dataToken = "", allowedHelperIds = new Set<string>();
       if (verified.caller.kind === "named") {
         const grant = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
-        if (grant) { allowedHelperIds = new Set((JSON.parse(String(grant.grant_json)) as StoredGrant).operationIds); dataToken = String(grant.token); }
+        if (grant) {
+          const parsed = JSON.parse(String(grant.grant_json)) as StoredGrant;
+          if (parsed.revision === approved.revision && parsed.revisionSha256 === approved.revisionSha256) allowedHelperIds = new Set(parsed.operationIds);
+          dataToken = String(grant.token);
+        }
         verified.caller = { ...verified.caller, helper: allowedHelperIds.size > 0 };
       }
       operations = effectiveDatasetOperations(JSON.parse(String(row.binding_json)), approved, verified.caller)
@@ -136,7 +157,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     } else if (verified.caller.kind !== "owner") {
       const row = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
       if (!row) denied();
-      const grant = JSON.parse(String(row.grant_json)) as StoredGrant;
+      const grant = currentGrant(JSON.parse(String(row.grant_json)), approved);
       // A data grant supplies organizer authority without requiring source Edit.
       if (verified.caller.kind === "named") verified.caller = { ...verified.caller, helper: true };
       operations = effectiveDatasetOperations({ kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
@@ -172,9 +193,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         if (!currentHead.active || currentHead.cursor.approvedRevisionHash !== current.revisionSha256) throw new Error("Dataset authority is no longer active on this host.");
         authorize(); return current;
       }
-      if (approved.definition.operationsPath.endsWith(".ts") && !options.compileOperations) throw new Error("TypeScript dataset operations require the configured host compiler.");
-      const compiledSource = options.compileOperations ? await options.compileOperations(source, approved.definition.operationsPath) : source;
-      if (typeof compiledSource !== "string" || !compiledSource.length || Buffer.byteLength(compiledSource) > 256 * 1024 || compiledSource.includes("\0")) throw new Error("Compiled dataset operations exceed the host limit.");
+      const compiledSource = await compile(source, approved.definition.operationsPath);
       const checkpoint = await initializeAppDatabase({ schemaSql, tables: approved.definition.tables.map(table => table.sqlName), signal }, options.runtime);
       authorize();
       journal.initialize({ scope: key, hostEpoch: randomUUID(), approvedRevisionHash: approved.revisionSha256, source: compiledSource, schemaSql,
@@ -187,6 +206,30 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         } });
       authorize();
       return approved;
+    },
+    async migrate(context: Context, raw: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }> {
+      const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
+      const expected = { ...raw.expected }, migrationSql = text(raw.migrationSql, 256 * 1024), schemaSql = raw.schemaSql, source = raw.operationSource, signal = raw.signal;
+      const captured = owner(context, key), ownerToken = JSON.stringify(captured), previous = revision(key);
+      if (expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId || expected.approvedRevisionHash !== previous.revisionSha256 || approved.revision !== previous.revision + 1) {
+        throw new Error("Dataset revision transition does not match the current approval.");
+      }
+      const authorize = () => { signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const compiledSource = await compile(source, approved.definition.operationsPath);
+      authorize();
+      const cursor = await options.supervisor.migrate({ scope: key, expected, tables: previous.definition.tables.map(table => table.sqlName),
+        newTables: approved.definition.tables.map(table => table.sqlName), schemaSql, source: compiledSource, definitionJson: JSON.stringify(approved),
+        approvedRevisionHash: approved.revisionSha256, migrationSql, signal, authorize,
+        account(allocation) {
+          const row = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
+          if (!row || parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256 !== previous.revisionSha256) throw new Error("Dataset approval changed during migration.");
+          const revisionJson = JSON.stringify(approved), artifactsJson = JSON.stringify({ schemaSql, operationSource: source });
+          const delta = Buffer.byteLength(revisionJson) + Buffer.byteLength(artifactsJson) - Buffer.byteLength(String(row.revision_json)) - Buffer.byteLength(String(row.artifacts_json));
+          if (options.accountMigration) synchronous(() => options.accountMigration!(context, { ...key, bytes: allocation.bytes + delta,
+            capacityBytes: allocation.capacityBytes, capacityDeltaBytes: allocation.capacityDeltaBytes }));
+          db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson, artifactsJson, key.workspaceId, key.datasetId);
+        } });
+      return { revision: approved, cursor };
     },
     setBinding(context: Context, raw: DatasetScope & { appId: string; binding: AppDatasetBinding | null }): void {
       const key = scope(raw), appId = text(raw.appId);
@@ -221,11 +264,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("DELETE FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").run(key.workspaceId, key.datasetId, principalKey);
         }
         else {
-          if (typeof raw.grant.discover !== "boolean" || Object.keys(raw.grant).some(key => !["operationIds", "discover"].includes(key))) throw new Error("Invalid dataset data grant.");
+          if (typeof raw.grant.discover !== "boolean" || Object.keys(raw.grant).some(key => !["operationIds", "discover", "revision", "revisionSha256"].includes(key))) throw new Error("Invalid dataset data grant.");
+          currentGrant(raw.grant, approved);
           const binding = parseDatasetBinding({ kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
             revisionSha256: approved.revisionSha256, operationIds: raw.grant.operationIds }, approved);
           if (approved.definition.operations.some(operation => binding.operationIds.includes(operation.operationId) && operation.access === "owner")) throw new Error("Owner-only operations cannot be granted.");
-          const json = JSON.stringify({ operationIds: binding.operationIds, discover: raw.grant.discover });
+          const json = JSON.stringify({ operationIds: binding.operationIds, discover: raw.grant.discover, revision: approved.revision, revisionSha256: approved.revisionSha256 });
           if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(json) + Buffer.byteLength(principalKey) + 256 - previousBytes }));
           db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,principal_key) DO UPDATE SET grant_json=excluded.grant_json,token=excluded.token")
             .run(key.workspaceId, key.datasetId, principalKey, json, randomUUID());
@@ -247,7 +291,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         ? db.prepare("SELECT dataset_id FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id>? ORDER BY dataset_id LIMIT ?").all(workspaceId, after, limit + 1)
         : db.prepare(`SELECT c.dataset_id FROM dohc_dataset_catalog c JOIN dohc_dataset_data_grants g
             ON c.workspace_id=g.workspace_id AND c.dataset_id=g.dataset_id WHERE c.workspace_id=? AND g.principal_key=? AND c.dataset_id>?
-            AND json_extract(g.grant_json,'$.discover')=1 ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, verified.principalKey, after, limit + 1);
+            AND json_extract(g.grant_json,'$.discover')=1
+            AND json_extract(g.grant_json,'$.revisionSha256')=json_extract(c.revision_json,'$.revisionSha256')
+            ORDER BY c.dataset_id LIMIT ?`).all(workspaceId, verified.principalKey, after, limit + 1);
       const selected = rows.slice(0, limit), datasets: DatasetDescription[] = [];
       let bytes = 0;
       for (const row of selected) {
@@ -262,7 +308,23 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     approvedArtifacts(context: Context, raw: DatasetScope) {
       const key = scope(raw);
       const current = journal.head(key, () => { owner(context, key); });
-      return { revision: revision(key), ...artifacts(key), active: current.active };
+      return { revision: revision(key), ...artifacts(key), active: current.active, cursor: current.cursor };
+    },
+    permissions(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
+      const key = scope(raw), after = raw.after === undefined ? "" : text(raw.after, 1024), limit = raw.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid dataset page size.");
+      owner(context, key); const approved = revision(key);
+      const rows = db.prepare(`SELECT 'app:'||app_id AS cursor,app_id AS principal,binding_json AS metadata,'app' AS kind
+          FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND 'app:'||app_id>?
+          UNION ALL SELECT 'data:'||principal_key AS cursor,principal_key AS principal,grant_json AS metadata,'data' AS kind
+          FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND 'data:'||principal_key>?
+          ORDER BY cursor LIMIT ?`).all(key.workspaceId, key.datasetId, after, key.workspaceId, key.datasetId, after, limit + 1);
+      const selected = rows.slice(0, limit);
+      return { permissions: selected.map(row => {
+        const metadata = JSON.parse(String(row.metadata));
+        return { kind: String(row.kind) as "app" | "data", principal: String(row.principal),
+          current: metadata.revision === approved.revision && metadata.revisionSha256 === approved.revisionSha256, metadata };
+      }), nextCursor: rows.length > limit ? String(selected.at(-1)!.cursor) : null };
     },
     async invoke(context: Context, raw: InvokeDatasetInput): Promise<DatasetInvocationResult> {
       const key = scope(raw), through = access(raw.access), operationId = text(raw.operationId), idempotencyKey = text(raw.idempotencyKey, 128);

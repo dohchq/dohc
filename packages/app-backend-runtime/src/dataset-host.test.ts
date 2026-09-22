@@ -74,7 +74,7 @@ it("creates a dataset without an app and several views share its authoritative r
   await expect(f.invoke("friend", id(6), { value: "submitted" }, "form")).resolves.toMatchObject({ result: { accepted: true }, revision: 1 });
   const rows = await f.invoke("owner", id(7));
   expect(rows.result).toMatchObject([{ value: "submitted" }]);
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7), id(8)], discover: true } });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7), id(8)], discover: true } });
   await f.invoke("helper", id(8), { id: (rows.result as Array<{ id: string }>)[0].id, value: "managed" });
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "managed" }]);
   expect(f.host.describe("helper", scope).tables[0].fields.map(field => field.name)).toEqual(["ID", "Value"]);
@@ -91,7 +91,7 @@ it("keeps submission, data discovery, private reads, and source approval separat
   expect(f.host.list("friend", { workspaceId: "workspace" })).toEqual({ datasets: [], nextCursor: null });
   expect(() => f.host.approvedArtifacts("helper", scope)).toThrow("not permitted");
   expect(() => f.host.setBinding("helper", { ...scope, appId: "form", binding: f.binding() })).toThrow("not permitted");
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(9)], discover: true } })).toThrow("Owner-only");
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(9)], discover: true } })).toThrow("Owner-only");
   expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.binding(), revisionSha256: "0".repeat(64) } })).toThrow();
 });
 
@@ -127,7 +127,7 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   await expect(f.invoke("friend", id(6), { value: "changed retry" }, "form")).rejects.toThrow();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
   await expect(f.invoke("friend", id(6), { value: "saved" }, "form")).rejects.toThrow("not permitted");
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("not permitted");
@@ -151,7 +151,7 @@ it("compiles verified TypeScript captures but preserves original artifacts", asy
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
   const f = await fixture(); await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7), id(8)]) });
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: false } });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: false } });
   await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
   await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("not permitted");
   expect(() => f.host.describe("helper", scope)).toThrow("not permitted");
@@ -166,16 +166,52 @@ it("accounts binding and grant replacements by retained size and rolls back quot
   } });
   await f.activate(); const initial = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
   const populated = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
   refuse = true;
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { operationIds: [id(7), id(8)], discover: true } })).toThrow("quota");
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7), id(8)], discover: true } })).toThrow("quota");
   expect(f.host.describe("helper", scope).operations.map(operation => operation.operationId)).toEqual([id(7)]);
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
   refuse = false;
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(initial);
+});
+
+it("migrates records atomically and retains stale grants for explicit reapproval", async () => {
+  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "saved" });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7)]) });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  const expected = f.host.approvedArtifacts("owner", scope).cursor;
+  const nextDefinition = structuredClone(definition); nextDefinition.name = "Orders updated";
+  const nextSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '');";
+  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql: nextSchema, operationSource });
+  const migrated = await f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql: nextSchema, operationSource, expected,
+    migrationSql: "ALTER TABLE items ADD COLUMN notes TEXT NOT NULL DEFAULT '';" });
+  expect(migrated.cursor.revision).toBe(expected.revision + 1);
+  expect(f.host.approvedArtifacts("owner", scope).schemaSql).toBe(nextSchema);
+  expect(f.host.permissions("owner", scope).permissions.map(permission => permission.current)).toEqual([false, false]);
+  expect(() => f.host.permissions("helper", scope)).toThrow("not permitted");
+  expect(f.host.list("helper", { workspaceId: "workspace" }).datasets).toEqual([]);
+  await expect(f.invoke("helper", id(7))).rejects.toThrow("needs approval");
+  await expect(f.invoke("friend", id(6), { value: "another" }, "form")).rejects.toThrow();
+  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } })).toThrow("needs approval");
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 2, revisionSha256: revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  const result = await f.host.invoke("helper", { ...scope, revision: 2, revisionSha256: revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-new" });
+  expect(result.result).toMatchObject([{ value: "saved" }]);
+  expect(f.host.permissions("owner", { ...scope, limit: 1 })).toMatchObject({ nextCursor: "app:form" });
+});
+
+it("rolls back migration approval when accounting refuses and rejects a stale preview", async () => {
+  const f = await fixture({ accountMigration() { throw new Error("quota"); } }); await f.activate();
+  const expected = f.host.approvedArtifacts("owner", scope).cursor;
+  const nextDefinition = { ...definition, name: "Next" };
+  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql, operationSource });
+  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow("quota");
+  expect(f.host.approvedArtifacts("owner", scope).revision).toEqual(prepared.revision);
+  await f.invoke("owner", id(6), { value: "new record" });
+  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow();
+  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "new record" }]);
 });
