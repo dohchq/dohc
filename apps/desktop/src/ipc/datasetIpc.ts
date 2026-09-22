@@ -2,6 +2,7 @@ import { DatasetRequest, DatasetInvocationResult, DatasetPreparation } from "@do
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -38,8 +39,12 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "approved" as const, revision };
       }
       let descriptorPath: string;
+      let expectedRevision: string | undefined;
       if (input.action === "create") {
         const generated = generateDatasetSources(input.definition);
+        expectedRevision = describeDatasetRevision({ definition: generated.definition, revision: 1,
+          schemaSql: generated.files[generated.definition.schemaPath]!, operationSource: generated.files[generated.definition.operationsPath]!,
+        }).revisionSha256;
         descriptorPath = Object.keys(generated.files).find(path => path === "dataset.json" || path.endsWith("/dataset.json"))!;
         await dependencies.createSources(operation.workspace, generated.files, operation.signal);
         current();
@@ -47,6 +52,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepare({ descriptorPath, adapter, signal: operation.signal }));
       current();
       if (input.action === "prepare") return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };
+      if (prepared.revision.revisionSha256 !== expectedRevision) {
+        host.discard(prepared.preparationId);
+        throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
+      }
       // The creation control approves the generated fields and actions it just displayed.
       const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, signal: operation.signal });
       current();

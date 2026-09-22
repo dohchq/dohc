@@ -21,9 +21,14 @@ import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from
 import { registerOwnerAppBackendIpc, createOwnerAppBackendHandler, createRemoteAppBackendTransport } from "./ipc/ownerAppBackendIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalAppBackendHost, type LocalAppBackendHost } from "./workspaces/localAppBackend";
+import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createDatasetHandler } from "./ipc/datasetIpc";
+import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { createHash } from "node:crypto";
+import { createFile as createDatasetSourceFile } from "./workspaces/workspaceFiles";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { activatePublishedAppBackend } from "./workspaces/publishAppBackend";
-import { createDesktopAppBackendRuntime } from "./workspaces/localAppBackendRuntime";
+import { createDesktopAppBackendRuntime, createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import { writeAppBackendExport, readAppBackendRecovery } from "./workspaces/appBackendExport";
 import type { OwnerAppBackendRequest, OwnerAppBackendResult } from "@dohc/cli/app-backend";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -3052,9 +3057,15 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 }
 
 let ownerAppBackendForCli: ((input: OwnerAppBackendRequest) => Promise<OwnerAppBackendResult>) | undefined;
+let datasetForCli: ((input: DatasetRequest) => Promise<DatasetResult>) | undefined;
+const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
+  dataset: input => {
+    if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
+    return datasetForCli(input);
+  },
   ownerAppPublication: input => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
     return ownerAppPublicationForCli(input);
@@ -3742,7 +3753,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopAgentSessions: () => cachedAgentSessions?.stopAll() ?? Promise.resolve(),
     settleYDocs: closeAllEngineYDocSessions,
     stopAgentIntegration: () => agentIntegration.stopAll(),
-    closeWorkspaces: () => workspaceAuthorities.close(),
+    closeWorkspaces: async () => {
+      await workspaceAuthorities.close();
+      await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
+      activeDatasetHosts.clear();
+    },
     disposeDatabase: () => workspaceDatabaseWorker.dispose(),
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
@@ -4110,6 +4125,80 @@ function registerIpcHandlers(): void {
     },
   } satisfies Parameters<typeof registerOwnerAppPublicationIpc<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>>[0];
   const localAppHosts = new WeakMap<AbortSignal, Promise<LocalAppBackendHost>>();
+  const localDatasetHosts = new WeakMap<AbortSignal, Promise<LocalDatasetHost>>();
+  const datasetRuntimePath = join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
+  const datasetForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+      signal.throwIfAborted(); operation.assertCurrent();
+      if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("The Collection workspace attachment changed.");
+      let pending = localDatasetHosts.get(operation.signal);
+      if (!pending) {
+        const lifetime = operation.signal;
+        pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath,
+          assertCurrent: () => { lifetime.throwIfAborted(); },
+          runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(datasetRuntimePath, "child.mjs") },
+          persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
+          compile: ownerPublicationDependencies.compile,
+        });
+        localDatasetHosts.set(lifetime, pending);
+        activeDatasetHosts.add(pending);
+        const ownedPending = pending;
+        void pending.then(host => {
+          const close = () => { void host.close().catch(error => console.error("Collection shutdown failed", error)).finally(() => activeDatasetHosts.delete(ownedPending)); };
+          if (lifetime.aborted) close(); else lifetime.addEventListener("abort", close, { once: true });
+        }, () => { localDatasetHosts.delete(lifetime); activeDatasetHosts.delete(ownedPending); });
+      }
+      const host = await pending;
+      signal.throwIfAborted(); operation.assertCurrent();
+      return host;
+    });
+  const datasetDependencies = {
+    hostForWorkspace: datasetForWorkspace,
+    withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
+      const result = await withEngineAdapter(workspace, work);
+      if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+      return result;
+    },
+    createSources: async (workspace: DesktopRendererWorkspaceOperation["workspace"], files: Record<string, string>, signal: AbortSignal) => {
+      assertWritableWorkspace(workspace);
+      const entries = Object.entries(files).sort(([left], [right]) => Number(left.endsWith("dataset.json")) - Number(right.endsWith("dataset.json")));
+      for (const [path, source] of entries) {
+        signal.throwIfAborted();
+        await createDatasetSourceFile(workspace.rootPath, path, source);
+      }
+      await openWorkspaceActivity(workspace);
+      const captured = await withEngineAdapter(workspace, async adapter => {
+        let capture = await adapter.reconcileCapture();
+        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+          signal.throwIfAborted();
+          capture = await adapter.flushCapture();
+        }
+        if (!capture.settled || !capture.running || capture.degraded) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
+        const metadata = await adapter.captureSourceMetadata({ workspaceId: workspace.workspaceId, versionId: "main", paths: Object.keys(files),
+          bounds: { maxInputFiles: 64, maxInputBytes: 2 * 1024 * 1024 }, signal });
+        if (metadata.files.length !== entries.length || metadata.files.some(file => !Object.hasOwn(files, file.path) || file.sha256 !== createHash("sha256").update(files[file.path]!).digest("hex"))) {
+          throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
+        }
+        return true;
+      });
+      if (!captured) throw new Error("Collection files were saved. Reopen the workspace to finish creating the Collection.");
+      signal.throwIfAborted();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+    },
+  };
+  const datasetHandler = createDatasetHandler<WebContents, DesktopRendererWorkspaceOperation["workspace"], DesktopRendererWorkspaceOperation>({
+    ...datasetDependencies,
+    withWorkspaceOperation: (sender, workspaceId, work) => withRendererWorkspaceOperation(sender, workspaceId, "Collection changes stopped because this window changed workspaces.", work),
+  });
+  ipcMain.handle(CHANNELS.dataset, async (event, raw: unknown) => {
+    assertTrustedSender(event);
+    return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
+  });
+  const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
+    ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
+  });
+  datasetForCli = async input => DatasetResult.parse(await cliDataset(input.workspaceId, input));
+  const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
   const localAppLaunches = new WeakMap<LocalAppBackendHost, Promise<LocalAppLaunchHost>>();
   const localRuntime = createDesktopAppBackendRuntime(utilityProcess, join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime", "child.mjs"));
   const localForWorkspace = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
@@ -4132,7 +4221,20 @@ function registerIpcHandlers(): void {
     });
   const localPublication = createLocalOwnerAppPublicationHandler<DesktopRendererWorkspaceOperation["workspace"],
     { workspace: DesktopRendererWorkspaceOperation["workspace"]; signal: AbortSignal; scope?: string; assertCurrent(): void }>({
-      ...ownerPublicationDependencies, localForWorkspace,
+      ...ownerPublicationDependencies, localForWorkspace, datasetForWorkspace,
+      launchLocalDataset: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
+        signal.throwIfAborted(); operation.assertCurrent();
+        const host = await datasetForWorkspace(workspace, signal);
+        let pending = localDatasetLaunches.get(host);
+        if (!pending) {
+          pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
+          localDatasetLaunches.set(host, pending);
+          void pending.catch(() => localDatasetLaunches.delete(host));
+        }
+        const launcher = await pending;
+        signal.throwIfAborted(); operation.assertCurrent();
+        return launcher.launch(publicationId, signal);
+      }),
       launchLocal: async (workspace, publicationId, signal) => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
         signal.throwIfAborted(); operation.assertCurrent();
         const backend = await localForWorkspace(workspace, signal);
