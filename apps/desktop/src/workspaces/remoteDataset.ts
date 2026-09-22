@@ -105,3 +105,31 @@ export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, 
   }
   return approved.revision;
 }
+
+export interface DatasetAuthorityRoute {
+  /** Returns the durable local transfer marker; absent means this dataset is local. */
+  status(datasetId: string): Promise<import("./localDatasetTransfer").DatasetTransferStatus | null>;
+  remote(origin: string): Promise<OwnerDatasetData>;
+}
+
+/** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file">, route: DatasetAuthorityRoute): OwnerDatasetData {
+  const target = async (datasetId: string) => {
+    const marker = await route.status(datasetId);
+    if (!marker) return local;
+    if (marker.state !== "imported" || !marker.receipt) throw new Error("This Collection is transferring. Wait for its shared authority to confirm, then retry.");
+    return route.remote(marker.targetOrigin);
+  };
+  return {
+    async list(page) {
+      const localPage = await local.list(page), localRows = await Promise.all(localPage.datasets.map(async row => ({ row, authority: await target(row.datasetId) })));
+      const remoteRows = await Promise.all(localRows.map(async ({ row, authority }) => authority === local ? row : await authority.describe(row.datasetId)));
+      return { datasets: remoteRows, nextCursor: localPage.nextCursor };
+    },
+    describe: async datasetId => (await target(datasetId)).describe(datasetId),
+    approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
+    invoke: async value => (await target(value.datasetId)).invoke(value),
+    upload: async value => (await target(value.datasetId)).upload(value),
+    file: async value => (await target(value.datasetId)).file(value),
+  };
+}
