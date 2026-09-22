@@ -64,6 +64,51 @@ afterEach(async () => {
 });
 
 describe("local dataset owner adapter", () => {
+  it("persists a local fence before sharing and resumes the same archive after a lost remote response", async () => {
+    const {host,workspaceRoot} = await open(), approved = await activate(host);
+    await host.action(call(approved,id(6),"before-transfer",{name:"Camera"}));
+    let saved: import("./localDatasetTransfer").DatasetTransferReceipt | undefined, calls = 0;
+    const target: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
+      calls++;
+      expect(host.approvedArtifacts(id(1)).active).toBe(false);
+      let chunks = 0; for await (const chunk of input.stream) chunks += chunk.byteLength;
+      expect(chunks).toBeGreaterThan(4096);
+      const receipt = {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
+        targetCursor:{...input.sourceCursor,hostEpoch:"new-server-epoch",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
+      if (saved) expect(receipt).toEqual(saved);
+      saved = receipt;
+      if (calls === 1) throw new Error("Lost remote response");
+      return receipt;
+    } };
+    await expect(host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target})).rejects.toThrow("Lost remote response");
+    const pending = host.transferStatus(id(1)); expect(pending?.state).toBe("ready");
+    await expect(host.action(call(approved,id(6),"after-fence",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+    await host.close();
+    const restarted = (await open({workspaceRoot})).host;
+    const resumedTarget: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
+      expect(input.transferId).toBe(saved!.transferId);expect(input.manifestSha256).toBe(saved!.manifestSha256);
+      for await (const _chunk of input.stream) { /* Verify retained archive hashes during streaming. */ }
+      return saved!;
+    } };
+    const completed = await restarted.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example/",target:resumedTarget});
+    expect(completed.state).toBe("imported");expect(completed.receipt).toEqual(saved);
+    expect(restarted.approvedArtifacts(id(1)).active).toBe(false);
+    await expect(restarted.action(call(approved,id(6),"after-import",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+    expect(await readdir(join(workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    await expect(restarted.transferToShared({datasetId:id(1),targetOrigin:"https://other.example",target:resumedTarget})).rejects.toThrow("another server");
+  },30_000);
+
+  it("keeps local writes fenced when the remote transfer receipt names another dataset", async () => {
+    const {host} = await open(), approved = await activate(host);
+    await expect(host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target:{async importRecovery(input){
+      for await (const _chunk of input.stream) { /* Finish bounded transport before the response. */ }
+      return {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
+        targetCursor:{...input.sourceCursor,datasetId:id(99),hostEpoch:"remote",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
+    }}})).rejects.toThrow("did not confirm");
+    expect(host.transferStatus(id(1))?.state).toBe("ready");
+    await expect(host.action(call(approved,id(6),"after-bad-receipt",{name:"Forbidden"}))).rejects.toThrow(/fenced|authority|active/i);
+  });
+
   it("creates without an app or account, executes reviewed bytes, and preserves records and retries across restart", async () => {
     const {host,workspaceRoot} = await open(), fixture = sources();
     const prepared = await host.prepare({descriptorPath:"items/dataset.json",adapter:fixture.adapter});

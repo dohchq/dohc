@@ -16,6 +16,7 @@ import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runt
 import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
+import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
@@ -146,7 +147,24 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers });
     const resources = options.resources?.({ db, transaction });
     let apps: ReturnType<typeof createLocalDatasetApps>;
+    const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime,
+      recovery: {
+        directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
+        captureAttachments(_context, key, cursor) {
+          return db.prepare("SELECT metadata,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NOT NULL AND attached_revision<=? ORDER BY file_id")
+            .all(key.workspaceId, key.datasetId, cursor.revision).map(row => ({ ...parseAppBackendFile(JSON.parse(String(row.metadata))), revision: Number(row.attached_revision) }));
+        },
+        async *openAttachment(_context, key, file) {
+          for (let offset = 0; offset < file.byteLength; offset += 1024 * 1024) {
+            assertCurrent();
+            const row = db.prepare("SELECT substr(content,?,?) bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NOT NULL")
+              .get(offset + 1, Math.min(1024 * 1024, file.byteLength - offset), key.workspaceId, key.datasetId, file.fileId);
+            if (!row || !(row.bytes instanceof Uint8Array)) throw Error("This Collection file is unavailable.");
+            yield row.bytes;
+          }
+        },
+      },
       resolveAuthority(context, request) {
         assertCurrent();
         if (context !== owner) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
@@ -195,6 +213,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const migrations = createLocalDatasetMigrations({ workspaceId, assertCurrent,
       approvedArtifacts: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       migrate: input => host.migrate(owner, input) });
+    const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
+      transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
       return tracked(async () => {
         const abort = signal(input.signal);
@@ -260,6 +280,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       list(input: {after?: string; limit?: number} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
       describe(datasetId: string) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId}); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
+      transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
+      transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }));
+      },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
           signal(input.signal).throwIfAborted(); checkRevision(input);
