@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -36,6 +37,30 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
     input: {}, requestId: 'relocated', nowMs: 1 });
   assert.deepEqual(result.result, [{ id: 'relocated', value: 42 }]);
   assert.ok(result.changeset.byteLength);
+  await cp(new URL('../../../packages/app-backend-runtime/dist/persistent.mjs', import.meta.url), join(root, 'persistent-client.mjs'));
+  const { openPersistentAppBackend } = await import(pathToFileURL(join(root, 'persistent-client.mjs')).href);
+  const directory = join(root, 'worker');
+  await mkdir(directory);
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const cursor = { revision: 0, digest: hash('initial') };
+  const worker = await openPersistentAppBackend({ directory, tables, schemaSql, cursor,
+    scope: { workspaceId: 'workspace', datasetId: 'dataset', hostEpoch: 'epoch', approvedRevisionHash: hash(schemaSql) } },
+    { entryPath: join(staged, 'persistent-child.mjs') });
+  try {
+    const input = { expected: cursor, caller: { kind: 'owner' }, operation: 'insert',
+      source: `globalThis.operations={insert(ctx){ctx.db.execute('INSERT INTO items VALUES (?, ?)', [ctx.requestId, 42]);return ctx.db.query('SELECT * FROM items');}}`,
+      input: {}, requestId: 'persistent-relocated', nowMs: 1 };
+    const prepared = await worker.prepare(input);
+    const next = await worker.finalize({ proposalId: prepared.proposalId, previousDigest: cursor.digest,
+      revision: 1, digest: hash('event'), changesetSha256: prepared.changesetSha256 });
+    const read = await worker.prepare({ ...input, expected: next, readOnly: true,
+      source: `globalThis.operations={insert(ctx){return ctx.db.query('SELECT * FROM items');}}` });
+    assert.deepEqual(read.result, [{ id: 'persistent-relocated', value: 42 }]);
+  } finally { await worker.close(); }
+  const persistentChild = await readFile(join(staged, 'persistent-child.mjs'));
+  await writeFile(join(staged, 'persistent-child.mjs'), '// changed');
+  await assert.rejects(requireAppBackendRuntime(staged), /resources changed/);
+  await writeFile(join(staged, 'persistent-child.mjs'), persistentChild);
   const child = await readFile(join(staged, 'child.mjs'));
   await writeFile(join(staged, 'child.mjs'), '// changed');
   await assert.rejects(requireAppBackendRuntime(staged), /resources changed/);

@@ -24,8 +24,10 @@ try {
   const source = `
     import {app, utilityProcess} from 'electron';
     import {join} from 'node:path';
-    import {writeFileSync} from 'node:fs';
-    import {createDesktopAppBackendRuntime} from ${JSON.stringify(join(desktopRoot, 'src/workspaces/localAppBackendRuntime.ts'))};
+    import {writeFileSync, mkdirSync} from 'node:fs';
+    import {createHash} from 'node:crypto';
+    import {openPersistentAppBackend} from '@dohc/app-backend-runtime/persistent';
+    import {createDesktopAppBackendRuntime, createDesktopAppRuntimeLauncher} from ${JSON.stringify(join(desktopRoot, 'src/workspaces/localAppBackendRuntime.ts'))};
     app.setPath('userData', ${JSON.stringify(userData)});
     app.whenReady().then(async()=>{
       try {
@@ -36,7 +38,32 @@ try {
           source:"globalThis.operations={insert(ctx){ctx.db.execute('INSERT INTO items VALUES (?, ?)',[ctx.requestId,42]);return ctx.db.query('SELECT * FROM items');}}",
           input:{},requestId:'fuse-proof',nowMs:1});
         await runtime.validateAppDatabase({database:accepted.database,tables,schemaSql});
-        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,electron:process.versions.electron}));
+        const hash=value=>createHash('sha256').update(value).digest('hex');
+        const cursor={revision:0,digest:hash('initial')};
+        const directory=join(app.getPath('userData'),'worker');mkdirSync(directory,{recursive:true});
+        const config={directory,tables,schemaSql,cursor,scope:{workspaceId:'workspace',datasetId:'dataset',hostEpoch:'epoch',approvedRevisionHash:hash(schemaSql)}};
+        const options={launch:createDesktopAppRuntimeLauncher(utilityProcess,false),entryPath:join(process.resourcesPath,'app-backend-runtime','persistent-child.mjs')};
+        const worker=await openPersistentAppBackend(config,options);
+        let persistentResult;
+        let checkpoint;
+        try {
+          const operation={expected:cursor,caller:{kind:'owner'},operation:'insert',
+            source:"globalThis.operations={insert(ctx){ctx.db.execute('INSERT INTO items VALUES (?, ?)',[ctx.requestId,43]);return ctx.db.query('SELECT * FROM items');}}",
+            input:{},requestId:'persistent-fuse-proof',nowMs:1};
+          const prepared=await worker.prepare(operation);
+          const next=await worker.finalize({proposalId:prepared.proposalId,previousDigest:cursor.digest,revision:1,digest:hash('event'),changesetSha256:prepared.changesetSha256});
+          const read=await worker.prepare({...operation,expected:next,readOnly:true,source:"globalThis.operations={insert(ctx){return ctx.db.query('SELECT * FROM items');}}"});
+          persistentResult=read.result;
+          checkpoint=await worker.snapshot(join(app.getPath('userData'),'checkpoint.sqlite'));
+        } finally {await worker.close();}
+        const recoveredDirectory=join(app.getPath('userData'),'recovered');mkdirSync(recoveredDirectory);
+        const recovered=await openPersistentAppBackend({...config,directory:recoveredDirectory,checkpointPath:checkpoint.path,cursor:checkpoint.cursor},options);
+        let recoveredResult;
+        try {
+          recoveredResult=(await recovered.prepare({expected:checkpoint.cursor,caller:{kind:'owner'},operation:'read',readOnly:true,
+            source:"globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM items');}}",input:{},requestId:'recovered',nowMs:2})).result;
+        } finally {await recovered.close();}
+        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({result:accepted.result,changesetBytes:accepted.changeset.byteLength,persistentResult,recoveredResult,electron:process.versions.electron}));
         app.exit(0);
       } catch(error) {writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({error:String(error)}));app.exit(1);}
     });`;
@@ -63,5 +90,7 @@ try {
   const result = JSON.parse(await readFile(resultPath, 'utf8'));
   assert.deepEqual(result.result, [{ id: 'fuse-proof', value: 42 }]);
   assert.ok(result.changesetBytes > 0);
-  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, client in app.asar, child and Wasm in resources.`);
+  assert.deepEqual(result.persistentResult, [{ id: 'persistent-fuse-proof', value: 43 }]);
+  assert.deepEqual(result.recoveredResult, result.persistentResult);
+  console.log(`App backend directory smoke passed: Electron ${result.electron}, RunAsNode disabled, snapshot and persistent workers in resources, persistent checkpoint restored.`);
 } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
