@@ -3246,7 +3246,7 @@ describe("durable link usage inventory", () => {
     let now = 2_000;
     const limited = handler(storage, {
       relayExchangeKey,
-      linkExchangeRateLimiter: limiter,
+      linkExchangeGlobalRateLimiter: limiter,
       nowMs: () => now,
     });
     await seedFileShare(limited);
@@ -3285,7 +3285,7 @@ describe("durable link usage inventory", () => {
       }),
     );
     expect([absentKey, wrongKey, wrongSecret, rateLimited].map((response) => response.status))
-      .toEqual([404, 404, 404, 404]);
+      .toEqual([404, 404, 404, 429]);
     expect(await ownerLinkInventoryRow(limited, grantId)).toMatchObject({
       lastUsedAtMs: null,
     });
@@ -5532,22 +5532,38 @@ describe("relay link grants", () => {
     }
   });
 
-  it("rate-limits by socket IP before a storage lookup and bounds the bucket map", async () => {
+  it("admits 100 valid same-network exchanges despite invalid probes and still refuses revoked secrets", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h), secret = linkSecret(created.url);
+    const exchange = (value: string) => h(request(null,"/sync/link-exchange",{
+      ...jsonBody({secret:value}),headers:{"content-type":"application/json","x-dohc-relay-client-ip":"192.0.2.10"},
+    }));
+    for(let index=0;index<12;index++) expect((await exchange("z".repeat(43))).status).toBe(404);
+    expect((await exchange("z".repeat(43))).status).toBe(429);
+    for(let index=0;index<100;index++) expect((await exchange(secret)).status).toBe(200);
+    storage.revokeShareGrant({shareId:"share-existing",grantId:String(created.grantId),revokedAtMs:2_001});
+    expect((await exchange(secret)).status).toBe(429);
+    const otherRequest=request(null,"/sync/link-exchange",jsonBody({secret}));
+    otherRequest.headers.set("x-dohc-relay-client-ip","192.0.2.11");
+    const otherIp=await h(otherRequest);
+    expect(otherIp.status).toBe(404);
+  });
+
+  it("bounds global credential probes before a storage lookup", async () => {
     const storage = await newStorage();
     const counted = countStorageCalls(storage, "findLinkGrantByCredentialHash");
     const limiter = new TokenBucketLimiter(1, 0.000_001, 2);
-    const h = handler(counted.storage, { linkExchangeRateLimiter: limiter });
-    const first = await denialBytes(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: "g".repeat(43) })),
-      ),
+    const h = handler(counted.storage, { linkExchangeGlobalRateLimiter: limiter });
+    await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: "g".repeat(43) })),
     );
-    const limited = await denialBytes(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
-      ),
+    const limitedResponse = await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: "h".repeat(43) })),
     );
-    expect(limited).toBe(first);
+    expect(limitedResponse.status).toBe(429);
+    expect(await limitedResponse.json()).toMatchObject({ok:false,code:"link_read_rate_limited"});
     expect(counted.calls).toHaveLength(1);
 
     expect(limiter.allow("192.0.2.11", 2_000)).toBe(true);

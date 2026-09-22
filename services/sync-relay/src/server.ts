@@ -37,6 +37,8 @@ import {
   LINK_EXCHANGE_BUCKET_CAPACITY,
   LINK_EXCHANGE_REFILL_PER_SECOND,
   LINK_EXCHANGE_MAX_IPS,
+  LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY,
+  LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND,
   LINK_READ_BUCKET_CAPACITY,
   LINK_READ_REFILL_PER_SECOND,
   LINK_READ_MAX_CAPABILITIES,
@@ -120,6 +122,8 @@ export interface CreateSyncRelayHandlerOptions {
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
   linkExchangeRateLimiter?: TokenBucketLimiter;
+  linkExchangeGlobalRateLimiter?: TokenBucketLimiter;
+  linkExchangeGrantRateLimiter?: TokenBucketLimiter;
   linkRedeemRateLimiter?: TokenBucketLimiter;
   linkReadRateLimiter?: TokenBucketLimiter;
   linkGrantReadRateLimiter?: TokenBucketLimiter;
@@ -191,6 +195,8 @@ export function createSyncRelayHandler({
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
+  linkExchangeGlobalRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_GLOBAL_BUCKET_CAPACITY, LINK_EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1),
+  linkExchangeGrantRateLimiter = new TokenBucketLimiter(LINK_GRANT_READ_BUCKET_CAPACITY, LINK_GRANT_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
   linkGrantReadRateLimiter = new TokenBucketLimiter(
@@ -533,6 +539,8 @@ export function createSyncRelayHandler({
     newLinkBearer,
     newLinkHandoffCode,
     linkExchangeRateLimiter,
+    linkExchangeGlobalRateLimiter,
+    linkExchangeGrantRateLimiter,
     linkRedeemRateLimiter,
     linkReadRateLimiter,
     linkGrantReadRateLimiter,

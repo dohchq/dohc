@@ -7,6 +7,7 @@ import {
   createShareWebApplication,
   type CreateShareWebApplicationOptions,
   EXCHANGE_BUCKET_CAPACITY,
+  EXCHANGE_GLOBAL_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
   MAX_SESSIONS_PER_GRANT,
   SHARE_WEB_CSP,
@@ -1257,68 +1258,38 @@ describe("share-web sessions", () => {
     expect(relayCalls).toBe(1);
   });
 
-  it("rate-limits exchanges by socket IP before calling the relay", async () => {
+  it("admits valid browser and agent exchanges behind one network while bounding malformed requests", async () => {
     let relayCalls = 0;
     const handler = createShareWebHandler({
-      relayUrl: "http://relay.test",
-      publicHosts: new Set([HOST]),
-      nowMs: () => 1_000,
-      newSessionToken: () => Buffer.alloc(32, 30).toString("base64url"),
+      relayUrl: "http://relay.test", publicHosts: new Set([HOST]), nowMs: () => 1_000,
       fetchRelay: async () => {
-        relayCalls += 1;
-        return Response.json({
-          ok: true,
-          grantId: "grant-rate-limit",
-          capabilityToken: CAP_ALPHA_1,
-          capabilityExpiresAtMs: 901_000,
-        });
+        relayCalls++;
+        return Response.json({ok:true,grantId:"grant-rate-limit",capabilityToken:CAP_ALPHA_1,capabilityExpiresAtMs:901_000});
       },
     });
-    const sameIpHeaders = {
-      "content-type": "application/json",
-      "x-dohc-share-web-client-ip": "192.0.2.10",
-    };
-
-    for (
-      let exchangeNumber = 1;
-      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
-      exchangeNumber += 1
-    ) {
-      const accepted = await handler(
-        request("/api/exchange", {
-          method: "POST",
-          headers: sameIpHeaders,
-          body: JSON.stringify({ secret: SECRET_ALPHA }),
-        }),
-      );
-      expect(accepted.status, `exchange ${exchangeNumber}`).toBe(200);
+    const headers = {"content-type":"application/json","x-dohc-share-web-client-ip":"192.0.2.10"};
+    for(let index=0;index<100;index++) {
+      expect((await handler(request(index%2?"/api/exchange":"/api/mcp/exchange",{
+        method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
     }
-
-    const limitedRequest = request("/api/exchange", {
-      method: "POST",
-      headers: sameIpHeaders,
-      body: JSON.stringify({ secret: SECRET_ALPHA }),
-    });
-    const limited = await handler(limitedRequest);
-    const generic = await handler(request("/not-found"));
-    const otherIp = await handler(
-      request("/api/exchange", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-dohc-share-web-client-ip": "192.0.2.11",
-        },
-        body: JSON.stringify({ secret: SECRET_ALPHA }),
-      }),
-    );
-
-    expect(limited.status).toBe(404);
-    expect(Buffer.from(await limited.arrayBuffer())).toEqual(
-      Buffer.from(await generic.arrayBuffer()),
-    );
-    expect(limitedRequest.bodyUsed).toBe(false);
-    expect(otherIp.status).toBe(200);
-    expect(relayCalls).toBe(EXCHANGE_BUCKET_CAPACITY + 1);
+    for(let index=0;index<EXCHANGE_BUCKET_CAPACITY;index++) {
+      expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(404);
+    }
+    expect((await handler(request("/api/exchange",{method:"POST",headers,body:"{"}))).status).toBe(429);
+    expect((await handler(request("/api/exchange",{method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
+    expect(relayCalls).toBe(101);
+  });
+  it("bounds exchange forwarding globally and releases every settled slot", async () => {
+    let release!:()=>void, calls=0;
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const handler=createShareWebHandler({relayUrl:"http://relay.test",publicHosts:new Set([HOST]),nowMs:()=>1_000,
+      fetchRelay:async()=>{calls++;await gate;return Response.json({ok:true,grantId:"grant",capabilityToken:CAP_ALPHA_1,capabilityExpiresAtMs:901_000});}});
+    const exchange=()=>handler(request("/api/exchange",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({secret:SECRET_ALPHA})}));
+    const pending=Array.from({length:64},()=>exchange());
+    expect((await exchange()).status).toBe(429);
+    release();expect((await Promise.all(pending)).every(response=>response.status===200)).toBe(true);
+    for(let index=64;index<EXCHANGE_GLOBAL_BUCKET_CAPACITY;index++) expect((await exchange()).status).toBe(200);
+    expect((await exchange()).status).toBe(429);expect(calls).toBe(EXCHANGE_GLOBAL_BUCKET_CAPACITY);
   });
 
   it("limits in-flight blob streams independently for each viewer session", async () => {

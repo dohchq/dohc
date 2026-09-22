@@ -97,6 +97,17 @@ derived address to its internal handler as `x-dohc-share-web-client-ip` for
 pre-authentication rate limiting. The public proxy must not accept that
 internal header from clients.
 
+Link exchange admits valid credentials per share grant, so people on one network
+do not share the invalid-credential allowance. The relay allows a burst of 960
+valid exchanges per grant and refills 16 per second. Both services bound all
+exchange probes to a burst of 2,400, refilling 40 per second, with 64 requests
+in flight. These budgets use the existing app and share-read admission sizes.
+Malformed viewer requests and invalid relay credentials use a separate per-IP
+allowance of 12, refilling 0.2 per second. Exhausted budgets return 429.
+The relay still performs a bounded credential lookup to distinguish a valid
+secret after the per-IP allowance is exhausted; the global budget bounds this
+work. Request bodies and relay responses have size limits and ten-second deadlines.
+
 Link secrets reach the server only in a POST body or cookie; URL fragments stay
 in the browser. Strip query strings from proxy access logs. Do not log request
 bodies, `Cookie`, `Set-Cookie`, or the internal client-IP header. Disable body

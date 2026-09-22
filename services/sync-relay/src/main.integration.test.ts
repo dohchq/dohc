@@ -762,7 +762,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
     });
 
-    const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
+    const secret = "z".repeat(43);
     const firstClientStatuses = await Promise.all(
       Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
         (
@@ -792,10 +792,10 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       secondClientStatus: secondClient.status,
     }).toEqual({
       firstClientStatuses: [
-        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
-        404,
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 404),
+        429,
       ],
-      secondClientStatus: 200,
+      secondClientStatus: 404,
     });
   });
 
@@ -806,7 +806,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       DOHC_RELAY_EXCHANGE_KEY: undefined,
     });
 
-    const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
+    const secret = "z".repeat(43);
     const firstClientStatuses = await Promise.all(
       Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
         (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
@@ -823,10 +823,10 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       secondClientStatus: spoofedSecondClient.status,
     }).toEqual({
       firstClientStatuses: [
-        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
-        404,
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 404),
+        429,
       ],
-      secondClientStatus: 404,
+      secondClientStatus: 429,
     });
   });
 

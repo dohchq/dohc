@@ -16,7 +16,13 @@ async function open(browser: Browser) {
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     await page.goto(`${viewerOrigin}/fixture-open`);
+    const exchangeReply = page.waitForResponse(response => new URL(response.url()).pathname === "/api/exchange");
+    const launchReply = page.waitForResponse(response => new URL(response.url()).pathname === "/api/apps/launch");
+    // Both waits have handlers before either can reject during a failed exchange.
+    void launchReply.catch(() => {});
     await page.getByRole("button", {name: "Open", exact: true}).click();
+    expect((await exchangeReply).status(), "Link exchange").toBe(200);
+    expect((await launchReply).status(), "App launch").toBe(200);
     await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     await expect(page.frameLocator("iframe").locator("body")).toHaveAttribute("data-ready", "true");
     const frame = page.frames().find(frame => frame !== page.mainFrame());
@@ -149,4 +155,21 @@ test("public link load harness: fundraiser business refusals preserve capacity",
     expect(fixture.counts()).toEqual({profiles:2,participants:2,receipts:1});
     expect(host.failures).toEqual([]);
   } finally {await evidence(info,samples,{scenario:"harness-check-not-load-evidence",counts:fixture.counts()});await host?.close();await fixture.close();}
+});
+
+test("public link enrollment: 13 same-network browsers complete normal journeys", async ({}, info) => {
+  test.skip(!enabled,"Opt-in same-network enrollment regression: DOHC_PUBLIC_LINK_LOAD=1");
+  test.setTimeout(120_000);
+  const fixture=await actualFundraiserFixture({loadScenario:"generic"}),samples:Sample[]=[];
+  let host:Awaited<ReturnType<typeof publicLoadBrowser>>|undefined;
+  try {
+    host=await publicLoadBrowser(fixture);
+    for(let index=0;index<13;index++) {
+      const client=await open(host.browser);
+      try {expect(await journey(samples,index,client.frame,false)).toBe(true);}
+      finally {await client.context.close();}
+    }
+    expect(fixture.counts()).toEqual({profiles:13,participants:13,receipts:13});
+    expect(host.failures).toEqual([]);
+  } finally {await evidence(info,samples,{scenario:"same-network-enrollment-regression",counts:fixture.counts()});await host?.close();await fixture.close();}
 });
