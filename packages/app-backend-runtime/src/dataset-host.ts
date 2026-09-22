@@ -35,7 +35,7 @@ export interface DatasetHostOptions<Context> {
   /** Signed retained-byte delta; runs in the binding or grant transaction. */
   accountMetadata?(context: Context, allocation: DatasetScope & { bytes: number }): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
-  operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
+  operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
 }
 export interface ActivateDatasetInput {
   workspaceId: string;
@@ -274,7 +274,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         const current = permissions(context, key, through);
         if (current.token !== permitted.token || !current.operations.some(candidate => candidate.operationId === operationId)) denied();
       };
-      const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation })) : {};
+      const resources = options.operationResources ? synchronous(() => options.operationResources!(context, { ...key, authority: permitted.authority, operation, input })) : {};
       return options.supervisor.invoke({ scope: key, tables: permitted.revision.definition.tables.map(table => table.sqlName),
         operation: operation.name, caller: permitted.authority.caller, callerKey: hash(JSON.stringify([permitted.authority.principalKey, through])),
         input, idempotencyKey, payloadSha256: hash(JSON.stringify([permitted.revision.revisionSha256, operationId, input])), readOnly: operation.readOnly,
