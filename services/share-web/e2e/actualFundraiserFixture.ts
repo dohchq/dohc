@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,21 +15,29 @@ import { createSyncRelayHandler } from "../../sync-relay/src/server";
 import { hashLinkBearer } from "../../sync-relay/src/linkSecurity";
 import { compileDatasetOperations } from "../../sync-relay/src/datasetCompiler";
 import { createShareWebApplication } from "../src/server";
+import { loadDefinition, loadSchema, loadOperations, loadFrontend } from "./publicLoadSources";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 export const viewerOrigin = "https://viewer.example.com";
 export const syntheticReceipt = Buffer.from("%PDF-1.7 synthetic fundraiser receipt\n%%EOF");
 
 /** Real approved compiler, publication, relay, SQLite, and isolated runtime. Only account identity is a fixture. */
-export async function actualFundraiserFixture() {
-  const manifestBytes = readFileSync(new URL("../../../examples/fundraiser/app.publish.json", import.meta.url));
+export async function actualFundraiserFixture(options: {loadScenario?: "generic" | "fundraiser"} = {}) {
+  let manifestBytes = readFileSync(new URL("../../../examples/fundraiser/app.publish.json", import.meta.url));
   const manifest = JSON.parse(manifestBytes.toString());
-  const definition = parseDatasetDefinition(JSON.parse(readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url), "utf8")));
-  const schemaSql = readFileSync(new URL("../../../examples/fundraiser/schema.sql", import.meta.url), "utf8");
-  const operationSource = readFileSync(new URL("../../../examples/fundraiser/backend.ts", import.meta.url), "utf8");
+  const generic = options.loadScenario === "generic";
+  const definition = generic ? loadDefinition : parseDatasetDefinition(JSON.parse(readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url), "utf8")));
+  const schemaSql = generic ? loadSchema : readFileSync(new URL("../../../examples/fundraiser/schema.sql", import.meta.url), "utf8");
+  const operationSource = generic ? loadOperations : readFileSync(new URL("../../../examples/fundraiser/backend.ts", import.meta.url), "utf8");
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+  if (options.loadScenario) {
+    manifest.inputs = [manifest.entryPath];
+    manifest.dataset = {kind: "dataset", datasetId: definition.datasetId, revision: 1, revisionSha256: revision.revisionSha256,
+      operationIds: definition.operations.map(operation => operation.operationId)};
+    manifestBytes = Buffer.from(JSON.stringify(manifest));
+  }
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
-  for (const path of manifest.inputs as string[]) sources.set(path, readFileSync(new URL(`../../../examples/${path}`, import.meta.url)));
+  for (const path of manifest.inputs as string[]) sources.set(path, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/${path}`, import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
@@ -51,7 +59,7 @@ export async function actualFundraiserFixture() {
     compileOperations:compileDatasetOperations,
     onShutdownError(error){throw error;}});
   const linkKey="fundraiser-browser-link-key-with-thirty-two-bytes",exchangeKey="fundraiser-browser-relay-exchange-key-with-thirty-two-bytes";
-  const secret="S".repeat(43),profile="P".repeat(43);
+  const secret="S".repeat(43);
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
   storage.createFileLinkShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:JSON.stringify({paths:["fundraiser"],versionId:null}),createdAtMs:1},
     grant:{grantId:"g",shareId:"s",principalKind:"link",principalUserId:null,principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null},
@@ -77,8 +85,9 @@ export async function actualFundraiserFixture() {
   await owner("grants",{grantId:"helper",grant:{revision:1,revisionSha256:revision.revisionSha256,
     operationIds:definition.operations.filter(operation=>operation.access==="helper").map(operation=>operation.operationId),discover:false}});
   const calls:Array<{operation:string;status:number;named:boolean}>=[];
+  const profiles = new Set<string>();
   const application=createShareWebApplication({relayUrl:"https://relay.example.org",publicRelayUrl:"https://relay.example.org",relayExchangeKey:exchangeKey,
-    publicHosts:new Set(["viewer.example.com"]),newProfileSecret:()=>profile,appLaunch:{viewerOrigin,appDomain:"example.net"},
+    publicHosts:new Set(["viewer.example.com"]),newProfileSecret:()=>{const value=randomBytes(32).toString("base64url");profiles.add(value);return value;},appLaunch:{viewerOrigin,appDomain:"example.net"},
     viewerAssetsDir:fileURLToPath(new URL("../viewer/dist",import.meta.url)),accountAuth:{publicOrigin:viewerOrigin,upstreamUrl:"https://auth.example.org"},
     fetchAuth:async request=>{
       const path=new URL(request.url).pathname;
@@ -95,6 +104,9 @@ export async function actualFundraiserFixture() {
     },
   });
   return {application,publicationId,secret,calls,compiler:prepared.candidate.compilerIdentity,
+    counts:()=>({participants:Number(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n),
+      profiles:profiles.size,
+      receipts:Number(storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n)}),
     field:(table:string,column:string)=>definition.tables.find(value=>value.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId,
     ownerRead:(operation:string,input:unknown={})=>owner("invoke",{revision:1,revisionSha256:revision.revisionSha256,
       operationId:definition.operations.find(value=>value.name===operation)!.operationId,input,idempotencyKey:randomUUID()}),
