@@ -73,13 +73,14 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
     };
     const alice = await client("alice"), bob = await client("bob");
     expect((await alice.data().describe(id(1))).tables[0]!.fields.map(field => field.name)).toEqual(["ID", "Name"]);
-    expect(await alice.read()).toMatchObject({ kind: "invoked", result: { rows: [{ id: "a", name: "Alice visible" }], count: 1 }, copy: { offline: false, coverage: "saved-pages" } });
+    expect(await alice.read()).toMatchObject({ kind: "invoked", result: { rows: [{ id: "a", name: "Alice visible" }], count: 1 } });
     expect(await bob.read()).toMatchObject({ kind: "invoked", result: { rows: [{ id: "b", name: "Bob visible" }], count: 1 } });
+    await alice.registry.close(); await bob.registry.close();
     for (const user of ["alice", "bob"]) {
       const bytes = await readFile(join(directory, user, "pages.json"), "utf8");
       for (const forbidden of ["PRIVATE", "operationSource", "schemaSql", user === "alice" ? "Bob visible" : "Alice visible"]) expect(bytes).not.toContain(forbidden);
     }
-    await alice.registry.close(); await bob.registry.close(); await stop();
+    await stop();
     const restartedAlice = await client("alice"), restartedBob = await client("bob");
     expect(await restartedAlice.read()).toMatchObject({ result: { rows: [{ id: "a" }] }, copy: { offline: true, coverage: "saved-pages" } });
     expect(await restartedBob.read()).toMatchObject({ result: { rows: [{ id: "b" }] }, copy: { offline: true, coverage: "saved-pages" } });
@@ -88,7 +89,7 @@ it("keeps two named recipients' projected pages isolated over real HTTP, through
     f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20 WHERE grant_id='alice-grant'").run());
     await listen(address.port);
     await expect(restartedAlice.read()).rejects.toThrow(/access or rules changed/);
-    expect(await restartedBob.read()).toMatchObject({ result: { rows: [{ id: "b" }] }, copy: { offline: false } });
+    expect(await restartedBob.read()).toMatchObject({ result: { rows: [{ id: "b" }] } });
     await stop();
     await expect(restartedAlice.read()).rejects.toThrow(/not saved/);
     await expect(readFile(join(directory, "alice", "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });

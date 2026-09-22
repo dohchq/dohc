@@ -7,8 +7,17 @@ import { createNamedDatasetData } from "./namedDataset";
 import { NamedDatasetOfflineError } from "./namedDatasetTransport";
 import { createHash } from "node:crypto";
 
+const disk = vi.hoisted(() => ({ beforeSync: null as null | (() => Promise<void>) }));
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    const file = await actual.open(...args), sync = file.sync.bind(file);
+    file.sync = async () => { await disk.beforeSync?.(); await sync(); };
+    return file;
+  } };
+});
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { disk.beforeSync = null; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const owner = "a".repeat(64), fingerprint = "b".repeat(64), revisionSha256 = "c".repeat(64);
 const description = { datasetId: id(1), name: "Registrations", revision: 1, revisionSha256,
@@ -31,12 +40,19 @@ async function fixture(maxBytes?: number) {
     return Response.json(status === 200 ? path.endsWith("/invoke") ? result : path.endsWith("/datasets") ? { datasets: [description], nextCursor: null } : description : { message: "refused" },
       { status, headers: { "x-dohc-dataset-access": token } });
   });
-  const cache = (binding: unknown = ["workspace", "share"]) => registry.scope({ owner, binding, assertCurrent() {} });
+  const saves: Promise<unknown>[] = [];
+  const cache = (binding: unknown = ["workspace", "share"]) => {
+    const scoped = registry.scope({ owner, binding, assertCurrent() {} });
+    return { ...scoped, put: (...args: Parameters<typeof scoped.put>) => {
+      const pending = scoped.put(...args); saves.push(pending.catch(() => undefined)); return pending;
+    } };
+  };
   const data = (binding?: unknown) => createNamedDatasetData({ workspaceId: "local-share", credentials: { userId: "helper", token: "private-token", email: "helper@example", serverUrl: "https://account", relayUrl: "https://relay" },
     shareView: { shareId: "share", relayUrl: "https://relay", grantedSelector: { paths: ["app"], versionId: null, access: "view" } },
     credentialGeneration: generation, currentCredentialGeneration: () => generation, assertCurrent() {}, signal: new AbortController().signal,
     relayJson: async () => { throw Error("unexpected transport"); }, offline: { cache: cache(binding), relayResponse } });
   return { directory, data, cache, relayResponse, registry: () => registry,
+    async settled() { await Promise.all(saves.splice(0)); },
     offline(value = true) { offline = value; }, status(value: number) { status = value; }, token(value: string) { token = value; }, malformed() { malformed = true; },
     accountChanged() { generation++; },
     async restart() { await registry.close(); registry = createNamedDatasetCacheRegistry({ directory: () => directory, maxBytes }); await registry.credentialsChanged(owner); },
@@ -45,8 +61,8 @@ async function fixture(maxBytes?: number) {
 
 it("saves only exact authorized result pages across restart, with honest stale scope and no offline writes", async () => {
   const f = await fixture();
-  expect(await f.data().inspect!(id(1))).toMatchObject({ copy: { offline: false, coverage: "saved-pages" } });
-  expect(await f.data().invoke(invocation)).toMatchObject({ ...result, copy: { offline: false, coverage: "saved-pages" } });
+  expect(await f.data().inspect!(id(1))).toEqual({ dataset: description, copy: undefined });
+  expect(await f.data().invoke(invocation)).toEqual(result);
   await f.restart(); f.offline();
   expect(await f.data().invoke({ ...invocation, idempotencyKey: "another-read" })).toMatchObject({ ...result, copy: { offline: true, coverage: "saved-pages" } });
   await expect(f.data().invoke({ ...invocation, input: { limit: 100 } })).rejects.toThrow(/not saved/);
@@ -83,7 +99,7 @@ it("does not classify a TypeError from response handling as transport failure", 
 });
 
 it("retains operation correction messages and allows full-sized online attachments without caching their bytes", async () => {
-  const f = await fixture(); await f.data().describe(id(1));
+  const f = await fixture(); await f.data().describe(id(1)); await f.settled();
   f.relayResponse.mockResolvedValueOnce(Response.json({ code: "capacity_reached", message: "Choose another time." }, { status: 409, headers: { "x-dohc-dataset-access": fingerprint } }));
   await expect(f.data().invoke(invocation)).rejects.toMatchObject({ refusal: { code: "capacity_reached", message: "Choose another time." } });
   const bytes = Buffer.alloc(3 * 1024 * 1024, 120), file = { fileId: "a".repeat(32), name: "receipt.png", contentType: "image/png", byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
@@ -94,7 +110,7 @@ it("retains operation correction messages and allows full-sized online attachmen
 });
 
 it("isolates share/workspace scopes and removes the previous account's disk pages", async () => {
-  const f = await fixture(); await f.data().describe(id(1)); f.offline();
+  const f = await fixture(); await f.data().describe(id(1)); await f.restart(); f.offline();
   await expect(f.data(["other-workspace", "share"]).describe(id(1))).rejects.toThrow(/not saved/);
   const old = f.data(); f.accountChanged();
   await expect(old.describe(id(1))).rejects.toThrow(/session changed/);
@@ -134,4 +150,86 @@ it("discards saved pages when a local share marker records narrower authority wh
   const narrowed = f.registry().scope({ owner, binding: ["workspace", "share"], localAuthority: { access: "view", paths: ["narrower"] }, assertCurrent() {} });
   expect(await narrowed.read(["describe", id(1)])).toBeNull();
   await expect(readFile(join(f.directory, "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+
+it("returns consecutive online reads before disk sync and advertises only durable offline pages", async () => {
+  const f = await fixture(); await f.data().describe(id(1)); await f.restart();
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  disk.beforeSync = async () => { disk.beforeSync = null; entered.resolve(); await release.promise; };
+  try {
+    expect(await f.data().invoke(invocation)).toEqual(result);
+    await entered.promise;
+    expect(await f.data().invoke({ ...invocation, input: { limit: 25 } })).toEqual(result);
+    expect(await f.data().inspect!(id(1))).toEqual({ dataset: description, copy: undefined });
+    const key = ["invoke", id(1), 1, revisionSha256, id(4), invocation.input];
+    expect(await f.cache().read(key)).toBeNull();
+  } finally { release.resolve(); }
+  await f.restart(); f.offline();
+  expect(await f.data().invoke(invocation)).toMatchObject({ ...result, copy: { offline: true, coverage: "saved-pages" } });
+  expect(await f.data().invoke({ ...invocation, input: { limit: 25 } })).toMatchObject({ ...result, copy: { offline: true } });
+});
+
+it("never exposes a failed save as an offline page, while retaining the prior durable page", async () => {
+  const f = await fixture(); await f.data().describe(id(1)); await f.restart();
+  const failed = Promise.withResolvers<void>();
+  disk.beforeSync = async () => { disk.beforeSync = null; failed.resolve(); throw Error("disk full"); };
+  expect(await f.data().invoke(invocation)).toEqual(result);
+  await failed.promise; await f.settled();
+  await f.restart(); f.offline();
+  expect(await f.data().inspect!(id(1))).toMatchObject({ dataset: description, copy: { offline: true } });
+  await expect(f.data().invoke(invocation)).rejects.toThrow(/not saved/);
+});
+
+it.each([["clear", false], ["account", false], ["clear", true], ["account", true]] as const)("purges an active delayed write after %s even with write failure %s and cannot revive it on restart", async (action, fail) => {
+  const f = await fixture(), cache = f.cache(); await cache.accept(fingerprint, await cache.begin());
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  disk.beforeSync = async () => { disk.beforeSync = null; entered.resolve(); await release.promise; if (fail) throw Error("disk full"); };
+  const save = cache.put("delayed", result, fingerprint).catch(error => error);
+  try {
+    await entered.promise;
+    const purge = action === "clear" ? cache.clear() : f.registry().credentialsChanged("f".repeat(64));
+    release.resolve();
+    await purge;
+    const saved = await save;
+    if (action === "clear") expect(saved).toBeNull(); else expect(saved).toBeInstanceOf(Error);
+    await f.restart();
+    expect(await f.cache().read("delayed")).toBeNull();
+    await expect(readFile(join(f.directory, "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { release.resolve(); await save; }
+});
+
+it("accounts for UTF-8 bytes, scope metadata and many evictions without serializing the full file per eviction", async () => {
+  const f = await fixture(10000), cache = f.cache(); await cache.accept(fingerprint, await cache.begin());
+  for (let i = 0; i < 40; i++) await cache.put(i, "漢字".repeat(20), fingerprint);
+  const stringify = vi.spyOn(JSON, "stringify");
+  try {
+    await cache.put("large", "漢字".repeat(700), fingerprint);
+    const fullFiles = stringify.mock.calls.filter(([value]) => value && typeof value === "object" &&
+      "scopes" in value && Array.isArray(value.scopes) && value.scopes.some((scope: { pages: unknown[] }) => scope.pages.length));
+    expect(fullFiles).toHaveLength(1);
+  } finally { stringify.mockRestore(); }
+  expect((await readFile(join(f.directory, "pages.json"))).byteLength).toBeLessThanOrEqual(10000);
+  expect(await cache.read(0)).toBeNull(); expect(await cache.read("large")).not.toBeNull();
+  for (let i = 0; i < 40; i++) {
+    const another = f.cache(["workspace", `share-${i}`]); await another.accept(fingerprint, await another.begin());
+    expect((await readFile(join(f.directory, "pages.json"))).byteLength).toBeLessThanOrEqual(10000);
+  }
+});
+
+
+it("stops new cache work during close and drains a save already admitted", async () => {
+  const f = await fixture(), cache = f.cache(); await cache.accept(fingerprint, await cache.begin());
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  disk.beforeSync = async () => { disk.beforeSync = null; entered.resolve(); await release.promise; };
+  const saved = cache.put("admitted", result, fingerprint);
+  try {
+    await entered.promise;
+    const closed = f.registry().close();
+    await expect(cache.put("late", result, fingerprint)).rejects.toThrow(/closing/);
+    release.resolve();
+    await saved; await closed; await f.restart();
+    expect(await f.cache().read("admitted")).toMatchObject({ value: result });
+    expect(await f.cache().read("late")).toBeNull();
+  } finally { release.resolve(); await saved; }
 });

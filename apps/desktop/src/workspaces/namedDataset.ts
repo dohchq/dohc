@@ -56,8 +56,9 @@ export function createNamedDatasetData(input: {
     } });
     try {
       const value = await read(remote); current();
-      const savedAtMs = save && fingerprint ? await cache.put(key, value, fingerprint) : null;
-      current(); return { value, ...(savedAtMs === null ? {} : { copy: copy(savedAtMs, false) }) };
+      // Saving is optional background work. Only a durable offline read advertises saved pages.
+      if (save && fingerprint) void cache.put(key, value, fingerprint).catch(() => undefined);
+      return { value };
     } catch (error) {
       current();
       if (!(error instanceof NamedDatasetOfflineError)) throw error;
