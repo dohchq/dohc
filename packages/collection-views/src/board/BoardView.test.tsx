@@ -320,6 +320,7 @@ describe("BoardView", () => {
         groups={makeGroups()}
         groupBy="status"
         onOpenRecord={onOpenRecord}
+        onCellChange={vi.fn()}
       />,
     );
     layOutBoard();
@@ -333,6 +334,14 @@ describe("BoardView", () => {
     onOpenRecord.mockClear();
     await keyboardDrag(card, []);
     expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("does not lift read-only cards", async () => {
+    render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" />);
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    card.focus(); fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    expect(card.className.includes("opacity-50")).toBe(false);
   });
 
   it("mounts only the cards near the column's viewport, and more on scroll", () => {

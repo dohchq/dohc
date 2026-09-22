@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
 import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
@@ -35,6 +35,9 @@ export interface BoardViewProps {
   onOpenRecord?: (record: CollectionRecord) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
+  /** Hosts with paged queries provide controls and a truthful page count. */
+  groupFooter?: (group: CollectionRecordGroup, index: number) => ReactNode;
+  groupCount?: (group: CollectionRecordGroup, index: number) => string;
 }
 
 type PersonLabel = (userId: string) => string | null;
@@ -67,10 +70,11 @@ interface BoardCardProps {
   fields: FieldDefinition[];
   onOpen?: (record: CollectionRecord) => void;
   personLabel?: PersonLabel;
+  canDrag: boolean;
 }
 
-function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
-  const { ref, isDragging } = useDraggable({ id: record.id });
+function BoardCard({ record, fields, onOpen, personLabel, canDrag }: BoardCardProps) {
+  const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
   // Click opens the record. Enter belongs to the keyboard drag sensor (it
   // lifts the card), so it must not also open; keyboard users open through
   // the card's Open button. The ref swallows the click that can trail a
@@ -154,6 +158,9 @@ function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
 }
 
 interface BoardColumnProps {
+  footer?: ReactNode;
+  count?: string;
+  canDrag: boolean;
   group: CollectionRecordGroup;
   index: number;
   label: string;
@@ -179,6 +186,9 @@ function BoardColumn({
   draggingId,
   onOpen,
   personLabel,
+  footer,
+  count,
+  canDrag,
 }: BoardColumnProps) {
   const { ref, isDropTarget } = useDroppable({ id: index });
   // A column mounts only the cards near its viewport (TableView precedent):
@@ -217,7 +227,7 @@ function BoardColumn({
     >
       <div className="flex items-center gap-1.5 px-1 pb-2">
         <span className="truncate text-[12px] font-medium text-muted">{label}</span>
-        <span className="font-mono text-[11px] text-subtle">{group.records.length}</span>
+        <span className="font-mono text-[11px] text-subtle">{count ?? group.records.length}</span>
       </div>
       <div
         ref={scrollRef}
@@ -244,12 +254,14 @@ function BoardColumn({
                   fields={fields}
                   onOpen={onOpen}
                   personLabel={personLabel}
+                  canDrag={canDrag}
                 />
               </div>
             );
           })}
         </div>
       </div>
+      {footer}
     </section>
   );
 }
@@ -262,6 +274,8 @@ export function BoardView({
   onCellChange,
   onOpenRecord,
   personLabel,
+  groupFooter,
+  groupCount,
 }: BoardViewProps) {
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const groupField = useMemo(
@@ -298,7 +312,7 @@ export function BoardView({
     });
   };
 
-  if (cardIndex.size === 0) {
+  if (cardIndex.size === 0 && !groupFooter) {
     return <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>;
   }
 
@@ -315,6 +329,9 @@ export function BoardView({
             draggingId={draggingId}
             onOpen={onOpenRecord}
             personLabel={personLabel}
+            footer={groupFooter?.(group, index)}
+            count={groupCount?.(group, index)}
+            canDrag={!!onCellChange}
           />
         ))}
       </div>
