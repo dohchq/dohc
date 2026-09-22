@@ -72,5 +72,5 @@ it("rejects tombstone-only changes during export before fencing the source", asy
       f.journal.fence({ expected: prepared.manifest.cursor, authorize: f.authorize });
     }).toThrow("changed while it was being exported");
     expect(f.journal.head(f.scope, f.authorize).active).toBe(true);
-  } finally { await stream.return(); await prepared.dispose(); }
+  } finally { await stream.return(undefined); await prepared.dispose(); }
 });
