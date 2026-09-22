@@ -40,6 +40,9 @@ export interface JournalEvent {
   recordedAtMs: number;
 }
 export interface JournalReceipt { revision: number; payloadSha256: string; resultJson: string }
+/** Disposable replay acceleration at an already committed cursor. Never part of export history. */
+export interface JournalMaterialization { cursor: DatasetCursor; checkpointId: string; byteLength: number; sha256: string }
+export interface MaterializationAllocation { bytes: number; stagedCreditBytes: number; releasedBytes: number }
 export class JournalError extends Error {
   constructor(readonly code: "conflict" | "invalid" | "inactive" | "corrupt", message: string) {
     super(message); this.name = "JournalError";
@@ -95,6 +98,9 @@ export type JournalExportRecord =
       definitionJson: string; capacityBytes: number; byteLength: number; sha256: string };
 export interface JournalExportCapture<T> { cursor: DatasetCursor; checkpoint: Extract<JournalExportRecord, { kind: "checkpoint" }>; captured: T }
 export interface DatasetJournal {
+  materialization(input: { scope: DatasetScope; authorize: Authorize }): JournalMaterialization | null;
+  materializationBlob(input: { scope: DatasetScope; cache: JournalMaterialization; offset: number; length?: number; authorize: Authorize }): Uint8Array | null;
+  cacheMaterialization(input: { expected: DatasetCursor; checkpoint: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<MaterializationAllocation>) => unknown }): JournalMaterialization;
   /** Reject admission for a permanently deleted dataset, including after restart. */
   assertNotDeleted(scope: DatasetScope, authorize: Authorize): void;
   /** The cleanup callback runs inside the deletion transaction, before private data is removed. */
@@ -213,7 +219,11 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
       cursor_json TEXT NOT NULL,previous_json TEXT,source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,
       capacity_bytes INTEGER NOT NULL,checkpoint_id TEXT NOT NULL,checkpoint_sha256 TEXT NOT NULL,
-      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`));
+      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_materializations (
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,cursor_json TEXT NOT NULL,checkpoint_id TEXT NOT NULL,
+      byte_length INTEGER NOT NULL CHECK(byte_length>=0),sha256 TEXT NOT NULL,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>=0),
+      PRIMARY KEY(workspace_id,dataset_id)) STRICT;`));
   function notDeleted(key: DatasetScope): void {
     if(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId))
       throw new JournalError("inactive","Dataset was permanently deleted.");
@@ -302,7 +312,68 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     if(eventHash(event)!==event.cursor.digest)return corrupt("Export event metadata is damaged.");
     return {...event,kind:"event",byteLength:integer(Number(row.byte_length),0,maxEvent)};
   }
+  function materializationRow(key: DatasetScope) {
+    return db.prepare("SELECT * FROM dohc_dataset_materializations WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
+  }
+  function materializationRelease(key: DatasetScope): number {
+    const row=materializationRow(key);
+    return row ? integer(Number(row.storage_bytes),0,maxCheckpoint+1024*1024) : 0;
+  }
+  function removeMaterialization(key: DatasetScope) {
+    const row=materializationRow(key);
+    if(!row)return;
+    checkpoints.removeMaterialization(key,String(row.checkpoint_id));
+    db.prepare("DELETE FROM dohc_dataset_materializations WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
+  }
+  function readMaterialization(key: DatasetScope, h: StoredHead): JournalMaterialization | null {
+    const row=materializationRow(key);
+    if(!row)return null;
+    // Cache damage is recoverable. Authorization and authority checks happen outside this fallback.
+    try {
+      const current=cursor(JSON.parse(String(row.cursor_json))),checkpointId=text(String(row.checkpoint_id),256);
+      if(!sameIdentity(current,h.cursor)||current.revision<h.checkpointCursor.revision||current.revision>h.cursor.revision)return null;
+      const canonical=current.revision===h.checkpointCursor.revision?h.checkpointCursor:exportRecord(key,current.revision).cursor;
+      if(!sameCursor(current,canonical))return null;
+      const manifest=checkpoints.info(key,checkpointId),byteLength=integer(Number(row.byte_length),0,h.capacityBytes),sha256=digest(String(row.sha256));
+      if(manifest.expectedBytes!==byteLength||manifest.sha256!==sha256)return null;
+      return {cursor:current,checkpointId,byteLength,sha256};
+    } catch { return null; }
+  }
   return {
+    materialization(input) {
+      const key=scope(input.scope);
+      return tx(()=>{callback(input.authorize);const h=storedHead(key);active(h);return readMaterialization(key,h);});
+    },
+    materializationBlob(input) {
+      const key=scope(input.scope),cache=structuredClone(input.cache),offset=integer(input.offset),length=integer(input.length??1024*1024,1,1024*1024);
+      return tx(()=>{
+        callback(input.authorize);const h=storedHead(key);active(h);
+        const current=readMaterialization(key,h);
+        if(!current||!sameCursor(cache.cursor,current.cursor)||cache.checkpointId!==current.checkpointId||cache.byteLength!==current.byteLength||cache.sha256!==current.sha256)return null;
+        if(offset>current.byteLength)invalid("Invalid materialization blob range.");
+        try {return checkpoints.read(key,current.checkpointId,offset,length);} catch {return null;}
+      });
+    },
+    cacheMaterialization(input) {
+      const expected=cursor(input.expected),checkpoint=structuredClone(input.checkpoint),authorize=input.authorize,account=input.account;
+      if(checkpoint instanceof Uint8Array)invalid("Materialization requires a sealed checkpoint stage.");
+      synchronous(authorize);if(account)synchronous(account);
+      return tx(()=>{
+        callback(authorize);const h=storedHead(expected);active(h);assertCursor(expected,h.cursor);
+        const resolved=checkpoints.resolve(expected,checkpoint,true);
+        if(resolved.expectedBytes>h.capacityBytes)invalid("Materialization exceeds reserved capacity.");
+        const releasedBytes=materializationRelease(expected);
+        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify(expected))+512;
+        if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Materialization replacement requires quota accounting.");
+        if(account)callback(()=>account(Object.freeze({bytes,stagedCreditBytes:resolved.stagedCreditBytes,releasedBytes})));
+        callback(authorize);const current=storedHead(expected);active(current);assertCursor(expected,current.cursor);
+        removeMaterialization(expected);
+        const checkpointId=checkpoints.activate(expected,checkpoint);
+        db.prepare("INSERT INTO dohc_dataset_materializations VALUES(?,?,?,?,?,?,?)")
+          .run(expected.workspaceId,expected.datasetId,JSON.stringify(expected),checkpointId,resolved.expectedBytes,resolved.sha256,account?bytes:0);
+        return {cursor:expected,checkpointId,byteLength:resolved.expectedBytes,sha256:resolved.sha256};
+      });
+    },
     assertNotDeleted(value,authorize) {
       const key=scope(value);
       callback(authorize);notDeleted(key);
@@ -318,7 +389,7 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         if(cleanup)callback(cleanup);
         callback(authorize);
         checkpoints.destroy(expected);
-        for(const table of ["dohc_dataset_receipts","dohc_dataset_events","dohc_dataset_checkpoint_history","dohc_dataset_journals"])
+        for(const table of ["dohc_dataset_materializations","dohc_dataset_receipts","dohc_dataset_events","dohc_dataset_checkpoint_history","dohc_dataset_journals"])
           db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(expected.workspaceId,expected.datasetId);
       });
     },
@@ -417,10 +488,12 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         assertCursor(expected,h.cursor);
         if(approvedRevisionHash===expected.approvedRevisionHash && (source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson))
           invalid("Changed dataset artifacts require a new approved revision.");
-        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024+capacityBytes-h.capacityBytes;
-        if(resolved.stagedCreditBytes&&!account)invalid("Staged checkpoint activation requires quota accounting.");
+        const releasedBytes=materializationRelease(expected);
+        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024+capacityBytes-h.capacityBytes-releasedBytes;
+        if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Staged checkpoint activation requires quota accounting.");
         if(account)callback(()=>account(Object.freeze({bytes,capacityBytes,capacityDeltaBytes:capacityBytes-h.capacityBytes,cursor:next,stagedCreditBytes:resolved.stagedCreditBytes})));
         callback(authorize);
+        removeMaterialization(expected);
         const checkpointId=checkpoints.activate(expected,checkpoint);
         db.prepare(`INSERT INTO dohc_dataset_checkpoint_history(workspace_id,dataset_id,revision,cursor_json,previous_json,source,schema_sql,
           definition_json,capacity_bytes,checkpoint_id,checkpoint_sha256)
@@ -457,10 +530,12 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
         if(db.prepare("SELECT 1 FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND json_extract(cursor_json,'$.hostEpoch')=? LIMIT 1")
           .get(expected.workspaceId,expected.datasetId,hostEpoch)||db.prepare("SELECT 1 FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND host_epoch=? LIMIT 1")
           .get(expected.workspaceId,expected.datasetId,hostEpoch))invalid("A claimed dataset requires a fresh host epoch.");
-        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024;
-        if(resolved.stagedCreditBytes&&!account)invalid("Staged checkpoint activation requires quota accounting.");
+        const releasedBytes=materializationRelease(expected);
+        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024-releasedBytes;
+        if((resolved.stagedCreditBytes||releasedBytes)&&!account)invalid("Staged checkpoint activation requires quota accounting.");
         if(account)callback(()=>account(Object.freeze({bytes,capacityBytes,capacityDeltaBytes:0,cursor:next,stagedCreditBytes:resolved.stagedCreditBytes})));
         callback(authorize);
+        removeMaterialization(expected);
         const checkpointId=checkpoints.activate(expected,checkpoint);
         db.prepare(`INSERT INTO dohc_dataset_checkpoint_history(workspace_id,dataset_id,revision,cursor_json,previous_json,source,schema_sql,
           definition_json,capacity_bytes,checkpoint_id,checkpoint_sha256)

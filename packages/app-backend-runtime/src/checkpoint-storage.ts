@@ -166,7 +166,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
       return tx(() => { callback(input.authorize); return db.prepare("SELECT * FROM dohc_dataset_checkpoints WHERE workspace_id=? AND state!=2 AND stage_id>? ORDER BY stage_id LIMIT ?")
         .all(validText(input.workspaceId), input.after ?? "", limit).map(value => manifest(validateRow(value as StageRow))); });
     },
-    resolve(key: DatasetScope, input: Uint8Array | CheckpointStage) {
+    resolve(key: DatasetScope, input: Uint8Array | CheckpointStage, requireStaged = false) {
       const value = input instanceof Uint8Array ? { expectedBytes: input.byteLength, sha256: digest(input), bytes: input } : input;
       if (input instanceof Uint8Array) {
         if (input.byteLength > maximumBytes) throw new Error("Checkpoint exceeds its size limit.");
@@ -174,7 +174,19 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
       }
       const stored = row(input);
       if (stored.workspace_id !== key.workspaceId || stored.dataset_id !== key.datasetId || stored.state === 0) throw new Error("Checkpoint is not sealed for this dataset.");
+      if (requireStaged && stored.state !== 1) throw new Error("Checkpoint is already active.");
       return { ...value, stageId: stored.stage_id, storageBytes: storageBytes(stored.byte_length), stagedCreditBytes: stored.reserved_bytes };
+    },
+    /** Journal-only: remove a cache blob, never a checkpoint in authoritative history. */
+    removeMaterialization(key: DatasetScope, stageId: string) {
+      const authoritative = db.prepare(`SELECT 1 FROM dohc_dataset_journals WHERE checkpoint_id=?
+        UNION ALL SELECT 1 FROM dohc_dataset_checkpoint_history WHERE checkpoint_id=? LIMIT 1`).get(stageId,stageId);
+      if (authoritative) return;
+      const owned=db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=? AND workspace_id=? AND dataset_id=? AND state=2")
+        .get(stageId,key.workspaceId,key.datasetId);
+      if (!owned) return;
+      db.prepare("DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id=?").run(stageId);
+      db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE stage_id=?").run(stageId);
     },
     activate(key: DatasetScope, input: Uint8Array | CheckpointStage): string {
       if (input instanceof Uint8Array) {

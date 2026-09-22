@@ -44,6 +44,139 @@ function fixture(limits:Partial<JournalOptions>={}) {
     materialize(){const exported=journal.checkpoint({scope,authorize});writeFileSync(join(directory,"restored.sqlite"),exported.bytes);const restored=open("restored.sqlite");for(const event of journal.events({scope,after:exported.cursor,authorize}).events){expect(restored.applyChangeset(event.changeset)).toBe(true);}return restored;}};
 }
 
+function materializationStage(f:ReturnType<typeof fixture>,bytes:Uint8Array=f.initialization.checkpoint,accounted=true) {
+  const stage=f.journal.stageCheckpoint({scope:f.scope,expectedBytes:bytes.byteLength,sha256:digest(bytes),authorize:f.authorize,
+    ...(accounted?{account:({bytes}:{bytes:number})=>{f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(bytes);}}:{})});
+  for(let offset=0,index=0;offset<bytes.byteLength;offset+=stage.chunkSize,index++)
+    f.journal.appendCheckpointChunk({stage,index,bytes:bytes.subarray(offset,offset+stage.chunkSize),authorize:f.authorize});
+  return f.journal.sealCheckpoint({stage,authorize:f.authorize});
+}
+function cacheAccount(f:ReturnType<typeof fixture>) {
+  return ({bytes,stagedCreditBytes,releasedBytes}:{bytes:number;stagedCreditBytes:number;releasedBytes:number})=>{
+    f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(bytes-stagedCreditBytes-releasedBytes);
+  };
+}
+it("keeps materialization caches outside authoritative history and retry lineage across restart",()=>{
+  const f=fixture(),write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
+  const expected=write.event.cursor;
+  const before=f.journal.exportPage({scope:f.scope,through:expected,afterRevision:-1,authorize:f.authorize});
+  const restored=f.materialize();restored.close();
+  const bytes=readFileSync(join(f.directory,"restored.sqlite")),checkpoint=materializationStage(f,bytes);
+  const cache=f.journal.cacheMaterialization({expected,checkpoint,authorize:f.authorize,account:cacheAccount(f)});
+  f.reopen();
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(cache);
+  expect(f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toEqual(new Uint8Array(bytes));
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(expected);
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(f.initial);
+  expect(f.journal.exportPage({scope:f.scope,through:expected,afterRevision:-1,authorize:f.authorize})).toEqual(before);
+  expect(f.journal.commitOperation(f.prepare()).kind).toBe("replayed");
+  const next=f.journal.commitOperation(f.prepare(expected,"order-2"));expect(next.kind).toBe("committed");
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(cache);
+  expect(f.journal.events({scope:f.scope,after:cache.cursor,authorize:f.authorize}).events).toHaveLength(1);
+});
+it("replaces exactly one cache and refunds its allocation without deleting authoritative checkpoints",()=>{
+  const f=fixture(),account=cacheAccount(f);
+  const first=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
+  const cost=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  const second=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(cost);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(1);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoints").get()!.n).toBe(2);
+  expect(f.db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=?").get(first.checkpointId)).toBeUndefined();
+  expect(f.journal.materializationBlob({scope:f.scope,cache:first,offset:0,authorize:f.authorize})).toBeNull();
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(second);
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
+});
+it.each(["before","after"] as const)("keeps cache install and accounting atomic across a fault %s commit",fault=>{
+  const f=fixture(),checkpoint=materializationStage(f),reserved=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  f.fault(fault);
+  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow();
+  f.reopen();
+  const cache=f.journal.materialization({scope:f.scope,authorize:f.authorize});
+  expect(cache===null).toBe(fault==="before");
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
+  if(fault==="before") {
+    expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(reserved);
+    f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)});
+  } else expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow("already active");
+});
+it("rejects stale or revoked cache installation without consuming its stage",()=>{
+  const f=fixture(),checkpoint=materializationStage(f),account=cacheAccount(f);
+  const write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
+  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account})).toThrow("cursor changed");
+  expect(()=>f.journal.cacheMaterialization({expected:write.event.cursor,checkpoint,authorize:f.authorize,account:()=>f.revoke()})).toThrow("denied");
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(1);
+});
+it("rolls back replacement and quota changes if accounting refuses the cache",()=>{
+  const f=fixture(),account=cacheAccount(f),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
+  const checkpoint=materializationStage(f),before=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:allocation=>{account(allocation);throw Error("quota");}})).toThrow("quota");
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(before);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(cache);
+  expect(f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toEqual(new Uint8Array(f.initialization.checkpoint));
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(1);
+});
+it("refuses active authoritative checkpoint stages as caches",()=>{
+  const f=fixture(),checkpoint=materializationStage(f);
+  const expected=f.journal.transitionCheckpoint({...f.initialization,expected:f.initial,checkpoint,
+    account:({bytes,stagedCreditBytes})=>f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(bytes-stagedCreditBytes)});
+  expect(()=>f.journal.cacheMaterialization({expected,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow("already active");
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(expected);
+});
+it.each(["cursor","epoch","digest","missing blob","chunk"])("falls back from a damaged cache %s without changing the journal",damage=>{
+  const f=fixture(),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
+  if(damage==="cursor")f.db.prepare("UPDATE dohc_dataset_materializations SET cursor_json=?").run("invalid json");
+  if(damage==="epoch")f.db.prepare("UPDATE dohc_dataset_materializations SET cursor_json=?").run(JSON.stringify({...cache.cursor,hostEpoch:"old-host"}));
+  if(damage==="digest")f.db.prepare("UPDATE dohc_dataset_materializations SET cursor_json=?").run(JSON.stringify({...cache.cursor,digest:digest("wrong")}));
+  if(damage==="missing blob"){
+    f.db.prepare("DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id=?").run(cache.checkpointId);
+    f.db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE stage_id=?").run(cache.checkpointId);
+  }
+  if(damage==="chunk")f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=? WHERE stage_id=? AND chunk_index=0").run(new Uint8Array([1]),cache.checkpointId);
+  if(damage!=="chunk")expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toBeNull();
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(f.initial);
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
+});
+it.each(["revoked","fenced","deleted"])("does not turn %s authority into a cache miss",state=>{
+  const f=fixture(),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
+  if(state==="revoked")f.revoke();
+  if(state==="fenced")f.journal.fence({expected:f.initial,authorize:f.authorize});
+  if(state==="deleted")f.journal.destroy({expected:f.initial,authorize:f.authorize});
+  expect(()=>f.journal.materialization({scope:f.scope,authorize:f.authorize})).toThrow();
+  expect(()=>f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toThrow();
+  if(state==="deleted")expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
+});
+it.each(["transition","claim"])("invalidates and refunds the cache on a checkpoint %s",kind=>{
+  const f=fixture(),account=cacheAccount(f),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
+  const cacheCost=Number(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes);
+  const baseline=fixture();let baselineBytes=0;
+  if(kind==="claim")baseline.journal.fence({expected:baseline.initial,authorize:baseline.authorize});
+  const baselineInput={...baseline.initialization,expected:baseline.initial,hostEpoch:"new-host",account:({bytes}:{bytes:number})=>{baselineBytes=bytes;}};
+  if(kind==="claim")baseline.journal.claimInactiveCheckpoint(baselineInput);else baseline.journal.transitionCheckpoint(baselineInput);
+  if(kind==="claim")f.journal.fence({expected:f.initial,authorize:f.authorize});
+  let allocationBytes=0;
+  const input={...f.initialization,expected:f.initial,hostEpoch:"new-host",account:({bytes,stagedCreditBytes}:{bytes:number;stagedCreditBytes:number})=>{
+    allocationBytes=bytes;f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(bytes-stagedCreditBytes);
+  }};
+  const next=kind==="claim"?f.journal.claimInactiveCheckpoint(input):f.journal.transitionCheckpoint(input);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=?").get(cache.checkpointId)).toBeUndefined();
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(cacheCost+allocationBytes);
+  expect(allocationBytes).toBe(baselineBytes-cacheCost);
+  expect(f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize}).cursor).toEqual(f.initial);
+  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(next);
+});
+it("does not remove an authoritative checkpoint when a damaged cache pointer references it",()=>{
+  const f=fixture();
+  f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
+  const id=f.db.prepare("SELECT checkpoint_id FROM dohc_dataset_journals").get()!.checkpoint_id;
+  f.db.prepare("UPDATE dohc_dataset_materializations SET checkpoint_id=?,cursor_json='broken'").run(id);
+  f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
+});
+
 it("recovers real multi-table SQLite changes without running operation code",()=>{
   const f=fixture();const result=f.journal.commitOperation(f.prepare());expect(result.kind).toBe("committed");
   f.reopen();const db=f.materialize();expect(db.prepare("SELECT remaining FROM stock").get()!.remaining).toBe(2);expect(db.prepare("SELECT * FROM orders").all()).toEqual([{id:"order-1",quantity:1}]);
