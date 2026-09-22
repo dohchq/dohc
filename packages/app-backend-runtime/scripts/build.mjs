@@ -5,6 +5,8 @@ await build({
   entryPoints: {
     index: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     child: fileURLToPath(new URL("../src/child.ts", import.meta.url)),
+    persistent: fileURLToPath(new URL("../src/persistent.ts", import.meta.url)),
+    "persistent-child": fileURLToPath(new URL("../src/persistent-child.ts", import.meta.url)),
   },
   outdir: fileURLToPath(new URL("../dist", import.meta.url)),
   outExtension: { ".js": ".mjs" },
@@ -12,5 +14,5 @@ await build({
   platform: "node",
   format: "esm",
   target: "node24",
-  external: ["quickjs-emscripten", "@dohc/app-backend-runtime/child"],
+  external: ["quickjs-emscripten", "@dohc/app-backend-runtime/child", "@dohc/app-backend-runtime/persistent-child"],
 });

@@ -88,6 +88,56 @@ Deployment must include `dist` and the QuickJS Wasm dependency files.
 The child export resolves through the package name, so bundling the host does not change its location.
 Desktop hosts must supply a compatible child launcher instead of treating Electron's executable as Node.
 Use `createAppBackendRuntime({ launch })` to inject that launcher.
+
+## Persistent materialization
+
+`@dohc/app-backend-runtime/persistent` exports `openPersistentAppBackend` for trusted hosts.
+This worker materializes a host-owned checkpoint and journal. It does not authorize callers or store authoritative retry receipts.
+The existing snapshot interface and its 16 MiB limit remain unchanged.
+
+The host supplies a fresh directory, approved schema, tables, scope, and checkpoint cursor.
+Scope includes workspace, dataset, host epoch, and approved revision hash.
+Paths must be absolute and cannot contain symbolic links. The worker creates `app.sqlite` exclusively.
+An initial revision-zero dataset can initialize from schema. Later revisions require a checkpoint.
+The host validates the checkpoint manifest before opening it. A checkpoint containing the internal cursor must match the supplied scope and cursor exactly.
+A clean checkpoint without the internal cursor must still match the approved schema and pass integrity checks.
+
+The host serializes operations using these steps:
+
+1. Call `prepare` with verified caller data and the expected cursor.
+2. Recheck authority and durably append the operation's result, changeset, attachments, and receipt to the host journal.
+3. Call `finalize` with the proposal ID, changeset hash, previous digest, and committed cursor.
+4. Return the result after host commit succeeds. Recover from the journal if finalization is uncertain.
+
+`prepare` keeps writes in an open transaction. `discard` rolls them back.
+Another prepare, replay, or snapshot refuses while a proposal is pending.
+Read-only prepares roll back immediately and need no finalization. The host must still recheck read authority before returning data.
+Finalization stores the internal cursor and dataset changes in the same transaction.
+The worker checks consecutive revisions and matching previous digests. The host verifies the journal's canonical event hashes.
+
+`apply` replays committed changesets without evaluating authored JavaScript.
+It aborts the entire transaction for conflicts or undeclared tables, including internal metadata.
+Replay temporarily removes triggers and disables foreign-key actions because the changeset already contains their effects.
+It restores triggers and checks foreign keys before committing, then enables foreign-key enforcement for subsequent operations.
+`snapshot(path)` creates an exclusive SQLite checkpoint containing the current scope and cursor, then keeps the worker open.
+It refuses an existing destination. The host publishes the checkpoint and its manifest durably before retiring journal events.
+
+On deadline, process death, or protocol failure, the client fails closed and does not restart itself.
+Call `close`, then rebuild in a fresh directory from the authoritative checkpoint and journal.
+The host owns directory cleanup after `close` completes. It must not reuse an orphan worker database.
+The client bounds admitted work to 64 messages and gives queued work its own deadline.
+Queued and active message payloads together cannot exceed 129 MiB.
+The execution deadline starts on dispatch and kills blocked native SQL as well as guest code.
+`abort(reason)` immediately kills the worker and waits for process exit. Use it when authority is revoked or execution is cancelled.
+
+Each operation receives a fresh QuickJS runtime. Reused SQLite connections additionally deny `changes()`, `total_changes()`, and `last_insert_rowid()`.
+Use `ctx.db.execute(...).changes` for the current statement's affected row count.
+The persistent storage reservation defaults to 128 MiB and can be lowered. It includes internal cursor pages; other guest limits retain snapshot defaults.
+This reservation is a bound, not a measured performance or scale guarantee.
+Electron hosts must inject their utility-process launcher and package the `persistent-child` export.
+
+Changeset filtering was checked against Node 24.16.0's [SQLite binding at c7d10158bc31036de6783d66beaaaf551e3167aa](https://github.com/nodejs/node/blob/c7d10158bc31036de6783d66beaaaf551e3167aa/src/node_sqlite.cc).
+Its filter includes tables when the callback returns true. Tests cover admitted replay and rollback of mixed admitted/internal changesets.
 The launcher starts the compiled `entryPath` with an empty environment and maps utility-process messages, errors, exits, and kill.
 The child accepts one request on `process.parentPort` and sends one reply.
 The utility-process adapter should send `{ kind: "close" }` after it receives the reply.
