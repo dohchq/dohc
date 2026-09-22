@@ -59,11 +59,11 @@ export function generateFieldMigration(input: { previous: DatasetDefinition; nex
   const field = input.field, sql: string[] = [], name = quote(field.sqlColumn), tableName = quote(table.sqlName);
   const invalid: string[] = [];
   if (next.required) invalid.push(`${name} IS NULL`);
-  if (field.type === "text" && next.type === "number") invalid.push(`(${name} IS NOT NULL AND CASE WHEN json_valid(${name}) THEN json_type(${name}) NOT IN ('integer','real') OR abs(CAST(${name} AS REAL)) > 1.7976931348623157e308 ELSE 1 END)`);
+  if (field.type === "text" && next.type === "number") invalid.push(`(${name} IS NOT NULL AND dohc_migration_number(${name}) IS NULL)`);
   if (invalid.length) {
     const guard = temporary();
     sql.push(`CREATE TABLE ${quote(guard)} (id TEXT);`,
-      `CREATE TRIGGER ${quote(`${guard}_check`)} BEFORE INSERT ON ${quote(guard)} BEGIN SELECT RAISE(ABORT,${literal(`Cannot change ${field.name}. Fix record `)} || NEW.id || ${literal(next.required ? ": enter a valid value, then review again." : ": enter a number, then review again.")}); END;`,
+      `CREATE TRIGGER ${quote(`${guard}_check`)} BEFORE INSERT ON ${quote(guard)} BEGIN SELECT RAISE(ABORT,${literal(`Cannot change ${field.name}. Fix record `)} || NEW.id || ${literal(": its value is missing or cannot convert without losing information. Then review again.")}); END;`,
       `INSERT INTO ${quote(guard)} SELECT CAST(${quote(table.primaryKey)} AS TEXT) FROM ${tableName} WHERE ${invalid.join(" OR ")} LIMIT 1;`,
       `DROP TABLE ${quote(guard)};`);
   }
@@ -76,7 +76,7 @@ export function generateFieldMigration(input: { previous: DatasetDefinition; nex
   for (const {table: old,copy} of copies) {
     const columns = [...old.fields.map(field => field.sqlColumn), "_record_version"];
     const expressions = columns.map(column => old.tableId === table.tableId && column === field.sqlColumn && field.type !== next.type
-      ? `CAST(${quote(column)} AS ${next.type === "number" ? "REAL" : "TEXT"})` : quote(column));
+      ? `${next.type === "number" ? "dohc_migration_number" : "dohc_migration_number_text"}(${quote(column)})` : quote(column));
     sql.push(`INSERT INTO ${quote(old.sqlName)} (${columns.map(quote).join(",")}) SELECT ${expressions.join(",")} FROM ${quote(copy)};`, `DROP TABLE ${quote(copy)};`);
   }
   if (triggerStart >= 0) sql.push(schemaSql.slice(triggerStart));

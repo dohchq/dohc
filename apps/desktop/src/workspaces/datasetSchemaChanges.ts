@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { parseDatasetDefinition, type DatasetRevision, type DatasetField } from "@dohc/security-contract/dataset";
+import { datasetNumberText, losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
 import { generateFieldMigration } from "./datasetFieldMigration";
@@ -76,11 +77,10 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       }
       field.type = change.type; field.required = change.required;
       if (field.type !== previous.type && field.default !== undefined && field.default !== null) {
-        if (field.type === "text") field.default = String(field.default);
+        if (field.type === "text") field.default = datasetNumberText(Number(field.default));
         else {
-          let value: unknown;
-          try { value = JSON.parse(String(field.default)); } catch { value = null; }
-          if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field.name} has a default that is not a number. Update its default in the source, then review again.`);
+          const value = losslessDatasetNumber(String(field.default));
+          if (value === null) throw new Error(`${field.name} has a default that cannot become a number without losing information. Update its default in the source, then review again.`);
           field.default = value;
         }
       }

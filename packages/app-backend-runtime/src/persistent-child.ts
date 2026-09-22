@@ -2,6 +2,7 @@ import { constants as fsConstants, copyFileSync, lstatSync, openSync, closeSync,
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync, constants } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import { datasetNumberText, losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 import { authorize, evaluate } from "./guest.js";
 import { AppBackendRuntimeError } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath, REPLAY_BATCH_BYTES, REPLAY_BATCH_EVENTS } from "./persistent-protocol.js";
@@ -170,6 +171,9 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       closeSync(openSync(copyPath,"wx",0o600));
       db.prepare("VACUUM INTO ?").run(copyPath);
       copy=new DatabaseSync(copyPath,databaseOptions);
+      // Pure conversion helpers exist only in the disposable migration copy, never in app execution or the saved schema.
+      copy.function("dohc_migration_number", {deterministic:true}, value => typeof value === "string" ? losslessDatasetNumber(value) : null);
+      copy.function("dohc_migration_number_text", {deterministic:true}, value => typeof value === "number" ? datasetNumberText(value) : null);
       copy.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;");
       const pageSize=Number(copy.prepare("PRAGMA page_size").get()!.page_size);
       copy.exec(`PRAGMA max_page_count=${Math.floor(config.limits.databaseBytes/pageSize)}`);
