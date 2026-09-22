@@ -81,15 +81,22 @@ export interface CommitOperationInput {
   /** The host validates and accounts attachments here, using the same transaction. */
   accountAndAttach?: (allocation: Readonly<{ revision: number; bytes: number; attachedFileIds: readonly string[] }>) => unknown;
 }
+export interface TransitionCheckpointInput extends Omit<InitializeDatasetInput,"scope"|"account"> {
+  expected: DatasetCursor;
+  /** Trusted, schema-validated checkpoint without a worker's private cursor marker. */
+  checkpoint: Uint8Array;
+  account?: (allocation: Readonly<{bytes: number; capacityBytes: number; capacityDeltaBytes: number; cursor: DatasetCursor}>) => unknown;
+}
 export interface DatasetJournal {
   initialize(input: InitializeDatasetInput): DatasetCursor;
+  transitionCheckpoint(input: TransitionCheckpointInput): DatasetCursor;
   head(scope: DatasetScope, authorize: Authorize): DatasetHead;
   receipt(input: { scope: DatasetScope; callerKey: string; idempotencyKey: string; payloadSha256: string; authorize: Authorize }): JournalReceipt | null;
   commitOperation(input: CommitOperationInput):
     | { kind: "committed"; receipt: JournalReceipt; event: JournalEvent }
     | { kind: "replayed"; receipt: JournalReceipt };
   events(input: { scope: DatasetScope; after: DatasetCursor; limit?: number; byteLimit?: number; authorize: Authorize }): { events: JournalEvent[]; head: DatasetCursor };
-  checkpoint(input: { scope: DatasetScope; authorize: Authorize }): { cursor: DatasetCursor; bytes: Uint8Array; sha256: string; source: string; schemaSql: string; definitionJson: string };
+  checkpoint(input: { scope: DatasetScope; revision?: number; authorize: Authorize }): { cursor: DatasetCursor; bytes: Uint8Array; sha256: string; source: string; schemaSql: string; definitionJson: string };
   /** Permanently stop writes from this host epoch. Recovery reads remain authorized separately. */
   fence(input: { expected: DatasetCursor; authorize: Authorize }): DatasetCursor;
 }
@@ -135,14 +142,17 @@ function eventHash(event: Omit<JournalEvent,"cursor"|"changeset"> & {cursor: Omi
   return hash(JSON.stringify(["dohc-dataset-event-v1",c.workspaceId,c.datasetId,c.hostEpoch,c.approvedRevisionHash,c.revision,event.previousDigest,
     event.proposalId,event.operation,event.callerKey,event.idempotencyKey,event.payloadSha256,hash(event.resultJson),event.changesetSha256,event.attachedFileIds,event.recordedAtMs]));
 }
-function genesisHash(c: Omit<DatasetCursor,"revision"|"digest">, checkpointHash: string, source: string, schemaSql: string, definitionJson: string): string {
-  return hash(JSON.stringify(["dohc-dataset-genesis-v1",c.workspaceId,c.datasetId,c.hostEpoch,c.approvedRevisionHash,checkpointHash,hash(source),hash(schemaSql),hash(definitionJson)]));
+function checkpointHash(c: Omit<DatasetCursor,"digest">, checkpointSha256: string, source: string, schemaSql: string, definitionJson: string,
+  capacityBytes: number, previous: DatasetCursor | null): string {
+  return hash(JSON.stringify(["dohc-dataset-checkpoint-v1",c.workspaceId,c.datasetId,c.hostEpoch,c.approvedRevisionHash,c.revision,
+    previous?[previous.workspaceId,previous.datasetId,previous.hostEpoch,previous.approvedRevisionHash,previous.revision,previous.digest]:null,
+    checkpointSha256,hash(source),hash(schemaSql),hash(definitionJson),capacityBytes]));
 }
 function resultText(value: string): string {
   if (typeof value!=="string" || Buffer.byteLength(value)>256*1024) invalid("Operation result exceeds the limit.");
   try { JSON.parse(value); } catch { invalid("Operation result must be JSON."); } return value;
 }
-type StoredHead = DatasetHead & { checkpointSha256: string; genesisDigest: string };
+type StoredHead = DatasetHead & {checkpointSha256: string; checkpointCursor: DatasetCursor; checkpointPrevious: DatasetCursor | null};
 
 /** The host owns authorization and durability. This module never accepts caller-supplied authority. */
 export function createDatasetJournal(options: JournalOptions): DatasetJournal {
@@ -157,7 +167,8 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,host_epoch TEXT NOT NULL,approved_revision_hash TEXT NOT NULL,
       source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),digest TEXT NOT NULL,
       active INTEGER NOT NULL CHECK(active IN (0,1)),capacity_bytes INTEGER NOT NULL CHECK(capacity_bytes>=4096),
-      checkpoint BLOB NOT NULL,checkpoint_sha256 TEXT NOT NULL,genesis_digest TEXT NOT NULL,
+      checkpoint BLOB NOT NULL,checkpoint_sha256 TEXT NOT NULL,checkpoint_revision INTEGER NOT NULL CHECK(checkpoint_revision>=0),
+      checkpoint_digest TEXT NOT NULL,checkpoint_previous_json TEXT,
       PRIMARY KEY(workspace_id,dataset_id)) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_events (
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),previous_digest TEXT NOT NULL,digest TEXT NOT NULL,
@@ -169,16 +180,25 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     CREATE TABLE IF NOT EXISTS dohc_dataset_receipts (
       workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,caller_key TEXT NOT NULL,idempotency_key TEXT NOT NULL,
       payload_sha256 TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),result_json TEXT NOT NULL,
-      PRIMARY KEY(workspace_id,dataset_id,caller_key,idempotency_key)) STRICT;`));
+      PRIMARY KEY(workspace_id,dataset_id,caller_key,idempotency_key)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_checkpoint_history (
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
+      cursor_json TEXT NOT NULL,previous_json TEXT,source TEXT NOT NULL,schema_sql TEXT NOT NULL,definition_json TEXT NOT NULL,
+      capacity_bytes INTEGER NOT NULL,checkpoint BLOB NOT NULL,checkpoint_sha256 TEXT NOT NULL,
+      PRIMARY KEY(workspace_id,dataset_id,revision)) STRICT;`));
   function storedHead(key: DatasetScope): StoredHead {
     const row=db.prepare(`SELECT workspace_id,dataset_id,host_epoch,approved_revision_hash,source,schema_sql,definition_json,revision,digest,active,
-      capacity_bytes,checkpoint_sha256,genesis_digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).get(key.workspaceId,key.datasetId);
+      capacity_bytes,checkpoint_sha256,checkpoint_revision,checkpoint_digest,checkpoint_previous_json FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).get(key.workspaceId,key.datasetId);
     if(!row) throw new JournalError("conflict","Dataset is not initialized.");
     try {
       const head={cursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision:Number(row.revision),digest:String(row.digest)}),
         active:row.active===1,source:text(String(row.source),256*1024),schemaSql:text(String(row.schema_sql),256*1024),definitionJson:resultText(String(row.definition_json)),capacityBytes:integer(Number(row.capacity_bytes),4096),
-        checkpointSha256:digest(String(row.checkpoint_sha256)),genesisDigest:digest(String(row.genesis_digest))};
-      if(genesisHash(head.cursor,head.checkpointSha256,head.source,head.schemaSql,head.definitionJson)!==head.genesisDigest) return corrupt("Dataset definition integrity check failed.");
+        checkpointSha256:digest(String(row.checkpoint_sha256)),
+        checkpointCursor:cursor({...key,hostEpoch:String(row.host_epoch),approvedRevisionHash:String(row.approved_revision_hash),revision:Number(row.checkpoint_revision),digest:String(row.checkpoint_digest)}),
+        checkpointPrevious:row.checkpoint_previous_json===null?null:cursor(JSON.parse(String(row.checkpoint_previous_json)))};
+      const previous=head.checkpointPrevious,current=head.checkpointCursor;
+      if(current.revision>head.cursor.revision || (previous ? previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId||previous.revision+1!==current.revision : current.revision!==0) ||
+        checkpointHash(current,head.checkpointSha256,head.source,head.schemaSql,head.definitionJson,head.capacityBytes,previous)!==current.digest) return corrupt("Dataset definition integrity check failed.");
       return head;
     } catch { return corrupt("Dataset header is damaged."); }
   }
@@ -218,20 +238,55 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       if(checkpoint.byteLength>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
       const authorize=input.authorize,account=input.account,checkpointSha256=hash(checkpoint);
       synchronous(authorize);if(account)synchronous(account);
-      const initial=cursor({...key,hostEpoch,approvedRevisionHash,revision:0,digest:genesisHash({...key,hostEpoch,approvedRevisionHash},checkpointSha256,source,schemaSql,definitionJson)});
+      const initial=cursor({...key,hostEpoch,approvedRevisionHash,revision:0,digest:checkpointHash({...key,hostEpoch,approvedRevisionHash,revision:0},checkpointSha256,source,schemaSql,definitionJson,capacityBytes,null)});
       return tx(()=>{
         callback(authorize);
         const exists=db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
         if(exists) {
           const h=storedHead(key);active(h);
-          if(!sameIdentity(initial,h.cursor)||h.genesisDigest!==initial.digest||h.capacityBytes!==capacityBytes)throw new JournalError("conflict","Dataset initialization differs from its approved state.");
+          if(!sameIdentity(initial,h.cursor)||h.checkpointCursor.digest!==initial.digest||h.checkpointCursor.revision!==0||h.capacityBytes!==capacityBytes)throw new JournalError("conflict","Dataset initialization differs from its approved state.");
           return h.cursor;
         }
         if(account)callback(()=>account(Object.freeze({bytes:capacityBytes+checkpoint.byteLength+Buffer.byteLength(JSON.stringify([initial,source,schemaSql,definitionJson]))+512,capacityBytes})));
         callback(authorize);
-        db.prepare("INSERT INTO dohc_dataset_journals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(key.workspaceId,key.datasetId,hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,0,initial.digest,1,capacityBytes,checkpoint,checkpointSha256,initial.digest);
+        db.prepare("INSERT INTO dohc_dataset_journals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(key.workspaceId,key.datasetId,hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,0,initial.digest,1,capacityBytes,checkpoint,checkpointSha256,0,initial.digest,null);
         return initial;
+      });
+    },
+    transitionCheckpoint(input) {
+      const expected=cursor(input.expected),hostEpoch=text(input.hostEpoch,256),approvedRevisionHash=digest(input.approvedRevisionHash);
+      const source=text(input.source,256*1024),schemaSql=text(input.schemaSql,256*1024),definitionJson=resultText(input.definitionJson);
+      const checkpoint=copyBytes(input.checkpoint,maxCheckpoint),checkpointSha256=hash(checkpoint),authorize=input.authorize,account=input.account;
+      const requestedCapacity=input.capacityBytes===undefined?undefined:integer(input.capacityBytes,4096,maxCheckpoint);
+      synchronous(authorize);if(account)synchronous(account);
+      return tx(()=>{
+        callback(authorize);
+        const h=storedHead(expected);active(h);
+        const capacityBytes=requestedCapacity??h.capacityBytes;
+        if(capacityBytes<h.capacityBytes)invalid("Checkpoint transition cannot release materialization capacity.");
+        if(checkpoint.byteLength>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
+        const next=cursor({...expected,hostEpoch,approvedRevisionHash,revision:integer(expected.revision+1,1),
+          digest:checkpointHash({...expected,hostEpoch,approvedRevisionHash,revision:expected.revision+1},checkpointSha256,source,schemaSql,definitionJson,capacityBytes,expected)});
+        // Lost transition acknowledgments do not run host accounting twice.
+        if(h.checkpointPrevious&&sameCursor(h.checkpointPrevious,expected)&&sameCursor(h.checkpointCursor,next))return next;
+        assertCursor(expected,h.cursor);
+        if(approvedRevisionHash===expected.approvedRevisionHash && (source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson))
+          invalid("Changed dataset artifacts require a new approved revision.");
+        const bytes=checkpoint.byteLength+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024+capacityBytes-h.capacityBytes;
+        if(account)callback(()=>account(Object.freeze({bytes,capacityBytes,capacityDeltaBytes:capacityBytes-h.capacityBytes,cursor:next})));
+        callback(authorize);
+        db.prepare(`INSERT INTO dohc_dataset_checkpoint_history(workspace_id,dataset_id,revision,cursor_json,previous_json,source,schema_sql,
+          definition_json,capacity_bytes,checkpoint,checkpoint_sha256)
+          SELECT workspace_id,dataset_id,checkpoint_revision,?,checkpoint_previous_json,source,schema_sql,definition_json,capacity_bytes,checkpoint,checkpoint_sha256
+          FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).run(JSON.stringify(h.checkpointCursor),expected.workspaceId,expected.datasetId);
+        const changed=db.prepare(`UPDATE dohc_dataset_journals SET host_epoch=?,approved_revision_hash=?,source=?,schema_sql=?,definition_json=?,
+          revision=?,digest=?,capacity_bytes=?,checkpoint=?,checkpoint_sha256=?,checkpoint_revision=?,checkpoint_digest=?,checkpoint_previous_json=?
+          WHERE workspace_id=? AND dataset_id=? AND host_epoch=? AND approved_revision_hash=? AND revision=? AND digest=? AND active=1`)
+          .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,capacityBytes,checkpoint,checkpointSha256,
+            next.revision,next.digest,JSON.stringify(expected),expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
+        if(Number(changed.changes)!==1)throw new JournalError("conflict","Dataset cursor changed during checkpoint transition.");
+        return next;
       });
     },
     head(value,authorize) {
@@ -280,8 +335,9 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       return tx(()=>{
         callback(authorize);
         const h=storedHead(key);
+        if(after.revision<h.checkpointCursor.revision)throw new JournalError("conflict","Dataset schema changed. Recover from its current checkpoint.");
         if(!sameIdentity(after,h.cursor)||after.revision>h.cursor.revision)throw new JournalError("conflict","Cursor scope or revision changed.");
-        const previous=after.revision===0?{...h.cursor,revision:0,digest:h.genesisDigest}:readEvent(key,after.revision).cursor;
+        const previous=after.revision===h.checkpointCursor.revision?h.checkpointCursor:readEvent(key,after.revision).cursor;
         assertCursor(after,previous);
         const headers=db.prepare("SELECT revision,storage_bytes FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND revision>? ORDER BY revision LIMIT ?")
           .all(key.workspaceId,key.datasetId,after.revision,limit);
@@ -300,13 +356,27 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
       });
     },
     checkpoint(input) {
-      const key=scope(input.scope),authorize=input.authorize;
+      const key=scope(input.scope),authorize=input.authorize,revision=input.revision===undefined?undefined:integer(input.revision);
       return tx(()=>{
         callback(authorize);const h=storedHead(key);
-        const row=db.prepare("SELECT checkpoint FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)!;
-        const bytes=copyBytes(row.checkpoint as Uint8Array,maxCheckpoint);
-        if(hash(bytes)!==h.checkpointSha256||genesisHash(h.cursor,h.checkpointSha256,h.source,h.schemaSql,h.definitionJson)!==h.genesisDigest)return corrupt("Checkpoint integrity check failed.");
-        return {cursor:cursor({...h.cursor,revision:0,digest:h.genesisDigest}),bytes,sha256:h.checkpointSha256,source:h.source,schemaSql:h.schemaSql,definitionJson:h.definitionJson};
+        const requested=revision??h.checkpointCursor.revision;
+        if(requested===h.checkpointCursor.revision) {
+          const row=db.prepare("SELECT checkpoint FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)!;
+          const bytes=copyBytes(row.checkpoint as Uint8Array,maxCheckpoint);
+          if(hash(bytes)!==h.checkpointSha256)return corrupt("Checkpoint integrity check failed.");
+          return {cursor:h.checkpointCursor,bytes,sha256:h.checkpointSha256,source:h.source,schemaSql:h.schemaSql,definitionJson:h.definitionJson};
+        }
+        if(requested>h.checkpointCursor.revision)throw new JournalError("conflict","Checkpoint revision is not available.");
+        const row=db.prepare("SELECT * FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=?").get(key.workspaceId,key.datasetId,requested);
+        if(!row)throw new JournalError("conflict","Checkpoint revision is not available.");
+        try {
+          const oldCursor=cursor(JSON.parse(String(row.cursor_json))),previous=row.previous_json===null?null:cursor(JSON.parse(String(row.previous_json)));
+          const source=text(String(row.source),256*1024),schemaSql=text(String(row.schema_sql),256*1024),definitionJson=resultText(String(row.definition_json)),capacityBytes=integer(Number(row.capacity_bytes),4096),sha256=digest(String(row.checkpoint_sha256)),bytes=copyBytes(row.checkpoint as Uint8Array,maxCheckpoint);
+          if(oldCursor.workspaceId!==key.workspaceId||oldCursor.datasetId!==key.datasetId||oldCursor.revision!==requested ||
+            (previous ? previous.workspaceId!==key.workspaceId||previous.datasetId!==key.datasetId||previous.revision+1!==requested : requested!==0) ||
+            hash(bytes)!==sha256||checkpointHash(oldCursor,sha256,source,schemaSql,definitionJson,capacityBytes,previous)!==oldCursor.digest)return corrupt("Checkpoint history integrity check failed.");
+          return {cursor:oldCursor,bytes,sha256,source,schemaSql,definitionJson};
+        } catch { return corrupt("Checkpoint history is damaged."); }
       });
     },
     fence(input) {

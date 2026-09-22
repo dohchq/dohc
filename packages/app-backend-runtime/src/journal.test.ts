@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { createDatasetJournal, type CommitOperationInput, type DatasetCursor, type DatasetScope, type JournalOptions } from "./journal.ts";
+import { createDatasetJournal, type CommitOperationInput, type DatasetCursor, type DatasetScope, type JournalOptions, type TransitionCheckpointInput } from "./journal.ts";
 
 const digest=(value:string|Uint8Array)=>createHash("sha256").update(value).digest("hex");
 // These probes use FULL durability on real files, including close/reopen recovery.
@@ -163,3 +163,72 @@ it("accounts initialization once and refuses conflicting initialization",()=>{
 it("does not accept attachment references without host validation",()=>{
   const f=fixture();expect(()=>f.journal.commitOperation({...f.prepare(),attachedFileIds:["receipt_file_0001"]})).toThrow("host validation");
 }, 20000);
+
+function migration(f: ReturnType<typeof fixture>, expected:DatasetCursor):TransitionCheckpointInput {
+  const db=f.materialize();
+  db.exec("ALTER TABLE orders ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE orders SET note='migrated-once';");db.close();
+  return {expected,hostEpoch:expected.hostEpoch,approvedRevisionHash:digest("approved-v2"),source:"globalThis.operations={version:2};",
+    schemaSql:schemaSql.replace("quantity INTEGER NOT NULL)","quantity INTEGER NOT NULL,note TEXT NOT NULL DEFAULT '')"),definitionJson:'{"version":2}',
+    checkpoint:readFileSync(join(f.directory,"restored.sqlite")),authorize:f.authorize};
+}
+it("atomically activates a migrated checkpoint and preserves prior retries and recovery history",()=>{
+  const f=fixture();const saved=f.journal.commitOperation(f.prepare());if(saved.kind!=="committed")throw Error();
+  const input=migration(f,saved.event.cursor);let accounted=0;
+  input.account=allocation=>{accounted+=allocation.bytes;expect(allocation.capacityDeltaBytes).toBe(0);f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);};
+  const next=f.journal.transitionCheckpoint(input);expect(next.revision).toBe(2);expect(next.approvedRevisionHash).toBe(input.approvedRevisionHash);expect(next.digest).not.toBe(saved.event.cursor.digest);
+  f.reopen();expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(next);
+  expect(f.journal.head(f.scope,f.authorize).definitionJson).toBe(input.definitionJson);
+  expect(f.journal.receipt({...f.prepare(),scope:f.scope})).toEqual(saved.receipt);
+  expect(f.journal.commitOperation({...f.prepare(next),changeset:new Uint8Array(),changesetSha256:digest(new Uint8Array())})).toEqual({kind:"replayed",receipt:saved.receipt});
+  expect(()=>f.journal.commitOperation({...f.prepare(next),payloadSha256:digest("changed")})).toThrow("another payload");
+  const rows=f.db.prepare("SELECT revision,checkpoint FROM dohc_dataset_checkpoint_history").all();expect(rows).toHaveLength(1);expect(rows[0].revision).toBe(0);expect(rows[0].checkpoint).toEqual(new Uint8Array(f.initialization.checkpoint));
+  expect(f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize}).cursor).toEqual(f.initial);
+  expect(()=>f.journal.checkpoint({scope:f.scope,revision:1,authorize:f.authorize})).toThrow("not available");
+  expect(()=>f.journal.checkpoint({scope:f.scope,revision:999,authorize:f.authorize})).toThrow("not available");
+  const before=accounted;expect(f.journal.transitionCheckpoint(input)).toEqual(next);expect(accounted).toBe(before);
+  expect(()=>f.journal.events({scope:f.scope,after:saved.event.cursor,authorize:f.authorize})).toThrow("Recover from its current checkpoint");
+  expect(f.journal.events({scope:f.scope,after:next,authorize:f.authorize}).events).toEqual([]);
+});
+it("recovers the new schema without running the migration again",()=>{
+  const f=fixture();const saved=f.journal.commitOperation(f.prepare());if(saved.kind!=="committed")throw Error();
+  const input=migration(f,saved.event.cursor),next=f.journal.transitionCheckpoint(input);f.reopen();
+  const checkpoint=f.journal.checkpoint({scope:f.scope,authorize:f.authorize});const path=join(f.directory,"after-migration.sqlite");writeFileSync(path,checkpoint.bytes);const db=new DatabaseSync(path);
+  try {
+    expect(db.prepare("SELECT * FROM orders").all()).toEqual([{id:"order-1",quantity:1,note:"migrated-once"}]);
+    const session=db.createSession();db.exec("BEGIN; UPDATE orders SET note='after-migration';");const changeset=session.changeset();session.close();db.exec("ROLLBACK");
+    const committed=f.journal.commitOperation({...f.prepare(next,"edit-order"),changeset,changesetSha256:digest(changeset)});if(committed.kind!=="committed")throw Error();
+    const page=f.journal.events({scope:f.scope,after:next,authorize:f.authorize});expect(page.events).toHaveLength(1);expect(page.events[0].cursor.revision).toBe(3);
+    expect(db.applyChangeset(page.events[0].changeset)).toBe(true);expect(db.prepare("SELECT note FROM orders").get()!.note).toBe("after-migration");
+  } finally {db.close();}
+});
+it.each(["before","after"] as const)("resolves checkpoint transition fault %s commit",fault=>{
+  const f=fixture();const input=migration(f,f.initial);f.fault(fault);expect(()=>f.journal.transitionCheckpoint(input)).toThrow(fault==="before"?"power loss":"acknowledgment");
+  f.reopen();expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(fault==="before"?0:1);
+  const next=f.journal.transitionCheckpoint(input);expect(next.revision).toBe(1);expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoint_history").get()!.n).toBe(1);
+});
+it("failed migration approval leaves old source, cursor, data and catalog untouched",()=>{
+  const f=fixture();const input=migration(f,f.initial),before=f.journal.checkpoint({scope:f.scope,authorize:f.authorize});
+  input.account=()=>{f.db.exec("UPDATE accounting SET bytes=123");throw Error("approval changed");};
+  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("approval changed");f.reopen();
+  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize})).toEqual(before);expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoint_history").get()!.n).toBe(0);
+});
+it("refuses checkpoint transition after a competing write or withdrawal",()=>{
+  const f=fixture(),input=migration(f,f.initial);f.journal.commitOperation(f.prepare());expect(()=>f.journal.transitionCheckpoint(input)).toThrow("cursor changed");
+  f.revoke();expect(()=>f.journal.transitionCheckpoint(input)).toThrow("denied");
+});
+it("never releases capacity or changes approved artifacts under the same hash",()=>{
+  const f=fixture(),input=migration(f,f.initial);
+  expect(()=>f.journal.transitionCheckpoint({...input,capacityBytes:4096})).toThrow("cannot release");
+  expect(()=>f.journal.transitionCheckpoint({...input,approvedRevisionHash:f.initial.approvedRevisionHash})).toThrow("new approved revision");
+});
+it("retains every older checkpoint over multiple approved transitions",()=>{
+  const f=fixture(),first=migration(f,f.initial);const second=f.journal.transitionCheckpoint(first);
+  const third=f.journal.transitionCheckpoint({...first,expected:second,hostEpoch:"host-2",approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};",definitionJson:'{"version":3}'});
+  expect(third.revision).toBe(2);expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_history ORDER BY revision").all()).toEqual([{revision:0},{revision:1}]);
+  f.reopen();expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(third);
+  expect(()=>f.journal.commitOperation(f.prepare(second))).toThrow("approval or host changed");
+  expect(f.journal.checkpoint({scope:f.scope,revision:1,authorize:f.authorize}).cursor).toEqual(second);
+  f.db.exec("UPDATE dohc_dataset_checkpoint_history SET definition_json='{}' WHERE revision=0");
+  expect(()=>f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize})).toThrow("history is damaged");
+});
