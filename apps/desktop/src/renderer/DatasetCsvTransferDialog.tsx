@@ -51,7 +51,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
     if (locked.current || !alive.current) return;
     locked.current = true; setBusy(true); setInvalid(null); const controller = new AbortController(); active.current = controller;
     try { await action(controller.signal); }
-    catch (error) { if (alive.current && !controller.signal.aborted) props.onError(fallback, error, null); }
+    catch (error) { if (alive.current && !controller.signal.aborted) props.onError(fallback, error, () => { void task(action, fallback); }); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
   const saveReport = (captured: CsvImportPlan, signal: AbortSignal) => props.onSave({ name: `${baseName}-import.json`, content: JSON.stringify(captured, null, 2), contentType: "application/json" }, signal);
