@@ -19,7 +19,7 @@ const source = `globalThis.operations = {
 };`;
 
 async function request(overrides: Partial<EvaluateAppOperationInput> = {}): Promise<EvaluateAppOperationInput> {
-  return { tables, database: await initializeAppDatabase({ tables, schemaSql }), source, operation: "reserve",
+  return { tables, database: overrides.database ?? await initializeAppDatabase({ tables, schemaSql }), source, operation: "reserve",
     input: {quantity:1}, caller: {kind:"public",id:"verified"}, requestId:"request-1", nowMs:1000, ...overrides };
 }
 
@@ -152,11 +152,16 @@ describe("app operation runtime", () => {
     await expect(evaluateAppOperation({...input,readOnly:true})).rejects.toThrow();
   });
 
-  it("requires declared tables and primary keys, while supporting constraints and triggers", async () => {
-    await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE items(value TEXT)"})).rejects.toThrow("primary key");
-    await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY)"})).rejects.toThrow("non-null");
-    await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE items(a INTEGER,b INTEGER,PRIMARY KEY(a,b))"})).rejects.toThrow("non-null");
-    await expect(initializeAppDatabase({tables:["items"],schemaSql:"CREATE TABLE other(id INTEGER PRIMARY KEY)"})).rejects.toThrow();
+  it.each([
+    ["missing primary key", "CREATE TABLE items(value TEXT)", "primary key"],
+    ["nullable primary key", "CREATE TABLE items(id TEXT PRIMARY KEY)", "non-null"],
+    ["nullable composite primary key", "CREATE TABLE items(a INTEGER,b INTEGER,PRIMARY KEY(a,b))", "non-null"],
+    ["undeclared table", "CREATE TABLE other(id INTEGER PRIMARY KEY)", undefined],
+  ])("rejects %s", async (_name, schemaSql, message) => {
+    await expect(initializeAppDatabase({tables:["items"],schemaSql:schemaSql!})).rejects.toThrow(message);
+  });
+
+  it("supports constraints, indexes, and triggers", async () => {
     const database=await initializeAppDatabase({tables:["items"],schemaSql:`CREATE TABLE items(id INTEGER PRIMARY KEY, amount INTEGER CHECK(amount>=0)); CREATE INDEX items_amount ON items(amount); CREATE TRIGGER bounded BEFORE INSERT ON items WHEN new.amount>5 BEGIN SELECT RAISE(ABORT,'limit'); END;`});
     const input=await request({tables:["items"],database,source:`globalThis.operations={reserve(ctx){ctx.db.execute('INSERT INTO items VALUES(1,6)');return true}}`});
     await expect(evaluateAppOperation(input)).rejects.toThrow();
