@@ -15,6 +15,8 @@ export interface RecoveryInstallOptions<Context> {
   transaction<T>(run: () => T): T;
   journal: DatasetJournal;
   /** Same signed retained-byte counter used by checkpoint staging and journal commits. */
+  /** Trusted local disaster recovery only. Never enable on shared replica or relay adapters. */
+  allowOwnerRecoveryClaim?: boolean;
   account?(context: Context, allocation: DatasetScope & { bytes: number; capacityDeltaBytes: number }): void;
   installAttachment?(context: Context, input: DatasetScope & { importId: string; file: RecoveryAttachment; stream: AsyncIterable<Uint8Array> }): Promise<void>;
   /** Commit all staged files and associations in the install transaction. */
@@ -40,6 +42,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       import_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,manifest_hash TEXT NOT NULL,
       source_json TEXT NOT NULL,target_json TEXT,phase TEXT NOT NULL,owner_token TEXT NOT NULL,
       retained_bytes INTEGER NOT NULL,head_json TEXT,UNIQUE(workspace_id,dataset_id)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_recovered_permissions(import_id TEXT NOT NULL,body TEXT NOT NULL) STRICT;
     CREATE TABLE IF NOT EXISTS dohc_dataset_import_records(
       import_id TEXT NOT NULL,revision INTEGER NOT NULL,kind TEXT NOT NULL,body TEXT NOT NULL,
       blob BLOB,stage_json TEXT,storage_bytes INTEGER NOT NULL,PRIMARY KEY(import_id,revision)) STRICT;
@@ -91,12 +94,12 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
   }
   return {
     discard,
-    claim(context: Context, input: DatasetScope & { transferId: string; manifestSha256: string; sourceCursor: DatasetCursor; authorize(): void }): RecoveryImportReceipt {
+    claim(context: Context, input: DatasetScope & { transferId: string; manifestSha256: string; sourceCursor: DatasetCursor; oldHostStopped?: true; authorize(): void }): RecoveryImportReceipt {
       const row = tx(() => find(input, input.transferId, input.authorize));
       if (!row || (row.phase !== "installed" && row.phase !== "claimed") || row.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(row.source_json)), input.sourceCursor)) throw new Error("Recovery transfer is not installed with this identity.");
       if (row.phase === "claimed") return receipt(row);
       const head = JSON.parse(String(row.head_json)) as ValidatedDatasetRecovery["headCheckpoint"] & { stage: CheckpointStage; sourceState: string };
-      if (head.sourceState !== "fenced") throw new Error("Transfer requires a fenced source dataset.");
+      if (head.sourceState !== "fenced" && !(options.allowOwnerRecoveryClaim && input.oldHostStopped === true)) throw new Error("Transfer requires a fenced source dataset.");
       journal.claimInactiveCheckpoint({ expected: input.sourceCursor, hostEpoch: randomUUID(), approvedRevisionHash: input.sourceCursor.approvedRevisionHash,
         source: head.source, schemaSql: head.schemaSql, definitionJson: head.definitionJson, capacityBytes: head.capacityBytes, checkpoint: head.stage, authorize: input.authorize,
         account(allocation) {
@@ -198,8 +201,12 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           db.prepare(`INSERT INTO dohc_dataset_receipts SELECT workspace_id,dataset_id,caller_key,idempotency_key,payload_sha256,revision,result_json FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=?`).run(scope.workspaceId, scope.datasetId);
           db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId, scope.datasetId, recovery.catalog.revisionJson, recovery.catalog.artifactsJson);
           db.prepare(`INSERT INTO dohc_dataset_catalog_history SELECT ?,?,json_extract(json_extract(body,'$.revisionJson'),'$.revision'),json_extract(body,'$.revisionJson'),json_extract(body,'$.artifactsJson') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='catalog-revision'`).run(scope.workspaceId, scope.datasetId, importId);
+          if (options.allowOwnerRecoveryClaim) {
+            db.prepare("INSERT INTO dohc_dataset_recovered_permissions SELECT import_id,body FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind') IN ('binding','grant')").run(importId);
+          } else {
           db.prepare(`INSERT INTO dohc_dataset_bindings SELECT ?,?,json_extract(body,'$.appId'),json_extract(body,'$.bindingJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='binding'`).run(scope.workspaceId, scope.datasetId, importId);
           db.prepare(`INSERT INTO dohc_dataset_data_grants SELECT ?,?,json_extract(body,'$.principalKey'),json_extract(body,'$.grantJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='grant'`).run(scope.workspaceId, scope.datasetId, importId);
+          }
           db.prepare(`INSERT INTO dohc_dataset_lifecycle SELECT ?,?,json_extract(body,'$.archived'),json_extract(body,'$.generation'),json_extract(body,'$.reason'),json_extract(body,'$.archivedAtMs') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='lifecycle'`).run(scope.workspaceId, scope.datasetId, importId);
           for (const row of db.prepare("SELECT body FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='attempt'").all(importId)) {
             const m = JSON.parse(String(row.body)) as Extract<import("./recovery-import.js").RecoveryMetadata, {kind: "attempt"}>;

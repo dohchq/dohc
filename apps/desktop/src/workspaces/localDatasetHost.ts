@@ -17,6 +17,7 @@ import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } fro
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
+import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
@@ -136,7 +137,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,
         metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,
         attached_revision INTEGER,storage_bytes INTEGER NOT NULL CHECK(storage_bytes>0),
-        PRIMARY KEY(workspace_id,dataset_id,file_id),UNIQUE(workspace_id,dataset_id,key)) STRICT;`);
+        PRIMARY KEY(workspace_id,dataset_id,file_id),UNIQUE(workspace_id,dataset_id,key)) STRICT;
+      CREATE TABLE IF NOT EXISTS local_dataset_recovery_files(import_id TEXT NOT NULL,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,attached_revision INTEGER NOT NULL,storage_bytes INTEGER NOT NULL,PRIMARY KEY(import_id,file_id)) STRICT;`);
     transaction(() => {
       db.prepare("INSERT OR IGNORE INTO local_dataset_identity VALUES(1,?)").run(workspaceId);
       if (db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get()!.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
@@ -155,6 +157,29 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime,
       recovery: {
         directory: exportDirectory, limits: { maxTotalBytes: maxStoredBytes },
+        install: { allowOwnerRecoveryClaim: true, account(_context, allocation) { charge(allocation.bytes); },
+          installAttachment: async (_context, input) => {
+            const chunks: Uint8Array[] = []; let size = 0;
+            for await (const chunk of input.stream) { assertCurrent(); size += chunk.byteLength; if (size > input.file.byteLength) throw new Error("Recovery attachment exceeds its declared length."); chunks.push(chunk); }
+            if (size !== input.file.byteLength) throw new Error("Recovery attachment is incomplete.");
+            const bytes = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
+            if (digest(bytes) !== input.file.sha256) throw new Error("Recovery attachment integrity check failed.");
+            const { revision, ...file } = input.file;
+            const now = Date.now(), metadata = JSON.stringify(file), key = JSON.stringify([workspaceId,input.datasetId,"recovery",input.file.fileId]);
+            const retained = bytes.byteLength + Buffer.byteLength(metadata) + Buffer.byteLength(key) + 384;
+            transaction(() => { charge(retained); db.prepare("INSERT INTO local_dataset_recovery_files VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(input.importId,workspaceId,input.datasetId,input.file.fileId,key,metadata,bytes,now,now+86_400_000,revision,retained); });
+          },
+          commitAttachments(_context, input) {
+            db.prepare("INSERT INTO local_dataset_files SELECT workspace_id,dataset_id,file_id,key,metadata,content,created_at_ms,expires_at_ms,attached_revision,storage_bytes FROM local_dataset_recovery_files WHERE import_id=? AND workspace_id=? AND dataset_id=?").run(input.importId,workspaceId,input.datasetId);
+            db.prepare("DELETE FROM local_dataset_recovery_files WHERE import_id=? AND workspace_id=? AND dataset_id=?").run(input.importId,workspaceId,input.datasetId);
+          },
+          async discardAttachments(_context, input) {
+            transaction(() => {
+              const row = db.prepare("SELECT coalesce(sum(storage_bytes),0) bytes FROM local_dataset_recovery_files WHERE import_id=? AND workspace_id=? AND dataset_id=?").get(input.importId,workspaceId,input.datasetId)!;
+              charge(-Number(row.bytes)); db.prepare("DELETE FROM local_dataset_recovery_files WHERE import_id=? AND workspace_id=? AND dataset_id=?").run(input.importId,workspaceId,input.datasetId);
+            });
+          },
+        },
         captureAttachments(_context, key, cursor) {
           return db.prepare("SELECT metadata,attached_revision FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NOT NULL AND attached_revision<=? ORDER BY file_id")
             .all(key.workspaceId, key.datasetId, cursor.revision).map(row => ({ ...parseAppBackendFile(JSON.parse(String(row.metadata))), revision: Number(row.attached_revision) }));
@@ -267,6 +292,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           idempotencyKey: input.idempotencyKey, signal: signal(input.signal)});
       });
     }
+    const recovery = createLocalDatasetRecovery({workspaceId,directory:exportDirectory,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
+      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
     const local = {
       prepare,
       prepareMigration(input: PrepareLocalDatasetMigration) { return tracked(() => migrations.prepareMigration({ ...input, signal: signal(input.signal) })); },
@@ -291,6 +318,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       reconcileAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.reconcileAttempt(owner, { workspaceId, ...input }); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
+      prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
+      claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)); },
+      discardRecovery(transferId: string) { return tracked(() => recovery.discard(transferId)); },
       prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {
         return tracked(async () => {
           const archive = await host.exportRecovery(owner, { workspaceId, datasetId, signal: signal(input.signal) });
@@ -355,6 +385,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         return closePromise ??= (async () => {
           closed = true; pending.clear(); migrations.clear(); lifetime.abort();
           await Promise.allSettled([...active]);
+          await recovery.close();
           try { await supervisor!.close(); } finally { db.close(); }
         })();
       },

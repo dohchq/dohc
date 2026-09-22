@@ -20,6 +20,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">>;
+  chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
@@ -53,6 +54,20 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
+      if (input.action === "prepareRecovery") {
+        const sourcePath = input.sourcePath ?? await dependencies.chooseRecoveryFile?.(operation.workspace,operation.signal);
+        current();
+        if (!sourcePath) return { kind: "recovery-prepared" as const, recovery:null };
+        const recovery = await host.prepareRecovery({sourcePath,signal:operation.signal}); current();
+        return { kind: "recovery-prepared" as const, recovery };
+      }
+      if (input.action === "claimRecovery") {
+        if(input.sourceCursor.workspaceId!==input.workspaceId || input.sourceCursor.datasetId!==input.datasetId) throw new Error("This recovery belongs to another Collection.");
+        const receipt = await host.claimRecovery(input); current();
+        if (!receipt.targetCursor) throw new Error("Recovery has not activated this Collection. Retry recovery.");
+        return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
+      }
+      if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
       const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();

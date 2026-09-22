@@ -141,7 +141,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     return verified;
   }
-  function owner(context: Context, key: DatasetScope): DatasetAuthority {
+  function owner(context: Context, key: { workspaceId: string; datasetId?: string }): DatasetAuthority {
     const result = authority(context, key, { kind: "data" });
     if (result.caller.kind !== "owner") denied();
     return result;
@@ -277,6 +277,34 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (!recovery?.install) throw new DatasetHostError("invalid", "Dataset recovery installation is not configured.");
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       await installer.discard(context, { ...key, transferId: raw.transferId, authorize: () => { owner(context, key); } });
+    },
+    claimRecovery(context: Context, raw: DatasetScope & { transferId: string; sourceCursor: DatasetCursor; manifestSha256: string; oldHostStopped: true; signal?: AbortSignal }) {
+      const key = scope(raw), recovery = options.recovery;
+      if (!recovery?.install?.allowOwnerRecoveryClaim || raw.oldHostStopped !== true) throw new DatasetHostError("invalid", "Local recovery requires confirmation that the old host stopped.");
+      const ownerToken = JSON.stringify(owner(context, key));
+      const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      return createRecoveryInstaller({ ...recovery.install, db, transaction, journal }).claim(context, { ...raw, ...key, authorize });
+    },
+    async prepareRecovery(context: Context, raw: { workspaceId: string; transferId: string; manifestSha256: string; stream: AsyncIterable<Uint8Array>; signal?: AbortSignal }) {
+      const recovery = options.recovery;
+      if (!recovery?.install?.allowOwnerRecoveryClaim) throw new DatasetHostError("invalid", "Local recovery is unavailable.");
+      const ownerToken = JSON.stringify(owner(context, { workspaceId: raw.workspaceId }));
+      const authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, { workspaceId: raw.workspaceId })) !== ownerToken) denied(); };
+      const staged = await stageDatasetRecovery({ ...raw, stagingParent: recovery.directory, expectedManifestSha256: raw.manifestSha256, limits: recovery.limits, authorize });
+      const validated = await validateDatasetRecovery({ staged, authorize, signal: raw.signal, runtime: options.runtime, compileOperations: options.compileOperations });
+      try {
+        const key = scope(validated.manifest.cursor);
+        if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
+        const assertAbsent = () => { authorize(); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
+        assertAbsent();
+        return { transferId: raw.transferId, manifestSha256: raw.manifestSha256, sourceCursor: structuredClone(validated.manifest.cursor),
+          revision: parseDatasetRevision(JSON.parse(validated.catalog.revisionJson)), dispose: () => validated.dispose(),
+          async install() {
+            assertAbsent();
+            const installer = createRecoveryInstaller({ ...recovery.install!, db, transaction, journal });
+            return installer.install(context, { transferId: raw.transferId, manifestSha256: raw.manifestSha256, recovery: validated, authorize });
+          } };
+      } catch (error) { await validated.dispose(); throw error; }
     },
     async importRecovery(context: Context, raw: DatasetScope & { transferId: string; sourceCursor: DatasetCursor; manifestSha256: string; stream: AsyncIterable<Uint8Array>; activate?: boolean; signal?: AbortSignal }) {
       const key = scope(raw), recovery = options.recovery;

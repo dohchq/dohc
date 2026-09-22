@@ -18,7 +18,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     ] }], operations: [{ operationId: "00000000-0000-4000-8000-000000000005", name: "submit", label: "Submit", tableId: "00000000-0000-4000-8000-000000000002",
       kind: "create", access: "link", readOnly: false, fieldIds: ["00000000-0000-4000-8000-000000000004"] }] };
   const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
-  const host = { list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => ({ result: [], revision: 1, replayed: false })),
+  const host = { prepareRecovery:vi.fn(async()=>({transferId:datasetId,manifestSha256:"a".repeat(64),sourceCursor:{workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:revision.revisionSha256,revision:0,digest:"b".repeat(64)},revision})), claimRecovery:vi.fn(), discardRecovery:vi.fn(async()=>{}), list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => ({ result: [], revision: 1, replayed: false })),
     approvedArtifacts: vi.fn(() => ({ active: true, revision })) };
   const createSources = vi.fn(async (_workspace: typeof workspace, _files: Record<string, string>, _signal: AbortSignal) => {});
   const handler = createDatasetHandler({
@@ -135,4 +135,17 @@ it("refuses stale form configuration before writing and guards a late source wri
   expect(f.createSources).not.toHaveBeenCalled();
   f.createSources.mockImplementation(async () => { f.stale(); });
   await expect(f.handler("window", f.createForm)).rejects.toThrow(/stale workspace/);
+});
+
+it("keeps recovery owner-only and rejects mismatched approval scope",async()=>{
+ const f=fixture();
+ const prepared=await f.handler("window",{workspaceId:"workspace",action:"prepareRecovery",sourcePath:"C:/private/backup.dohc-recovery"});
+ expect(prepared.kind).toBe("recovery-prepared");expect(f.host.prepareRecovery).toHaveBeenCalledOnce();
+ if(prepared.kind!=="recovery-prepared"||!prepared.recovery)throw Error("missing preparation");
+ const {revision:_,...claim}=prepared.recovery;
+ await expect(f.handler("window",{workspaceId:"workspace",datasetId,action:"claimRecovery",...claim,sourceCursor:{...claim.sourceCursor,workspaceId:"other"},oldHostStopped:true})).rejects.toThrow(/another Collection/);
+ expect(f.host.claimRecovery).not.toHaveBeenCalled();
+ f.workspace.shareView={shareId:"shared"};
+ await expect(f.handler("window",{workspaceId:"workspace",action:"prepareRecovery",sourcePath:"C:/private/backup.dohc-recovery"})).rejects.toThrow(/original workspace/);
+ expect(f.host.prepareRecovery).toHaveBeenCalledOnce();
 });

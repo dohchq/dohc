@@ -112,7 +112,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     ctx.shareAccess === undefined ? register : skip;
 
   registerWrite("dohc_dataset", {
-    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows saved-operation metadata; permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. The same rules apply in dohc and apps.",
+    description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows saved-operation metadata; permissions manages explicit data grants. Export streams a private recovery archive to an explicit absolute savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 

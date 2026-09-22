@@ -26,6 +26,8 @@ const revision = z.unknown().transform((value, context) => {
 });
 export const DatasetCursor = z.object({ ...selection, hostEpoch: z.string().min(1).max(256), approvedRevisionHash: sha256,
   revision: z.number().int().nonnegative(), digest: sha256 }).strict();
+export const DatasetRecoveryPreparation = z.object({ transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, revision }).strict();
+export type DatasetRecoveryPreparation = z.infer<typeof DatasetRecoveryPreparation>;
 export const DatasetDataGrant = z.object({ revision: z.number().int().positive(), revisionSha256: sha256,
   operationIds: z.array(identity).min(1).max(128), discover: z.boolean() }).strict();
 export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discriminatedUnion("kind", [
@@ -51,6 +53,9 @@ export type DatasetLifecycleState = z.infer<typeof DatasetLifecycleState>;
 export const DatasetPendingAttemptsPage = z.object({ datasetId: identity, entries: z.array(z.object({ reference: sha256, operation: z.string().min(1).max(200), recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000).nullable(), revision: z.number().int().positive().nullable(), outcome: z.enum(["committed", "unconfirmed"]), attachmentCount: z.number().int().nonnegative() }).strict()).max(100), nextAfter: z.number().int().positive().nullable() }).strict();
 export type DatasetPendingAttemptsPage = z.infer<typeof DatasetPendingAttemptsPage>;
 export const DatasetRequest = z.discriminatedUnion("action", [
+  z.object({ ...workspace, action: z.literal("prepareRecovery"), sourcePath: z.string().min(1).max(4096).optional() }).strict(),
+  z.object({ ...selection, action: z.literal("claimRecovery"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, oldHostStopped: z.literal(true) }).strict(),
+  z.object({ ...workspace, action: z.literal("discardRecovery"), transferId: identity }).strict(),
   z.object({ ...selection, action: z.literal("history"), beforeRevision: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional(), includeArchived: z.boolean().optional() }).strict(),
   z.object({ ...selection, action: z.literal("describe"), includeArchived: z.boolean().optional() }).strict(),
@@ -111,6 +116,9 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetLifecycleState.extend({ kind: z.literal("lifecycle-updated") }).strict(),
   DatasetPendingAttemptsPage.extend({ kind: z.literal("pending-attempts") }).strict(),
   z.object({ kind: z.literal("attempt-reconciled"), cleared: z.literal(true) }).strict(),
+  z.object({ kind: z.literal("recovery-prepared"), recovery: DatasetRecoveryPreparation.nullable() }).strict(),
+  z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor }).strict(),
+  z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),

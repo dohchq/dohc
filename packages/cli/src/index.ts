@@ -178,9 +178,10 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     if (options.argv.length === 2 && options.argv[0] === "dataset" && ["--help", "-h"].includes(options.argv[1]!)) return {
       exitCode: 0, stderr: "", stdout: [
         "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
-        "Actions: list, describe, history, permissions, setGrant, removeGrant, create, prepare, approve, discard, invoke, export",
+        "Actions: list, describe, history, permissions, setGrant, removeGrant, lifecycle, archive, restore, pendingAttempts, reconcileAttempt, create, prepare, approve, discard, invoke, export",
         "Source actions: prepareMigration, prepareSchemaChange, approveMigration, discardMigration, createForm",
         "File actions: upload, file",
+        "Recovery actions: prepareRecovery, claimRecovery, discardRecovery",
         "Every request names workspaceId. Run this command from its owning workspace.",
         "list: optional after and limit. describe: datasetId.",
         "history: datasetId, optional beforeRevision and limit. Shows saved-operation metadata.",
@@ -191,6 +192,9 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         "prepare: descriptorPath. Captures existing source for review.",
         "approve: preparationId and revisionSha256 from the reviewed preparation.",
         "discard: preparationId. Leaves the source files in place.",
+        "prepareRecovery: explicit absolute sourcePath ending in .dohc-recovery. Review result before claimRecovery.",
+        "claimRecovery: datasetId, transferId, manifestSha256, sourceCursor, oldHostStopped:true. Stop the old host first.",
+        "discardRecovery: transferId. Cancels a prepared recovery before installation.",
         "export: datasetId, absolute savePath ending in .dohc-recovery, optional overwrite.",
         "Recovery archives contain private records, uploaded files, history, and retry credentials. Store them privately.",
         "invoke: datasetId, revision, revisionSha256, operationId, input, idempotencyKey.",

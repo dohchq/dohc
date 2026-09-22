@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +73,56 @@ afterEach(async () => {
 });
 
 describe("local dataset owner adapter", () => {
+  it("restores a chosen active backup only after owner claim and preserves files and retry history", async () => {
+    const sourceHost = await open(), approved = await activate(sourceHost.host);
+    const bytesBase64 = Buffer.from("%PDF-recovery-receipt").toString("base64");
+    const upload = {datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"recovery-file",name:"receipt.pdf",contentType:"application/pdf",bytesBase64};
+    const uploaded = await sourceHost.host.upload(upload);
+    const invocation = call(approved,id(6),"recovery-write",{name:"Saved",fileId:uploaded.file.fileId});
+    const committed = await sourceHost.host.invoke(invocation);
+    const archive = await sourceHost.host.prepareExport(id(1));
+    const sourcePath = join(sourceHost.workspaceRoot,"backup.dohc-recovery");
+    await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}});
+    await archive.dispose();
+    const target = await open();
+    const prepared = await target.host.prepareRecovery({sourcePath});
+    expect(target.host.list().datasets).toEqual([]);
+    await expect(target.host.claimRecovery(prepared)).rejects.toThrow(/old host stopped/);
+    expect(target.host.list().datasets).toEqual([]);
+    await sourceHost.host.close();
+    const claim = {...prepared,oldHostStopped:true as const};
+    const restored = await target.host.claimRecovery(claim);
+    expect(restored.targetCursor?.hostEpoch).not.toBe(prepared.sourceCursor.hostEpoch);
+    expect(restored.targetCursor?.revision).toBe(prepared.sourceCursor.revision+1);
+    expect((await target.host.query(call(approved,id(5)))).result).toEqual([expect.objectContaining({name:"Saved"})]);
+    expect((await target.host.file({...upload,fileId:uploaded.file.fileId})).bytesBase64).toBe(bytesBase64);
+    expect(await target.host.invoke(invocation)).toEqual({...committed,replayed:true});
+    expect(await target.host.claimRecovery(claim)).toEqual(restored);
+    await expect(target.host.prepareRecovery({sourcePath})).rejects.toThrow(/already exists/);
+    expect((await target.host.query(call(approved,id(5)))).result).toHaveLength(1);
+    await target.host.close();
+    const restarted = await open({workspaceRoot:target.workspaceRoot});
+    expect(await restarted.host.claimRecovery(claim)).toEqual(restored);
+  });
+
+  it("discards preparation, rejects damaged or foreign backups, and leaves the target absent", async () => {
+    const sourceHost = await open(); await activate(sourceHost.host);
+    const archive = await sourceHost.host.prepareExport(id(1));
+    const sourcePath = join(sourceHost.workspaceRoot,"backup.dohc-recovery");
+    await writeDatasetRecoveryExport({path:sourcePath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    const target = await open(), prepared = await target.host.prepareRecovery({sourcePath});
+    await target.host.discardRecovery(prepared.transferId);
+    expect(target.host.list().datasets).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+    await expect(target.host.claimRecovery({...prepared,oldHostStopped:true})).rejects.toThrow(/not installed/);
+    const foreign = await open({workspaceId:"other"});
+    await expect(foreign.host.prepareRecovery({sourcePath})).rejects.toThrow(/another workspace/);
+    const bytes = await readFile(sourcePath); await writeFile(sourcePath,bytes.subarray(0,bytes.length-5));
+    await expect(target.host.prepareRecovery({sourcePath})).rejects.toThrow(/truncated/);
+    expect(target.host.list().datasets).toEqual([]);
+    expect(await readdir(join(target.workspaceRoot,".dohc","datasets","exports"))).toEqual([]);
+  });
+
   it("exports an actual committed dataset and receipt to a streamed recovery file", async () => {
     const {host} = await open(), approved = await activate(host);
     const attachment = Buffer.from("%PDF-synthetic-recovery-receipt");

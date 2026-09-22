@@ -223,3 +223,20 @@ it("rejects tampered or duplicate retained submission metadata before installati
   });
   await expect(validateDatasetRecovery({staged: duplicate, authorize: f.authorize})).rejects.toThrow(/UNIQUE/);
 });
+it("requires trusted local recovery and explicit stopped-host acknowledgement for an active backup", async () => {
+  const f = await fixture(); f.add("first");
+  f.db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run(f.scope.workspaceId,f.scope.datasetId,"helper",JSON.stringify({operationIds:[id(5)],discover:true,revision:1,revisionSha256:f.revision.revisionSha256}),"old-token");
+  const valid = await validateDatasetRecovery({staged:await f.stage(),authorize:f.authorize}), t = target(f,{allowOwnerRecoveryClaim:true});
+  try {
+    const input={transferId:"local-recovery",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize};
+    await t.installer.install({},input);
+    const claim={...f.scope,transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:f.head(),authorize:f.authorize};
+    expect(() => t.installer.claim({},claim)).toThrow(/fenced source/);
+    const relayInstaller=createRecoveryInstaller({db:t.db,journal:t.journal,transaction:t.transaction});
+    expect(() => relayInstaller.claim({},{...claim,oldHostStopped:true})).toThrow(/fenced source/);
+    expect(t.journal.head(f.scope,f.authorize).active).toBe(false);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_data_grants").get()!.n).toBe(0);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_recovered_permissions").get()!.n).toBe(1);
+    expect(t.installer.claim({},{...claim,oldHostStopped:true}).targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
+  } finally { await valid.dispose(); }
+});
