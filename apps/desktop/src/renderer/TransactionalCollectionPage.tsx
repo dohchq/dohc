@@ -28,6 +28,7 @@ export interface TransactionalCollectionPageProps {
   /** Shell-owned confirmation states the real recovery path before deletion. */
   confirmDelete?(row: TransactionalRow): Promise<boolean>;
   onCustomAction?(operationId: string): void;
+  onCreateForm?(): void;
 }
 type Query = { after: TransactionalCursor | null; search: string; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
@@ -167,6 +168,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold text-ink">{table.name}</h2><div className="flex flex-wrap gap-2">
+      {props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly) ? <SecondaryButton disabled={disabled || editor !== null} onClick={props.onCreateForm}>Create form</SecondaryButton> : null}
       {undo ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })}>Undo last edit</SecondaryButton> : null}
       {canCreate ? <PrimaryButton disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}>New record</PrimaryButton> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}

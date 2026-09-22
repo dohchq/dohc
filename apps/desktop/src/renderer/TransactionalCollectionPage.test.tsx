@@ -31,6 +31,13 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("offers form creation only with a public create action and a connected handler", async () => {
+    const onCreateForm = vi.fn(); const result = setup({ onCreateForm }); await screen.findByText("Alice");
+    expect(screen.queryByRole("button", { name: "Create form" })).toBeNull();
+    const description = dataset(); description.operations.find(operation => operation.operationId === create)!.access = "link";
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} />); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Create form" })); expect(onCreateForm).toHaveBeenCalledOnce();
+  });
   it("shows only approved fields and actions with bounded cursor paging", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: page(request.input && typeof request.input === "object" && "after" in request.input ? "Bob" : "Alice", true) }));
     setup({ invoke });
