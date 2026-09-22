@@ -2,9 +2,12 @@
 
 Reader: engineers connecting published app operations to authoritative storage.
 
-This package evaluates approved JavaScript against a temporary SQLite snapshot.
-It returns a candidate snapshot, SQLite changeset, JSON result, and attached file identifiers.
-It does not commit shared state or authorize callers.
+Transactional Collections use this package's host journal and [persistent materialization](#persistent-materialization).
+The trusted host authorizes and commits changes; isolated workers evaluate approved JavaScript and apply committed events.
+See [the operator guide](../../docs/how-to/app-backend.md) to create and manage an app.
+
+The package also exposes a snapshot evaluator that returns candidate bytes, a changeset, JSON, and attached file identifiers.
+That evaluator does not commit shared state or authorize callers. The snapshot-specific limits below do not describe persistent dataset capacity.
 
 The host must validate the publication, operation, caller, and files before evaluation.
 The host must recheck authority when it atomically commits the candidate and retry receipt.
@@ -41,7 +44,7 @@ Use `ctx.refuse` when a business rule fails. Returning `{ ok: false }` is an ord
 The caller receives `AppBackendRuntimeError` with `code: 'operation_refused'` and a `refusal` containing the supplied code and message.
 Other guest exceptions return a generic error without invoking guest error getters.
 
-## Isolation and limits
+## Snapshot evaluator isolation and limits
 
 Each evaluation uses a fresh QuickJS Wasm runtime inside a child process.
 The guest receives no process, filesystem, network, module loader, or host environment.

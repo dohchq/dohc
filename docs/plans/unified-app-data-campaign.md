@@ -278,10 +278,10 @@ The go signal does not authorize merges, public deployment, live fundraiser migr
 - Current Collection contract: `CONTEXT.md`, `packages/workspace-contracts/src/collection.ts`.
 - Collection UI and live editing: `apps/desktop/src/renderer/CollectionPage.tsx`, `packages/collection-views/src/table/TableView.tsx`, `apps/desktop/src/workspaces/collectionRecordEdits.ts`.
 - Collection indexing: `crates/dohc-engine-domain/src/collections.rs`.
-- Feature-branch contracts and limits: `docs/how-to/app-backend.md`, `docs/adr/0010-app-backends-own-private-transactional-data.md`, `packages/app-backend-runtime/README.md`.
-- Feature-branch host ordering: `services/sync-relay/src/appBackendHost.ts`, `services/sync-relay/src/storage/appBackendData.ts`, `apps/desktop/src/workspaces/localAppBackend.ts`.
+- Dataset contracts and limits: `docs/how-to/app-backend.md`, `docs/adr/0011-transactional-datasets-use-a-host-journal-and-worker-materialization.md`, `packages/app-backend-runtime/README.md`.
+- Host commit and authority ordering: `packages/app-backend-runtime/src/dataset-host.ts`, `packages/app-backend-runtime/src/journal.ts`, `services/sync-relay/src/datasetHost.ts`, `apps/desktop/src/workspaces/localDatasetHost.ts`.
 - Unified UI/generation: `apps/desktop/src/renderer/ConnectedTransactionalCollection.tsx`, `apps/desktop/src/workspaces/datasetFormGenerator.ts`.
-- Existing examples and browser proof: `examples/fundraiser`, `examples/stock-orders`, `services/share-web/e2e/app-backend-fundraiser.spec.ts`, `apps/desktop/e2e/app-backend-local.spec.ts` on that branch.
+- Examples and browser proofs: `examples/fundraiser`, `examples/stock-orders`, `services/share-web/e2e/app-backend-fundraiser.spec.ts`, `apps/desktop/e2e/app-backend-local.spec.ts`, `apps/desktop/e2e/dataset-collection.spec.ts`, `apps/desktop/e2e/dataset-shared-form.spec.ts`.
 - Experiment: `packages/app-backend-runtime/prototype/RESULTS.md` on the prototype branch. Local evidence is retained in `.agent-artifacts/backend-performance-39d365ba0`.
 
 Review status: Fable reviewed the draft and the final delta on September 22, 2026. Fable found no substantive plan blockers. The remaining risks are the unproven two-store authority fence, SQLite scale envelope, and helper/source-access separation; Stage 1 and Stage 2 gates cover them.
