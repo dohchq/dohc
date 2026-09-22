@@ -91,7 +91,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     const collection = page.getByRole("region", { name: "Equipment", exact: true });
     await collection.getByRole("button", { name: "New record", exact: true }).click();
     await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Camera");
-    await collection.getByRole("button", { name: "Save", exact: true }).click();
+    await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Camera");
     await collection.getByRole("button", { name: "Fields and names" }).click();
     const fields = page.getByRole("dialog", { name: "Fields and names" });

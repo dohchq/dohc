@@ -94,7 +94,10 @@ export function previewDatasetCsv(csv: CsvTable, fields: readonly TransactionalF
         else if (csv.literalValues && literal === null) {
           if (field.required) throw Error(`Enter ${field.name}.`);
           value = null;
-        } else if (csv.literalValues && literal === "" && field.type === "text") value = "";
+        } else if (csv.literalValues && literal === "") {
+          if (field.type !== "text") throw Error(`Empty source text is not a ${field.type} value for ${field.name}.`);
+          value = "";
+        }
         else value = convert(field, csv.literalValues && field.type === "relation" ? JSON.stringify(literal) : cells[column]!);
         if (value !== undefined) values[fieldId] = value;
       }

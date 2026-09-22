@@ -11,7 +11,7 @@ import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
-import { DatasetCsvTransferDialog } from "./DatasetCsvTransferDialog";
+import { DatasetTransferDialog } from "./DatasetTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
@@ -169,7 +169,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         if (result.kind !== "history") throw Error("dohc could not read this Collection's history. Try again.");
         return result;
       }} />}
-    {transferringCsv && <DatasetCsvTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
+    {transferringCsv && <DatasetTransferDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} invoke={invoke} onError={onError}
       onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
       onSave={async (file, signal) => {
         signal.throwIfAborted();

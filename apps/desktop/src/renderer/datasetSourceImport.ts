@@ -152,6 +152,3 @@ export async function readDocumentCollectionToCsv(reader: SourceImportReader, wo
   } while (cursor);
   return collectionRecordsToCsv(details.schema, records);
 }
-
-/** A source import is a copy: it never deletes or edits the document or SQLite source. */
-export const SOURCE_IMPORT_NOTICE = "This copies selected values into the Collection. The source stays unchanged. Document bodies are not imported.";
