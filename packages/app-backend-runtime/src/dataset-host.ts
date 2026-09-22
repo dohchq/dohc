@@ -9,6 +9,7 @@ import type { DatasetInvocation, DatasetInvocationResult, DatasetMigration } fro
 import type { JsonValue } from "./protocol.js";
 import { prepareDatasetRecoveryExport, type RecoveryAttachment } from "./recovery-export.js";
 import type { RecoveryLimits } from "./recovery.js";
+import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -43,6 +44,8 @@ export interface DatasetHostOptions<Context> {
   accountMetadata?(context: Context, allocation: DatasetScope & { bytes: number }): void;
   /** Checkpoint retention and signed catalog replacement delta, in the transition transaction. */
   accountMigration?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number; capacityDeltaBytes: number }): void;
+  /** Signed staging reservation; use the same retained-byte counter as accountMigration. */
+  accountCheckpointStage?(context: Context, allocation: Readonly<CheckpointStageAllocation>): void;
   /** Resolve uploaded files and quota accounting from trusted host state. */
   operationResources?(context: Context, request: DatasetScope & { authority: DatasetAuthority; operation: DatasetOperation; input: JsonValue }): Pick<DatasetInvocation, "files" | "accountAndAttach">;
   recovery?: {
@@ -96,7 +99,7 @@ function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
-  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.operationResources]) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources]) {
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
@@ -248,6 +251,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       return approved;
     },
     async migrate(context: Context, raw: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }> {
+      if (options.accountMigration && !options.accountCheckpointStage) throw new Error("Dataset migration requires checkpoint staging quota accounting.");
       const approved = verifyDatasetArtifacts(raw), key = scope({ workspaceId: raw.workspaceId, datasetId: approved.datasetId });
       const expected = { ...raw.expected }, migrationSql = text(raw.migrationSql, 256 * 1024), schemaSql = raw.schemaSql, source = raw.operationSource, signal = raw.signal;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured), previous = revision(key);
@@ -260,12 +264,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const cursor = await options.supervisor.migrate({ scope: key, expected, tables: previous.definition.tables.map(table => table.sqlName),
         newTables: approved.definition.tables.map(table => table.sqlName), schemaSql, source: compiledSource, definitionJson: JSON.stringify(approved),
         approvedRevisionHash: approved.revisionSha256, migrationSql, signal, authorize,
+        accountStage(allocation) { if (options.accountCheckpointStage) synchronous(() => options.accountCheckpointStage!(context, allocation)); },
         account(allocation) {
           const row = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
           if (!row || parseDatasetRevision(JSON.parse(String(row.revision_json))).revisionSha256 !== previous.revisionSha256) throw new Error("Dataset approval changed during migration.");
           const revisionJson = JSON.stringify(approved), artifactsJson = JSON.stringify({ schemaSql, operationSource: source });
           const delta = Buffer.byteLength(revisionJson) + Buffer.byteLength(artifactsJson) + 256;
-          if (options.accountMigration) synchronous(() => options.accountMigration!(context, { ...key, bytes: allocation.bytes + delta,
+          if (options.accountMigration) synchronous(() => options.accountMigration!(context, { ...key, bytes: allocation.bytes - allocation.stagedCreditBytes + delta,
             capacityBytes: allocation.capacityBytes, capacityDeltaBytes: allocation.capacityDeltaBytes }));
           db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(key.workspaceId,key.datasetId,previous.revision,row.revision_json,row.artifacts_json);
           db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=? WHERE workspace_id=? AND dataset_id=?").run(revisionJson, artifactsJson, key.workspaceId, key.datasetId);

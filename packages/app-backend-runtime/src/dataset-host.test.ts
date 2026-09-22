@@ -205,11 +205,15 @@ it("migrates records atomically and retains stale grants for explicit reapproval
 });
 
 it("rolls back migration approval when accounting refuses and rejects a stale preview", async () => {
-  const f = await fixture({ accountMigration() { throw new Error("quota"); } }); await f.activate();
+  const stageDeltas: number[] = [];
+  const f = await fixture({ accountCheckpointStage(_context, allocation) { stageDeltas.push(allocation.bytes); }, accountMigration() { throw new Error("final migration quota"); } }); await f.activate();
   const expected = f.host.approvedArtifacts("owner", scope).cursor;
   const nextDefinition = { ...definition, name: "Next" };
   const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql, operationSource });
-  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow("quota");
+  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow("final migration quota");
+  expect(stageDeltas.length).toBe(2);
+  expect(stageDeltas[0]).toBeGreaterThan(0);
+  expect(stageDeltas[1]).toBe(-stageDeltas[0]!);
   expect(f.host.approvedArtifacts("owner", scope).revision).toEqual(prepared.revision);
   await f.invoke("owner", id(6), { value: "new record" });
   await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow();
