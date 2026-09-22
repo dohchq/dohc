@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
-import { effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetField, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { effectiveDatasetOperations, parseDatasetBinding, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
+export type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import { initializeAppDatabase, type AppBackendRuntimeOptions } from "./index.js";
 import type { DatasetJournal, DatasetScope, JournalDb } from "./journal.js";
@@ -18,14 +19,6 @@ export interface DatasetAuthority {
   authorityToken?: string;
 }
 export interface DatasetDataGrant { operationIds: string[]; discover: boolean }
-export interface DatasetDescription {
-  datasetId: string;
-  name: string;
-  revision: number;
-  revisionSha256: string;
-  tables: Array<{ tableId: string; name: string; fields: Array<Omit<DatasetField, "sqlColumn">> }>;
-  operations: DatasetOperation[];
-}
 export interface DatasetHostOptions<Context> {
   db: JournalDb;
   transaction: <T>(run: () => T) => T;

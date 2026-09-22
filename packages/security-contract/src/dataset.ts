@@ -83,6 +83,15 @@ export interface AppDatasetBinding {
 export interface AppDatasetCapability extends AppDatasetBinding {
   operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly">>;
 }
+/** Grant-filtered metadata for Collection controls and agent discovery. */
+export interface DatasetDescription {
+  datasetId: string;
+  name: string;
+  revision: number;
+  revisionSha256: string;
+  tables: Array<{ tableId: string; name: string; fields: Array<Omit<DatasetField, "sqlColumn">> }>;
+  operations: DatasetOperation[];
+}
 
 const ids = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sqlNames = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -157,10 +166,10 @@ function validDefault(field: DatasetField, value: AppBackendJson): boolean {
     case "multi-select": return Array.isArray(value) && value.every(entry => typeof entry === "string" && field.options!.includes(entry)) && new Set(value).size === value.length;
     // Attachment ownership and referenced records require host validation at write time.
     case "attachment": return false;
-    case "relation": return field.relation!.many && Array.isArray(value) && value.length === 0;
+    case "relation": return field.relation?.many !== false && Array.isArray(value) && value.length === 0;
   }
 }
-function field(value: unknown): DatasetField {
+function field(value: unknown, allowWithheldRelation = false): DatasetField {
   const row = record(value, ["fieldId", "name", "sqlColumn", "type", "required", "unique"], ["default", "options", "relation"]);
   if (!fieldTypes.has(row.type as DatasetFieldType)) fail();
   const result: DatasetField = { fieldId: uuid(row.fieldId), name: text(row.name), sqlColumn: sqlName(row.sqlColumn), type: row.type as DatasetFieldType,
@@ -169,10 +178,10 @@ function field(value: unknown): DatasetField {
     result.options = boundedArray(row.options, 100, 1).map(value => text(value, 200));
     unique(result.options);
   } else if (Object.hasOwn(row, "options")) fail();
-  if (result.type === "relation") {
+  if (result.type === "relation" && (!allowWithheldRelation || Object.hasOwn(row, "relation"))) {
     const relation = record(row.relation, ["datasetId", "tableId", "fieldId", "many"]);
     result.relation = { datasetId: uuid(relation.datasetId), tableId: uuid(relation.tableId), fieldId: uuid(relation.fieldId), many: boolean(relation.many) };
-  } else if (Object.hasOwn(row, "relation")) fail();
+  } else if (result.type !== "relation" && Object.hasOwn(row, "relation")) fail();
   if (result.unique && (result.type === "attachment" || result.type === "multi-select" || result.relation?.many)) fail();
   if (Object.hasOwn(row, "default")) {
     result.default = row.default as AppBackendJson;
@@ -183,7 +192,7 @@ function field(value: unknown): DatasetField {
 function table(value: unknown): DatasetTable {
   const row = record(value, ["tableId", "name", "sqlName", "primaryKey", "fields"]);
   const result: DatasetTable = { tableId: uuid(row.tableId), name: text(row.name), sqlName: sqlName(row.sqlName), primaryKey: sqlName(row.primaryKey),
-    fields: boundedArray(row.fields, DATASET_MAX_FIELDS, 1).map(field) };
+    fields: boundedArray(row.fields, DATASET_MAX_FIELDS, 1).map(value => field(value)) };
   unique(result.fields.map(field => field.sqlColumn.toLowerCase()));
   unique(result.fields.map(field => field.name));
   const primary = result.fields.find(field => field.sqlColumn === result.primaryKey);
@@ -230,6 +239,42 @@ function definition(value: unknown): DatasetDefinition {
 
 export function parseDatasetDefinition(value: unknown): DatasetDefinition {
   return definition(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES));
+}
+
+export function parseDatasetDescription(value: unknown): DatasetDescription {
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "name", "revision", "revisionSha256", "tables", "operations"]);
+  const result: DatasetDescription = {
+    datasetId: uuid(row.datasetId), name: text(row.name), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
+    tables: boundedArray(row.tables, DATASET_MAX_TABLES).map(value => {
+      const table = record(value, ["tableId", "name", "fields"]);
+      const fields = boundedArray(table.fields, DATASET_MAX_FIELDS).map(value => {
+        const metadata = record(value, ["fieldId", "name", "type", "required", "unique"], ["default", "options", "relation"]);
+        const { sqlColumn: _column, ...parsed } = field({ ...metadata, sqlColumn: "field" }, true);
+        return parsed;
+      });
+      unique(fields.map(field => field.name));
+      return { tableId: uuid(table.tableId), name: text(table.name), fields };
+    }),
+    operations: boundedArray(row.operations, DATASET_MAX_OPERATIONS).map(operation),
+  };
+  unique([result.datasetId, ...result.tables.map(table => table.tableId), ...result.tables.flatMap(table => table.fields.map(field => field.fieldId)), ...result.operations.map(operation => operation.operationId)]);
+  unique(result.tables.map(table => table.name));
+  unique(result.operations.map(operation => operation.name));
+  const tables = new Map(result.tables.map(table => [table.tableId, table]));
+  for (const operation of result.operations) {
+    const table = tables.get(operation.tableId);
+    if (!table || operation.fieldIds.some(id => !table.fields.some(field => field.fieldId === id))) fail();
+  }
+  for (const table of result.tables) {
+    if (!result.operations.some(operation => operation.tableId === table.tableId)) fail();
+    for (const field of table.fields) {
+      if (!result.operations.some(operation => operation.tableId === table.tableId && operation.fieldIds.includes(field.fieldId))) fail();
+      if (!field.relation) continue;
+      const target = tables.get(field.relation.tableId)?.fields.find(candidate => candidate.fieldId === field.relation!.fieldId);
+      if (field.relation.datasetId !== result.datasetId || !target || !target.unique || !target.required || !["text", "number"].includes(target.type)) fail();
+    }
+  }
+  return result;
 }
 export function parseDatasetRevision(value: unknown): DatasetRevision {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "revision", "revisionSha256", "definitionSha256", "schemaSha256", "operationsSha256", "definition"]);

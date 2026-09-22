@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
-  effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetRevision,
+  effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision,
   parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
   type AppDatasetBinding, type DatasetDefinition, type DatasetField, type DatasetRevision,
 } from "./dataset";
@@ -80,6 +80,28 @@ describe("dataset publication binding", () => {
 });
 
 describe("dataset definition", () => {
+  it("parses grant-filtered descriptions without accepting SQL columns or hidden fields", () => {
+    const rev = revision(), op = rev.definition.operations[1]!;
+    const description = { datasetId: rev.datasetId, name: rev.definition.name, revision: rev.revision, revisionSha256: rev.revisionSha256,
+      tables: [{ tableId: rev.definition.tables[0]!.tableId, name: "People", fields: [
+        { fieldId: id(3), name: "Record ID", type: "text", required: true, unique: true },
+        { fieldId: id(4), name: "Name", type: "text", required: true, unique: false },
+      ] }], operations: [op] };
+    expect(parseDatasetDescription(description).tables[0]!.fields[0]).not.toHaveProperty("sqlColumn");
+    expect(() => parseDatasetDescription({ ...description, tables: [{ ...description.tables[0], fields: [{ ...description.tables[0]!.fields[0], sqlColumn: "id" }] }] })).toThrow();
+    expect(() => parseDatasetDescription({ ...description, operations: [{ ...op, fieldIds: [id(5)] }] })).toThrow();
+  });
+  it("accepts withheld relation targets but validates any disclosed target", () => {
+    const rev = revision();
+    const relationField = { fieldId: id(8), name: "Friends", type: "relation", required: false, unique: false, default: [] };
+    const description = { datasetId: rev.datasetId, name: rev.definition.name, revision: rev.revision, revisionSha256: rev.revisionSha256,
+      tables: [{ tableId: id(2), name: "People", fields: [relationField] }], operations: [{ ...rev.definition.operations[1]!, fieldIds: [id(8)] }] };
+    expect(parseDatasetDescription(description).tables[0]!.fields[0]).toEqual(relationField);
+    const exposed = { ...relationField, relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: true } };
+    expect(() => parseDatasetDescription({ ...description, tables: [{ ...description.tables[0], fields: [exposed] }] })).toThrow();
+    const draft = definition(); draft.tables[0]!.fields.push({ ...relationField, sqlColumn: "friends" } as DatasetField);
+    expect(() => parseDatasetDefinition(draft)).toThrow();
+  });
   it("creates an independent draft with stable identities across display renames", () => {
     const input = definition();
     const parsed = parseDatasetDefinition(input);
