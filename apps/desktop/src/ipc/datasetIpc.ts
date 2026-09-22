@@ -1,4 +1,4 @@
-import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -8,6 +8,7 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
+import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 
@@ -73,7 +74,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
@@ -153,6 +154,31 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if(input.action === "pendingAttempts") { if(!data.pendingAttempts)throw new Error("Pending submission review is unavailable."); const result=await data.pendingAttempts(input);current();return {kind:"pending-attempts" as const,...result}; }
       if(input.action === "reconcileAttempt") { if(!data.reconcileAttempt)throw new Error("Pending submission review is unavailable."); const result=await data.reconcileAttempt(input);current();return {kind:"attempt-reconciled" as const,...result}; }
       if(input.action === "cancelAttempt") { if(!data.cancelAttempt)throw new Error("Pending submission cancellation is unavailable."); const result=await data.cancelAttempt(input);current();return {kind:"attempt-cancelled" as const,...result}; }
+      if (input.action === "historyRevision") {
+        if (!data.historyRevision) throw new Error("Saved Collection rules are unavailable. Update the host and try again.");
+        const result = DatasetHistoryRevision.parse(await data.historyRevision(input)); current();
+        if (result.revision.datasetId !== input.datasetId || result.revision.revisionSha256 !== input.revisionSha256) throw new Error("This revision belongs to another Collection change.");
+        return { kind: "history-revision" as const, ...result };
+      }
+      if (input.action === "prepareHistoryRestore") {
+        if (!data.historyRevision) throw new Error("Saved Collection rules are unavailable. Update the host and try again.");
+        const approved = await data.approvedArtifacts(input.datasetId); current();
+        if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("The Collection changed. Refresh History before restoring rules.");
+        const saved = await data.historyRevision({ datasetId: input.datasetId, revisionSha256: input.targetRevisionSha256 }); current();
+        if (saved.revision.revisionSha256 !== input.targetRevisionSha256) throw new Error("The saved rules differ from this selection. Refresh History.");
+        const changed = await data.historyRevision({ datasetId: input.datasetId, revisionSha256: input.changedRevisionSha256 }); current();
+        if (changed.revision.revisionSha256 !== input.changedRevisionSha256) throw new Error("The selected change differs from History. Refresh History.");
+        const generated = generateDatasetHistoryRestore(approved, saved, changed);
+        const expected = describeDatasetRevision({ definition: generated.definition, revision: approved.revision.revision + 1, schemaSql: generated.schemaSql, operationSource: generated.operationSource });
+        await dependencies.createSources(operation.workspace, generated.files, operation.signal); current();
+        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath }); current();
+        if (prepared.previousRevision.revisionSha256 !== approved.revision.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
+          migrations.get(prepared.preparationId)?.clear();
+          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
+          throw new Error("The Collection changed while preparing this restore. Refresh History and review it again.");
+        }
+        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
+      }
       if (input.action === "history") {
         if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
         const result = await data.history(input); current(); return { kind: "history" as const, ...result };

@@ -209,3 +209,14 @@ it("omits only confirmed remote deletions from the transfer catalog and keeps fa
   vi.mocked(remote.deletionStatus!).mockResolvedValue({deleted:false}); vi.mocked(remote.describe).mockRejectedValue(Error("permission changed"));
   await expect(data.list({})).rejects.toThrow("permission changed");
 });
+
+it("verifies immutable history source against the requested revision and current credential", async () => {
+  const f = fixture(), value = { datasetId: id(1), revisionSha256: revision.revisionSha256 };
+  f.relay.mockResolvedValue({ revision, schemaSql: "SQL", operationSource: "RULES" });
+  expect(await f.data.historyRevision!(value)).toEqual({ revision, schemaSql: "SQL", operationSource: "RULES" });
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/history-revision?revisionSha256=${revision.revisionSha256}`);
+  await expect(f.data.historyRevision!({ ...value, revisionSha256: "f".repeat(64) })).rejects.toThrow("another Collection revision");
+  f.relay.mockResolvedValue({ revision, schemaSql: "SQL", operationSource: "tampered" });
+  await expect(f.data.historyRevision!(value)).rejects.toThrow();
+  f.switchCredential(); await expect(f.data.historyRevision!(value)).rejects.toThrow();
+});

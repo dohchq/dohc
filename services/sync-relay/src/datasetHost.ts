@@ -287,7 +287,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       discardMigration(auth: AppBackendAuth, input: Parameters<typeof host.discardMigration>[1]) {
         return host.discardMigration(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
-      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
+      describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, historyRevision: host.historyRevision, publication,
       lifecycle: host.lifecycle, archiveDataset: host.archiveDataset, restoreDataset: host.restoreDataset,
       deletePreview: host.deletePreview, deleteDataset: host.deleteDataset, deletionStatus: host.deletionStatus,
       pendingAttempts: host.pendingAttempts, reconcileAttempt: host.reconcileAttempt, cancelAttempt: host.cancelAttempt,

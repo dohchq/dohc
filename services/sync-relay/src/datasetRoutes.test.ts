@@ -603,3 +603,16 @@ it("keeps published upload, saved submission, and protected file paths working a
   expect((await f.named("file",read)).status).toBe(404);
   expect((await f.app("upload",upload)).status).toBe(404);
 });
+
+it("exposes immutable approved rule history only through the owner route", async () => {
+  const f = await httpFixture(); expect((await f.activate()).status).toBe(200);
+  const path = `${f.path}/history-revision?revisionSha256=${revision.revisionSha256}`;
+  const response = await f.http(path); expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ revision, schemaSql, operationSource });
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect((await f.http(path, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+  expect((await f.http(path, undefined, { authorization: "Bearer stranger" })).status).toBe(404);
+  expect((await f.http(`${f.path}/history-revision?revisionSha256=invalid`)).status).toBe(400);
+  expect((await f.http(`${path}&revisionSha256=${revision.revisionSha256}`)).status).toBe(400);
+
+});

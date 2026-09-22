@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetLifecyclePage, DatasetLifecycleState, DatasetPendingAttemptsPage, DatasetMigrationCandidate, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetHistoryRevision, DatasetLifecyclePage, DatasetLifecycleState, DatasetPendingAttemptsPage, DatasetMigrationCandidate, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -21,6 +21,7 @@ export interface OwnerDatasetData {
   migrationPreviewPage?(input: Parameters<RuntimeDatasetHost["migrationPreviewPage"]>[1]): Promise<DatasetMigrationPreviewPage>;
   discardMigrationCandidate?(input: Parameters<RuntimeDatasetHost["discardMigration"]>[1]): Promise<void>;
   inspect?(datasetId: string, options?: { includeArchived?: boolean }): Promise<{ dataset: DatasetDescription; copy?: import("@dohc/cli/dataset").DatasetCopyStatus }>;
+  historyRevision?(input: { datasetId: string; revisionSha256: string }): Promise<DatasetHistoryRevision>;
   history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
   list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
@@ -117,6 +118,13 @@ export function createRemoteDatasetData(input: {
       const result = await request(`${path(value.datasetId)}/grants`, value.action === "setGrant"
         ? { grantId: value.grantId, grant: value.grant } : { principalKey: value.principalKey, grant: null });
       z.object({ ok: z.literal(true) }).strict().parse(result);
+    },
+    async historyRevision(value) {
+      if (input.shareId !== undefined) throw new Error("Open the original workspace to inspect Collection rules.");
+      const result = DatasetHistoryRevision.parse(await request(`${path(value.datasetId)}/history-revision?revisionSha256=${sha256.parse(value.revisionSha256)}`));
+      verifyDatasetArtifacts(result);
+      if (result.revision.datasetId !== value.datasetId || result.revision.revisionSha256 !== value.revisionSha256) throw new Error("The server returned another Collection revision.");
+      return result;
     },
     async history(page) {
       const query = new URLSearchParams();
@@ -286,7 +294,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "prepareMigrationCandidate" | "approveMigrationCandidate" | "discardMigrationCandidate" | "migrationPreviewPage" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "deletePreview" | "deleteDataset" | "deletionStatus" | "pendingAttempts" | "reconcileAttempt" | "cancelAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "prepareMigrationCandidate" | "approveMigrationCandidate" | "discardMigrationCandidate" | "migrationPreviewPage" | "invoke" | "upload" | "file" | "history" | "historyRevision" | "lifecycle" | "archive" | "restore" | "deletePreview" | "deleteDataset" | "deletionStatus" | "pendingAttempts" | "reconcileAttempt" | "cancelAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -329,6 +337,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
       const authority = await target(datasetId);
       return "inspect" in authority && authority.inspect ? authority.inspect(datasetId, options) : { dataset: await authority.describe(datasetId, options) };
     },
+    historyRevision: async value => { const authority = await target(value.datasetId); if (!authority.historyRevision) throw new Error("Saved Collection rules are unavailable. Update the host and try again."); return authority.historyRevision(value); },
     history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
     prepareMigrationCandidate: async value => {

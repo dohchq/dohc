@@ -179,7 +179,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       exitCode: 0, stderr: "", stdout: [
         "Usage: dohc [--as-agent] dataset <action> '<JSON>' [--json]",
         "Actions: list, describe, history, permissions, setGrant, removeGrant, lifecycle, archive, restore, deletePreview, delete, pendingAttempts, reconcileAttempt, cancelAttempt, create, prepare, approve, discard, invoke, export",
-        "Source actions: prepareMigration, prepareSchemaChange, migrationPreviewPage, approveMigration, discardMigration, createForm",
+        "Source actions: historyRevision, prepareHistoryRestore, prepareMigration, prepareSchemaChange, migrationPreviewPage, approveMigration, discardMigration, createForm",
         "File actions: upload, file",
         "Recovery actions: prepareRecovery, claimRecovery, discardRecovery",
         "Every request names workspaceId. Run this command from its owning workspace.",
