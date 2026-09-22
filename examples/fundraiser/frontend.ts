@@ -3,6 +3,7 @@ import { downloadBlob, readRecoveryFile, recoveryText } from "./recovery.ts";
 import {
   BackendError, backendStatus, createFundraiserClient, createRegistrationAttempt, decodeBase64, defaultAppContext, mutationKey,
   RECEIPT_MAX_BYTES, RECEIPT_TYPES, receiptUploadFromFile, submitRegistration,
+  restoreRegistrationAttempt, type RegistrationRetry,
   type AppContext, type BackendStatus, type FundraiserClient, type RegistrationAttempt, type RegistrationDraft,
 } from "./client.ts";
 import type {
@@ -212,7 +213,7 @@ function createSessionBlock(id: SessionId, onChange: () => void) {
 
 function createRegisterView(client: FundraiserClient, context: AppContext, hooks: { remember(token: string): void; openStatus(): void }): View {
   let sessions: PublicSession[] | null = null, loadSeq = 0, busy = false;
-  let attempt: RegistrationAttempt | null = null;
+  let attempt: RegistrationRetry | null = null, attemptToken: string | null = null, ready = false, outcomeUnknown = false;
   const sessionName = (id: SessionId) => sessions?.find(item => item.id === id)?.name ?? DEFAULT_SESSION_NAME[id];
   const heading = el("h2", { tabindex: "-1" }, "Register");
   const messages = el("div", { class: "messages" });
@@ -248,7 +249,7 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
     fileStatus.textContent = file ? receiptProblem(file) ?? `Selected ${file.name}` : "";
   });
   const form = el("form", { novalidate: true, submit: (event: Event) => { event.preventDefault(); void send(); } },
-    fieldset, messages, el("p", {class: "hint"}, "Sending downloads a private recovery file with names and your receipt. Keep it until registration is confirmed."),
+    fieldset, messages,
     el("div", { class: "actions" }, submitButton));
   const confirmation = el("section", { class: "confirmation", hidden: true });
   const recoveryInput = el("input", {type: "file", accept: "application/json,.json"});
@@ -336,7 +337,7 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
     recoveryInput.disabled = busy || attempt !== null;
   }
   async function send(): Promise<void> {
-    if (busy) return;
+    if (busy || !ready) return;
     let current = attempt;
     if (!current) {
       const checked = validate();
@@ -346,24 +347,31 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
       try { current = await createRegistrationAttempt(checked.input, await receiptUploadFromFile(checked.file)); }
       catch { setBusy(false); messages.replaceChildren(notice("The receipt file could not be read. Choose it again.", "error")); return; }
       attempt = current;
-      try { saveAttempt(current); }
-      catch {
-        setBusy(false);
-        context.pendingAttemptChanged?.(current);
-        showPending("The recovery download could not start. Copy the recovery data into a JSON file before retrying.");
-        return;
-      }
     }
     setBusy(true, "Sending…");
     try {
+      if (!attemptToken) {
+        if (current.fileId === null) {
+          if (!current.receipt) throw new BackendError(503);
+          current.fileId = (await client.uploadReceipt(current.receipt, current.uploadKey)).file.fileId;
+        }
+        const retained = (await client.registrationAttempt({ action: "save", idempotencyKey: current.registerKey, input: { ...current.input, receiptFileId: current.fileId } })).attempt;
+        if (!retained) throw new BackendError(503);
+        attemptToken = retained.token;
+        if (retained.idempotencyKey !== current.registerKey) {
+          current = restoreRegistrationAttempt(retained); attempt = current; outcomeUnknown = true;
+          restoreDraft(current); setBusy(true, "Sending…");
+        }
+      }
       const reply = await submitRegistration(client, current);
-      attempt = null;
       context.pendingAttemptChanged?.(null);
       setBusy(false);
       showConfirmation(reply.result, reply.replayed);
     } catch (error) {
-      if (uncertain(error)) { setBusy(false); context.pendingAttemptChanged?.(current); showPending(describe(error)); }
+      const definitive = error instanceof BackendError && error.status === 409 && !!error.refusal;
+      if (uncertain(error) || outcomeUnknown || attemptToken && !definitive) { outcomeUnknown = true; setBusy(false); if (current.receipt) context.pendingAttemptChanged?.(current as RegistrationAttempt); showPending(describe(error)); }
       else {
+        if (!await clearRetained()) { outcomeUnknown = true; setBusy(false); showPending("dohc could not clear this response. Retry to confirm its outcome."); return; }
         attempt = null; setBusy(false);
         context.pendingAttemptChanged?.(null);
         messages.replaceChildren(notice(describe(error, {
@@ -377,10 +385,10 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
   function showPending(text: string): void {
     const retry = button("Retry same registration", { class: "primary", click: () => void send() });
     messages.replaceChildren(notice(`${text} Your details are kept. Retry sends the same registration and cannot create a duplicate.`, "error",
-      retry, button("Save recovery file", {class: "secondary", click: () => {
-        if (attempt) { try { saveAttempt(attempt); } catch { showPending("The recovery download could not start. Copy the recovery data below into a JSON file."); } }
-      }}), button("Discard pending registration", { class: "secondary", click: confirmDiscard })),
-      el("p", {class: "hint"}, "Before closing this page, save a recovery file. It includes names, the receipt and a private retry secret."), recoveryFallback());
+      retry, attempt?.receipt ? button("Save recovery file", {class: "secondary", click: () => {
+        if (attempt?.receipt) { try { saveAttempt(attempt as RegistrationAttempt); } catch { showPending("The recovery download could not start. Copy the recovery data below into a JSON file."); } }
+      }}) : null, button("Discard pending registration", { class: "secondary", click: confirmDiscard })),
+      el("p", {class: "hint"}, attemptToken ? "Your response is saved for retry in this browser. Reopen this app to continue." : "Keep this page open until your response is saved for retry. You can also save a private recovery file."), ...(attempt?.receipt ? [recoveryFallback()] : []));
     retry.focus();
   }
   function saveAttempt(current: RegistrationAttempt): void {
@@ -391,31 +399,48 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
     const details = el("details", {}, el("summary", {}, "Copy recovery data if the download is missing"),
       el("p", {class: "hint"}, "Copy this entire text into a file named fundraiser-recovery.json. Keep the file private."), text,
       button("Select recovery data", {class: "secondary", click: () => { text.focus(); text.select(); }}));
-    details.addEventListener("toggle", () => { if (details.open && attempt && !text.value) text.value = recoveryText(attempt); });
+    details.addEventListener("toggle", () => { if (details.open && attempt?.receipt && !text.value) text.value = recoveryText(attempt as RegistrationAttempt); });
     return details;
   }
   function confirmDiscard(): void {
     const keep = button("Keep pending registration", { class: "secondary", click: () => showPending("The registration outcome is still unknown.") });
     messages.replaceChildren(notice("Discard this pending registration? It may already be saved. Check with the organizer before registering the same group again.", "info",
-      button("Discard", { class: "danger", click: () => {
+      button("Discard", { class: "danger", click: async () => {
+        if (busy) return; setBusy(true);
+        if (!await clearRetained()) { setBusy(false); showPending("dohc could not clear this response. Try again."); return; }
         attempt = null; context.pendingAttemptChanged?.(null);
         setBusy(false); messages.replaceChildren(); submitButton.focus();
       } }), keep));
     keep.focus();
   }
   /** Rebuilds the draft from a retained attempt and keeps it frozen until Retry settles it. */
-  function restoreDraft(retained: RegistrationAttempt): void {
+  function restoreDraft(retained: RegistrationRetry): void {
     nameInput.value = retained.input.fullName; mobileInput.value = retained.input.mobile;
     for (const block of blocks) {
       const roster = retained.input.sessions.find(item => item.sessionId === block.id);
       if (roster) block.restore(roster); else block.reset();
     }
     for (const input of methods.inputs) input.checked = input.value === retained.input.paymentMethod;
-    receiptBlock.hidden = false; fileStatus.textContent = `Receipt kept from the earlier attempt: ${retained.receipt.name}`;
+    receiptBlock.hidden = false; fileStatus.textContent = retained.receipt ? `Receipt kept from the earlier attempt: ${retained.receipt.name}` : "Your uploaded receipt is kept with this response.";
     attempt = retained; updateTotal(); setBusy(false);
     showPending("This registration was sent before, and its outcome is still unknown.");
   }
-  if (context.pendingAttempt) restoreDraft(context.pendingAttempt);
+  async function loadRetained(): Promise<void> {
+    setBusy(true, "Checking saved response…");
+    try {
+      const saved = (await client.registrationAttempt({ action: "get" })).attempt;
+      ready = true;
+      if (saved) { attemptToken = saved.token; outcomeUnknown = true; restoreDraft(restoreRegistrationAttempt(saved)); }
+      else if (context.pendingAttempt) restoreDraft(context.pendingAttempt);
+      else { messages.replaceChildren(); setBusy(false); }
+    } catch (error) { setBusy(false); submitButton.disabled = true; messages.replaceChildren(notice("dohc could not check your saved response. Try again before registering.", "error", button("Check saved response", {class: "primary", click: () => void loadRetained()}))); }
+  }
+  async function clearRetained(): Promise<boolean> {
+    if (!attemptToken) return true;
+    try { const result = await client.registrationAttempt({action: "clear", token: attemptToken}); if (result.attempt !== null) return false; attemptToken = null; outcomeUnknown = false; return true; }
+    catch { return false; }
+  }
+  void loadRetained();
   function showConfirmation(result: RegisterResult, replayed: boolean): void {
     const tokenOutput = el("output", { class: "mono token" }, result.statusToken);
     const title = el("h3", { tabindex: "-1" }, "Registration received");
@@ -428,18 +453,21 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
         el("div", {}, el("dt", {}, "Total"), el("dd", {}, money(result.total))),
         el("div", {}, el("dt", {}, "Sessions"), el("dd", {}, sessionCounts(result, sessionName)))),
       el("section", { class: "group token-group" }, el("h4", {}, "Private status token"),
-        el("p", {}, "Keep this token. It is the only way to check this registration, and this page does not save it."),
+        el("p", {}, "This browser can reopen your confirmation. Save this private token to check your registration elsewhere."),
         el("div", { class: "token-row" }, tokenOutput, copyControl(result.statusToken, tokenOutput)),
         button("Save status token", {class: "secondary", click: () => downloadBlob(new Blob([result.statusToken + "\n"], {type: "text/plain"}), "fundraiser-status.txt")})),
       el("div", { class: "actions" },
         button("Check status", { class: "primary", click: hooks.openStatus }),
-        button("Register another group", { class: "secondary", click: reset })));
+        button("Register another group", { class: "secondary", click: () => void reset() })));
     form.hidden = true; confirmation.hidden = false; recovery.hidden = true;
     hooks.remember(result.statusToken);
     context.rememberStatusToken?.(result.statusToken);
     title.focus();
   }
-  function reset(): void {
+  async function reset(): Promise<void> {
+    if (busy) return; setBusy(true);
+    if (!await clearRetained()) { setBusy(false); confirmation.append(notice("dohc could not clear this response. Try Register another group again.", "error")); return; }
+    attempt = null; setBusy(false);
     for (const block of blocks) block.reset();
     for (const input of methods.inputs) input.checked = false;
     receiptBlock.hidden = true; fileInput.value = ""; fileStatus.textContent = "";

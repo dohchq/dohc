@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { webcrypto } from "node:crypto";
 import {
-  BackendError, createFundraiserClient, createRegistrationAttempt, submitRegistration, type BackendPort, type FundraiserClient,
+  BackendError, createFundraiserClient, createRegistrationAttempt, submitRegistration, type BackendPort, type FundraiserClient, type RetainedRegistrationAttempt,
 } from "../../../../examples/fundraiser/client";
 import { EXAMPLE_NOTICE, fullName, mountFundraiser, normalizeMobile } from "../../../../examples/fundraiser/frontend";
 import type { AttendeeRow, PublicSession, RegisterResult, RegistrationRow } from "../../../../examples/fundraiser/ui-types";
@@ -32,7 +32,13 @@ const row: RegistrationRow = {
   fullName: "Ana Cruz", mobile: "+639171234567", source: "website", paymentMethod: "gcash", hasReceipt: true, updatedAtMs: 1_790_000_000_000,
 };
 function fakeClient(overrides: Partial<FundraiserClient> = {}): FundraiserClient {
+  let retained: RetainedRegistrationAttempt | null = null;
   return {
+    registrationAttempt: vi.fn<FundraiserClient["registrationAttempt"]>(async request => {
+      if (request.action === "clear") retained = null;
+      if (request.action === "save" && !retained) retained = { token: "B".repeat(43), idempotencyKey: request.idempotencyKey, input: request.input };
+      return { attempt: retained };
+    }),
     listPublicSessions: vi.fn<FundraiserClient["listPublicSessions"]>(async () => sessions),
     uploadReceipt: vi.fn<FundraiserClient["uploadReceipt"]>(async () => uploaded),
     register: vi.fn<FundraiserClient["register"]>(async () => ({ result: saved, revision: 1, replayed: false })),
@@ -115,7 +121,7 @@ it("retries a registration with the same keys and skips a confirmed upload", asy
   const invoke = vi.fn(async (_operation: string, _input: unknown, _key: string) => ({ result: saved as unknown, revision: 2, replayed: false }))
     .mockRejectedValueOnce(new BackendError(503));
   const upload = vi.fn<BackendPort["upload"]>().mockResolvedValue(uploaded);
-  const port: BackendPort = { invoke: invoke as unknown as BackendPort["invoke"], upload, file: vi.fn(), close: vi.fn() };
+  const port: BackendPort = { invoke: invoke as unknown as BackendPort["invoke"], upload, file: vi.fn(), attempt: vi.fn(), close: vi.fn() };
   const client = createFundraiserClient(port);
   const attempt = await createRegistrationAttempt({ fullName: "Ice de Vera", mobile: "+639171234567", sessions: [], paymentMethod: "gcash" }, { name: "receipt.png", contentType: "image/png", bytesBase64: "YWJjZA==" });
   await expect(submitRegistration(client, attempt)).rejects.toMatchObject({ status: 503, uncertain: true });
@@ -165,8 +171,40 @@ it("freezes the draft after an uncertain outcome and retries the identical regis
   expect(vi.mocked(client.register).mock.calls[1]).toEqual(vi.mocked(client.register).mock.calls[0]);
 });
 
+it("restores the exact saved request after reload, without another upload or recovery download", async () => {
+  const client = fakeClient({register: vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(503)).mockResolvedValue({result:saved,revision:1,replayed:true})});
+  mount(client); await fillRegistration(); send();
+  await screen.findByRole("button", {name:"Retry same registration"});
+  const first = vi.mocked(client.register).mock.calls[0];
+  mount(client);
+  fireEvent.click(await screen.findByRole("button", {name:"Retry same registration"}));
+  await screen.findByText("Registration received");
+  expect(vi.mocked(client.register).mock.calls[1]).toEqual(first);
+  expect(client.uploadReceipt).toHaveBeenCalledOnce(); expect(URL.createObjectURL).not.toHaveBeenCalled();
+  mount(client); fireEvent.click(await screen.findByRole("button", {name:"Retry same registration"}));
+  await screen.findByText(token); expect(vi.mocked(client.register).mock.calls[2]).toEqual(first);
+  fireEvent.click(screen.getByRole("button", {name:"Register another group"}));
+  await waitFor(()=>expect(fieldsetDisabled("Mobile number")).toBe(false));
+  expect(client.registrationAttempt).toHaveBeenCalledWith({action:"clear",token:"B".repeat(43)});
+});
+
+it("does not send a new registration until the original retry state is checked", async () => {
+  const client = fakeClient({registrationAttempt:vi.fn<FundraiserClient["registrationAttempt"]>().mockRejectedValue(new BackendError(503))});
+  mount(client); await screen.findByRole("button", {name:"Check saved response"}); await fillRegistration(); send();
+  expect(client.uploadReceipt).not.toHaveBeenCalled(); expect(client.register).not.toHaveBeenCalled();
+});
+
+it("keeps a reloaded uncertain request after a later refusal", async () => {
+  const client = fakeClient({register:vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(503)).mockRejectedValue(new BackendError(409))});
+  mount(client);await fillRegistration();send();await screen.findByRole("button",{name:"Retry same registration"});
+  mount(client);fireEvent.click(await screen.findByRole("button",{name:"Retry same registration"}));
+  await waitFor(()=>expect(client.register).toHaveBeenCalledTimes(2));
+  await screen.findByRole("button",{name:"Retry same registration"});
+  expect(vi.mocked(client.registrationAttempt).mock.calls.some(([request])=>request.action==="clear")).toBe(false);
+});
+
 it("unfreezes after a definite refusal and sends the corrected draft under a new key", async () => {
-  const client = fakeClient({ register: vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(409)).mockResolvedValue({ result: saved, revision: 1, replayed: false }) });
+  const client = fakeClient({ register: vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(409,{code:"capacity_unavailable",message:"The session is full."})).mockResolvedValue({ result: saved, revision: 1, replayed: false }) });
   mount(client);
   await fillRegistration();
   send();
@@ -197,6 +235,7 @@ it("resumes a retained attempt from the app context and reports when it settles"
   const root = document.createElement("div");
   document.body.replaceChildren(root);
   mountFundraiser(root, client, { pendingAttempt, pendingAttemptChanged });
+  await screen.findByRole("button", {name: "Retry same registration"});
   expect(fieldsetDisabled("Mobile number")).toBe(true);
   expect((screen.getByLabelText("Player 1 name") as HTMLInputElement).value).toBe("Ana Cruz");
   expect((screen.getByLabelText("BDO") as HTMLInputElement).checked).toBe(true);
@@ -219,8 +258,8 @@ it("reports unavailable organizer access without simulating authority", async ()
   await waitFor(() => expect(client.listRegistrations).toHaveBeenCalledWith({ status: "pending_verification", search: "", offset: 0, limit: 50 }));
 });
 
-it("keeps readable recovery data when a download cannot start and sends nothing yet", async () => {
-  const client = fakeClient(); mount(client); await fillRegistration();
+it("keeps optional recovery data without requiring a download to submit", async () => {
+  const client = fakeClient({register: vi.fn<FundraiserClient["register"]>().mockRejectedValueOnce(new BackendError(503)).mockResolvedValue({result:saved,revision:1,replayed:true})}); mount(client); await fillRegistration();
   vi.mocked(URL.createObjectURL).mockImplementation(() => { throw new Error("download refused"); });
   send();
   await screen.findByRole("button", {name: "Retry same registration"});
@@ -229,8 +268,8 @@ it("keeps readable recovery data when a download cannot start and sends nothing 
   const value = (screen.getByLabelText("Private recovery data") as HTMLTextAreaElement).value;
   const recovery = JSON.parse(value);
   expect(recovery.attempt.input).toMatchObject({fullName: "Ice de Vera", retrySecret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)});
-  expect(client.register).not.toHaveBeenCalled();
-  expect(client.uploadReceipt).not.toHaveBeenCalled();
+  expect(client.register).toHaveBeenCalledOnce();
+  expect(client.uploadReceipt).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole("button", {name: "Retry same registration"}));
   await screen.findByText("Registration received");
   expect(client.register).toHaveBeenCalledWith({...recovery.attempt.input, receiptFileId: uploaded.file.fileId}, recovery.attempt.registerKey);

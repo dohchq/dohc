@@ -22,7 +22,7 @@ export const viewerOrigin = "https://viewer.example.com";
 export const syntheticReceipt = Buffer.from("%PDF-1.7 synthetic fundraiser receipt\n%%EOF");
 
 /** Real approved compiler, publication, relay, SQLite, and isolated runtime. Only account identity is a fixture. */
-export async function actualFundraiserFixture(options: {loadScenario?: "generic" | "fundraiser"} = {}) {
+export async function actualFundraiserFixture(options: {loadScenario?: "generic" | "fundraiser"; loseFirstRegisterResponse?: boolean} = {}) {
   let manifestBytes = readFileSync(new URL("../../../examples/fundraiser/app.publish.json", import.meta.url));
   const manifest = JSON.parse(manifestBytes.toString());
   const generic = options.loadScenario === "generic";
@@ -66,7 +66,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     credential:{credentialId:"credential",grantId:"g",secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
   storage.tx(()=>storage.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('helper','s','user','helper-user',NULL,'view',1,'active',1,NULL,NULL)").run());
   const accountCookie=`${getCookies({baseURL:viewerOrigin}).sessionToken.name}=synthetic-organizer-session`;
-  let signedIn=false;
+  let signedIn=false, lostRegisterResponse = false;
   const relay=createSyncRelayHandler({storage,datasetHost,appPublicationLimits:APP_PUBLICATION_LIMITS,linkKey,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,
     resolveActor(request,workspaceId) {
       if(request.headers.get("authorization")==="Bearer owner")return {workspaceId,userId:"owner"};
@@ -100,7 +100,9 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     },
     fetchRelay:async request=>{
       const body=request.method==="POST"&&new URL(request.url).pathname.endsWith("/invoke")?await request.clone().json():null;
-      const response=await relay(request);if(body)calls.push({operation:body.operation,status:response.status,named:request.headers.has("cookie")});return response;
+      const response=await relay(request);if(body)calls.push({operation:body.operation,status:response.status,named:request.headers.has("cookie")});
+      if (options.loseFirstRegisterResponse && body?.operation === "register" && !lostRegisterResponse) { lostRegisterResponse = true; await response.arrayBuffer(); return new Response(null, {status: 503}); }
+      return response;
     },
   });
   return {application,publicationId,secret,calls,compiler:prepared.candidate.compilerIdentity,

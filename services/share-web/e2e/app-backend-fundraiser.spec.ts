@@ -8,7 +8,7 @@ import { actualFundraiserFixture, syntheticReceipt, viewerOrigin } from "./actua
 // This Windows browser proof uses PowerShell 7 to create its temporary TLS certificate.
 test("actual fundraiser registers guests and organizers manage the same private database", async ({}, info) => {
   test.setTimeout(120_000);
-  const f=await actualFundraiserFixture(),failures:string[]=[];
+  const f=await actualFundraiserFixture({loseFirstRegisterResponse:true}),failures:string[]=[];
   const certificateScript=`$rsa=[System.Security.Cryptography.RSA]::Create(2048)
 $req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-fundraiser-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
@@ -39,6 +39,7 @@ $cert.Dispose();$rsa.Dispose()`;
   try {
     const guestContext=await browser.newContext({viewport:{width:1280,height:1000}}),guest=await guestContext.newPage();
     guest.setDefaultTimeout(15_000);
+    const downloads:string[]=[];guest.on("download",download=>downloads.push(download.suggestedFilename()));
     guest.on("pageerror",error=>failures.push(String(error)));
     await guest.goto(`${viewerOrigin}/fixture-open`);await guest.getByRole("button",{name:"Open fundraiser"}).click();
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
@@ -55,23 +56,35 @@ $cert.Dispose();$rsa.Dispose()`;
     await publicApp.getByLabel("Receipt",{exact:true}).setInputFiles({name:"synthetic-receipt.pdf",mimeType:"application/pdf",buffer:syntheticReceipt});
     await guest.setViewportSize({width:390,height:844});
     await guest.screenshot({path:info.outputPath("fundraiser-public-mobile.png")});
-    const recoveryDownload=guest.waitForEvent("download");
     await publicApp.getByRole("button",{name:"Send registration",exact:true}).click();
-    const recovery=await recoveryDownload;expect(recovery.suggestedFilename()).toBe("fundraiser-recovery.json");
-    await recovery.saveAs(info.outputPath("synthetic-recovery.json"));
-    const recoveryData=JSON.parse(await readFile(info.outputPath("synthetic-recovery.json"),"utf8"));
-    expect(recoveryData.attempt.input.receiptSha256).toBe(createHash("sha256").update(syntheticReceipt).digest("hex"));
-    await expect(publicApp.getByRole("heading",{name:"Registration received"})).toBeVisible();
-    await expect(publicApp.locator(".confirmation").getByText("₱1,150",{exact:true})).toBeVisible();
-    const token=await publicApp.locator("output.token").innerText();expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    await publicApp.getByRole("button",{name:"Check status",exact:true}).click();
-    await publicApp.getByRole("button",{name:"Check status",exact:true}).click();
-    await expect(publicApp.getByText("Players: First Player",{exact:true})).toBeVisible();
-    await publicApp.getByLabel("Private status token",{exact:true}).fill("Z".repeat(43));
-    await publicApp.getByRole("button",{name:"Check status",exact:true}).click();
-    await expect(publicApp.getByRole("alert")).toContainText("This status link is invalid.");
-    await publicApp.getByRole("button",{name:"Organizer",exact:true}).click();
-    await expect(publicApp.getByRole("alert")).toContainText("Organizer access is unavailable");
+    await expect(publicApp.getByRole("button",{name:"Retry same registration",exact:true})).toBeVisible();
+    expect((await f.ownerRead("listRegistrations")).result.records).toHaveLength(1);
+    await guest.reload();
+    const refreshedApp=guest.frameLocator("iframe");
+    await expect(refreshedApp.getByRole("button",{name:"Retry same registration",exact:true})).toBeVisible();
+    await refreshedApp.getByRole("button",{name:"Retry same registration",exact:true}).click();
+    await expect(refreshedApp.getByRole("heading",{name:"Registration received"})).toBeVisible();
+    await expect(refreshedApp.locator(".confirmation").getByText("₱1,150",{exact:true})).toBeVisible();
+    const token=await refreshedApp.locator("output.token").innerText();expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(downloads).toEqual([]);
+    await guest.reload();
+    await refreshedApp.getByRole("button",{name:"Retry same registration",exact:true}).click();
+    await expect(refreshedApp.locator("output.token")).toHaveText(token);
+    expect((await f.ownerRead("listRegistrations")).result.records).toHaveLength(1);
+    const separateContext=await browser.newContext(),separateGuest=await separateContext.newPage();
+    await separateGuest.goto(`${viewerOrigin}/fixture-open`);await separateGuest.getByRole("button",{name:"Open fundraiser"}).click();
+    const separateApp=separateGuest.frameLocator("iframe");
+    await expect(separateApp.getByRole("button",{name:"Send registration",exact:true})).toBeEnabled();
+    await expect(separateApp.getByRole("button",{name:"Retry same registration",exact:true})).toHaveCount(0);
+    await expect(separateApp.locator("output.token")).toHaveCount(0);await separateContext.close();
+    await refreshedApp.getByRole("button",{name:"Check status",exact:true}).click();
+    await refreshedApp.getByRole("button",{name:"Check status",exact:true}).click();
+    await expect(refreshedApp.getByText("Players: First Player",{exact:true})).toBeVisible();
+    await refreshedApp.getByLabel("Private status token",{exact:true}).fill("Z".repeat(43));
+    await refreshedApp.getByRole("button",{name:"Check status",exact:true}).click();
+    await expect(refreshedApp.getByRole("alert")).toContainText("This status link is invalid.");
+    await refreshedApp.getByRole("button",{name:"Organizer",exact:true}).click();
+    await expect(refreshedApp.getByRole("alert")).toContainText("Organizer access is unavailable");
     expect(f.calls.some(call=>call.operation==="totals"&&!call.named&&call.status===404)).toBe(true);
 
     const organizerContext=await browser.newContext({viewport:{width:1280,height:1000},reducedMotion:"reduce"}),organizer=await organizerContext.newPage();
