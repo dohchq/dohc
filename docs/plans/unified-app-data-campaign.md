@@ -2,7 +2,7 @@
 
 Reader: Ice, the implementation lead, and reviewers approving and delivering this campaign.
 
-Status: approved completion work is implemented and locally verified on `campaign/unified-app-data`. Fable's required completion review remains blocked by provider rate limits. Not merged or deployed.
+Status: approved completion work is implemented and locally verified on `campaign/unified-app-data`. At Ice's request, Opus 5.5 replaces quota-exhausted Fable for the remaining second-family review. That review is pending. Not merged or deployed.
 
 ## Approved completion work, September 23
 
@@ -33,6 +33,8 @@ Real desktop proofs cover a shared form continuing after a custom-rule-preservin
 The canonical JavaScript gate passed at clean `891a361a7`, including 352 backend runtime tests, 9,749 desktop tests, native self-hosting, account-browser checks, and desktop persistence/onboarding. Passing Rust evidence at `b79c260c8` remains applicable: Rust source, dependencies, configuration, and gate inputs are unchanged. The verification record preserves each tested commit, individual passing desktop flows, failed attempts, and evidence reuse.
 
 The earlier ten-dataset soak passed 7,300 operations over 3,630 seconds and all 73 idle shutdown checks. Warm read/write p95 was 2.9–3.9/11.7–15.9 ms on the Ryzen workstation, with 288 MiB peak sampled worker memory. The 100,000-row desktop proof measured warm refresh p95 at 23.3 ms and input feedback at 14.5 ms. The 100-participant public-link test also passed, including capacity refusals and a separate abuse test.
+
+The strict one-second cold-operation target was not met by every sample. Wide-dataset cold p95 was 984 ms, with a 1,123 ms maximum. The benchmark runner checks p95, so its PASS does not establish the plan's stricter per-operation target. That exception remains open; no target or measurement has been changed to count it as a pass.
 
 Earlier concurrent-export trials passed 9,600 operations and eighteen restored archives, but exposed multi-second foreground pauses. Diagnosis traced the reproduced pause to checkpoint maintenance sharing the foreground operation lane. The completion fix stages and seals checkpoints in the background. A quiet eight-hundred-operation continuation completed two 118 MB caches with no result, count, or cursor errors. Read p95/max were 21.74/93.33 ms; write p95/max were 38.23/219.75 ms. No new hour soak ran after this fix. These workstation measurements do not promise uniform latency or network performance.
 
