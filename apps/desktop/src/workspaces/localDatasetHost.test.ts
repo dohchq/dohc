@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
-import { compileClosedApp } from "./closedAppCompiler";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
+import { compileDatasetOperations as relayCompileDatasetOperations } from "../../../../services/sync-relay/src/datasetCompiler";
 import { stageDatasetRecovery, recoveryManifestSha256 } from "@dohc/app-backend-runtime/recovery";
 import { writeDatasetRecoveryExport } from "./datasetRecoveryExport";
 import { fixture as relayFixture, limits as relayLimits } from "../../../../services/sync-relay/src/datasetTestFixture";
@@ -216,10 +217,7 @@ describe("local dataset owner adapter", () => {
   });
   it("restores a backup to local authority then transfers records and attachments to the relay through response loss", async () => {
     const f = relayFixture(), remoteDirectory = await mkdtemp(join(tmpdir(),"dohc-transfer-relay-"));
-    const compileOperations = async (source:string,path:string) => {
-      const bytes=Buffer.from(source),built=await compileClosedApp({entryPath:path,inputs:[{path,bytes,sha256:digest(bytes)}],packageMap:{},bounds:{maxInputFiles:1,maxInputBytes:256*1024,maxOutputBytes:256*1024}});
-      return Buffer.from(built.files[0]!.bytes).toString("utf8");
-    };
+    const compileOperations = relayCompileDatasetOperations;
     let relayHost = await f.storage.createDatasetHost({directory:remoteDirectory,limits:relayLimits,compileOperations,onShutdownError(error){throw error;}});
     const controller=new AbortController(); let offline=false,posted=0;
     const handler=()=>createSyncRelayHandler({storage:f.storage,datasetHost:relayHost,appPublicationLimits:relayLimits,
@@ -465,14 +463,13 @@ describe("local dataset owner adapter", () => {
   });
 
   it("routes the captured operations through the host compiler without filesystem rereads", async () => {
-    const compile = vi.fn<NonNullable<LocalDatasetHostOptions["compile"]>>((request) => compileClosedApp(request));
+    const compile = vi.fn<NonNullable<LocalDatasetHostOptions["compile"]>>((source, path, signal) => compileDatasetOperations(source, path, { signal }));
     const {host} = await open({compile});
     await activate(host);
     expect(compile).toHaveBeenCalledTimes(1);
-    const [request,abort] = compile.mock.calls[0]!;
-    expect(request.entryPath).toBe(definition.operationsPath);
-    expect(request.inputs).toHaveLength(1);
-    expect(Buffer.from(request.inputs[0]!.bytes).toString()).toBe(source);
+    const [captured, path, abort] = compile.mock.calls[0]!;
+    expect(path).toBe(definition.operationsPath);
+    expect(captured).toBe(source);
     expect(abort).toBeInstanceOf(AbortSignal);
     await host.close(); expect(abort.aborted).toBe(true);
   });

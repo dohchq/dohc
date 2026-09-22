@@ -422,6 +422,12 @@ importers:
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../security-contract
+      acorn:
+        specifier: ^8.18.0
+        version: 8.18.0
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
       quickjs-emscripten:
         specifier: 0.32.0
         version: 0.32.0
@@ -429,9 +435,6 @@ importers:
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
-      esbuild:
-        specifier: 0.28.1
-        version: 0.28.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

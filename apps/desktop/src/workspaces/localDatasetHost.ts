@@ -14,7 +14,7 @@ import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
-import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
@@ -33,7 +33,7 @@ export interface LocalDatasetHostOptions {
   runtime?: AppBackendRuntimeOptions;
   persistentRuntime?: DatasetSupervisorOptions["runtime"];
   /** Electron supplies its installed, supervised compiler. Node tests may use the direct compiler. */
-  compile?(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
+  compile?(source: string, path: string, signal: AbortSignal): Promise<string>;
   maxWorkers?: number;
   /** Retained journal and checkpoint bytes plus reserved materialization capacity. */
   maxStoredBytes?: number;
@@ -84,7 +84,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   const maxStoredBytes = options.maxStoredBytes ?? 1024 * 1024 * 1024;
   if (!Number.isSafeInteger(maxStoredBytes) || maxStoredBytes < 4096) throw new Error("Invalid Collection storage limit.");
   if (process.versions.electron && !options.compile) throw new Error("Electron must configure the installed Collection compiler.");
-  const compile = options.compile ?? ((request: ClosedAppBuildRequest) => compileClosedApp(request));
+  const compile = options.compile ?? ((source: string, path: string, signal: AbortSignal) => compileDatasetOperations(source, path, { signal }));
   const root = await realpath(options.workspaceRoot);
   let directory = root;
   for (const part of [".dohc", "datasets"]) {
@@ -220,12 +220,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId };
       },
       async compileOperations(source, sourcePath) {
-        const bytes = Buffer.from(source);
-        const built = await compile({ entryPath: sourcePath, inputs: [{path: sourcePath, bytes, sha256: digest(bytes)}],
-          packageMap: {}, bounds: {maxInputFiles: 1, maxInputBytes: artifactBytes, maxOutputBytes: artifactBytes} }, lifetime.signal);
+        const compiled = await compile(source, sourcePath, lifetime.signal);
         assertCurrent(); lifetime.signal.throwIfAborted();
-        if (built.files.length !== 1 || built.files[0]?.path !== "bundle.js") throw new Error("Collection actions must compile to one script.");
-        return decode(built.files[0].bytes);
+        return compiled;
       },
       accountCreation(context, allocation) { charge(allocation.datasetId,allocation.bytes); return resources?.accountCreation?.(context, allocation); },
       accountMetadata(_context, allocation) { charge(allocation.datasetId,allocation.bytes); },

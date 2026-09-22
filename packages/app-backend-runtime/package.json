@@ -10,6 +10,7 @@
     "./journal": { "types": "./src/journal.ts", "default": "./dist/journal.mjs" },
     "./supervisor": { "types": "./src/supervisor.ts", "default": "./dist/supervisor.mjs" },
     "./dataset-host": { "types": "./src/dataset-host.ts", "default": "./dist/dataset-host.mjs" },
+    "./dataset-compiler": { "types": "./src/dataset-compiler.ts", "default": "./dist/dataset-compiler.mjs" },
     "./dataset-attempts": { "types": "./src/dataset-attempts.ts", "default": "./dist/dataset-attempts.mjs" },
     "./recovery": { "types": "./src/recovery.ts", "default": "./dist/recovery.mjs" },
     "./recovery-export": { "types": "./src/recovery-export.ts", "default": "./dist/recovery-export.mjs" },
@@ -20,6 +21,6 @@
   },
   "files": ["dist", "src", "README.md"],
   "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },
-  "dependencies": { "@dohc/security-contract": "workspace:*", "quickjs-emscripten": "0.32.0" },
-  "devDependencies": { "@types/node": "^24.13.3", "esbuild": "0.28.1", "typescript": "^7.0.2", "vitest": "^4.1.11" }
+  "dependencies": { "@dohc/security-contract": "workspace:*", "acorn": "^8.18.0", "esbuild": "0.28.1", "quickjs-emscripten": "0.32.0" },
+  "devDependencies": { "@types/node": "^24.13.3", "typescript": "^7.0.2", "vitest": "^4.1.11" }
 }
