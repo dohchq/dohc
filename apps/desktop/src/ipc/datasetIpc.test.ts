@@ -21,7 +21,9 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   const host = { prepareRecovery:vi.fn(async()=>({transferId:datasetId,manifestSha256:"a".repeat(64),sourceCursor:{workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:revision.revisionSha256,revision:0,digest:"b".repeat(64)},revision})), claimRecovery:vi.fn(), discardRecovery:vi.fn(async()=>{}), list: vi.fn(() => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => ({ result: [], revision: 1, replayed: false })),
     approvedArtifacts: vi.fn(() => ({ active: true, revision })) };
   const createSources = vi.fn(async (_workspace: typeof workspace, _files: Record<string, string>, _signal: AbortSignal) => {});
-  const handler = createDatasetHandler({
+  const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal) => {});
+  const withAdapter = vi.fn();
+  const handler = createDatasetHandler({ flushSourceCapture,
     async withWorkspaceOperation(_caller: string, workspaceId, work) {
       if (workspaceId !== workspace.workspaceId) throw Error("wrong workspace");
       return work({ workspace, signal: abort.signal, assertCurrent() { if (!current) throw Error("stale workspace"); } });
@@ -29,11 +31,11 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
-    withAdapter: vi.fn(), createSources,
+    withAdapter, createSources,
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetId, revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
-  return { handler, host, workspace, abort, createSources, createForm, stale() { current = false; } };
+  return { handler, host, workspace, abort, createSources, createForm, flushSourceCapture, withAdapter, stale() { current = false; } };
 }
 
 it("uses owner authority before disclosing standalone Collections", async () => {
@@ -176,4 +178,39 @@ it("refuses shared-view deletion before reaching owner data", async () => {
   const f = fixture(remote); f.workspace.shareView={shareId:"shared"};
   await expect(f.handler("window",{action:"deletePreview",workspaceId:"workspace",datasetId})).rejects.toThrow(/original workspace/);
   expect(remote.deletePreview).not.toHaveBeenCalled();
+});
+
+
+it("waits for source capture before preparing authored Collection changes", async () => {
+  for (const action of ["prepare", "prepareMigration"] as const) {
+    const f = fixture();
+    let finish!: () => void;
+    f.flushSourceCapture.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    f.withAdapter.mockRejectedValue(new Error("source capture reached"));
+    const request = action === "prepare" ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
+      : { workspaceId: "workspace", action, datasetId, descriptorPath: "data/dataset.json", migrationPath: "data/change.sql" };
+    const pending = f.handler("window", request);
+    const checked = expect(pending).rejects.toThrow("source capture reached");
+    await vi.waitFor(() => expect(f.flushSourceCapture).toHaveBeenCalledOnce());
+    expect(f.withAdapter).not.toHaveBeenCalled();
+    finish();
+    await checked;
+    expect(f.withAdapter).toHaveBeenCalledOnce();
+  }
+});
+
+it("refuses source review after failed settlement or changed workspace authority", async () => {
+  const request = { workspaceId: "workspace", action: "prepareMigration", datasetId, descriptorPath: "data/dataset.json", migrationPath: "data/change.sql" };
+  const failed = fixture();
+  failed.flushSourceCapture.mockRejectedValue(new Error("capture not settled"));
+  await expect(failed.handler("window", request)).rejects.toThrow("capture not settled");
+  expect(failed.withAdapter).not.toHaveBeenCalled();
+  const stale = fixture();
+  stale.flushSourceCapture.mockImplementation(async () => { stale.stale(); });
+  await expect(stale.handler("window", request)).rejects.toThrow("stale workspace");
+  expect(stale.withAdapter).not.toHaveBeenCalled();
+  const aborted = fixture();
+  aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); });
+  await expect(aborted.handler("window", request)).rejects.toThrow("review cancelled");
+  expect(aborted.withAdapter).not.toHaveBeenCalled();
 });

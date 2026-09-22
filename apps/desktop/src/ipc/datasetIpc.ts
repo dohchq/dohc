@@ -26,6 +26,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
+  /** Reconciles disk edits before capturing immutable source for review. */
+  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<void>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
@@ -124,6 +126,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         preparingMigrations++;
         const review = createLocalDatasetMigrations(migrationAuthority);
         try {
+          await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
           const prepared = await dependencies.withAdapter(operation.workspace, adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
           migrationAuthority.assertCurrent();
           const { signal } = operation;
@@ -280,7 +283,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         descriptorPath = Object.keys(generated.files).find(path => path === "dataset.json" || path.endsWith("/dataset.json"))!;
         await dependencies.createSources(operation.workspace, generated.files, operation.signal);
         current();
-      } else descriptorPath = input.descriptorPath;
+      } else {
+        descriptorPath = input.descriptorPath;
+        await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
+      }
       const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepare({ descriptorPath, adapter, signal: operation.signal }));
       current();
       if (input.action === "prepare") return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };

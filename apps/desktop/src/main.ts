@@ -4241,6 +4241,21 @@ function registerIpcHandlers(): void {
         },
       });
     },
+    flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
+      await openWorkspaceActivity(workspace);
+      const captured = await withEngineAdapter(workspace, async adapter => {
+        signal.throwIfAborted();
+        let capture = await adapter.reconcileCapture();
+        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
+          signal.throwIfAborted();
+          capture = await adapter.flushCapture();
+        }
+        signal.throwIfAborted();
+        if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+        return true;
+      });
+      if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+    },
     withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);
       if (result === null) throw new Error("The workspace engine is unavailable. Reopen the workspace.");

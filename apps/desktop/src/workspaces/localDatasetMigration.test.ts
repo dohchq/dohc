@@ -91,7 +91,7 @@ describe("owner Collection migration", () => {
     await host.close();
     const restarted = (await open({ workspaceRoot })).host;
     expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera migrated", note: null }]);
-    await expect(restarted.query(call(first, id(5)))).rejects.toThrow(/rules changed/);
+    await expect(restarted.query(call(first, id(5)))).rejects.toThrow(/access needs approval/);
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
     const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"), { readOnly: true });
     try {
@@ -187,7 +187,7 @@ describe("owner Collection migration", () => {
   it("routes owner IPC and CLI review/approval through the same actual host", async () => {
     const { host } = await open(), f = fixture(); await activate(host, f); f.next();
     const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
-    const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => {
+    const handler = createDatasetHandler({ flushSourceCapture: async () => {}, withWorkspaceOperation: async (_caller, _id, work) => {
       let active = true;
       try { return await work({ workspace, signal, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
       finally { active = false; }

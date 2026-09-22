@@ -49,7 +49,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
   let alterSources: ((paths: string[]) => void) | undefined;
   const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, prepareMigrationCandidate() { throw new Error("Local store is fenced"); }, approveMigrationCandidate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
-  const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => {
+  const handler = createDatasetHandler({ flushSourceCapture: async () => {}, withWorkspaceOperation: async (_caller, _id, work) => {
     let active = true;
     try { return await work({ workspace, signal, scope, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
     finally { active = false; }
