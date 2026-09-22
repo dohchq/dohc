@@ -443,7 +443,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
                       <p className="mb-0 break-words">Required: {publication.collectionCapability.requiredFields.join(", ") || "None"}</p>
                       <p className="mb-0 break-words">Shown in the app: {publication.collectionCapability.readFields.join(", ") || "None"}</p>
                       <p className="mb-0">People with this share can read every response file and all its fields.</p>
-                    </details> : availableBackend(publication) ? null : <p className="mb-0 mt-1">No collection access</p>}
+                    </details> : availableBackend(publication) || publication.datasetCapability ? null : <p className="mb-0 mt-1">No collection access</p>}
+                    {publication.datasetCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Collection access details unavailable.</p> : publication.datasetCapability ? <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval capability={publication.datasetCapability} /><p className="mb-0">Open the Collection to view and manage its records.</p></details> : null}
                     {publication.backendCapability === "unavailable" ? <p className="mb-0 mt-1 text-warning">Backend data details unavailable.</p> : <BackendSummary capability={availableBackend(publication)} />}
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-2">

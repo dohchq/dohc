@@ -22,7 +22,7 @@ const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid dataset capability." }); return z.NEVER; }
 });
 const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, active: z.boolean() };
-const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), backendCapability: z.union([OwnerAppBackendCapability, z.literal("unavailable")]).nullable() };
+const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), backendCapability: z.union([OwnerAppBackendCapability, z.literal("unavailable")]).nullable(), datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable() };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),

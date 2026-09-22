@@ -65,6 +65,10 @@ it("creates and manages one dataset through authenticated routes and the public 
   expect((await (await f.http("w/datasets")).json()).datasets[0].name).toBe("Requests");
   expect((await f.http(f.path)).status).toBe(200);
   const publicationId = f.publish(), publicPath = `link/app-publications/${publicationId}/backend/invoke`;
+  const listing = await (await f.http("w/app-publications")).json();
+  const listed = listing.publications.find((row: { publicationId: string }) => row.publicationId === publicationId);
+  expect(listed).toMatchObject({ datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6)] }, backendCapability: null, collectionCapability: null });
+  expect(JSON.stringify(listed)).not.toContain(operationSource);
   const body = {authorityRevision: 1, operation: "submit", input: {name: "Friend"}, idempotencyKey: "submission"};
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
   expect((await f.http(`${f.path}/binding`, {publicationId, enabled: true})).status).toBe(200);
