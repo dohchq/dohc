@@ -12,7 +12,7 @@ function sqlDefault(field: DatasetField): string {
   return literal(typeof field.default === "string" ? field.default : JSON.stringify(field.default));
 }
 
-function schema(definition: DatasetDefinition): string {
+export function generateDatasetSchema(definition: DatasetDefinition): string {
   const statements: string[] = [];
   for (const table of definition.tables) {
     const columns = table.fields.map(field => {
@@ -73,9 +73,24 @@ export function generateDatasetSources(value: DatasetDefinition): { definition: 
   const descriptor = posix.join(posix.dirname(definition.schemaPath), "dataset.json");
   return { definition, files: {
     [descriptor]: JSON.stringify(definition, null, 2) + "\n",
-    [definition.schemaPath]: schema(definition),
+    [definition.schemaPath]: generateDatasetSchema(definition),
     [definition.operationsPath]: `const definition = ${JSON.stringify(definition)};\n${operationsSource}`,
   } };
+}
+
+/** Labels and captured source paths may change without changing executable rules. */
+export function hasGeneratedDatasetOperations(source: string, definition: DatasetDefinition): boolean {
+  const end = source.indexOf(";\n");
+  if (!source.startsWith("const definition = ") || end < 0 || source.slice(end + 2) !== operationsSource) return false;
+  try {
+    const embedded = parseDatasetDefinition(JSON.parse(source.slice("const definition = ".length, end)));
+    const normalize = (value: DatasetDefinition) => {
+      const copy = structuredClone(value); copy.name = ""; copy.schemaPath = ""; copy.operationsPath = "";
+      for (const table of copy.tables) { table.name = ""; for (const field of table.fields) field.name = ""; }
+      return JSON.stringify(copy);
+    };
+    return normalize(embedded) === normalize(definition);
+  } catch { return false; }
 }
 
 // This source runs inside the existing synchronous, transaction-scoped guest API.

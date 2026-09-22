@@ -352,6 +352,8 @@ describe("persistent dataset worker",()=>{
     "CREATE TABLE dohc_applied(id INTEGER PRIMARY KEY)",
     "DROP TABLE items",
     "UPDATE items SET value='changed'; CREATE TABLE escape(id INTEGER PRIMARY KEY)",
+    "CREATE TABLE migration_00000000000000000000000000000000 AS SELECT * FROM items",
+    "SELECT * FROM migration_00000000000000000000000000000000",
   ])("refuses unsafe or mismatched migration without changing live data: %s",async migrationSql=>{
     await fixture(async({root,open})=>{
       const worker=await open();

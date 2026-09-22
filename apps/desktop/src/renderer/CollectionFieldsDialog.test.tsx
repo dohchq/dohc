@@ -10,8 +10,8 @@ const dataset: DatasetDescription = { datasetId: id(1), name: "People", revision
   tables: [{ tableId: id(2), name: "People", fields: [{ fieldId: id(3), name: "Name", type: "text", required: false, unique: false }] }] };
 function preparation(): DatasetMigrationPreparation {
   const revision: DatasetRevision = { datasetId: id(1), revision: 1, revisionSha256: dataset.revisionSha256, definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64),
-    definition: { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js", operations: [],
-      tables: [{ ...dataset.tables[0]!, sqlName: "people", primaryKey: "name", fields: [{ ...dataset.tables[0]!.fields[0]!, sqlColumn: "name" }] }] } };
+    definition: { formatVersion: 1, datasetId: id(1), name: "People", schemaPath: "people/schema.sql", operationsPath: "people/operations.js", operations: [{operationId:id(12),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}],
+      tables: [{ ...dataset.tables[0]!, sqlName: "people", primaryKey: "name", fields: [{ ...dataset.tables[0]!.fields[0]!, sqlColumn: "name",unique:true,required:true }] }] } };
   const next = structuredClone(revision); next.revision = 2; next.revisionSha256 = "e".repeat(64);
   next.definition.tables[0]!.fields.push({ fieldId: id(4), name: "Note", type: "text", required: false, unique: false, sqlColumn: "note" });
   const expected = { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: dataset.revisionSha256 };
@@ -75,4 +75,31 @@ it("discards stale review responses after workspace switching", async () => {
   expect(onPrepare.mock.calls[0]![1].aborted).toBe(true);
   expect(screen.queryByText("People · Note")).toBeNull();
   expect(props.onError).not.toHaveBeenCalled();
+});
+
+it("reviews a type and required change using the stable field identity", async () => {
+  const {props}=setup();
+  fireEvent.change(screen.getByLabelText("Change"),{target:{value:"changeField"}});
+  expect(screen.queryByLabelText("Name")).toBeNull();
+  expect(screen.getByLabelText("Type")).toHaveProperty("value","text");
+  fireEvent.change(screen.getByLabelText("Type"),{target:{value:"number"}});
+  fireEvent.click(screen.getByRole("checkbox",{name:"Required"}));
+  fireEvent.click(screen.getByRole("button",{name:"Review change"}));
+  await waitFor(()=>expect(props.onPrepare).toHaveBeenCalledWith({kind:"changeField",tableId:id(2),fieldId:id(3),type:"number",required:true},expect.any(AbortSignal)));
+});
+
+it("keeps a label-only review short and does not demand a destructive-change confirmation", async () => {
+  const review=preparation();
+  review.revision.definition=structuredClone(review.previousRevision.definition);
+  review.revision.definition.tables[0]!.fields[0]!.name="Full name";
+  const {props}=setup({onPrepare:vi.fn(async()=>review)});
+  fireEvent.change(screen.getByLabelText("Change"),{target:{value:"renameField"}});
+  fireEvent.change(screen.getByLabelText("Name"),{target:{value:"Full name"}});
+  fireEvent.click(screen.getByRole("button",{name:"Review change"}));
+  await screen.findByText("People · Full name");
+  expect(screen.queryByRole("checkbox",{name:/reviewed this change/})).toBeNull();
+  expect(screen.queryByText("Show migration SQL")).toBeNull();
+  expect(screen.getByText(/Existing shared apps keep working/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button",{name:"Approve change"}));
+  await waitFor(()=>expect(props.onApprove).toHaveBeenCalledOnce());
 });

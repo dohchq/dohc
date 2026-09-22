@@ -64,6 +64,7 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
 
 export function authorizeMigration(db:DatabaseSync, approved:string[]):void {
   const tables=new Set(approved.map(table=>table.toLowerCase()));
+  const transientTables = new Set<string>();
   const schemaTables=new Set(["sqlite_schema","sqlite_master"]);
   const safeObject=(name:string)=>!/^(dohc|sqlite)_/i.test(name);
   db.setAuthorizer((action,first,second,database)=>{
@@ -71,15 +72,17 @@ export function authorizeMigration(db:DatabaseSync, approved:string[]):void {
     // SQLite ALTER TABLE inspects the empty temp schema while rewriting references.
     if(database==="temp" && action===constants.SQLITE_READ && ["sqlite_temp_master","sqlite_temp_schema"].includes(name)) return constants.SQLITE_OK;
     if(database!==null && database!=="main") return constants.SQLITE_DENY;
+    // Rebuilds use private intermediate tables. Final schema validation rejects any retained intermediate table.
+    if(action===constants.SQLITE_CREATE_TABLE && /^migration_[a-f0-9]{32}$/.test(name)) transientTables.add(name);
     if(action===constants.SQLITE_SELECT || action===constants.SQLITE_RECURSIVE) return constants.SQLITE_OK;
     // SQLite validates ALTER ADD constraints through its table-valued quick_check pragma.
     if(action===constants.SQLITE_READ && name==="pragma_quick_check" && parent==="quick_check") return constants.SQLITE_OK;
     if(action===constants.SQLITE_PRAGMA && name==="quick_check" && tables.has(parent)) return constants.SQLITE_OK;
     if(action===constants.SQLITE_FUNCTION) return unsafeFunctions.has(parent) ? constants.SQLITE_DENY : constants.SQLITE_OK;
-    if([constants.SQLITE_READ,constants.SQLITE_INSERT,constants.SQLITE_UPDATE,constants.SQLITE_DELETE].includes(action)) return tables.has(name) || schemaTables.has(name) ? constants.SQLITE_OK : constants.SQLITE_DENY;
-    if([constants.SQLITE_CREATE_TABLE,constants.SQLITE_DROP_TABLE].includes(action)) return tables.has(name) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+    if([constants.SQLITE_READ,constants.SQLITE_INSERT,constants.SQLITE_UPDATE,constants.SQLITE_DELETE].includes(action)) return tables.has(name) || transientTables.has(name) || schemaTables.has(name) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+    if([constants.SQLITE_CREATE_TABLE,constants.SQLITE_DROP_TABLE].includes(action)) return tables.has(name) || transientTables.has(name) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     if(action===constants.SQLITE_ALTER_TABLE) return name==="main" && tables.has(parent) ? constants.SQLITE_OK : constants.SQLITE_DENY;
-    if([constants.SQLITE_CREATE_INDEX,constants.SQLITE_DROP_INDEX,constants.SQLITE_CREATE_TRIGGER,constants.SQLITE_DROP_TRIGGER].includes(action)) return tables.has(parent) && (safeObject(name) || name.startsWith("sqlite_autoindex_")) ? constants.SQLITE_OK : constants.SQLITE_DENY;
+    if([constants.SQLITE_CREATE_INDEX,constants.SQLITE_DROP_INDEX,constants.SQLITE_CREATE_TRIGGER,constants.SQLITE_DROP_TRIGGER].includes(action)) return (tables.has(parent) || transientTables.has(parent)) && (safeObject(name) || name.startsWith("sqlite_autoindex_")) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     if(action===constants.SQLITE_REINDEX) return safeObject(name) ? constants.SQLITE_OK : constants.SQLITE_DENY;
     return constants.SQLITE_DENY;
   });

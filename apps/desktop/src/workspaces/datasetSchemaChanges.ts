@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { parseDatasetDefinition, type DatasetRevision, type DatasetField } from "@dohc/security-contract/dataset";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
-import { generateDatasetSources } from "./datasetGenerator";
+import { generateDatasetSources, hasGeneratedDatasetOperations } from "./datasetGenerator";
+import { generateFieldMigration } from "./datasetFieldMigration";
 
 const quote = (value: string) => `"${value}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
@@ -46,8 +47,7 @@ function appendColumn(schema: string, table: string, sql: string): string {
 
 /** Build new source files; existing authored files are never overwritten. */
 export function generateDatasetSchemaChange(input: { revision: DatasetRevision; schemaSql: string; operationSource: string; change: DatasetSchemaChange }) {
-  const original = input.revision.definition, generated = generateDatasetSources(original);
-  if (input.operationSource !== generated.files[original.operationsPath]) throw new Error("This Collection has custom actions. Edit its source and use Review source change.");
+  const original = input.revision.definition, generated = hasGeneratedDatasetOperations(input.operationSource, original);
   let definition = structuredClone(original), schemaSql = input.schemaSql, migrationSql = "SELECT 1;", summary: string;
   const change = input.change;
   if (change.kind === "renameCollection") { definition.name = change.name; summary = `Rename ${original.name} to ${change.name}`; }
@@ -59,13 +59,51 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
       const field = table.fields.find(candidate => candidate.fieldId === change.fieldId);
       if (!field) throw new Error("This field changed. Refresh the Collection.");
       summary = `Rename ${field.name} to ${change.name}`; field.name = change.name;
+    } else if (change.kind === "changeField") {
+      const field = table.fields.find(candidate => candidate.fieldId === change.fieldId);
+      if (!field) throw new Error("This field changed. Refresh the Collection.");
+      if (!generated) {
+        const actions = original.operations.filter(operation => operation.fieldIds.includes(field.fieldId)).map(operation => operation.label).join(", ");
+        throw new Error(`${field.name} uses custom rules${actions ? ` in ${actions}` : ""}. Update ${original.operationsPath}, then choose Review source change.`);
+      }
+      if (field.sqlColumn === table.primaryKey) throw new Error("The record ID cannot change type or become optional. Choose another field.");
+      const previous = structuredClone(field);
+      if (field.type !== change.type && !(["text", "number"].includes(field.type) && ["text", "number"].includes(change.type))) {
+        throw new Error("This type change needs a conversion rule. Edit the Collection source, then choose Review source change.");
+      }
+      if (field.type !== change.type && definition.tables.some(candidate => candidate.fields.some(related => related.relation?.fieldId === field.fieldId))) {
+        throw new Error(`${field.name} is used by related records. Review a source change that converts both fields together.`);
+      }
+      field.type = change.type; field.required = change.required;
+      if (field.type !== previous.type && field.default !== undefined && field.default !== null) {
+        if (field.type === "text") field.default = String(field.default);
+        else {
+          let value: unknown;
+          try { value = JSON.parse(String(field.default)); } catch { value = null; }
+          if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field.name} has a default that is not a number. Update its default in the source, then review again.`);
+          field.default = value;
+        }
+      }
+      definition = parseDatasetDefinition(definition);
+      const migration = generateFieldMigration({ previous: original, next: definition, schemaSql: input.schemaSql, field: previous, tableId: table.tableId });
+      schemaSql = migration.schemaSql; migrationSql = migration.migrationSql;
+      summary = `Change ${field.name}`;
     } else {
       const fieldId = randomUUID(), field: DatasetField = { ...change.field, fieldId, sqlColumn: `field_${fieldId.replaceAll("-", "")}` };
       if (field.required && (!Object.hasOwn(field, "default") || field.default === null)) throw new Error("A new required field needs a default for existing records.");
       if (field.unique && Object.hasOwn(field, "default") && field.default !== null) throw new Error("A new unique field cannot give every record the same default.");
       table.fields.push(field);
-      // Existing app bindings and helper grants stay pinned to the old revision until separately approved.
-      for (const operation of definition.operations) if (operation.tableId === table.tableId && ["read", "create", "edit"].includes(operation.kind)) operation.fieldIds.push(fieldId);
+      // New fields do not widen public or collaborator access, or rewrite authored operations.
+      if (generated) {
+        for (const kind of ["read", "create", "edit"] as const) {
+          const owner = definition.operations.filter(operation => operation.access === "owner" && operation.tableId === table.tableId && operation.kind === kind);
+          if (!owner.length) {
+            const existing = definition.operations.find(operation => operation.tableId === table.tableId && operation.kind === kind);
+            if (existing) { const operationId = randomUUID(); definition.operations.unshift({...structuredClone(existing), operationId,
+              name:`owner_${operationId.replaceAll("-", "")}`, access:"owner", fieldIds:[...existing.fieldIds,fieldId]}); }
+          } else for (const operation of owner) operation.fieldIds.push(fieldId);
+        }
+      }
       definition = parseDatasetDefinition(definition);
       const sql = column(field), tableSql = quote(table.sqlName);
       schemaSql = appendColumn(schemaSql, table.sqlName, sql);
@@ -79,9 +117,11 @@ export function generateDatasetSchemaChange(input: { revision: DatasetRevision; 
   }
   const base = posix.dirname(original.schemaPath).split("/revisions/")[0]!;
   const directory = posix.join(base, "revisions", `${input.revision.revision + 1}-${randomUUID()}`);
-  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, "operations.js");
-  const next = generateDatasetSources(definition), descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");
-  const operationSource = next.files[definition.operationsPath]!;
+  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(original.operationsPath)}`);
+  const descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");
+  const executableChange = change.kind === "addField" || change.kind === "changeField";
+  const next = generated && executableChange ? generateDatasetSources(definition) : { definition: parseDatasetDefinition(definition), files: {} as Record<string, string> };
+  const operationSource = generated && executableChange ? next.files[definition.operationsPath]! : input.operationSource;
   return { definition: next.definition, schemaSql, operationSource, migrationSql, descriptorPath, migrationPath, summary,
     files: { [descriptorPath]: JSON.stringify(next.definition, null, 2) + "\n", [definition.schemaPath]: schemaSql,
       [definition.operationsPath]: operationSource, [migrationPath]: migrationSql } };

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { generateDatasetSources } from "./datasetGenerator";
@@ -81,7 +82,7 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   const review = await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Status", type: "select", required: true, unique: false, options: ["New", "Done"], default: "New" } });
   expect(f.host.describe(id(1)).revision).toBe(1);
   const field = review.revision.definition.tables[0]!.fields.at(-1)!;
-  expect(review.revision.definition.operations.find(op => op.operationId === id(8))!.fieldIds).toEqual([id(4),field.fieldId]);
+  expect(review.revision.definition.operations.find(op => op.operationId === id(8))!.fieldIds).toEqual([id(4)]);
   const next = await approve(f, review);
   const rows = (await f.host.query(call(next.revision, id(5)))).result as { rows: Array<{ id: string; version: number; values: Record<string, unknown> }> };
   expect(rows.rows[0]!.id).toBe((added.result as { id: string }).id);
@@ -114,12 +115,19 @@ it("adds a unique field as an index and rejects duplicate values through existin
   await expect(f.host.action(call(next.revision, id(6), { values: { [id(4)]: "Two", [field.fieldId]: "one@example.com" } }, "two"))).rejects.toThrow(/already uses/);
 });
 
-it("refuses changed capture, stale revision, missing required defaults and authored rules", async () => {
+it("refuses changed capture, stale revision and missing required defaults while preserving authored rules", async () => {
   const f = await fixture();
   await expect(f.prepare({ kind: "addField", tableId: id(2), field: { name: "Required", type: "text", required: true, unique: false } })).rejects.toThrow("needs a default");
   await expect(f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Person" }, { ...f.revision, revisionSha256: "0".repeat(64) })).rejects.toThrow("rules changed");
   const artifacts = f.host.approvedArtifacts(id(1));
-  expect(() => generateDatasetSchemaChange({ ...artifacts, operationSource: artifacts.operationSource + "\n// custom", change: { kind: "renameCollection", name: "Guests" } })).toThrow("custom actions");
+  const customSource = artifacts.operationSource + "\n// custom";
+  const renamed = generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "renameCollection", name: "Guests" } });
+  expect(renamed.operationSource).toBe(customSource);
+  expect(renamed.schemaSql).toBe(artifacts.schemaSql);
+  const addition = generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "addField", tableId: id(2), field: {name:"Notes",type:"text",required:false,unique:false} } });
+  expect(addition.operationSource).toBe(customSource);
+  expect(addition.definition.operations).toEqual(artifacts.revision.definition.operations);
+  expect(() => generateDatasetSchemaChange({ ...artifacts, operationSource: customSource, change: { kind: "changeField", tableId:id(2), fieldId:id(4), type:"number",required:true } })).toThrow(/custom rules.*people\/operations.js/);
   f.tamper(paths => { const migration = paths.find(path => path.endsWith("migration.sql"))!; f.files.set(migration, "DELETE FROM people;"); });
   await expect(f.prepare({ kind: "renameCollection", name: "Guests" })).rejects.toThrow("differs from this review");
   expect(f.host.describe(id(1)).revision).toBe(1);
@@ -136,6 +144,86 @@ it("updates the default no-agent Collection actions so new fields are visible an
   await f.host.action(call(next.revision,create.operationId,{values:{[field.fieldId]:"Visible"}},"native"));
   const result=(await f.host.query(call(next.revision,read.operationId))).result as {rows:Array<{values:Record<string,unknown>}>};
   expect(result.rows[0]!.values[field.fieldId]).toBe("Visible");
+});
+
+it("previews text to number changes and preserves record identities and later edits", async () => {
+  const f = await fixture();
+  const created = await f.host.action(call(f.revision,id(6),{values:{[id(4)]:"12.5"}},"first"));
+  const review = await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true});
+  expect(review.candidate.preview.firstPage.changes[0]).toMatchObject({kind:"update",before:{name:"12.5"},after:{name:12.5}});
+  const next = await approve(f,review);
+  const result = (await f.host.query(call(next.revision,id(5)))).result as {rows:Array<{id:string;version:number;values:Record<string,unknown>}>};
+  expect(result.rows[0]).toMatchObject({id:(created.result as {id:string}).id,version:1,values:{[id(4)]:12.5}});
+  await f.host.action(call(next.revision,id(7),{id:result.rows[0]!.id,expectedVersion:1,values:{[id(4)]:15}},"later"));
+  const reverse = await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
+  const restored=(await f.host.query(call(reverse.revision,id(5)))).result as typeof result;
+  expect(restored.rows[0]).toMatchObject({version:2,values:{[id(4)]:"15.0"}});
+});
+
+it("refuses invalid numeric values with the affected record ID and leaves live data intact", async () => {
+  const f = await fixture();
+  const created = await f.host.action(call(f.revision,id(6),{values:{[id(4)]:"pay later"}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true})).rejects.toThrow(`Fix record ${(created.result as {id:string}).id}`);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+  const result=(await f.host.query(call(f.revision,id(5)))).result as {rows:Array<{values:Record<string,unknown>}>};
+  expect(result.rows[0]!.values[id(4)]).toBe("pay later");
+});
+
+it("refuses a required field change until missing values are filled", async () => {
+  const optional=structuredClone(definition); optional.tables[0]!.fields[1]!.required=false;
+  const f = await fixture(optional);
+  const created=await f.host.action(call(f.revision,id(6),{values:{}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true})).rejects.toThrow(/Fix record/);
+  await f.host.action(call(f.revision,id(7),{id:(created.result as {id:string}).id,expectedVersion:1,values:{[id(4)]:"Ada"}},"filled"));
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
+  expect(next.revision.definition.tables[0]!.fields[1]!.required).toBe(true);
+});
+
+it("allows generated field edits after a metadata rename without replacing custom SQL constraints", async () => {
+  const f=await fixture();
+  await approve(f,await f.prepare({kind:"renameField",tableId:id(2),fieldId:id(4),name:"Amount"}));
+  await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true}));
+  const artifacts=f.host.approvedArtifacts(id(1));
+  expect(()=>generateDatasetSchemaChange({...artifacts,schemaSql:artifacts.schemaSql.replace('"name" REAL NOT NULL','"name" REAL NOT NULL CHECK ("name" > 0)'),
+    change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:false}})).toThrow(/custom SQL constraints/);
+});
+
+it("changes fields added through ALTER ADD without losing earlier field values", async () => {
+  const f=await fixture();
+  const added=await approve(f,await f.prepare({kind:"addField",tableId:id(2),field:{name:"Amount",type:"text",required:false,unique:false}}));
+  const field=added.revision.definition.tables[0]!.fields.at(-1)!;
+  await f.host.action(call(added.revision,id(6),{values:{[id(4)]:"Ada",[field.fieldId]:"42"}},"added"));
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:field.fieldId,type:"number",required:false}));
+  const result=(await f.host.query(call(next.revision,id(5)))).result as {rows:Array<{values:Record<string,unknown>}>};
+  expect(result.rows[0]!.values).toMatchObject({[id(4)]:"Ada",[field.fieldId]:42});
+});
+
+it("preserves authored TypeScript actions and source extension when renaming fields", () => {
+  const initial=generateDatasetSources(definition), custom=structuredClone(initial.definition);
+  custom.operationsPath="people/operations.ts";
+  custom.operations.push({operationId:id(20),name:"custom",label:"Confirm booking",tableId:id(2),kind:"action",access:"owner",readOnly:false,fieldIds:[id(4)]});
+  const source="const amount: number = 1; globalThis.operations = { custom() { return amount; } };";
+  const schemaSql=initial.files[custom.schemaPath]!;
+  const revision=describeDatasetRevision({definition:custom,revision:1,schemaSql,operationSource:source});
+  const changed=generateDatasetSchemaChange({revision,schemaSql,operationSource:source,change:{kind:"renameField",tableId:id(2),fieldId:id(4),name:"Full name"}});
+  expect(changed.operationSource).toBe(source);
+  expect(changed.definition.operationsPath).toMatch(/operations.ts$/);
+  expect(changed.definition.operations).toEqual(custom.operations);
+});
+
+it("preserves convertible defaults and refuses incompatible defaults", async () => {
+  const f=await fixture();
+  const added=await approve(f,await f.prepare({kind:"addField",tableId:id(2),field:{name:"Amount",type:"text",required:false,unique:false,default:"5"}}));
+  const field=added.revision.definition.tables[0]!.fields.at(-1)!;
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:field.fieldId,type:"number",required:false}));
+  expect(next.revision.definition.tables[0]!.fields.at(-1)!.default).toBe(5);
+  const artifacts=f.host.approvedArtifacts(id(1));
+  const initial=generateDatasetSources(definition), bad=structuredClone(initial.definition);
+  bad.tables[0]!.fields[1]!.default="pay later";
+  const generated=generateDatasetSources(bad), schemaSql=generated.files[bad.schemaPath]!,operationSource=generated.files[bad.operationsPath]!;
+  const revision=describeDatasetRevision({definition:bad,revision:1,schemaSql,operationSource});
+  expect(()=>generateDatasetSchemaChange({revision,schemaSql,operationSource,change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true}})).toThrow(/default that is not a number/);
+  expect(()=>generateDatasetSchemaChange({...artifacts,schemaSql:artifacts.schemaSql+"\nATTACH DATABASE ':memory:' AS other;",change:{kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:false}})).toThrow(/custom SQL constraints/);
 });
 
 it("captures remote schema changes without opening the fenced local store and binds approval to the caller", async () => {
