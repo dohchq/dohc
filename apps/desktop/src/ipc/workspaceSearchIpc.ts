@@ -1,10 +1,9 @@
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
-import {
-  CancelWorkspaceSearchPayload,
-  WorkspaceSearchPayload,
+import type {
   WorkspaceSearchStartResult,
+  workspaceSearchOperations,
 } from "./bridgeContract";
-import { CHANNELS } from "./channels";
+import type { OperationHandlers } from "./operationTable";
 import type {
   WorkspaceSearchAuthority,
   WorkspaceSearchOwner,
@@ -16,20 +15,10 @@ interface WorkspaceSearchIpcEvent {
   sender: WorkspaceSearchSender;
 }
 
-type WorkspaceSearchIpcHandler<Event> = (
-  event: Event,
-  payload: unknown,
-) => Promise<unknown> | unknown;
-
-export function registerWorkspaceSearchIpcHandlers<
+export function workspaceSearchHandlers<
   Event extends WorkspaceSearchIpcEvent,
   Workspace extends WorkspaceSearchWorkspace,
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: WorkspaceSearchIpcHandler<Event>,
-  ): void;
-  assertTrustedSender(event: Event): void;
   withWorkspaceOperation<Result>(
     event: Event,
     workspaceId: string,
@@ -38,12 +27,9 @@ export function registerWorkspaceSearchIpcHandlers<
   authorizeCancel(event: Event): boolean;
   owner: Pick<WorkspaceSearchOwner<Workspace>, "start" | "cancel">;
   onActivityError(error: unknown): void;
-}): void {
-  dependencies.registerHandler(
-    CHANNELS.searchWorkspace,
-    async (event, payload) => {
-      dependencies.assertTrustedSender(event);
-      const input = WorkspaceSearchPayload.parse(payload);
+}): OperationHandlers<typeof workspaceSearchOperations, Event> {
+  return {
+    async searchWorkspace(input, { event }) {
       const accepted = Promise.withResolvers<WorkspaceSearchStartResult>();
       let wasAccepted = false;
       const activity = dependencies.withWorkspaceOperation(
@@ -74,17 +60,12 @@ export function registerWorkspaceSearchIpcHandlers<
         }
         dependencies.onActivityError(error);
       });
-      return WorkspaceSearchStartResult.parse(await accepted.promise);
+      return await accepted.promise;
     },
-  );
 
-  dependencies.registerHandler(
-    CHANNELS.cancelWorkspaceSearch,
-    (event, payload) => {
-      dependencies.assertTrustedSender(event);
-      const input = CancelWorkspaceSearchPayload.parse(payload);
+    async cancelWorkspaceSearch(input, { event }) {
       if (!dependencies.authorizeCancel(event)) return;
-      return dependencies.owner.cancel(event.sender.id, input.searchId);
+      await dependencies.owner.cancel(event.sender.id, input.searchId);
     },
-  );
+  };
 }

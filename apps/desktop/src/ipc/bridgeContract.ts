@@ -77,6 +77,7 @@ import {
   ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { OperationBridge, OperationTable } from "./operationTable";
 // The manifest schema is plain zod, which the sandboxed preload already
 // bundles, so the contract shares the settings declaration rather than keeping
 // a second copy of it. A copy that drifts would fail the whole plugin list's
@@ -2627,6 +2628,56 @@ export const TryInVersionStateResult = z.object({
   state: TryInVersionRunState.nullable(),
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
+
+// A window works only on the versions of the workspace open in it.
+const versionGuard = {
+  guard: "active-workspace",
+  inactiveMessage:
+    "Versions stopped because this window changed workspaces. Open the workspace and try again.",
+} as const;
+
+export const workspaceVersionOperations = {
+  listWorkspaceVersions: {
+    channel: "desktop:list-workspace-versions",
+    payload: WorkspaceIdPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
+  },
+  createWorkspaceVersion: {
+    channel: "desktop:create-workspace-version",
+    payload: CreateWorkspaceVersionPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
+  },
+  switchWorkspaceVersion: {
+    channel: "desktop:switch-workspace-version",
+    payload: SwitchWorkspaceVersionPayload, result: SwitchWorkspaceVersionResult, ...versionGuard,
+  },
+  compareWorkspaceVersions: {
+    channel: "desktop:compare-workspace-versions",
+    payload: CompareWorkspaceVersionsPayload, result: CompareWorkspaceVersionsResult, ...versionGuard,
+  },
+  mergeWorkspaceVersion: {
+    channel: "desktop:merge-workspace-version",
+    payload: MergeWorkspaceVersionPayload, result: MergeWorkspaceVersionResult, ...versionGuard,
+  },
+  listWorkspaceVersionConflicts: {
+    channel: "desktop:list-workspace-version-conflicts",
+    payload: ListWorkspaceVersionConflictsPayload, result: ListWorkspaceVersionConflictsResult, ...versionGuard,
+  },
+  resolveWorkspaceVersionConflict: {
+    channel: "desktop:resolve-workspace-version-conflict",
+    payload: ResolveWorkspaceVersionConflictPayload, result: ResolveWorkspaceVersionConflictResult, ...versionGuard,
+  },
+  tryInWorkspaceVersion: {
+    channel: "desktop:try-in-workspace-version",
+    payload: TryInWorkspaceVersionPayload, result: TryInWorkspaceVersionResult, ...versionGuard,
+  },
+  getTryInVersionState: {
+    channel: "desktop:get-try-in-version-state",
+    payload: WorkspaceIdPayload, result: TryInVersionStateResult, ...versionGuard,
+  },
+  dismissTryInVersionReview: {
+    channel: "desktop:dismiss-try-in-version-review",
+    payload: WorkspaceIdPayload, ...versionGuard,
+  },
+} satisfies OperationTable;
 
 const SiteDiagnostic = z.object({
   path: PATH_STRING.optional(),
@@ -5793,6 +5844,22 @@ export type CancelWorkspaceSearchPayload = z.infer<
   typeof CancelWorkspaceSearchPayload
 >;
 
+// Workspace content search answers accepted once the rg child spawns, or a
+// typed refusal while initial capture runs. Results stream separately through
+// onSearchResults, and a new search cancels the previous one in main. The
+// search's workspace operation outlives the answer, so the start handler holds
+// that operation itself instead of taking the active-workspace guard.
+export const workspaceSearchOperations = {
+  searchWorkspace: {
+    channel: "desktop:search-workspace",
+    payload: WorkspaceSearchPayload, result: WorkspaceSearchStartResult, guard: "trusted-sender",
+  },
+  cancelWorkspaceSearch: {
+    channel: "desktop:cancel-workspace-search",
+    payload: CancelWorkspaceSearchPayload, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
 // engine capture, reusing its store) and STREAMS remote CRDT deltas back over
@@ -6030,7 +6097,9 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
-export interface DohcDesktopBridge {
+export interface DohcDesktopBridge
+  extends OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof workspaceSearchOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6337,37 +6406,6 @@ export interface DohcDesktopBridge {
   ): Promise<RefreshShareMountsResult>;
   unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
-  // Named versions. Gated in main on the workspace's engine capture.
-  listWorkspaceVersions(
-    payload: WorkspaceIdPayload,
-  ): Promise<ListWorkspaceVersionsResult>;
-  createWorkspaceVersion(
-    payload: CreateWorkspaceVersionPayload,
-  ): Promise<ListWorkspaceVersionsResult>;
-  switchWorkspaceVersion(
-    payload: SwitchWorkspaceVersionPayload,
-  ): Promise<SwitchWorkspaceVersionResult>;
-  compareWorkspaceVersions(
-    payload: CompareWorkspaceVersionsPayload,
-  ): Promise<CompareWorkspaceVersionsResult>;
-  mergeWorkspaceVersion(
-    payload: MergeWorkspaceVersionPayload,
-  ): Promise<MergeWorkspaceVersionResult>;
-  listWorkspaceVersionConflicts(
-    payload: ListWorkspaceVersionConflictsPayload,
-  ): Promise<ListWorkspaceVersionConflictsResult>;
-  resolveWorkspaceVersionConflict(
-    payload: ResolveWorkspaceVersionConflictPayload,
-  ): Promise<ResolveWorkspaceVersionConflictResult>;
-  // "Try it in a version" (PR 0N-2). The gesture is engine-gated like the
-  // other version operations; state/dismiss are safe no-ops elsewhere.
-  tryInWorkspaceVersion(
-    payload: TryInWorkspaceVersionPayload,
-  ): Promise<TryInWorkspaceVersionResult>;
-  getTryInVersionState(
-    payload: WorkspaceIdPayload,
-  ): Promise<TryInVersionStateResult>;
-  dismissTryInVersionReview(payload: WorkspaceIdPayload): Promise<void>;
   // Engine history + linked Chats. Gated in main on the workspace's engine
   // capture.
   listEngineMoments(
@@ -6550,14 +6588,6 @@ export interface DohcDesktopBridge {
   // the approval is off, and resumes the quit once the user confirms.
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
-  // Workspace content search. Answers accepted after the rg child
-  // spawns, or returns a typed updating refusal while initial capture runs;
-  // results stream separately through onSearchResults. A new search cancels
-  // the previous one in main.
-  searchWorkspace(
-    payload: WorkspaceSearchPayload,
-  ): Promise<WorkspaceSearchStartResult>;
-  cancelWorkspaceSearch(payload: CancelWorkspaceSearchPayload): Promise<void>;
   // Streamed result batches, validated batch-by-batch in the preload. Returns
   // an unsubscribe function. The searchId round-trips so the renderer drops
   // batches that belong to a superseded search.
