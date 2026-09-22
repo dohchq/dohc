@@ -88,7 +88,7 @@ describe("persistent dataset worker",()=>{
       ]) await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(${JSON.stringify(sql)})}}`})).rejects.toThrow();
     });
   });
-  it.each(["rowid","\"oid\"","[_rowid_]"])("rejects implicit %s in schema predicates without matching literal text",async alias=>{
+  it.each(["rowid","\"oid\"","[_rowid_]","items.'rowid'","items./* alias */'oid'","items.'_rowid_'"])("rejects implicit %s in schema predicates without matching literal text",async alias=>{
     await fixture(async({open})=>{
       await expect(open({schemaSql:`CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK((${alias} < 2) OR value='rowid'));`})).rejects.toMatchObject({code:"invalid_schema"});
     });

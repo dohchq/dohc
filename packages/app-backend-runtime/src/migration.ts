@@ -15,7 +15,8 @@ function predicatesReadRowid(sql:string):boolean {
     let depth=0;
     for(let next=index+1;next<tokens.length;next++) {
       const expression=tokens[next];
-      if(!expression.literal && ["rowid","oid","_rowid_"].includes(expression.value)) return true;
+      const identifier=!expression.literal || tokens[next-1]?.value===".";
+      if(identifier && ["rowid","oid","_rowid_"].includes(expression.value)) return true;
       if(expression.value==="("&&!expression.quoted)depth++;
       else if(expression.value===")"&&!expression.quoted){depth--;if(depth<=0)break;}
       else if(depth===0)break;
