@@ -136,7 +136,7 @@ export function boundedText(value: string, maxBytes: number, label: string): str
 
 export function approvedTables(tables: string[]): string[] {
   if (!Array.isArray(tables) || tables.length < 1 || tables.length > 64 ||
-    tables.some(table => typeof table !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(table) || /^(sqlite|dohc)_/i.test(table)) ||
+    tables.some(table => typeof table !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table) || /^(sqlite|dohc)_/i.test(table)) ||
     new Set(tables.map(table => table.toLowerCase())).size !== tables.length) throw new Error("Invalid approved app tables.");
   return [...tables];
 }
