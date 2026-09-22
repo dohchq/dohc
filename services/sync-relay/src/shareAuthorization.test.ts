@@ -113,6 +113,12 @@ describe("share authorization", () => {
     expect(authorizeNamedLiveEditShareGrant({
       storage: storageFixture(), actorUserId: "stranger", grantId: grant.grantId,
     })).toEqual({ ok: false, reason: "not-authorized" });
+    for (const revoked of [{ status: "revoked" }, { revokedAtMs: 2000 }] satisfies Partial<SyncRelayShareGrantRow>[]) {
+      expect(authorizeNamedLiveEditShareGrant({
+        storage: storageFixture({ grant: { ...grant, ...revoked } }),
+        actorUserId: "recipient-1", grantId: grant.grantId,
+      }), JSON.stringify(revoked)).toEqual({ ok: false, reason: "not-authorized" });
+    }
     for (const selectorJson of [
       "{", JSON.stringify({ paths: ["docs"], versionId: "pinned-version" }),
       JSON.stringify({ paths: [], versionId: null }),
