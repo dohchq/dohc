@@ -1,11 +1,28 @@
 import { DatabaseSync, constants } from "node:sqlite";
-import { authorize, insertsImplicitRowid } from "./guest.js";
+import { authorize, insertsImplicitRowid, sqlTokens } from "./guest.js";
 import { reject } from "./persistent-protocol.js";
 import type { RuntimeLimits } from "./protocol.js";
 
 export const datasetSchema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name != 'dohc_applied' ORDER BY type,name";
 const options={allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false};
 const unsafeFunctions=new Set(["load_extension","readfile","writefile","edit","fts3_tokenizer"]);
+
+function predicatesReadRowid(sql:string):boolean {
+  const tokens=sqlTokens(sql);
+  for(let index=0;index<tokens.length;index++) {
+    const token=tokens[index];
+    if(token.quoted || !["check","default","as"].includes(token.value)) continue;
+    let depth=0;
+    for(let next=index+1;next<tokens.length;next++) {
+      const expression=tokens[next];
+      if(!expression.literal && ["rowid","oid","_rowid_"].includes(expression.value)) return true;
+      if(expression.value==="("&&!expression.quoted)depth++;
+      else if(expression.value===")"&&!expression.quoted){depth--;if(depth<=0)break;}
+      else if(depth===0)break;
+    }
+  }
+  return false;
+}
 
 export function assertReplayableSchema(schemaSql:string):void {
   // Ignore quoted identifiers, literals, and comments when finding the SQL keyword.
@@ -31,6 +48,7 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
       const rowid=primary.length===1 && String(primary[0].type).toUpperCase()==="INTEGER" && !expected.prepare(`PRAGMA index_list("${table}")`).all().some(index=>index.origin==="pk");
       if (!primary.length || (!rowid && primary.some(column=>Number(column.notnull)!==1))) reject("invalid_schema","Dataset tables require non-null primary keys.");
       if(rowid) capturedRowidTables.add(table.toLowerCase());
+      if(!rowid && predicatesReadRowid(String(declaredTables.find(row=>row.name===table)!.sql))) reject("invalid_schema","Dataset predicates must use a declared primary key, not an implicit rowid.");
       if(columns.some(column=>/^(rowid|oid|_rowid_)$/i.test(String(column.name)) && !(rowid && column.name===primary[0].name))) reject("invalid_schema","Rowid aliases are reserved unless they name the INTEGER PRIMARY KEY.");
     }
     if(schema.some(row=>row.type==="trigger" && insertsImplicitRowid(String(row.sql),capturedRowidTables))) reject("invalid_schema","Triggers cannot insert implicit rowid values into journaled datasets.");

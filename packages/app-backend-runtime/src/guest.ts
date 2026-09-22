@@ -18,16 +18,20 @@ interface AuthorizationOptions extends GuestOptions {
 const connectionCounters = new Set(["changes", "total_changes", "last_insert_rowid"]);
 const unsafeFunctions = new Set(["load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"]);
 const persistentRowidTables=new WeakMap<DatabaseSync,ReadonlySet<string>>();
-export function insertsImplicitRowid(sql:string, capturedTables:ReadonlySet<string>):boolean {
-  // SQLite's authorizer reports INSERT at table granularity, without its column list.
-  const tokens:Array<{value:string;quoted:boolean}>=[];
+export function sqlTokens(sql:string):Array<{value:string;quoted:boolean;literal:boolean}> {
+  const tokens:Array<{value:string;quoted:boolean;literal:boolean}>=[];
   const pattern=/--[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_$]*|[^\s]/g;
   for(const match of sql.matchAll(pattern)) {
     const raw=match[0];if(raw.startsWith("--")||raw.startsWith("/*"))continue;
     const quote=raw[0],quoted="'\"`[".includes(quote);
     const value=quoted ? raw.slice(1,-1).replaceAll(quote+quote,quote) : raw;
-    tokens.push({value:value.toLowerCase(),quoted});
+    tokens.push({value:value.toLowerCase(),quoted,literal:quote==="'"});
   }
+  return tokens;
+}
+export function insertsImplicitRowid(sql:string, capturedTables:ReadonlySet<string>):boolean {
+  // SQLite's authorizer reports INSERT at table granularity, without its column list.
+  const tokens=sqlTokens(sql);
   const keyword=(index:number,value:string)=>tokens[index]?.value===value&&!tokens[index].quoted;
   for(let index=0;index<tokens.length;index++) {
     if(!keyword(index,"insert")&&!keyword(index,"replace"))continue;

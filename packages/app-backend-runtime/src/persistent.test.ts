@@ -71,6 +71,9 @@ describe("persistent dataset worker",()=>{
         await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO items(${alias},id,value) VALUES(100,'new','value')\")}}`})).rejects.toThrow();
       }
       await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
+      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK(rowid<2 OR value=''));"})).rejects.toMatchObject({code:"invalid_schema"});
+      const literal=await open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK(value!='rowid') DEFAULT 'oid');"});
+      expect((await literal.prepare({...operation(),readOnly:true})).result).toEqual([]);
       await expect(open({schemaSql:"CREATE TABLE Items(id INTEGER PRIMARY KEY,value TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
       await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); CREATE TRIGGER hidden_row AFTER INSERT ON items BEGIN INSERT INTO items(rowid,id,value) VALUES(100,'other','value'); END;"})).rejects.toMatchObject({code:"invalid_schema"});
       const captured=await open({schemaSql:"CREATE TABLE items(ROWID INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(42,'value');"});
@@ -83,6 +86,11 @@ describe("persistent dataset worker",()=>{
         "INSERT/**/INTO [items] (`_rowid_`,id,value) VALUES(100,'new','value')",
         "UPDATE items SET rowid=100 WHERE id='id'",
       ]) await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(${JSON.stringify(sql)})}}`})).rejects.toThrow();
+    });
+  });
+  it.each(["rowid","\"oid\"","[_rowid_]"])("rejects implicit %s in schema predicates without matching literal text",async alias=>{
+    await fixture(async({open})=>{
+      await expect(open({schemaSql:`CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK((${alias} < 2) OR value='rowid'));`})).rejects.toMatchObject({code:"invalid_schema"});
     });
   });
   it("commits only after host finalization and restores checkpoint scope/cursor",async()=>{
