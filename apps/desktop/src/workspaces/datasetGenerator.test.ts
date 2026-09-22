@@ -109,6 +109,22 @@ describe("initial dataset source", { timeout: 30_000 }, () => {
     expect((await app.call("read", {})).result).toMatchObject({ rows: [{ values: { [id(10)]: "file-1" } }] });
   });
 
+  it("queries full board groups and date ranges independently of the table's first page", async () => {
+    const app = await runtime();
+    for (let n=0;n<55;n++) await app.call("submit",{values:{[id(4)]:`Person ${n}`,[id(8)]:n<52?"2026-09-01":"2026-10-01",[id(11)]:n%10}});
+    const group = {fieldId:id(8),value:"2026-10-01"};
+    const grouped = (await app.call("read",{limit:2,group})).result as {rows:unknown[];nextCursor:JsonValue;group:unknown};
+    expect(grouped.rows).toHaveLength(2);expect(grouped.group).toEqual(group);
+    expect((await app.call("read",{limit:2,group,after:grouped.nextCursor})).result).toMatchObject({rows:[{values:{[id(8)]:"2026-10-01"}}],nextCursor:null});
+    const range = {fieldId:id(8),start:"2026-10-01",end:"2026-11-01"};
+    expect((await app.call("read",{range})).result).toMatchObject({range,rows:Array.from({length:3},()=>({values:{[id(8)]:"2026-10-01"}})),nextCursor:null});
+    const groups = (await app.call("read",{groupBy:id(11),limit:8})).result as {groups:JsonValue[];nextGroupCursor:JsonValue};
+    expect(groups.groups).toEqual([0,1,2,3,4,5,6,7]);
+    expect((await app.call("read",{groupBy:id(11),limit:8,groupAfter:groups.nextGroupCursor})).result).toEqual({groupBy:id(11),groups:[8,9],nextGroupCursor:null});
+    for(const input of [{groupBy:id(5),limit:8},{group:{fieldId:id(5),value:"Pending"}},{range}] as JsonValue[]) await expect(app.call("public",input,link)).rejects.toThrow("Check the fields");
+    await expect(app.call("read",{range:{...range,start:"2026-02-30"}})).rejects.toThrow("Check the fields");
+  });
+
   it("enforces single and many same-dataset relations, including deletion and raw target updates", async () => {
     const definition = fixture();
     definition.tables.push({ tableId: id(30), name: "Teams", sqlName: "teams", primaryKey: "id", fields: [field(31, "id", { required: true, unique: true })] });

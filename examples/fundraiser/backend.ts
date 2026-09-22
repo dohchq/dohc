@@ -256,7 +256,7 @@
       if (!sort || sort.type === "attachment" || !["asc", "desc"].includes(direction)) invalid(ctx, "Choose a sortable field.");
     }
     const encode = value => typeof value === "boolean" ? Number(value) : value;
-    const decode = (field, value) => field.type === "checkbox" ? value === 1 : value;
+    const decode = (field, value) => value === null ? null : field.type === "checkbox" ? value === 1 : value;
     const q = value => '"' + value + '"';
     const terms = [], params = [];
     if (input.search !== undefined && input.search !== "") {
@@ -272,6 +272,34 @@
         if (!field || (filter.value !== null && !["string", "number", "boolean"].includes(typeof filter.value))) invalid(ctx, "Choose a valid filter.");
         terms.push(q(field.sqlColumn) + " IS ?"); params.push(encode(filter.value));
       }
+    }
+    if (input.group !== undefined) {
+      object(ctx, input.group);
+      const field = fields.find(field => field.fieldId === input.group.fieldId), value = input.group.value;
+      if (!field || (value !== null && !["string", "number", "boolean"].includes(typeof value))) invalid(ctx, "Choose a valid group.");
+      terms.push(q(field.sqlColumn) + " IS ?"); params.push(encode(value));
+    }
+    if (input.range !== undefined) {
+      object(ctx, input.range);
+      const range = input.range, field = fields.find(field => field.fieldId === range.fieldId);
+      const day = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value;
+      if (!field || field.type !== "date" || !day(range.start) || !day(range.end) || range.start >= range.end) invalid(ctx, "Choose a valid date range.");
+      terms.push(q(field.sqlColumn) + " >= ? AND " + q(field.sqlColumn) + " < ?"); params.push(range.start,range.end);
+    }
+    if (input.groupBy !== undefined) {
+      const field = fields.find(field => field.fieldId === input.groupBy);
+      if (!field || field.type === "attachment" || limit > 8 || input.after !== undefined || input.sort !== undefined) invalid(ctx, "Choose a valid group field.");
+      const group = q(field.sqlColumn);
+      if (input.groupAfter !== undefined) {
+        object(ctx,input.groupAfter);
+        const value = input.groupAfter.value;
+        if (value !== null && !["string","number","boolean"].includes(typeof value)) invalid(ctx,"Choose a valid group page.");
+        if (value === null) terms.push(group + " IS NOT NULL");
+        else { terms.push(group + " > ?"); params.push(encode(value)); }
+      }
+      const rows = ctx.db.query("SELECT DISTINCT " + group + " AS value FROM " + q(table.sqlName) + (terms.length ? " WHERE " + terms.join(" AND ") : "") + " ORDER BY " + group + " ASC NULLS FIRST LIMIT ?",[...params,limit+1]);
+      const more = rows.length > limit; if(more)rows.pop();
+      return {groupBy:field.fieldId,groups:rows.map(row=>decode(field,row.value)),nextGroupCursor:more?{value:decode(field,rows[rows.length-1].value)}:null};
     }
     if (input.after !== undefined && input.after !== null) {
       const after = input.after;
@@ -289,7 +317,7 @@
     const last = rows[rows.length - 1];
     return {rows: rows.map(row => ({id: row.id, version: table.version ? row.version : 1,
       values: Object.fromEntries(fields.map(field => [field.fieldId, decode(field, row[field.sqlColumn])]))})),
-      nextCursor: more ? {id: last.id, value: decode(sort, last[sort.sqlColumn])} : null};
+      nextCursor: more ? {id: last.id, value: decode(sort, last[sort.sqlColumn])} : null, ...(input.range ? {range:input.range} : {}), ...(input.group ? {group:input.group} : {})};
   }
   function tableSessions(ctx, input) { return collectionRead(ctx, input, collectionTables.tableSessions); }
   function tableRegistrations(ctx, input) { return collectionRead(ctx, input, collectionTables.tableRegistrations); }
