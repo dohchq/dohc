@@ -57,6 +57,7 @@ import {
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseCollectionTabPath,
+  parseTransactionalCollectionTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -226,6 +227,7 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 }
 
 export function editorTitle(path: string, label?: string): string {
+  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
   if (isGraphTabPath(path)) return "Graph";
   if (isCollectionTabPath(path)) {

@@ -8,6 +8,7 @@ import {
   pluginDetailsTabPath,
   pluginPanelTabPath,
   siteTabPath,
+  transactionalCollectionTabPath,
 } from "./workbenchState";
 
 beforeEach(() => {
@@ -46,6 +47,14 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it("names data Collection tabs from discovery without changing their stable identity",()=>{
+    const path=transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002");
+    const props={groupId:"left",groupNumber:1,tabs:[{path}],activeTab:path,activeTabDirty:false,recoveryPaths:new Set<string>(),onActivate:noop,onClose:noop,onContextMenu:noop,onMove:noop,onMoveToGroup:noop,onCreateGroupRight:noop};
+    const mounted=render(<EditorTabs {...props}/>);
+    expect(screen.getByTestId(`tab-${path}`).textContent).toContain("Collection");
+    mounted.rerender(<EditorTabs {...props} tabLabels={new Map([[path,"Registrations"]])}/>);
+    const tab=screen.getByTestId(`tab-${path}`);expect(tab.textContent).toContain("Registrations");expect(tab.title).toBe("Collection: Registrations");expect(tab.textContent).not.toContain("00000000");
+  });
   it("names current history changes after their file, never the internal moment id", () => {
     const path = momentDiffTabPath("moment-ydoc-internal-hash");
     render(
