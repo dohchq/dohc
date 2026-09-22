@@ -9,6 +9,8 @@ import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/secur
 import { fixture, limits } from "./appBackendTestFixture";
 import { createSyncRelayHandler } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
+import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
+import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
@@ -27,10 +29,10 @@ const schemaSql = "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,name TEXT 
 const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({definition, revision: 1, schemaSql, operationSource});
 
-async function httpFixture() {
+async function httpFixture(maxParticipantsPerGrant?: number) {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
   let now = 10;
-  const host = await f.storage.createDatasetHost({directory, limits, nowMs: () => now, onShutdownError(error) {throw error;}});
+  const host = await f.storage.createDatasetHost({directory, limits, maxParticipantsPerGrant, nowMs: () => now, onShutdownError(error) {throw error;}});
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
   const linkKey = "dataset-http-test-key", token = "T".repeat(43);
   f.storage.mintLinkSession({session: {sessionId: "dataset-http", capabilityHash: hashLinkBearer(token, linkKey), grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
@@ -59,7 +61,7 @@ async function httpFixture() {
       compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
     return f.storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate, blobs: [], limits, nowMs: 10}).publicationId;
   }
-  return {...f, host, http, path, activate, invoke, publish, publicHeaders, advance(ms: number) {now += ms;}};
+  return {...f, host, handler, http, path, activate, invoke, publish, publicHeaders, advance(ms: number) {now += ms;}};
 }
 
 it("exposes bounded owner history and denies helpers, strangers, and malformed cursors", async () => {
@@ -284,4 +286,44 @@ it("retains the first participant attempt across lost replies and clears only it
   expect((await request({...save, principalKey: "other"})).status).toBe(400);
   await f.http(`${f.path}/binding`, {publicationId, enabled: false});
   expect((await request({action: "get"})).status).toBe(404);
+});
+it("preserves the configured participant cap across app publications while keeping owner access", async () => {
+  const f = await httpFixture(1); await f.activate(); const publicationId = f.publish();
+  await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  const path = `link/app-publications/${publicationId}/backend/invoke`;
+  const submit = {authorityRevision: 1, operation: "submit", input: {name: "First"}, idempotencyKey: "first"};
+  expect((await f.http(path, submit, f.publicHeaders)).status).toBe(200);
+  expect((await f.http(path, {...submit, idempotencyKey: "again"}, f.publicHeaders)).status).toBe(200);
+  expect((await f.http(path, submit, {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)})).status).toBe(413);
+  const otherApp = f.publish("a".repeat(64)); await f.http(`${f.path}/binding`, {publicationId: otherApp, enabled: true});
+  expect((await f.http(`link/app-publications/${otherApp}/backend/upload`, upload, {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)})).status).toBe(413);
+  expect((await f.invoke()).status).toBe(200);
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n).toBe(1);
+});
+
+it("imports a fenced dataset and its receipt over HTTP with a durable retry receipt", async () => {
+  const source = await httpFixture(), target = await httpFixture(); await source.activate();
+  const owner = {kind: "named" as const, workspaceId: "w", userId: "owner"};
+  const {authorityRevision: _authorityRevision, ...fileBody} = upload;
+  const uploaded = source.host.ownerUpload(owner, {workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, ...fileBody});
+  await source.host.invoke(owner, {workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: {name: "Restored", fileId: uploaded.file.fileId}, idempotencyKey: "saved"});
+  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)});
+  const scope = {workspaceId: "w", datasetId: id(1)}, cursor = journal.head(scope, () => {}).cursor;
+  journal.fence({expected: cursor, authorize() {}});
+  const archive = await source.host.exportRecovery(owner, scope);
+  try {
+    const chunks = []; for await (const bytes of archive.stream()) chunks.push(bytes);
+    const body = Buffer.concat(chunks), transferId = "http-transfer", manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
+    const url = `https://relay/sync/w/datasets/${id(1)}/imports/${transferId}`;
+    const request = () => new Request(url, {method: "POST", headers: {authorization: "Bearer owner", "content-type": "application/octet-stream",
+      "x-dohc-dataset-manifest-sha256": manifestSha256, "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body});
+    const response = await target.handler(request()); expect(response.status).toBe(200);
+    const receipt = await response.json(); expect(receipt).toMatchObject({transferId, manifestSha256, sourceCursor: cursor, targetCursor: {revision: cursor.revision + 1}});
+    expect(await (await target.handler(new Request(url, {headers: {authorization: "Bearer owner"}}))).json()).toEqual(receipt);
+    expect(await (await target.handler(request())).json()).toEqual(receipt);
+    expect(await (await target.invoke()).json()).toMatchObject({result: [{name: "Restored", receipt: uploaded.file.fileId}]});
+    expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: revision.revisionSha256, fileId: uploaded.file.fileId})).toEqual({file: uploaded.file, bytesBase64: upload.bytesBase64});
+    expect(target.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_import_files").get()!.n).toBe(0);
+    expect((await target.handler(new Request(url, {headers: {authorization: "Bearer stranger"}}))).status).toBe(404);
+  } finally {await archive.dispose();}
 });

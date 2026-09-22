@@ -16,7 +16,8 @@ export interface DatasetRoute {
   route: "dataset";
   workspaceId: string;
   datasetId?: string;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history";
+  transferId?: string;
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -52,6 +53,40 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
   options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
   const admit = createAppBackendAdmission(options.limits);
   return async (request: Request, route: DatasetRoute, auth: Extract<AppBackendAuth, {kind: "named"}>): Promise<Response> => {
+    if (route.action === "import") {
+      if (!route.transferId || !["GET", "POST"].includes(request.method)) throw relayError("method_not_allowed");
+      if (!storage.workspaceIsOwnedBy(route.workspaceId, auth.userId)) throw notFound();
+      if (new URL(request.url).search) throw badRequest("Dataset imports do not accept a query.");
+      const scope = {workspaceId: route.workspaceId, datasetId: route.datasetId!, transferId: route.transferId};
+      if (request.method === "GET") return response(() => host.recoveryImportStatus(auth, scope));
+      if (request.headers.get("content-type") !== "application/octet-stream" || !request.body) throw badRequest("Dataset import requires a recovery stream.");
+      const rawCursor = request.headers.get("x-dohc-dataset-source-cursor");
+      if (!rawCursor || Buffer.byteLength(rawCursor) > 1024) throw badRequest("Invalid recovery source cursor.");
+      let value; try {value = JSON.parse(rawCursor);} catch {throw badRequest("Invalid recovery source cursor.");}
+      const cursor = record(value, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
+      if (cursor.workspaceId !== scope.workspaceId || cursor.datasetId !== scope.datasetId || !Number.isSafeInteger(cursor.revision) || Number(cursor.revision) < 0) throw badRequest("Invalid recovery source cursor.");
+      const sourceCursor = {workspaceId: scope.workspaceId, datasetId: scope.datasetId, hostEpoch: text(cursor.hostEpoch), approvedRevisionHash: digest(cursor.approvedRevisionHash), revision: Number(cursor.revision), digest: digest(cursor.digest)};
+      const manifestSha256 = digest(request.headers.get("x-dohc-dataset-manifest-sha256"));
+      const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(120_000)]);
+      const release = admit({dataset: JSON.stringify([scope.workspaceId, scope.datasetId]), participant: auth.userId, organizer: true}, "restore", options.nowMs());
+      try {
+        const body = request.body;
+        async function* stream() {
+          const reader = body.getReader();
+          const aborted = () => {void reader.cancel().catch(() => {});};
+          signal.addEventListener("abort", aborted, {once: true});
+          try {
+            for (;;) {
+              signal.throwIfAborted();
+              if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
+              const item = await reader.read(); if (item.done) break;
+              for (let offset = 0; offset < item.value.byteLength; offset += 1024 * 1024) yield item.value.subarray(offset, offset + 1024 * 1024);
+            }
+          } finally {signal.removeEventListener("abort", aborted); await reader.cancel().catch(() => {}); reader.releaseLock();}
+        }
+        return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
+      } finally {release();}
+    }
     const read = ["list", "describe", "artifacts", "permissions", "history"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;

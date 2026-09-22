@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import { createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
+import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { parseDatasetRevision, verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -14,8 +17,9 @@ import { requireLinkAppPublication } from "./storage/publications";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
-import { notFound } from "./errors";
+import { notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
+import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const principalKey = (workspaceId: string, grantId: string, userId: string) => hash(JSON.stringify(["dohc-dataset-principal-v1", workspaceId, grantId, userId]));
@@ -27,6 +31,7 @@ export interface RelayDatasetHostOptions {
   nowMs?: () => number;
   runtime?: DatasetSupervisorOptions["runtime"];
   maxWorkers?: number;
+  maxParticipantsPerGrant?: number;
   compileOperations?: DatasetHostOptions<AppBackendAuth>["compileOperations"];
   onShutdownError(error: unknown): void;
 }
@@ -34,6 +39,8 @@ export interface RelayDatasetHostOptions {
 /** The existing relay connection owns every authoritative dataset transaction. */
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const {storage, limits} = options, nowMs = options.nowMs ?? Date.now;
+  const maxParticipantsPerGrant = options.maxParticipantsPerGrant ?? 1000;
+  if (!Number.isSafeInteger(maxParticipantsPerGrant) || maxParticipantsPerGrant < 1) throw new Error("Invalid dataset participant limit.");
   const standing = storage.captureStanding();
   const transaction = <T>(run: () => T): T => storage.tx(run);
   const journal = createDatasetJournal({db: storage.db, transaction, nowMs});
@@ -41,7 +48,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, storage_bytes INTEGER NOT NULL CHECK(storage_bytes>=0),
     PRIMARY KEY(workspace_id,dataset_id),
     FOREIGN KEY(workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-  ) STRICT;`));
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS sync_relay_dataset_participants(
+    workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,grant_id TEXT NOT NULL,principal_key TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,dataset_id,grant_id,principal_key),
+    FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`));
   const supervisor = await createDatasetSupervisor({journal, directory: options.directory, runtime: options.runtime,
     maxWorkers: options.maxWorkers, nowMs});
   let closing: Promise<void> | undefined;
@@ -74,6 +85,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     current();
     if (auth.kind !== "named" || auth.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, auth.userId)) throw notFound();
     return {caller: {kind: "owner", userId: auth.userId}, principalKey: ownerPrincipalKey(workspaceId)};
+  }
+  function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
+    if (authority.caller.kind !== "link") return;
+    const grantId = authority.caller.grantId;
+    storage.tx(() => {
+      current();
+      if (storage.db.prepare("SELECT 1 FROM sync_relay_dataset_participants WHERE workspace_id=? AND dataset_id=? AND grant_id=? AND principal_key=?").get(workspaceId, datasetId, grantId, authority.principalKey)) return;
+      const count = Number(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants WHERE workspace_id=? AND dataset_id=? AND grant_id=?").get(workspaceId, datasetId, grantId)!.n);
+      if (count >= maxParticipantsPerGrant) throw relayError("quota_exceeded", "App participant limit reached.");
+      account(workspaceId, datasetId, Buffer.byteLength(JSON.stringify([workspaceId, datasetId, grantId, authority.principalKey])) + 128);
+      storage.db.prepare("INSERT INTO sync_relay_dataset_participants VALUES(?,?,?,?)").run(workspaceId, datasetId, grantId, authority.principalKey);
+    });
   }
   function named(workspaceId: string, grantId: string, userId: string): DatasetAuthority {
     const result = authorizeShareGrantAction({storage, grantId, principalKind: "user", principalUserId: userId, action: "read"});
@@ -161,15 +184,34 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     return {workspaceId, datasetId: requested.datasetId, authorityRevision, capability: verified.capability, authority: verified.authority, candidate};
   }
   try {
+    const recoveryDirectory = join(options.directory, "recovery");
+    await mkdir(recoveryDirectory, {recursive: true});
     const files = createDatasetFiles(storage, account, nowMs);
     const attempts = createDatasetAttempts({db: storage.db, transaction,
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
+    const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
+    createRecoveryInstaller({db: storage.db, transaction, journal});
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
+      recovery: {
+        directory: recoveryDirectory, limits: {maxTotalBytes: storage.options.workspaceQuotaBytes},
+        captureAttachments(auth, key, cursor) {owner(auth, key.workspaceId); return recoveryFiles.capture(key, cursor);},
+        openAttachment(auth, key, file) {owner(auth, key.workspaceId); return recoveryFiles.open(key, file);},
+        install: {
+          account(auth, allocation) {
+            owner(auth, allocation.workspaceId);
+            storage.db.prepare("INSERT OR IGNORE INTO sync_relay_dataset_usage VALUES(?,?,0)").run(allocation.workspaceId, allocation.datasetId);
+            account(allocation.workspaceId, allocation.datasetId, allocation.bytes);
+          },
+          installAttachment(auth, input) {owner(auth, input.workspaceId); return recoveryFiles.install(input);},
+          commitAttachments(auth, input) {owner(auth, input.workspaceId); recoveryFiles.commit(input);},
+          discardAttachments(auth, input) {owner(auth, input.workspaceId); return recoveryFiles.discard(input);},
+        },
+      },
       accountCreation(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes, true); },
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       accountCheckpointStage(_auth, allocation) { account(allocation.scope.workspaceId, allocation.scope.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
-      operationResources(_auth, request) { return files.resources(request, request.authority, request.input); },
+      operationResources(_auth, request) { enroll(request.workspaceId, request.datasetId, request.authority); return files.resources(request, request.authority, request.input); },
     });
     storage.tx(() => storage.db.exec(`DROP TRIGGER IF EXISTS sync_relay_dataset_delete;
       CREATE TRIGGER sync_relay_dataset_delete
@@ -186,6 +228,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN (
           SELECT stage_id FROM dohc_dataset_checkpoints WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
         DELETE FROM dohc_dataset_checkpoints WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM sync_relay_dataset_import_files WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_import_records WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
+        DELETE FROM dohc_dataset_import_metadata WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
+        DELETE FROM dohc_dataset_import_checkpoints WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
+        DELETE FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
     return {
@@ -196,6 +243,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         return host.migrate(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
+      exportRecovery: host.exportRecovery, importRecovery: host.importRecovery, recoveryImportStatus: host.recoveryStatus,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
       },
@@ -229,6 +277,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         }
         if (!permitted) throw notFound();
         const captured = permitted;
+        enroll(workspaceId, datasetId, captured.authority);
         return files.upload(scope, captured.authority, input, () => {
           signal?.throwIfAborted(); current();
           const checked = host.authorize(auth, {...scope, operationId: captured.operation.operationId});
