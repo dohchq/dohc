@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,7 +21,7 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];migrationStorage?:DatasetSupervisorOptions["migrationStorage"];nowMs?:()=>number } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
@@ -42,7 +42,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
-    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,migrationStorage:options.migrationStorage,nowMs:options.nowMs });
+    directory: join(directory, "workers"), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,onMaintenanceError:options.onMaintenanceError });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
@@ -61,7 +61,7 @@ function migration(f:Awaited<ReturnType<typeof fixture>>,overrides:Partial<Datas
 
 it("previews actual changed values and approves the exact candidate without running SQL twice",async()=>{
   let executions=0,reserved=0;
-  const f=await fixture({migrationStorage:{authorize(){},account({bytes}){reserved+=bytes;}},launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")executions++;controls.deliver();})});
+  const f=await fixture({maintenanceStorage:{authorize(){},account({bytes}){reserved+=bytes;}},launch:launcher((command,controls)=>{if(command.command.kind==="migrateCheckpoint")executions++;controls.deliver();})});
   await f.invoke({id:"one",value:"original"});
   const input=migration(f,{migrationSql:"ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE items SET value=lower(hex(randomblob(12))),note='previewed';"});
   const candidate=await f.supervisor.prepareMigration({...input,authorityKey:"owner-v1"});
@@ -80,7 +80,7 @@ it("previews actual changed values and approves the exact candidate without runn
 
 it("rejects changed owner and stale data and replaces a discarded candidate without leaks",async()=>{
   let balance=0;
-  const f=await fixture({migrationStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
+  const f=await fixture({maintenanceStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
   await f.invoke({id:"one",value:"original"});
   const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner-v1"});
   const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner-v1",authorize:f.authorize};
@@ -95,7 +95,7 @@ it("rejects changed owner and stale data and replaces a discarded candidate with
 
 it("refuses an expired preview and releases its reservation on explicit discard",async()=>{
   let now=100,balance=0;
-  const f=await fixture({nowMs:()=>now,migrationStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
+  const f=await fixture({nowMs:()=>now,maintenanceStorage:{authorize(){},account({bytes}){balance+=bytes;}}});
   const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner"});now=candidate.expiresAtMs;
   const access={scope:f.scope,tables:["items"],candidateId:candidate.candidateId,authorityKey:"owner",authorize:f.authorize};
   expect(()=>f.supervisor.migrationPreviewPage(access)).toThrow("expired");
@@ -113,7 +113,7 @@ function launcher(hook: (command: any, controls: { stop(): void; deliver(): void
 }
 
 it("deletes migration candidates and reservations with their dataset without a second refund",async()=>{
-  const account=vi.fn();const f=await fixture({migrationStorage:{authorize(){},account}});
+  const account=vi.fn();const f=await fixture({maintenanceStorage:{authorize(){},account}});
   const candidate=await f.supervisor.prepareMigration({...migration(f),authorityKey:"owner"});
   expect(account).toHaveBeenCalledTimes(2);
   expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toHaveLength(2);
@@ -356,4 +356,136 @@ it("rechecks authority before returning a structured refusal", async () => {
   }) });
   revoke = () => f.db.exec("UPDATE grants SET allowed=0");
   await expect(f.invoke({ refuse: true })).rejects.toThrow("denied");
+});
+
+
+it("recovers from a materialization cache and replays only its tail while retaining old retries",async()=>{
+  const opened:number[]=[],replayed:number[]=[];
+  let balance=0;
+  const launch=launcher((command,controls)=>{
+    if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+    controls.deliver();
+  });
+  const storage={authorize(){},account({bytes}:{bytes:number}){balance+=bytes;}};
+  const f=await fixture({launch,maintenanceStorage:storage,materializationEvents:2});
+  for(let n=1;n<=3;n++)await f.invoke({id:String(n),value:"saved"},{idempotencyKey:String(n)});
+  await f.invoke({}, {readOnly:true});
+  const cached=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
+  expect(cached.cursor.revision).toBe(2);
+  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(3);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(3);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+  expect(balance).toBe(f.db.prepare("SELECT storage_bytes FROM dohc_dataset_materializations").get()!.storage_bytes);
+  await f.supervisor.close();
+  const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),runtime:{launch},maintenanceStorage:storage,materializationEvents:2});
+  cleanups.push(()=>reopened.close());
+  const input={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
+  expect((await reopened.invoke(input)).result).toHaveLength(3);
+  expect(opened).toEqual([0,2]);expect(replayed).toEqual([3]);
+  const original={id:"1",value:"saved"};
+  expect(await reopened.invoke({...input,input:original,idempotencyKey:"1",payloadSha256:hash(JSON.stringify(original)),readOnly:false})).toMatchObject({revision:1,replayed:true});
+});
+
+it("acknowledges a committed write before cache maintenance and serializes later work",async()=>{
+  let release:(()=>void)|undefined;
+  const storage={authorize(){},account(){}};
+  const f=await fixture({materializationEvents:1,maintenanceStorage:storage,launch:launcher((command,controls)=>{
+    if(command.command.kind==="snapshot"){release=controls.deliver;return;}controls.deliver();
+  })});
+  expect((await f.invoke({id:"one",value:"saved"})).revision).toBe(1);
+  await vi.waitFor(()=>expect(release).toBeTypeOf("function"));
+  let completed=false;
+  const read=f.invoke({}, {readOnly:true}).then(result=>{completed=true;return result;});
+  await new Promise<void>(resolve=>setImmediate(resolve));expect(completed).toBe(false);
+  release!();expect((await read).result).toHaveLength(1);
+});
+
+it("keeps committed writes successful when materialization quota is exhausted",async()=>{
+  const failures:unknown[]=[];
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){throw Error("quota full");}},onMaintenanceError:(_scope,error)=>failures.push(error)});
+  expect((await f.invoke({id:"one",value:"saved"})).revision).toBe(1);
+  expect((await f.invoke({}, {readOnly:true})).result).toHaveLength(1);
+  expect(failures).toHaveLength(1);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+});
+
+it("flushes idle workers with host authority after the request credential expires",async()=>{
+  let cached!:()=>void;
+  const installed=new Promise<void>(resolve=>cached=resolve);
+  const f=await fixture({idleMs:10,maintenanceStorage:{authorize(){},account(){}},transform:journal=>({...journal,cacheMaterialization(input){const value=journal.cacheMaterialization(input);cached();return value;}})});
+  await f.invoke({id:"one",value:"saved"});
+  f.db.prepare("UPDATE grants SET allowed=0").run();
+  await installed;
+  expect(f.journal.materialization({scope:f.scope,authorize(){}})?.cursor.revision).toBe(1);
+  expect(f.journal.head(f.scope,()=>{}).cursor.revision).toBe(1);
+});
+
+
+it.each(["chunk", "full hash", "missing marker", "wrong marker", "schema"])("falls back to authoritative history for a cache with damaged %s",async(damage)=>{
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}}});
+  await f.invoke({id:"one",value:"saved"});
+  await f.invoke({}, {readOnly:true});
+  const cache=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
+  await f.supervisor.close();
+  const bytes=f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})!;
+  if(damage==="chunk"||damage==="full hash") {
+    const corrupted=Uint8Array.from(bytes);corrupted[corrupted.length-1]^=1;
+    f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=? WHERE stage_id=?").run(corrupted,cache.checkpointId);
+    if(damage==="full hash")f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET sha256=? WHERE stage_id=?").run(createHash("sha256").update(corrupted).digest("hex"),cache.checkpointId);
+  } else {
+    const path=join(f.directory,"damaged.sqlite");await writeFile(path,bytes);
+    const db=new DatabaseSync(path);
+    if(damage==="missing marker")db.exec("DROP TABLE dohc_applied");
+    else if(damage==="wrong marker")db.exec("UPDATE dohc_applied SET revision=99");
+    else db.exec("ALTER TABLE items ADD COLUMN unexpected TEXT");
+    db.close();
+    const damaged=await readFile(path),sha256=createHash("sha256").update(damaged).digest("hex");
+    let stage=f.journal.stageCheckpoint({scope:f.scope,expectedBytes:damaged.length,sha256,authorize:f.authorize});
+    f.journal.appendCheckpointChunk({stage,index:0,bytes:damaged,authorize:f.authorize});
+    stage=f.journal.sealCheckpoint({stage,authorize:f.authorize});
+    f.journal.cacheMaterialization({expected:cache.cursor,checkpoint:stage,authorize:f.authorize,account(){}});
+  }
+  const replayed:number[]=[],errors:unknown[]=[];
+  const reopened=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,"workers"),onMaintenanceError:(_scope,error)=>errors.push(error),runtime:{launch:launcher((command,controls)=>{
+    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));controls.deliver();
+  })}});
+  cleanups.push(()=>reopened.close());
+  const result=await reopened.invoke({scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize});
+  expect(result.result).toEqual([{id:"one",value:"saved"}]);expect(replayed).toEqual([1]);expect(errors).toHaveLength(1);
+});
+
+it("leaves restart-reclaimable reservations when closing during a snapshot",async()=>{
+  let entered!:()=>void;
+  const snapshot=new Promise<void>(resolve=>entered=resolve);
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},launch:launcher((command,controls)=>{
+    if(command.command.kind==="snapshot"){entered();return;}controls.deliver();
+  })});
+  expect((await f.invoke({id:"one",value:"saved"})).revision).toBe(1);
+  await snapshot;
+  await f.supervisor.close();
+  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(1);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  const stages=f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize});
+  expect(stages.length).toBeLessThanOrEqual(1);
+  expect((await readdir(join(f.directory,"workers"))).filter(name=>name.startsWith("worker-"))).toHaveLength(0);
+});
+
+
+it("refuses cache installation after authority transfers during the snapshot",async()=>{
+  let release:(()=>void)|undefined;
+  const errors:unknown[]=[];
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},onMaintenanceError:(_scope,error)=>errors.push(error),launch:launcher((command,controls)=>{
+    if(command.command.kind==="snapshot"){release=controls.deliver;return;}controls.deliver();
+  })});
+  const result=await f.invoke({id:"one",value:"saved"});expect(result.revision).toBe(1);
+  await vi.waitFor(()=>expect(release).toBeTypeOf("function"));
+  f.journal.fence({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
+  const after=f.invoke({}, {readOnly:true});const check=expect(after).rejects.toThrow("transferred");
+  release!();await check;
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+  expect(errors.length).toBeGreaterThan(0);
+  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(1);
 });

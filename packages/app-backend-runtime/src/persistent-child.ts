@@ -81,6 +81,7 @@ function initialize(input:OpenRequest):DatasetCursor {
     const rows=db.prepare(`SELECT scope,revision,digest FROM ${marker}`).all();
     if (rows.length!==1 || rows[0].scope!==JSON.stringify(config.scope) || rows[0].revision!==config.cursor.revision || rows[0].digest!==config.cursor.digest) reject("invalid_checkpoint","Checkpoint cursor does not match the host manifest.");
   } else {
+    if(config.requireCheckpointCursor) reject("invalid_checkpoint","Cached checkpoint has no committed cursor.");
     db.exec(markerSchema);
     db.prepare(`INSERT INTO ${marker} VALUES(1,?,?,?)`).run(JSON.stringify(config.scope),config.cursor.revision,config.cursor.digest);
   }

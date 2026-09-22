@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isAppBackendRuntimeError, approvedTables, boundedText, DEFAULT_LIMITS } from "./protocol.js";
 import type { AppOperationFile, JsonValue } from "./protocol.js";
@@ -86,12 +86,15 @@ export interface DatasetSupervisorOptions {
   idleMs?: number;
   queueMs?: number;
   nowMs?: () => number;
+  /** Maximum journal events between successful materialization caches. */
+  materializationEvents?: number;
+  onMaintenanceError?: (scope: DatasetScope, error: unknown) => void;
   /** Host-lifetime maintenance authority and quota, independent of any request credential. */
-  migrationStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
+  maintenanceStorage?: { authorize():void; account(allocation:Readonly<CheckpointStageAllocation>):unknown };
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
 type Job = { bytes: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
-type Lane = { scope: DatasetScope; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void> };
+type Lane = { scope: DatasetScope; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function copyScope(value:DatasetScope):DatasetScope {
   if(!value||![value.workspaceId,value.datasetId].every(part=>typeof part==="string"&&/^[A-Za-z0-9._:-]{1,128}$/.test(part)))throw new Error("Invalid dataset scope.");
@@ -105,18 +108,86 @@ const sameAuthority = (left: DatasetCursor, right: DatasetCursor) => left.worksp
 /** Coordinates one authority journal and recoverable workers. This is not a public request handler. */
 export async function createDatasetSupervisor(options: DatasetSupervisorOptions) {
   const maxWorkers = options.maxWorkers ?? 4, idleMs = options.idleMs ?? 30_000, queueMs = options.queueMs ?? 30_000;
-  for (const [value, max] of [[maxWorkers, 16], [idleMs, 300_000], [queueMs, 60_000]]) {
+  const materializationEvents = options.materializationEvents ?? 128;
+  for (const [value, max] of [[maxWorkers, 16], [idleMs, 300_000], [queueMs, 60_000], [materializationEvents, 4096]]) {
     if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error("Invalid dataset worker limit.");
   }
   await mkdir(options.directory, { recursive: true });
   const root = await realpath(options.directory);
   const ownership=await acquireSupervisorOwnership(root);
   const lanes = new Map<string, Lane>();
+  const blockedMaintenance = new Set<string>();
   const candidates = new Map<string, Candidate>();
   const candidateCleanup = new Set<Promise<void>>();
   let preparingCandidates = 0;
   let closed = false, workerCount = 0, queuedCount = 0, queuedBytes = 0;
   const now = options.nowMs ?? Date.now;
+
+  function reportMaintenanceError(scope:DatasetScope,error:unknown):void {
+    try {options.onMaintenanceError?.({...scope},error);} catch { /* Diagnostics cannot change a committed response. */ }
+  }
+  async function maintainMaterialization(lane:Lane,force=false):Promise<void> {
+    const storage=options.maintenanceStorage,worker=lane.worker;
+    if(!storage||!worker||closed||blockedMaintenance.has(JSON.stringify(lane.scope)))return;
+    const reservations:CheckpointStage[]=[];
+    let path:string|undefined;
+    const authorize=()=>{
+      if(closed)throw new Error("Dataset host is closed.");
+      storage.authorize();
+    };
+    try {
+      authorize();
+      const current=options.journal.head(lane.scope,storage.authorize);
+      if(!current.active||!sameCursor(current.cursor,worker.cursor))throw new Error("Dataset changed during materialization maintenance.");
+      const previous=options.journal.materialization({scope:lane.scope,authorize});
+      const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
+      if(worker.cursor.revision<=after||(!force&&worker.cursor.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0)))return;
+      lane.nextMaterializationRevision=worker.cursor.revision+materializationEvents;
+      // Account the physical snapshot before SQLite creates it, including its overlap with chunk staging.
+      reservations.push(options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:current.capacityBytes,
+        sha256:digest(`materialization-reservation-${randomUUID()}`),authorize,account:storage.account}));
+      path=join(worker.directory,`materialization-${randomUUID()}.sqlite`);
+      const snapshot=await worker.runtime.snapshot(path);
+      if(snapshot.path!==path||snapshot.cursor.revision!==worker.cursor.revision||snapshot.cursor.digest!==worker.cursor.digest)throw new Error("Materialization cursor differs from its committed worker.");
+      const info=await lstat(path);
+      if(!info.isFile()||info.isSymbolicLink()||info.size<100||info.size>current.capacityBytes)throw new Error("Materialization exceeds its reserved capacity.");
+      const file=await open(path,"r"),buffer=Buffer.alloc(1024*1024),hash=createHash("sha256");
+      try {
+        for(let offset=0;offset<info.size;) {
+          authorize();const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);
+          if(!result.bytesRead)throw new Error("Materialization is truncated.");
+          hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;
+        }
+        let stage=options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:info.size,sha256:hash.digest("hex"),authorize,account:storage.account});
+        reservations.push(stage);
+        for(let index=0,offset=0;offset<info.size;index++) {
+          const length=Math.min(buffer.length,info.size-offset);let bytesRead=0;
+          while(bytesRead<length) {
+            authorize();const result=await file.read(buffer,bytesRead,length-bytesRead,offset+bytesRead);
+            if(!result.bytesRead)throw new Error("Materialization is truncated.");bytesRead+=result.bytesRead;
+          }
+          options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize});offset+=length;
+        }
+        stage=options.journal.sealCheckpoint({stage,authorize});
+        options.journal.cacheMaterialization({expected:worker.cursor,checkpoint:stage,authorize,account:allocation=>storage.account({
+          scope:lane.scope,stage,bytes:allocation.bytes-allocation.stagedCreditBytes-allocation.releasedBytes})});
+        reservations.pop();
+      } finally {await file.close();}
+    } catch(error) {
+      reportMaintenanceError(lane.scope,error);
+      if(path)try{await stopWorker(lane);}catch(stopError){reportMaintenanceError(lane.scope,stopError);}
+    }
+    finally {
+      let removed=true;
+      if(path)try{await rm(path,{force:true});}catch(error){removed=false;blockedMaintenance.add(JSON.stringify(lane.scope));reportMaintenanceError(lane.scope,error);}
+      // If a file cannot be removed, retain its reservation until exclusive startup reclaims both.
+      for(let index=reservations.length-1;index>=0;index--) {
+        if(index===0&&!removed)continue;
+        try{options.journal.discardCheckpoint({stage:reservations[index]!,...storage});}
+        catch(error){blockedMaintenance.add(JSON.stringify(lane.scope));reportMaintenanceError(lane.scope,error);}
+      }
+    }
+  }
 
   async function dropCandidate(candidate: Candidate) {
     if(candidates.get(candidate.result.candidateId)!==candidate)return;
@@ -125,8 +196,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try {
       await removing;
       candidate.filesRemoved=true;
-      if(options.migrationStorage)while(candidate.reservations.length) {
-        try {options.journal.discardCheckpoint({stage:candidate.reservations[0]!,...options.migrationStorage});candidate.reservations.shift();}
+      if(options.maintenanceStorage)while(candidate.reservations.length) {
+        try {options.journal.discardCheckpoint({stage:candidate.reservations[0]!,...options.maintenanceStorage});candidate.reservations.shift();}
         catch(error) {if(!closed)throw error;break;} // Closed authority leaves durable reservations for exclusive startup maintenance.
       }
       candidates.delete(candidate.result.candidateId);
@@ -186,32 +257,50 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try {
       const current = head(input);
       if (!current.active) throw new Error("Dataset authority was transferred.");
-      const checkpoint = options.journal.captureExport({ scope: input.scope, authorize: () => standing(input), capture: () => null }).checkpoint;
-      if (!sameAuthority(checkpoint.cursor, current.cursor)) throw new Error("Dataset checkpoint is invalid.");
-      directory = await ownership.createDirectory();
-      const checkpointPath = join(directory, "checkpoint.sqlite");
-      const file=await open(checkpointPath,"wx",0o600),hash=createHash("sha256");
-      try {
-        for(let offset=0;offset<checkpoint.byteLength;) {
-          const bytes=options.journal.exportBlob({scope:input.scope,record:checkpoint,offset,length:Math.min(1024*1024,checkpoint.byteLength-offset),authorize:()=>standing(input)});
-          if(!bytes.byteLength||bytes.byteLength>Math.min(1024*1024,checkpoint.byteLength-offset))throw new Error("Dataset checkpoint range is invalid.");
-          hash.update(bytes);
-          for(let written=0;written<bytes.byteLength;) {
-            const result=await file.write(bytes,written,bytes.byteLength-written,offset+written);
-            if(!result.bytesWritten)throw new Error("Dataset checkpoint write made no progress.");
-            written+=result.bytesWritten;
+      const canonical = options.journal.captureExport({ scope: input.scope, authorize: () => standing(input), capture: () => null }).checkpoint;
+      if (!sameAuthority(canonical.cursor, current.cursor)) throw new Error("Dataset checkpoint is invalid.");
+      const cache = options.journal.materialization({scope: input.scope, authorize: () => standing(input)});
+      async function restore(useCache: boolean): Promise<Worker> {
+        const checkpoint = useCache ? cache! : canonical;
+        directory = await ownership.createDirectory();
+        const checkpointPath = join(directory, "checkpoint.sqlite");
+        const file=await open(checkpointPath,"wx",0o600),hash=createHash("sha256");
+        try {
+          for(let offset=0;offset<checkpoint.byteLength;) {
+            const range={scope:input.scope,offset,length:Math.min(1024*1024,checkpoint.byteLength-offset),authorize:()=>standing(input)};
+            const bytes=useCache ? options.journal.materializationBlob({...range,cache:cache!}) : options.journal.exportBlob({...range,record:canonical});
+            if(!bytes?.byteLength||bytes.byteLength>range.length)throw new Error("Dataset checkpoint range is invalid.");
+            hash.update(bytes);
+            for(let written=0;written<bytes.byteLength;) {
+              const result=await file.write(bytes,written,bytes.byteLength-written,offset+written);
+              if(!result.bytesWritten)throw new Error("Dataset checkpoint write made no progress.");
+              written+=result.bytesWritten;
+            }
+            offset+=bytes.byteLength;
           }
-          offset+=bytes.byteLength;
+          if(hash.digest("hex")!==checkpoint.sha256)throw new Error("Dataset checkpoint is invalid.");
+        }finally{await file.close();}
+        standing(input);
+        const runtime = await openPersistentAppBackend({ directory, checkpointPath, requireCheckpointCursor:useCache, schemaSql: current.schemaSql, tables: input.tables,
+          ownership:{root:ownership.root,session:ownership.session},
+          scope: { workspaceId: current.cursor.workspaceId, datasetId: current.cursor.datasetId, hostEpoch: current.cursor.hostEpoch,
+            approvedRevisionHash: current.cursor.approvedRevisionHash }, cursor: { revision: checkpoint.cursor.revision, digest: checkpoint.cursor.digest },
+          databaseBytes: current.capacityBytes }, options.runtime);
+        return { runtime, directory, cursor: checkpoint.cursor, tables: [...input.tables] };
+      }
+      let worker:Worker;
+      if(cache) {
+        try {worker=await restore(true);}
+        catch(error) {
+          const after=head(input);
+          if(!after.active||!sameCursor(after.cursor,current.cursor))throw error;
+          if(directory)await removeDirectory(directory);
+          directory=undefined;
+          reportMaintenanceError(input.scope,error);
+          worker=await restore(false);
         }
-        if(hash.digest("hex")!==checkpoint.sha256)throw new Error("Dataset checkpoint is invalid.");
-      }finally{await file.close();}
-      standing(input);
-      const runtime = await openPersistentAppBackend({ directory, checkpointPath, schemaSql: current.schemaSql, tables: input.tables,
-        ownership:{root:ownership.root,session:ownership.session},
-        scope: { workspaceId: current.cursor.workspaceId, datasetId: current.cursor.datasetId, hostEpoch: current.cursor.hostEpoch,
-          approvedRevisionHash: current.cursor.approvedRevisionHash }, cursor: { revision: checkpoint.cursor.revision, digest: checkpoint.cursor.digest },
-        databaseBytes: current.capacityBytes }, options.runtime);
-      const worker = { runtime, directory, cursor: checkpoint.cursor, tables: [...input.tables] };
+      } else worker=await restore(false);
+      lane.nextMaterializationRevision=worker.cursor.revision+materializationEvents;
       lane.worker = worker;
       return worker;
     } catch (error) {
@@ -304,9 +393,9 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const reservations:CheckpointStage[]=[];
     const abort=()=>{void worker?.runtime.abort("Dataset migration preview was cancelled.").catch(()=>{});};
     try {
-      if(input.accountStage&&!options.migrationStorage)throw new Error("Migration previews require host-lifetime storage accounting.");
-      if(options.migrationStorage)for(let index=0;index<2;index++)reservations.push(options.journal.stageCheckpoint({scope:input.scope,expectedBytes:captured.capacityBytes,
-        sha256:digest(`migration-preview-reservation-${randomUUID()}`),authorize:()=>standing(input),account:options.migrationStorage.account}));
+      if(input.accountStage&&!options.maintenanceStorage)throw new Error("Migration previews require host-lifetime storage accounting.");
+      if(options.maintenanceStorage)for(let index=0;index<2;index++)reservations.push(options.journal.stageCheckpoint({scope:input.scope,expectedBytes:captured.capacityBytes,
+        sha256:digest(`migration-preview-reservation-${randomUUID()}`),authorize:()=>standing(input),account:options.maintenanceStorage.account}));
       worker=await recover(lane,input);standing(input);
       input.signal?.addEventListener("abort",abort,{once:true});
       directory=await ownership.createDirectory();
@@ -326,7 +415,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     }catch(error){await stopWorker(lane);standing(input);throw error;}
     finally{
       preparingCandidates--;input.signal?.removeEventListener("abort",abort);if(directory)await removeDirectory(directory);
-      if(options.migrationStorage)for(const stage of reservations)try{options.journal.discardCheckpoint({stage,...options.migrationStorage});}catch{}
+      if(options.maintenanceStorage)for(const stage of reservations)try{options.journal.discardCheckpoint({stage,...options.maintenanceStorage});}catch{}
     }
   }
 
@@ -424,15 +513,16 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   }
 
   function pump(lane: Lane): void {
-    if (lane.active) return;
+    if (lane.active || closed) return;
     const job = lane.queue.shift();
     if (!job) {
       if (lane.worker) {
         lane.idle = setTimeout(() => {
-          lane.done = stopWorker(lane).finally(() => {
-            const key = JSON.stringify(lane.scope);
-            if (!lane.active && !lane.queue.length && !lane.worker && lanes.get(key) === lane) lanes.delete(key);
-          });
+          lane.active=true;
+          lane.done=(async()=>{
+            try {await maintainMaterialization(lane,true);await stopWorker(lane);}
+            finally {lane.active=false;pump(lane);}
+          })();
           // close observes cleanup failures; timers must not reject without a handler.
           void lane.done.catch(() => {});
         }, idleMs);
@@ -446,18 +536,20 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     job.signal?.removeEventListener("abort", job.abort);
     lane.active = true;
     lane.done = (async () => {
+      let released=false;
       try {
         const result = await job.work();
-        lane.active = false;
-        pump(lane);
-        job.resolve(result);
-      } catch (error) {
-        lane.active = false;
-        pump(lane);
-        job.reject(error);
-      }
+        if(options.maintenanceStorage&&lane.worker&&!blockedMaintenance.has(JSON.stringify(lane.scope))&&lane.worker.cursor.revision>=(lane.nextMaterializationRevision??materializationEvents)) {
+          job.resolve(result);
+          // Respond first; keep this lane serialized while a bounded cache is prepared.
+          await new Promise<void>(resolve=>setImmediate(resolve));
+          await maintainMaterialization(lane);
+        } else {released=true;lane.active=false;pump(lane);job.resolve(result);return;}
+      } catch (error) { job.reject(error); }
+      finally {if(!released){lane.active=false;pump(lane);}}
     })();
   }
+
   function migrationInput(raw:DatasetMigration):DatasetMigration {
     const input:DatasetMigration={...raw,scope:copyScope(raw.scope),expected:{...copyScope(raw.expected),hostEpoch:raw.expected.hostEpoch,
       approvedRevisionHash:raw.expected.approvedRevisionHash,revision:raw.expected.revision,digest:raw.expected.digest},tables:approvedTables(raw.tables),newTables:approvedTables(raw.newTables),

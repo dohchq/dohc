@@ -12,6 +12,7 @@ export interface PersistentOpenInput {
   directory: string;
   ownership?: WorkerOwnership;
   checkpointPath?: string;
+  requireCheckpointCursor?: boolean;
   schemaSql: string;
   tables: string[];
   scope: DatasetScope;
@@ -99,6 +100,7 @@ export function openRequest(input:PersistentOpenInput):OpenRequest {
   if (!Number.isSafeInteger(databaseBytes) || databaseBytes<4096 || databaseBytes>128*1024*1024) reject("invalid_input","Invalid dataset storage reservation.");
   const limits={...runtimeLimits(input.limits),databaseBytes};
   return {directory:input.directory,checkpointPath:input.checkpointPath,
+    requireCheckpointCursor:input.requireCheckpointCursor===true,
     ...(input.ownership ? {ownership:{root:input.ownership.root,session:input.ownership.session}} : {}),
     tables:approvedTables(input.tables),schemaSql:boundedText(input.schemaSql,limits.sourceBytes,"Database schema"),
     scope:{workspaceId:input.scope.workspaceId,datasetId:input.scope.datasetId,hostEpoch:input.scope.hostEpoch,approvedRevisionHash:input.scope.approvedRevisionHash},
