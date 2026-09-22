@@ -130,7 +130,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     const triggers=db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
     let constraintConflict=false, forbidden=false;
     // The changeset already contains trigger and foreign-key actions from the writer.
-    db.exec("PRAGMA foreign_keys=OFF");
+    db.exec("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON");
     try {
       db.exec("BEGIN IMMEDIATE");transaction=true;
       for (const trigger of triggers) db.exec(`DROP TRIGGER "${String(trigger.name).replaceAll('"','""')}"`);
@@ -148,7 +148,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input));
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     }
-    finally { db.exec("PRAGMA foreign_keys=ON"); }
+    finally { db.exec("PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }
   }
   if (command.kind==="migrateCheckpoint") {
     noLinks(command.input.path,true);
@@ -165,7 +165,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
       authorizeMigration(copy,[...new Set([...config.tables,...command.input.tables])]);
       copy.exec(command.input.migrationSql);copy.setAuthorizer(null);
       if (copy.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(marker)) reject("invalid_checkpoint","Migration introduced internal metadata.");
-      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits);
+      verifyDatasetSchema(copy,command.input.schemaSql,command.input.tables,config.limits,command.input.schemaSql!==config.schemaSql);
       copy.exec("COMMIT");
       closeSync(openSync(command.input.path,"wx",0o600));outputReserved=true;
       copy.prepare("VACUUM INTO ?").run(command.input.path);

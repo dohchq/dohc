@@ -254,6 +254,19 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("reopens an accepted connection-dependent CHECK without rerunning its decision",async()=>{
+    await fixture(async({root,open})=>{
+      const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL CHECK(total_changes()=1));";
+      const writer=await open({schemaSql});
+      const prepared=await writer.prepare(operation(initial,{id:1,value:"accepted"}));
+      const cursor=await writer.finalize(event(prepared));
+      const checkpointPath=join(root,"accepted-check.sqlite");await writer.snapshot(checkpointPath);
+      const recovered=await open({schemaSql,cursor,checkpointPath});
+      expect((await recovered.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"accepted"}]);
+      await expect(recovered.prepare(operation(cursor,{id:2,value:"next"}))).rejects.toThrow();
+    });
+  });
+
   it.each([
     "ATTACH DATABASE ':memory:' AS escape",
     "PRAGMA writable_schema=ON",

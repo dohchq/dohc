@@ -13,11 +13,11 @@ export function assertReplayableSchema(schemaSql:string):void {
   if (/\bAUTOINCREMENT\b/i.test(code)) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
 }
 
-export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits):void {
+export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:string[], limits:RuntimeLimits, validateNewPredicates=false):void {
   assertReplayableSchema(schemaSql);
   const expected=new DatabaseSync(":memory:",options);
   try {
-    expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA max_page_count=${Math.floor(limits.databaseBytes/4096)}`);
+    expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA ignore_check_constraints=ON; PRAGMA max_page_count=${Math.floor(limits.databaseBytes/4096)}`);
     authorize(expected,{tables},{initializing:true});
     expected.exec(schemaSql);expected.setAuthorizer(null);
     if (expected.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='sqlite_sequence'").get()) reject("invalid_schema","AUTOINCREMENT is unavailable for journaled datasets. Use an INTEGER PRIMARY KEY or an explicit ID.");
@@ -33,7 +33,11 @@ export function verifyDatasetSchema(db:DatabaseSync, schemaSql:string, tables:st
     }
     if (JSON.stringify(db.prepare(datasetSchema).all())!==JSON.stringify(schema)) reject("invalid_checkpoint","Checkpoint schema does not match the approved dataset.");
   } finally {expected.close();}
-  if (db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check!=="ok" || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_checkpoint","Checkpoint integrity check failed.");
+  // Trusted host checkpoints contain previously accepted predicates, including time-dependent CHECKs.
+  db.exec(validateNewPredicates ? "PRAGMA ignore_check_constraints=OFF" : "PRAGMA ignore_check_constraints=ON");
+  try {
+    if (db.prepare("PRAGMA integrity_check(1)").get()?.integrity_check!=="ok" || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_checkpoint","Checkpoint integrity check failed.");
+  } finally {db.exec("PRAGMA ignore_check_constraints=OFF");}
 }
 
 export function authorizeMigration(db:DatabaseSync, approved:string[]):void {

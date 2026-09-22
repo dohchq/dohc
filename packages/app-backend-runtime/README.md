@@ -120,8 +120,10 @@ It aborts the entire transaction for conflicts or undeclared tables, including i
 Replay temporarily removes triggers and disables foreign-key actions because the changeset already contains their effects.
 It restores triggers and checks foreign keys before committing, then enables foreign-key enforcement for subsequent operations.
 If intermediate unique constraints reject an otherwise valid net changeset, recovery applies it to a disposable shadow without secondary constraints.
-It then copies the final rows into the unchanged approved schema in one transaction, checking constraints and recomputing generated columns.
+It then copies the final rows into the unchanged approved schema in one transaction, checking structural constraints and recomputing generated columns.
 This fallback runs only during replay and leaves ordinary writes unchanged. It uses additional temporary disk space up to the dataset reservation.
+Replay and checkpoint integrity checks restore accepted state without reevaluating `CHECK` predicates, which can depend on time or randomness.
+The trusted host verifies journal and checkpoint identity before supplying them. Replay still checks keys and foreign keys; subsequent guest writes enforce `CHECK` again.
 `snapshot(path)` creates an exclusive SQLite checkpoint containing the current scope and cursor, then keeps the worker open.
 It refuses an existing destination. The host publishes the checkpoint and its manifest durably before retiring journal events.
 

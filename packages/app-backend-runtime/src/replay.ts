@@ -56,9 +56,9 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
     if(!applied || forbidden) reject("invalid_changeset","The committed changeset cannot be replayed.");
     shadow.exec("COMMIT");
 
-    // Canonical CHECK/UNIQUE constraints validate the final rows; generated columns recompute here.
+    // Replay restores accepted predicates; structural constraints and generated columns still apply.
     const triggers=database.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
-    database.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
+    database.exec("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; BEGIN IMMEDIATE");
     try {
       for(const trigger of triggers) database.exec(`DROP TRIGGER ${quote(String(trigger.name))}`);
       for(const table of tables) database.exec(`DELETE FROM ${quote(table.name)}`);
@@ -67,7 +67,7 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
       for(const trigger of triggers) database.exec(String(trigger.sql));
       commit();database.exec("COMMIT");
     } catch(error) {if(database.isTransaction) database.exec("ROLLBACK");throw error;}
-    finally {database.exec("PRAGMA foreign_keys=ON");}
+    finally {database.exec("PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF");}
   } finally {
     shadow?.close();
     for(const file of [path,path+"-journal"]) {
