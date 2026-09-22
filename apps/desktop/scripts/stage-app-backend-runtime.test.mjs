@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { load } from 'js-yaml';
 import { stageAppBackendRuntime, requireAppBackendRuntime } from './stage-app-backend-runtime.mjs';
 import { createInstalledDatasetCompiler } from '../src/workspaces/installedDatasetCompiler.ts';
+import { compileDatasetOperations } from '@dohc/app-backend-runtime/dataset-compiler';
 
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
@@ -35,7 +36,9 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
     await cp(compilerRequire.resolve('@esbuild/win32-x64/esbuild.exe'), join(binaryDirectory, 'esbuild.exe'));
     const compile = await createInstalledDatasetCompiler(resources);
     const source = 'type Value=number;globalThis.operations={read(){const value:Value=42;return {value};}};';
-    assert.match(await compile(source, 'data/operations.ts', new AbortController().signal), /value = 42/);
+    const installedOutput = await compile(source, 'data/operations.ts', new AbortController().signal);
+    assert.match(installedOutput, /value = 42/);
+    assert.equal(installedOutput, await compileDatasetOperations(source, 'data/operations.ts'));
   }
   const compilerBytes = await readFile(join(staged, 'dataset-compiler.mjs'));
   await rm(join(staged, 'dataset-compiler.mjs'));
