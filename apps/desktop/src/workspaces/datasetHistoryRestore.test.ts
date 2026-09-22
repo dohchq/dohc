@@ -109,6 +109,26 @@ it("refuses a reviewed reversal after a new registration and preserves every reg
   const rows = (await f.host.query(call(final.revision, id(5)))).result as { rows: Array<{ values: Record<string, unknown> }> };
   expect(rows.rows[0]!.values[id(4)]).toBe("New submission");
 });
+it("keeps consecutive reversal sources beside earlier revisions without nesting paths", async () => {
+  const f = await fixture();
+  let previous = f.revision;
+  let current = (await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Full name" }))).revision;
+  const paths = new Set<string>([f.revision.definition.schemaPath, current.definition.schemaPath]);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const review = await restore(f, previous.revisionSha256);
+    expect(review.revision.definition.schemaPath).toMatch(new RegExp(`^people/revisions/${current.revision + 1}-[^/]+/schema\\.sql$`));
+    expect(paths.has(review.revision.definition.schemaPath)).toBe(false);
+    paths.add(review.revision.definition.schemaPath);
+    expect(review.revision.definition.datasetId).toBe(f.revision.datasetId);
+    expect(review.revision.definition.operations).toEqual(f.revision.definition.operations);
+    expect(review.revision.definition.tables).toEqual(previous.definition.tables);
+    const result = await approve(f, review);
+    previous = current; current = result.revision;
+    expect((await f.host.query(call(current, id(5)))).result).toMatchObject({ rows: [] });
+  }
+  expect(f.files.get(f.revision.definition.schemaPath)).toBeDefined();
+  for (const path of paths) expect(f.files.get(path)).toBe(f.files.get(f.revision.definition.schemaPath));
+});
 it("rejects changed captured reversal source before approval", async () => {
   const f = await fixture(); await approve(f, await f.prepare({ kind: "renameField", tableId: id(2), fieldId: id(4), name: "Full name" }));
   f.tamper(paths => { const path = paths.find(path => path.endsWith("operations.js"))!; f.files.set(path, f.files.get(path)! + "\n// changed after selection"); });

@@ -17,7 +17,7 @@ export function generateDatasetRelationChoices(input: { revision: DatasetRevisio
     fieldIds: [...new Set([key.fieldId, label.fieldId])] });
   const base = posix.dirname(definition.schemaPath).split("/revisions/")[0]!;
   const directory = posix.join(base, "revisions", `${revision.revision + 1}-${randomUUID()}`);
-  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, "operations.js");
+  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(revision.definition.operationsPath)}`);
   const parsed = parseDatasetDefinition(definition);
   const quote = (value: string) => `"${value}"`;
   const operationSource = input.operationSource + `\n;(() => {\nconst settings = ${JSON.stringify({ name, table: quote(target.sqlName), key: quote(key.sqlColumn), label: quote(label.sqlColumn), keyFieldId: key.fieldId, labelFieldId: label.fieldId, numeric: key.type === "number" })};\n${READ_SOURCE}\n})();\n`;

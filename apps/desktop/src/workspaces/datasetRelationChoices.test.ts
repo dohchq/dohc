@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetRelationChoices } from "./datasetRelationChoices";
 
@@ -25,6 +26,21 @@ const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, o
 const generate = () => generateDatasetRelationChoices({ revision, schemaSql, operationSource, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
 
 describe("public relation choice source", () => {
+  it("keeps TypeScript rules executable when preparing public choices", async () => {
+    const typedDefinition = { ...definition, operationsPath: "data/actions.ts" };
+    const typedSource = operationSource + "\nconst authored: string = 'kept';\nglobalThis.operations.authored = () => authored;";
+    const typedRevision = describeDatasetRevision({ definition: typedDefinition, revision: 1, schemaSql, operationSource: typedSource });
+    const next = generateDatasetRelationChoices({ revision: typedRevision, schemaSql, operationSource: typedSource, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
+    expect(next.definition.operationsPath).toMatch(/\/operations\.ts$/);
+    expect(next.operationSource.startsWith(typedSource + "\n;")).toBe(true);
+    const sandbox = { operations: {} as Record<string, (ctx?: unknown, input?: unknown) => unknown> };
+    runInNewContext(await compileDatasetOperations(next.operationSource, next.definition.operationsPath), sandbox);
+    expect(sandbox.operations.authored!()).toBe("kept");
+    const query = sandbox.operations[next.definition.operations.at(-1)!.name]!;
+    expect(query({ db: { query: () => [{ choice_key: "a", choice_label: "Alpha" }] } }, {})).toEqual({
+      rows: [{ id: "a", values: { [id(3)]: "a", [id(4)]: "Alpha" } }], nextCursor: null,
+    });
+  });
   it("explains authored action maps that cannot accept another action", () => {
     const locked = "globalThis.operations = Object.freeze({});";
     const result = generateDatasetRelationChoices({ revision, schemaSql, operationSource: locked, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
