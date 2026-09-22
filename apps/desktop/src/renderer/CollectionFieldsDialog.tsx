@@ -18,7 +18,7 @@ export interface CollectionFieldsDialogProps {
   onClose(): void;
   onReviewSource(): void;
 }
-type FieldType = Extract<DatasetSchemaChange, { kind: "addField" }>["field"]["type"];
+type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
   ["select", "Select"], ["multi-select", "Multi-select"], ["url", "URL"], ["attachment", "File"]];
 
@@ -34,14 +34,21 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
   const [pending, setPending] = useState(false), [invalid, setInvalid] = useState<string | null>(null);
   const lifetime = useRef<AbortController | null>(null), active = useRef(true), locked = useRef(false);
+  const selectedField = table?.fields.find(field => field.fieldId === fieldId);
+  function selectField(id: string) {
+    const field = table?.fields.find(field => field.fieldId === id);
+    setFieldId(id); setName(field?.name ?? ""); setType(field?.type ?? "text"); setRequired(field?.required ?? false);
+  }
   useLayoutEffect(() => { active.current = true; return () => { active.current = false; lifetime.current?.abort(); }; }, []);
   function changeFromDraft(): DatasetSchemaChange {
+    if (kind === "changeField") return DatasetSchemaChange.parse({kind, tableId: props.tableId, fieldId, type, required});
     const label = name.trim();
     if (!label) throw new Error("Enter a name.");
     if (kind === "renameCollection") return DatasetSchemaChange.parse({ kind, name: label });
     if (kind === "renameTable") return DatasetSchemaChange.parse({ kind, tableId: props.tableId, name: label });
     if (table?.fields.some(field => field.name.toLocaleLowerCase() === label.toLocaleLowerCase() && (kind === "addField" || field.fieldId !== fieldId))) throw new Error("A field already uses this name. Choose another name.");
     if (kind === "renameField") return DatasetSchemaChange.parse({ kind, tableId: props.tableId, fieldId, name: label });
+    if (type === "relation") throw new Error("Choose a field type.");
     const field: Extract<DatasetSchemaChange, { kind: "addField" }>["field"] = { name: label, type, required, unique };
     if (type === "select" || type === "multi-select") { field.options = parseOptionsText(options); if (!field.options.length) throw new Error("Enter at least one option."); }
     if (hasDefault) {
@@ -76,10 +83,20 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     <h2 id="collection-fields-title" className="m-0 text-sm font-semibold text-ink">Fields and names</h2>
     <label className="text-[12px] text-muted">Change<select aria-label="Change" disabled={pending} className={`${selectClass} mt-1 w-full`} value={kind} onChange={event => {
       const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
+      if (next === "changeField") { selectField(fieldId); return; }
+      if (next === "addField") { setType("text"); setRequired(false); }
       setName(next === "renameTable" ? table?.name ?? "" : next === "renameCollection" ? props.dataset.name : next === "renameField" ? table?.fields.find(field => field.fieldId === fieldId)?.name ?? "" : "");
-    }}><option value="addField">Add field</option><option value="renameField">Rename field</option><option value="renameTable">Rename table</option><option value="renameCollection">Rename Collection</option></select></label>
-    {kind === "renameField" && <label className="text-[12px] text-muted">Field<select aria-label="Field" disabled={pending} className={`${selectClass} mt-1 w-full`} value={fieldId} onChange={event => { setFieldId(event.target.value); setName(table?.fields.find(field => field.fieldId === event.target.value)?.name ?? ""); }}>{table?.fields.map(field => <option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select></label>}
-    <label className="text-[12px] text-muted">Name<input aria-label="Name" autoFocus className={`${inputClass} mt-1`} disabled={pending} value={name} onChange={event => setName(event.target.value)} /></label>
+    }}><option value="addField">Add field</option><option value="renameField">Rename field</option><option value="changeField">Change field type or requirement</option><option value="renameTable">Rename table</option><option value="renameCollection">Rename Collection</option></select></label>
+    {(kind === "renameField" || kind === "changeField") && <label className="text-[12px] text-muted">Field<select aria-label="Field" disabled={pending} className={`${selectClass} mt-1 w-full`} value={fieldId} onChange={event => selectField(event.target.value)}>{table?.fields.map(field => <option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select></label>}
+    {kind !== "changeField" && <label className="text-[12px] text-muted">Name<input aria-label="Name" autoFocus className={`${inputClass} mt-1`} disabled={pending} value={name} onChange={event => setName(event.target.value)} /></label>}
+    {kind === "changeField" && <>
+      <label className="text-[12px] text-muted">Type<select aria-label="Type" className={`${selectClass} mt-1 w-full`} disabled={pending} value={type} onChange={event => setType(event.target.value as FieldType)}>
+        {selectedField?.type === "relation" && <option value="relation">Relation</option>}
+        {types.filter(([value]) => value === selectedField?.type || ["text", "number"].includes(selectedField?.type ?? "") && ["text", "number"].includes(value)).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+      </select></label>
+      <label className="flex items-center gap-1 text-[12px] text-muted"><input type="checkbox" checked={required} disabled={pending} onChange={event => setRequired(event.target.checked)} />Required</label>
+      <p className="m-0 text-[12px] text-muted">Review existing values before applying this change. Fix conflicting records first. Other conversions need a source change.</p>
+    </>}
     {kind === "addField" && <>
       <label className="text-[12px] text-muted">Type<select aria-label="Type" className={`${selectClass} mt-1 w-full`} disabled={pending} value={type} onChange={event => { setType(event.target.value as FieldType); setRequired(false); setUnique(false); setHasDefault(false); setDefaultText(""); }}>{types.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       {(type === "select" || type === "multi-select") && <label className="text-[12px] text-muted">Options<input aria-label="Options" className={`${inputClass} mt-1`} disabled={pending} value={options} placeholder="Todo, Doing, Done" onChange={event => setOptions(event.target.value)} /></label>}
@@ -87,7 +104,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
         <label className="flex items-center gap-1"><input type="checkbox" checked={unique} disabled={pending || type === "attachment" || type === "multi-select"} onChange={event => setUnique(event.target.checked)} />Unique</label>
         <label className="flex items-center gap-1"><input type="checkbox" checked={hasDefault} disabled={pending || type === "attachment"} onChange={event => setHasDefault(event.target.checked)} />Default value</label></div>
       {hasDefault && <label className="text-[12px] text-muted">Default{type === "checkbox" ? <select aria-label="Default" className={`${selectClass} mt-1 w-full`} disabled={pending} value={defaultText || "false"} onChange={event => setDefaultText(event.target.value)}><option value="false">Unchecked</option><option value="true">Checked</option></select> : <input aria-label="Default" className={`${inputClass} mt-1`} type={type === "number" ? "number" : type === "date" ? "date" : "text"} disabled={pending} value={defaultText} onChange={event => setDefaultText(event.target.value)} />}</label>}
-      <p className="m-0 text-[12px] text-muted">Shared apps and helpers need approval for the new fields. Choose their access after this change.</p>
+      <p className="m-0 text-[12px] text-muted">New fields do not expand shared access. Custom rules stay unchanged; edit their source to use a new field.</p>
     </>}
     {invalid && <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p>}
     <div className="flex flex-wrap items-center justify-end gap-2"><SecondaryButton type="button" disabled={pending} onClick={props.onReviewSource}>Review source change</SecondaryButton><SecondaryButton type="button" disabled={pending} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Preparing…" : "Review change"}</PrimaryButton></div>

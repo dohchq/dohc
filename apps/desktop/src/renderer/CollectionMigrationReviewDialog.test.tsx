@@ -7,7 +7,7 @@ import { CollectionMigrationReviewDialog, type CollectionMigrationReviewDialogPr
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 function prep(): DatasetMigrationPreparation {
-  const base: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Fundraiser", schemaPath: "schema.sql", operationsPath: "operations.js", tables: [{ tableId: id(2), name: "Registrations", sqlName: "registrations", primaryKey: "record_id", fields: [{ fieldId: id(3), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false }] }], operations: [] };
+  const base: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Fundraiser", schemaPath: "schema.sql", operationsPath: "operations.js", tables: [{ tableId: id(2), name: "Registrations", sqlName: "registrations", primaryKey: "name", fields: [{ fieldId: id(3), name: "Name", sqlColumn: "name", type: "text", required: true, unique: true }] }], operations: [{operationId:id(12),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}] };
   const next = structuredClone(base); next.tables[0]!.fields.push({ fieldId: id(4), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false });
   const revision = (definition: DatasetDefinition, number: number): DatasetRevision => ({ datasetId: definition.datasetId, definition, revision: number, revisionSha256: `${number}`.repeat(64), definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64) });
   const expected = { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: "a".repeat(64), revision: 1, digest: "e".repeat(64) };
