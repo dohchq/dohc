@@ -227,7 +227,7 @@ const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTicket
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
-const datasetDirectory = await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
 const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
   maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
 }, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
@@ -569,7 +569,7 @@ installShutdown(server, {
     await configuredServiceHost?.close();
     await liveValidation.close();
     await datasetHost?.close();
-    if (datasetDirectory) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
+    if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
     storage.close();
     try {
       await pool?.end();

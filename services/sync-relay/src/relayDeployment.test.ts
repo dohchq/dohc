@@ -1,5 +1,5 @@
 import { DatabaseSync, backup } from "node:sqlite";
-import { mkdtempSync, rmSync, readFileSync, renameSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, renameSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -13,6 +13,7 @@ import { guardRelayResponses } from "./relayResponseStanding";
 import { createDeviceHostCredential } from "./deviceHostCredential";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./storage/context";
+import { acquireSupervisorOwnership } from "../../../packages/app-backend-runtime/src/worker-ownership";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
@@ -29,6 +30,25 @@ function read(path: string, table: string) {
 }
 
 describe("relay deployment continuity", () => {
+  it("reuses its private dataset root and reclaims crashed preview directories on restart",async()=>{
+    const f=fixture(),first=openRelayDeployment(f.configPath);
+    let orphan:string;
+    try {
+      mkdirSync(first.datasetDirectory,{recursive:true});
+      const ownership=await acquireSupervisorOwnership(first.datasetDirectory);
+      try {orphan=await ownership.createDirectory();writeFileSync(join(orphan,"report.jsonl"),"private preview");}
+      finally {ownership.close();}
+    }finally{first.storage.close();}
+    expect(existsSync(orphan!)).toBe(true);
+    const second=openRelayDeployment(f.configPath);
+    try {
+      expect(second.datasetDirectory).toBe(first.datasetDirectory);
+      const ownership=await acquireSupervisorOwnership(second.datasetDirectory);
+      try {expect(existsSync(orphan!)).toBe(false);expect(existsSync(f.relayPath)).toBe(true);}
+      finally{ownership.close();}
+      expect(existsSync(second.datasetDirectory)).toBe(true);
+    }finally{second.storage.close();}
+  });
   it("owns storage and maintenance exclusively and keeps history stable across restart", () => {
     const f = fixture(), first = openRelayDeployment(f.configPath);
     try {
