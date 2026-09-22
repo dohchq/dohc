@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
+import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
+import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision, verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -160,6 +162,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   }
   try {
     const files = createDatasetFiles(storage, account, nowMs);
+    const attempts = createDatasetAttempts({db: storage.db, transaction,
+      account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const host = createDatasetHost<AppBackendAuth>({db: storage.db, transaction, journal, supervisor, resolveAuthority, compileOperations: options.compileOperations,
       accountCreation(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes, true); },
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
@@ -175,6 +179,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_catalog WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_catalog_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_receipts WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_attempts WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_events WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_journals WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
@@ -193,6 +198,24 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
       invoke(auth: AppBackendAuth, input: Parameters<typeof host.invoke>[1]) {
         return host.invoke(auth, {...input, signal: AbortSignal.any([storage.unavailable, ...(input.signal ? [input.signal] : [])])});
+      },
+      attempt(auth: AppBackendAuth, publicationId: string, input: {authorityRevision: number; operation: string; request: DatasetAttemptRequest}, signal?: AbortSignal) {
+        const published = publication(auth, publicationId);
+        if (!published || published.authorityRevision !== input.authorityRevision) throw notFound();
+        const {workspaceId, datasetId, capability} = published;
+        const operation = capability.operations.find(value => value.name === input.operation);
+        if (!operation || operation.readOnly) throw notFound();
+        const scope = {workspaceId, datasetId, revision: capability.revision, revisionSha256: capability.revisionSha256,
+          operationId: operation.operationId, access: {kind: "app" as const, appId: publicationId}};
+        const captured = host.authorize(auth, scope);
+        return attempts.request({...scope, appId: publicationId, principalKey: captured.authority.principalKey}, input.request, () => {
+          signal?.throwIfAborted(); current();
+          const latest = publication(auth, publicationId);
+          if (!latest || latest.authorityRevision !== input.authorityRevision ||
+            JSON.stringify(host.authorize(auth, scope).authority) !== JSON.stringify(captured.authority)) throw notFound();
+          const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
+          if (!head || head.active !== 1 || head.approved_revision_hash !== scope.revisionSha256) throw notFound();
+        });
       },
       upload(auth: AppBackendAuth, publicationId: string, input: AppBackendUploadRequest, signal?: AbortSignal) {
         const published = publication(auth, publicationId);

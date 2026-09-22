@@ -20,7 +20,7 @@ it("maps only the bound publication routes and forwards filtered account authori
   const f = await fixture();
   for (const [method, suffix, mapped] of [
     ["GET", "", "/descriptor"], ["GET", `/blobs/${"b".repeat(64)}?authorityRevision=3`, `/blobs/${"b".repeat(64)}?authorityRevision=3`],
-    ["POST", "/backend/invoke", "/invoke"], ["POST", "/backend/upload", "/upload"], ["POST", "/backend/file", "/file"],
+    ["POST", "/backend/attempt", "/attempt"], ["POST", "/backend/invoke", "/invoke"], ["POST", "/backend/upload", "/upload"], ["POST", "/backend/file", "/file"],
   ] as const) {
     const request = new Request(prefix + suffix, { method, body: method === "POST" ? '{"authorityRevision":3}' : undefined, headers: {
       "content-type": "application/json", authorization: "Bearer attacker", cookie: "stolen=secret", origin: "https://attacker.example", "x-dohc-relay-exchange-key": "attacker", "x-dohc-link-profile-secret": "link-secret",

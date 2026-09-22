@@ -17,6 +17,7 @@ function forward(body: unknown, fetchRelay: (request: Request) => Promise<Respon
 
 it("forwards to fixed backend routes with launch authority and no browser credentials", async () => {
   for (const [body, action, expected, reply] of [
+    [{ id: "one", op: "backend.attempt", operation: "register", request: { action: "get" } }, "attempt", { authorityRevision: 7, operation: "register", action: "get" }, { attempt: null }],
     [invoke, "invoke", { authorityRevision: 7, operation: "register", idempotencyKey: "attempt-1", input: { quantity: 2 } }, { result: { registrationId: "registration-1" }, revision: 1, replayed: false }],
     [upload, "upload", { authorityRevision: 7, idempotencyKey: "upload-1", name: file.name, contentType: file.contentType, bytesBase64: "JVBERg==" }, { file, replayed: false }],
     [readFile, "file", { authorityRevision: 7, fileId: file.fileId, operation: "receipt.read", input: readFile.input }, { file, bytesBase64: "JVBERg==" }],
@@ -108,4 +109,19 @@ it("passes only bounded typed app refusals while discarding private or malformed
   const controller = new AbortController();
   const stale = await forward(invoke, async () => { controller.abort(); return Response.json(refusal, { status: 409 }); }, "application/json", controller.signal);
   expect(stale.status).toBe(503);
+});
+
+
+it("validates exact pending submissions without accepting caller identity", async () => {
+  const attempt = { token: "t".repeat(43), idempotencyKey: "first", input: { values: { name: "Friend" } } };
+  const body = {id: "pending", op: "backend.attempt", operation: "register", request: {action: "save", idempotencyKey: attempt.idempotencyKey, input: attempt.input}};
+  expect(await (await forward(body, async () => Response.json({attempt}))).json()).toEqual({attempt});
+  for (const request of [{...body.request, principalKey: "other"}, {action: "clear", token: "short"}, {action: "save", idempotencyKey: "key", input: "x".repeat(65537)}]) {
+    let called = false;
+    expect((await forward({...body, request}, async () => {called = true; return Response.json({attempt: null});})).status).toBe(400);
+    expect(called).toBe(false);
+  }
+  for (const reply of [{attempt, principalKey: "private"}, {attempt: {...attempt, token: "short"}}, {attempt: {...attempt, input: JSON.parse('{"constructor":"bad"}')}}]) {
+    expect((await forward(body, async () => Response.json(reply))).status).toBe(503);
+  }
 });

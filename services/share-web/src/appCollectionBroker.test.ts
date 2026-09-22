@@ -25,9 +25,11 @@ it('forwards backend operations, uploads, and file reads while rejecting supplie
     const invoke={id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
     const upload={id:'upload',op:'backend.upload',idempotencyKey:'upload-1',name:'receipt.pdf',contentType:'application/pdf',bytesBase64:'JVBERg=='};
     const file={id:'file',op:'backend.file',fileId:'file_0123456789abcdef',operation:'receipt.read',input:{}};
-    for(const body of [invoke,upload,file])expect((await f.request(body)).ok).toBe(true);
+    const attempt={id:'attempt',op:'backend.attempt',operation:'register',request:{action:'get'}};
+    for(const body of [invoke,upload,file,attempt])expect((await f.request(body)).ok).toBe(true);
     for(const body of [{...invoke,caller:{kind:'owner'}},{...upload,path:'private'},{...file,authorityRevision:1}])expect((await f.request(body)).status).toBe(400);
-    expect(calls).toEqual([invoke,upload,file]);
+    expect((await f.request({...attempt,principalKey:'other'})).status).toBe(400);
+    expect(calls).toEqual([invoke,upload,file,attempt]);
   }finally{f.close();}
 });
 it('uses bounded file budgets without widening operation replies',async()=>{

@@ -257,3 +257,31 @@ it("lets the workspace owner upload and inspect files without an app publication
   expect((await f.http(`${f.path}/upload`, {...body, revision: 2})).status).toBe(409);
   expect((await f.http(`${f.path}/file`, {...request, revision: 2})).status).toBe(409);
 });
+
+
+it("retains the first participant attempt across lost replies and clears only its captured token", async () => {
+  const f = await httpFixture(); await f.activate(); const publicationId = f.publish();
+  await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  const path = `link/app-publications/${publicationId}/backend`;
+  const request = (action: object, headers = f.publicHeaders) => f.http(`${path}/attempt`, {authorityRevision: 1, operation: "submit", ...action}, headers);
+  expect(await (await request({action: "get"})).json()).toEqual({attempt: null});
+  const save = {action: "save", idempotencyKey: "original", input: {name: "Friend"}};
+  const first = await request(save); expect(first.status).toBe(200);
+  const saved = await first.json(); expect(saved.attempt).toMatchObject({idempotencyKey: "original", input: {name: "Friend"}});
+  expect(await (await request({...save, idempotencyKey: "other-tab", input: {name: "Changed"}})).json()).toEqual(saved);
+  expect(await (await request({action: "get"})).json()).toEqual(saved);
+  const invoke = {authorityRevision: 1, operation: "submit", idempotencyKey: saved.attempt.idempotencyKey, input: saved.attempt.input};
+  expect((await f.http(`${path}/invoke`, invoke, f.publicHeaders)).status).toBe(200);
+  expect(await (await f.http(`${path}/invoke`, invoke, f.publicHeaders)).json()).toMatchObject({revision: 1, replayed: true});
+  expect(await (await f.invoke()).json()).toMatchObject({result: [{name: "Friend"}]});
+  expect(await (await request({action: "get"}, {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)})).json()).toEqual({attempt: null});
+  expect((await request({action: "clear", token: "x".repeat(43)})).status).not.toBe(200);
+  expect(await (await request({action: "get"})).json()).toEqual(saved);
+  expect(await (await request({action: "clear", token: saved.attempt.token})).json()).toEqual({attempt: null});
+  const next = await (await request({...save, idempotencyKey: "next"})).json();
+  expect(next.attempt.token).not.toBe(saved.attempt.token);
+  expect((await request({action: "clear", token: saved.attempt.token})).status).not.toBe(200);
+  expect((await request({...save, principalKey: "other"})).status).toBe(400);
+  await f.http(`${f.path}/binding`, {publicationId, enabled: false});
+  expect((await request({action: "get"})).status).toBe(404);
+});

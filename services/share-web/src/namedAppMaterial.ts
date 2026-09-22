@@ -31,7 +31,7 @@ export function createNamedAppMaterialResolver(options: {
           const revision = url.searchParams.get("authorityRevision");
           if ([...url.searchParams.keys()].join() !== "authorityRevision" || !revision || !/^[1-9][0-9]*$/.test(revision) || !Number.isSafeInteger(Number(revision))) return refuse();
           path = target + url.pathname.slice(prefix.length) + url.search;
-        } else if (request.method === "POST" && ["invoke", "upload", "file"].some(action => url.pathname === prefix + "/backend/" + action) && !url.search) {
+        } else if (request.method === "POST" && ["invoke", "upload", "file", "attempt"].some(action => url.pathname === prefix + "/backend/" + action) && !url.search) {
           if (request.headers.get("content-type") !== "application/json") return refuse();
           path = target + url.pathname.slice((prefix + "/backend").length);
         } else return refuse();

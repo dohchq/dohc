@@ -1,4 +1,5 @@
 import { readBoundedJson } from "@dohc/service-http";
+import { parseDatasetAttemptRequest, parseDatasetAttemptResult } from "@dohc/security-contract/dataset-attempts";
 import {
   APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, APP_BACKEND_REFUSAL_BYTES,
   parseAppBackendFile, parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest, parseAppBackendRefusal,
@@ -23,13 +24,18 @@ export async function forwardAppBackend(input: {
   try { body = await readBoundedJson(input.request, APP_BACKEND_UPLOAD_REQUEST_BYTES, input.signal); }
   catch (cause) { return error(cause instanceof RangeError ? 413 : 400); }
   if (!record(body) || typeof body.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.id) || body.id.includes("\n")) return error(400);
-  let action: "invoke" | "upload" | "file", payload: unknown;
+  let action: "invoke" | "upload" | "file" | "attempt", payload: unknown;
   try {
     if (body.op !== "backend.upload" && new TextEncoder().encode(JSON.stringify(body)).byteLength > APP_BACKEND_REQUEST_BYTES) return error(413);
     if (body.op === "backend.invoke") {
       if (!exact(body, ["id", "op", "operation", "idempotencyKey", "input"])) return error(400);
       action = "invoke";
       payload = parseAppBackendInvokeRequest({ authorityRevision: input.authorityRevision, operation: body.operation, idempotencyKey: body.idempotencyKey, input: body.input });
+    } else if (body.op === "backend.attempt") {
+      if (!exact(body, ["id", "op", "operation", "request"])) return error(400);
+      action = "attempt";
+      const checked = parseAppBackendInvokeRequest({ authorityRevision: input.authorityRevision, operation: body.operation, idempotencyKey: "attempt", input: null });
+      payload = { authorityRevision: checked.authorityRevision, operation: checked.operation, ...parseDatasetAttemptRequest(body.request) };
     } else if (body.op === "backend.upload") {
       if (!exact(body, ["id", "op", "idempotencyKey", "name", "contentType", "bytesBase64"])) return error(400);
       action = "upload";
@@ -63,6 +69,8 @@ export async function forwardAppBackend(input: {
     if (action === "invoke") {
       if (!exact(value, ["result", "revision", "replayed"]) || !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 || typeof value.replayed !== "boolean") return error(503);
       result = { result: parseAppBackendJson(value.result), revision: value.revision, replayed: value.replayed };
+    } else if (action === "attempt") {
+      result = parseDatasetAttemptResult(value);
     } else if (action === "upload") {
       if (!exact(value, ["file", "replayed"]) || typeof value.replayed !== "boolean") return error(503);
       result = { file: parseAppBackendFile(value.file), replayed: value.replayed };

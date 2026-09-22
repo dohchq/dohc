@@ -27,6 +27,7 @@ export function attachAppCollectionBroker(frame: HTMLIFrameElement, send: (body:
     const valid = body.op === "collection.list" ? ["id,limit,op", "afterPath,id,limit,op"].includes(keys)
       : body.op === "collection.create" ? keys === "fields,id,idempotencyKey,op"
       : body.op === "backend.invoke" ? keys === "id,idempotencyKey,input,op,operation"
+      : body.op === "backend.attempt" ? keys === "id,op,operation,request"
       : body.op === "backend.upload" ? keys === "bytesBase64,contentType,id,idempotencyKey,name,op"
       : body.op === "backend.file" ? keys === "fileId,id,input,op,operation" : false;
     if (!valid) {reject(400);return;}

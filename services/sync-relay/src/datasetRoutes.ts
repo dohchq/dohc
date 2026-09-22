@@ -3,6 +3,7 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendJson, parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { RelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
@@ -158,6 +159,12 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
           return {publicationId: route.publicationId, authorityRevision, files: published.candidate.files};
         }
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024);
+        if (route.action === "attempt") {
+          const body = record(raw, ["authorityRevision", "operation", "action"], ["idempotencyKey", "input", "token"]);
+          const {authorityRevision: expected, operation, ...attempt} = body;
+          let parsed; try { parsed = parseDatasetAttemptRequest(attempt); } catch { throw badRequest("Invalid pending submission request."); }
+          return host.attempt(auth, route.publicationId, {authorityRevision: positive(expected), operation: text(operation), request: parsed}, signal);
+        }
         if (route.action === "upload") {
           let body; try {body = parseAppBackendUploadRequest(raw);} catch {throw badRequest("Invalid app upload.");}
           return host.upload(auth, route.publicationId, body, signal);

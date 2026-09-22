@@ -7,7 +7,7 @@ import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { APP_BACKEND_RECOVERY_BYTES, type AppBackendRecoveryBundle } from "./storage/appBackendData";
 import { badRequest, notFound, relayError } from "./errors";
 
-export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "describe" | "descriptor" | "blob" | "export" | "restore" | "helper";
+export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "attempt" | "describe" | "descriptor" | "blob" | "export" | "restore" | "helper";
 export interface AppBackendRoute {
   route: "app-backend";
   publicationId: string;

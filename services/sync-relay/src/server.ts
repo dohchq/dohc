@@ -786,7 +786,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (!publicationId || !/^[0-9a-f]{64}$/.test(publicationId)) throw notFound();
     if (parts.length === 4) return {route: "link-app-publication", publicationId};
     if (parts.length === 5 && parts[4] === "collection") return {route: "link-app-collection", publicationId};
-    if (parts.length === 6 && parts[4] === "backend" && (parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file")) {
+    if (parts.length === 6 && parts[4] === "backend" && (parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt")) {
       return {route:"app-backend", publicationId, action:parts[5]};
     }
     if (parts.length === 6 && parts[4] === "blobs" && /^[0-9a-f]{64}$/.test(parts[5]!)) {
@@ -923,7 +923,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "reactivate") return {route: "owner-app-publication", workspaceId, publicationId, action: "reactivate"};
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
-        (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" ||
+        (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
          parts[5] === "describe" || parts[5] === "descriptor" || parts[5] === "export" || parts[5] === "restore" || parts[5] === "helper")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }

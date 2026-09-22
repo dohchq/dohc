@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { createDatasetAttempts, parseDatasetAttemptRequest, type DatasetAttemptScope } from "./dataset-attempts.js";
+import { createDatasetAttempts, type DatasetAttemptScope } from "./dataset-attempts.js";
+import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 const open: DatabaseSync[] = [];
 const scope: DatasetAttemptScope = { workspaceId: "workspace", datasetId: "dataset", appId: "publication", principalKey: "participant", operationId: "create", revisionSha256: "a".repeat(64) };
 function fixture(maxAttemptsPerDataset = 4096) {
