@@ -14,9 +14,11 @@ At `7e5d7a153`, the fresh ten-dataset soak completed 7,300 operations over 3,630
 
 The 100-participant public-link test passed, including expected fundraiser capacity refusals and a separate abuse test. Its transport and the local benchmark do not establish controlled-LAN or hosted-service guarantees.
 
-Fable reviewed the implementation through the recovery-launcher fixes. The final worker-retirement delta passed independent risk review, but its Fable review remains blocked by provider rate limits. Ordinary four-core hardware, controlled-LAN measurement, concurrent export effects, and an independent human usability pass remain outstanding. Desktop creation and compilation currently require Windows x64. The campaign is not yet fully accepted or ready to merge under the review policy.
+Concurrent recovery exports were measured on the same workstation in twelve baseline and export-overlap trials. All 9,600 indexed operations and eighteen full backup restorations passed integrity checks. During exports, per-round read p95 was 7.0–9.8 ms and write p95 was 17.7–39.2 ms. Large-dataset reads sometimes paused for 2.49–2.97 seconds; baseline trials without export also had 2.10–2.64-second pauses. These measurements do not establish the cause of those pauses. Normal backups preserved their captured data version while later edits continued. This test used local archive files, one export at a time, and no attachment bytes or network transport.
 
-Local evidence is recorded in `.agent-artifacts/campaign-review-ledger.md`. The final host benchmark is retained at `C:/w/dohc-benchmark-cache-racefix-20260922`; earlier failed runs remain separately identified. No live fundraiser records or deployment were changed.
+Fable reviewed the implementation through the recovery-launcher fixes. The final worker-retirement delta passed independent risk review, but its Fable review remains blocked by provider rate limits. Ice confirmed that no ordinary computer or second network device is available and deferred independent human usability testing. Ordinary four-core hardware, controlled-LAN performance, and human usability remain unverified. Desktop creation and compilation currently require Windows x64. The campaign is not yet fully accepted or ready to merge under the review policy.
+
+Local evidence is recorded in `.agent-artifacts/campaign-review-ledger.md`. The final host benchmark is retained at `C:/w/dohc-benchmark-cache-racefix-20260922`; concurrent-export evidence is in `.agent-artifacts/concurrent-export-20260922`. Earlier failed runs remain separately identified. No live fundraiser records or deployment were changed.
 
 ## The result we will deliver
 
