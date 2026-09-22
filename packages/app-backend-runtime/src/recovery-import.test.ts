@@ -9,7 +9,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal, type DatasetCursor } from "./journal";
 import { prepareDatasetRecoveryExport } from "./recovery-export";
 import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecovery } from "./recovery";
-import { validateDatasetRecovery } from "./recovery-import";
+import { validateDatasetRecovery, readValidatedBlob } from "./recovery-import";
 import { parseRecoveryJournalRecord } from "./recovery-record";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
@@ -66,6 +66,13 @@ it("validates empty history and an actual checkpoint without inventing events",a
   const f=await fixture(),staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
   expect([...valid.records()].map(item=>[item.record.kind,item.record.cursor.revision])).toEqual([["checkpoint",0]]);
   expect([...valid.metadata()]).toEqual([]);expect(valid.manifest.cursor).toEqual(f.head());await valid.dispose();
+});
+it("streams only live validated blob references and refuses forged or disposed references",async()=>{
+  const f=await fixture(),staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
+  const read=async(blob:Parameters<typeof readValidatedBlob>[0])=>{let bytes=0;for await(const chunk of readValidatedBlob(blob)){expect(chunk.length).toBeLessThanOrEqual(1024*1024);bytes+=chunk.length;}return bytes;};
+  expect(await read(valid.checkpoint.blob)).toBe(valid.checkpoint.record.byteLength);
+  await expect(read({...valid.checkpoint.blob})).rejects.toThrow("not validated");
+  const retained=valid.checkpoint.blob;await valid.dispose();await expect(read(retained)).rejects.toThrow("disposed");
 });
 it("replays actual changesets across a same-schema revision and preserves old receipts and files",async()=>{
   const f=await fixture(),fileId="receipt_file_0001",first=f.add("first",[fileId]);await f.migrate();f.add("tail");

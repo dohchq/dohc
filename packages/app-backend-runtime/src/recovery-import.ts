@@ -10,6 +10,28 @@ import type { StagedDatasetRecovery } from "./recovery.js";
 import { parseRecoveryJournalRecord, equalRecoveryCursor, recoveryObject, recoveryText, recoveryInteger, recoveryDigest, invalidRecovery as fail } from "./recovery-record.js";
 
 export interface RecoveryBlob { path: string; offset: number; byteLength: number }
+const validatedBlobs = new WeakMap<RecoveryBlob, { sha256: string; authorize(): void }>();
+/** Only accepts blob references returned by successful validation; rechecks bytes while streaming. */
+export async function* readValidatedBlob(blob: RecoveryBlob): AsyncGenerator<Uint8Array> {
+  const capability = validatedBlobs.get(blob);
+  if (!capability) fail("blob was not validated.");
+  capability.authorize();
+  const info = await lstat(blob.path);
+  if (!info.isFile() || info.isSymbolicLink()) fail("validated blob path changed.");
+  const handle = await open(blob.path, "r"), digest = createHash("sha256");
+  try {
+    for (let offset = 0; offset < blob.byteLength;) {
+      capability.authorize(); const chunk = new Uint8Array(Math.min(CHUNK, blob.byteLength - offset));
+      let written = 0;
+      while (written < chunk.length) {
+        const read = await handle.read(chunk, written, chunk.length - written, blob.offset + offset + written);
+        if (!read.bytesRead) fail("validated blob was truncated."); written += read.bytesRead;
+      }
+      offset += chunk.length; digest.update(chunk); yield chunk;
+    }
+    capability.authorize(); if (digest.digest("hex") !== capability.sha256) fail("validated blob changed.");
+  } finally { await handle.close(); }
+}
 export interface ValidatedRecoveryJournal { record: JournalExportRecord; blob: RecoveryBlob }
 export interface RecoveryCatalog { revisionJson: string; artifactsJson: string }
 export type RecoveryMetadata =
@@ -200,7 +222,11 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
     }
     const records = function* (): Iterable<ValidatedRecoveryJournal> {
       for (const row of index.prepare("SELECT * FROM records ORDER BY revision").iterate()) {
-        authorize(); yield { record: parseRecoveryJournalRecord(JSON.parse(String(row.metadata)), maxEvent), blob: { path: String(row.path), offset: Number(row.offset), byteLength: Number(row.length) } };
+        authorize(); const record = parseRecoveryJournalRecord(JSON.parse(String(row.metadata)), maxEvent);
+        const blob = Object.freeze({ path: String(row.path), offset: Number(row.offset), byteLength: Number(row.length) });
+        validatedBlobs.set(blob, { sha256: record.kind === "checkpoint" ? record.sha256 : record.changesetSha256,
+          authorize() { if (closed) fail("validation was disposed."); authorize(); } });
+        yield { record, blob };
       }
     };
     for (const item of records()) {
@@ -223,7 +249,9 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
     }
     await worker?.close(); worker = undefined; authorize();
     if (workerDirectory) { await rm(workerDirectory, { recursive: true, force: true }); workerDirectory = undefined; }
-    return { manifest: staged.manifest, catalog, checkpoint: { record: currentCheckpoint, blob: { path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength } }, records,
+    const checkpointBlob = Object.freeze({ path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength });
+    validatedBlobs.set(checkpointBlob, { sha256: checkpoint.entry.sha256, authorize() { if (closed) fail("validation was disposed."); authorize(); } });
+    return { manifest: staged.manifest, catalog, checkpoint: { record: currentCheckpoint, blob: checkpointBlob }, records,
       metadata: function* () { for (const row of index.prepare("SELECT body FROM metadata ORDER BY seq").iterate()) { authorize(); yield JSON.parse(String(row.body)) as RecoveryMetadata; } }, dispose };
   } catch (error) { await dispose(); throw error; }
 }
