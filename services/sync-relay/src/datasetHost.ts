@@ -218,6 +218,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       AFTER DELETE ON sync_relay_dataset_usage BEGIN
         DELETE FROM dohc_dataset_bindings WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_data_grants WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_lifecycle WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_catalog WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_catalog_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_lifecycle WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;

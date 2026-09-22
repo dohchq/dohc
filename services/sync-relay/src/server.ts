@@ -1,6 +1,6 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
-import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes";
+import type { AppBackendRoute } from "./appBackendRoutes";
 import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { createDatasetAppRoutes, createDatasetRoutes, type DatasetRoute } from "./datasetRoutes";
 import { createDatasetReplicaRoutes, type DatasetReplicaRoute } from "./datasetReplicaRoutes";
@@ -81,7 +81,6 @@ export interface CreateSyncRelayHandlerOptions {
   appPublicationLimits?: AppPublicationLimits;
   appCollectionPolicy?: AppCollectionPolicy;
   appBackendsEnabled?: boolean;
-  appBackendMaxParticipantsPerGrant?: number;
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
@@ -173,7 +172,6 @@ export function createSyncRelayHandler({
   appPublicationLimits,
   appCollectionPolicy,
   appBackendsEnabled = false,
-  appBackendMaxParticipantsPerGrant,
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
@@ -222,10 +220,6 @@ export function createSyncRelayHandler({
 } {
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   if (appBackendsEnabled && !appPublicationLimits) throw new TypeError("App backends require app publications.");
-  const respondToAppBackend = appBackendsEnabled ? createAppBackendRoutes(
-    storage.createAppBackendHost({limits: appPublicationLimits!, nowMs, maxParticipantsPerGrant:appBackendMaxParticipantsPerGrant}), storage.unavailable,
-    {limits: appBackendAdmissionLimits, nowMs},
-  ) : undefined;
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
   const respondToDatasetExport = datasetHost ? createDatasetRecoveryExport(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
@@ -664,7 +658,7 @@ export function createSyncRelayHandler({
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       if (route.route === "app-backend") {
-        if (!respondToAppBackend) throw notFound();
+        if (!appBackendsEnabled || !respondToDatasetApp) throw notFound();
         if (!route.workspaceId) {
           if (!linkKey || request.headers.has("cookie")) throw notFound();
           const {capability} = requireLinkCapability(request);
@@ -672,8 +666,7 @@ export function createSyncRelayHandler({
           if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
           const auth = {kind:"link" as const, capabilityHash:capability.session.capabilityHash,
             profileTokenHash:hashLinkProfileSecret(secret, linkKey)};
-          if (respondToDatasetApp) { const datasetResponse = await respondToDatasetApp(request, route, auth); if (datasetResponse) return datasetResponse; }
-          return await respondToAppBackend(request, route, auth);
+          return await respondToDatasetApp(request, route, auth);
         }
         const authorization = request.headers.get("authorization");
         let actorRequest: Request;
@@ -689,8 +682,7 @@ export function createSyncRelayHandler({
         const actor = await resolveNamedActor(actorRequest, route.workspaceId);
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         const auth = {kind:"named" as const, workspaceId:route.workspaceId,userId:actor.userId};
-        if (respondToDatasetApp) { const datasetResponse = await respondToDatasetApp(request, route, auth); if (datasetResponse) return datasetResponse; }
-        return await respondToAppBackend(request, route, auth);
+        return await respondToDatasetApp(request, route, auth);
       }
       if (route.route === "link-app-publication") return respondToLinkAppPublication(request, route);
       if (route.route === "link-app-collection") return await respondToLinkAppCollection(request, route);
@@ -958,7 +950,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[4] === "collection-approval") return {route: "owner-app-publication", workspaceId, publicationId, action: "collection-approval"};
     if (parts.length === 6 && parts[4] === "backend" &&
         (parts[5] === "activate" || parts[5] === "invoke" || parts[5] === "upload" || parts[5] === "file" || parts[5] === "attempt" ||
-         parts[5] === "describe" || parts[5] === "descriptor" || parts[5] === "export" || parts[5] === "restore" || parts[5] === "helper")) {
+         parts[5] === "descriptor")) {
       return {route:"app-backend",workspaceId,publicationId,action:parts[5]};
     }
     if (parts.length === 7 && parts[4] === "backend" && parts[5] === "blobs" && /^[0-9a-f]{64}$/.test(parts[6]!)) {

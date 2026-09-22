@@ -187,13 +187,12 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
   };
 }
 
-/** Returns null only for publications using the separate app-backend capability. */
 export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,
   options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs: () => number}) {
   const admit = createAppBackendAdmission(options.limits);
-  return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response | null> => {
+  return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response> => {
     const published = host.publication(auth, route.publicationId);
-    if (!published) return null;
+    if (!published) throw notFound();
     const {authority, workspaceId, datasetId, authorityRevision, capability} = published;
     const release = admit({dataset: JSON.stringify([workspaceId, datasetId]), participant: authority.principalKey,
       ...(authority.caller.kind === "link" ? {link: JSON.stringify([workspaceId, authority.caller.grantId])} : {}),

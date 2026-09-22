@@ -86,7 +86,7 @@ it("creates and manages one dataset through authenticated routes and the public 
   const publicationId = f.publish(), publicPath = `link/app-publications/${publicationId}/backend/invoke`;
   const listing = await (await f.http("w/app-publications")).json();
   const listed = listing.publications.find((row: { publicationId: string }) => row.publicationId === publicationId);
-  expect(listed).toMatchObject({ datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6), id(8)] }, backendCapability: null, collectionCapability: null });
+  expect(listed).toMatchObject({ datasetCapability: { kind: "dataset", datasetId: id(1), operationIds: [id(5), id(6), id(8)] }, collectionCapability: null });
   expect(JSON.stringify(listed)).not.toContain(operationSource);
   const body = {authorityRevision: 1, operation: "submit", input: {name: "Friend"}, idempotencyKey: "submission"};
   expect((await f.http(publicPath, body, f.publicHeaders)).status).toBe(404);
@@ -408,6 +408,20 @@ it("preserves the configured participant cap across app publications while keepi
   expect((await f.http(`link/app-publications/${otherApp}/backend/upload`, upload, {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)})).status).toBe(413);
   expect((await f.invoke()).status).toBe(200);
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n).toBe(1);
+});
+
+it("accepts 100 distinct public participants through the unified dataset backend", async () => {
+  const f = await httpFixture(100); await f.activate(); const publicationId = f.publish();
+  await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  for (let index = 0; index < 100; index++) {
+    const response = await f.http(`link/app-publications/${publicationId}/backend/invoke`,
+      {authorityRevision: 1, operation: "submit", input: {name: `Friend ${index}`}, idempotencyKey: `submit-${index}`},
+      {...f.publicHeaders, "x-dohc-link-profile-secret": String(index).padStart(43, "P")});
+    expect(response.status).toBe(200);
+  }
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n).toBe(100);
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(100);
+  expect((await f.invoke()).status).toBe(200);
 });
 
 it("imports a fenced dataset and its receipt over HTTP with a durable retry receipt", async () => {

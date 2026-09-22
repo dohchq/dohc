@@ -561,7 +561,6 @@ export type CommittedLiveUpdateResult =
 
 export interface SyncRelayStorage {
   createDatasetHost(options: Omit<import("../datasetHost").RelayDatasetHostOptions, "storage">): Promise<import("../datasetHost").RelayDatasetHost>;
-  createAppBackendHost(options: Omit<import("../appBackendHost").AppBackendHostOptions, "storage">): import("../appBackendHost").AppBackendHost;
   enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];

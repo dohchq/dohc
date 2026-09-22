@@ -336,7 +336,6 @@ const relayApplication = createSyncRelayHandler({
   publicEditRelease,
   appPublicationLimits,
   appBackendsEnabled,
-  appBackendMaxParticipantsPerGrant,
   datasetHost,
   appCollectionPolicy,
 });
