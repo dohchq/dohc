@@ -191,7 +191,23 @@ The child exits after that close message.
 
 ## Retention and startup maintenance
 
-The host retains committed events, schema checkpoints, and retry receipts within its storage quota. It does not compact history or expire accepted retry keys.
+Local and relay hosts keep one replaceable materialization checkpoint per dataset to reduce worker replay.
+The supervisor attempts a snapshot after 128 committed events, and before its 30-second idle eviction when changes remain uncached.
+The triggering operation returns before maintenance begins. The dataset's lane stays serialized while the snapshot is prepared.
+Other datasets keep their own lanes; synchronous storage work still uses the host process.
+
+The checkpoint contains an existing committed cursor. It does not advance the revision or replace the authoritative schema checkpoint.
+Installation checks the active head, current authority, checksum, and staged bytes before replacing the cache and refunding its previous allocation.
+Worker reopening validates the cache against retained journal state and the worker's scope marker.
+An invalid cache falls back to the authoritative checkpoint and history. Authorization, deletion, and inactive-host errors still refuse access.
+
+Maintenance reserves the temporary snapshot's dataset capacity before creating it, then accounts the staged checkpoint's actual bytes.
+Peak storage includes the old cache, temporary snapshot reservation, and new staged checkpoint until replacement and cleanup finish.
+File reads and chunk staging use 1 MiB buffers. Checkpoint sealing verifies the complete staged hash before installation.
+Maintenance failures do not change an accepted operation's result. Insufficient quota can prevent caching, so replay length is not guaranteed under storage pressure.
+Recovery exports retain the authoritative history and retry records; they do not include this replaceable cache.
+
+The host retains committed events, schema checkpoints, and retry receipts within its storage quota. It does not delete committed history or expire accepted retry keys.
 Receipts still refer to their original events, and recovery exports require the complete revision chain. Removing either would break recovery or repeat protection.
 When quota is exhausted, further writes fail. An export preserves the data but does not release storage. Operators must provision capacity for retained history.
 

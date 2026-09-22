@@ -173,7 +173,9 @@ dohc dataset export '{"workspaceId":"WORKSPACE_ID","datasetId":"DATASET_ID","sav
 
 The destination directory must exist. Existing files require explicit `overwrite:true`.
 Protect the archive as private data. Its integrity checks detect corruption; they do not encrypt it.
-The host retains committed history, schema checkpoints, and retry receipts within its quota; automatic history compaction is not implemented.
+The host keeps a replaceable checkpoint to reduce replay when reopening a Collection.
+Checkpoint maintenance preserves committed history, schema checkpoints, and accepted retry keys. It does not delete old history.
+If checkpoint maintenance cannot finish, the host rebuilds from the original checkpoint and retained history; reopening can take longer.
 Quota exhaustion refuses further writes. Exporting an archive does not release storage.
 Do not replace an authority that has accepted newer writes with an older archive.
 Restore to clean local host storage with the same workspace identity and no existing copy of that Collection.
