@@ -286,6 +286,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       describe(datasetId: string) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId}); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
+      prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {
+        return tracked(async () => {
+          const archive = await host.exportRecovery(owner, { workspaceId, datasetId, signal: signal(input.signal) });
+          return { ...archive, maxBytes: maxStoredBytes + 2 * 1024 * 1024 };
+        });
+      },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
         return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }));

@@ -363,7 +363,9 @@ export function parseCliArguments(
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value) || ("action" in value && value.action !== verb)) fail("dataset arguments must match the requested action");
-      return {actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "dataset", request: DatasetRequest.parse({...value, action:verb})};
+      const request = DatasetRequest.parse({...value, action:verb});
+      if (request.action === "export" && !request.savePath) fail("dataset export requires an explicit savePath");
+      return {actor: global.actorFlag ? "agent" : "human", json: global.json, verb: "dataset", request};
     } catch { fail("invalid dataset arguments; run dohc dataset --help"); }
   }
   if (family === "app") {

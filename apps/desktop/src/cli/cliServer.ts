@@ -1613,6 +1613,7 @@ async function dispatch(
       return context.appBackend(request.args.request);
     }
     case "dataset": {
+      if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
       return context.dataset(request.args.request);
     }

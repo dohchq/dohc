@@ -279,7 +279,7 @@ The go signal does not authorize merges, public deployment, live fundraiser migr
 - Collection indexing: `crates/dohc-engine-domain/src/collections.rs`.
 - Feature-branch contracts and limits: `docs/how-to/app-backend.md`, `docs/adr/0010-app-backends-own-private-transactional-data.md`, `packages/app-backend-runtime/README.md`.
 - Feature-branch host ordering: `services/sync-relay/src/appBackendHost.ts`, `services/sync-relay/src/storage/appBackendData.ts`, `apps/desktop/src/workspaces/localAppBackend.ts`.
-- Feature-branch UI/generation: `apps/desktop/src/renderer/OwnerAppBackend.tsx`, `apps/desktop/src/workspaces/appFormGenerator.ts`.
+- Unified UI/generation: `apps/desktop/src/renderer/ConnectedTransactionalCollection.tsx`, `apps/desktop/src/workspaces/datasetFormGenerator.ts`.
 - Existing examples and browser proof: `examples/fundraiser`, `examples/stock-orders`, `services/share-web/e2e/app-backend-fundraiser.spec.ts`, `apps/desktop/e2e/app-backend-local.spec.ts` on that branch.
 - Experiment: `packages/app-backend-runtime/prototype/RESULTS.md` on the prototype branch. Local evidence is retained in `.agent-artifacts/backend-performance-39d365ba0`.
 
@@ -290,4 +290,3 @@ The review resolved an ambiguous approval object by defining dataset revisions. 
 Fable session: `b5c3cd8f-5947-4c79-b74d-9d1472bbea84`, model `claude-fable-5-1`. The draft review and focused fix review covered this plan; neither constitutes production verification. Local review reports are retained in `.agent-artifacts/unified-app-data-campaign-2026-09-22`.
 
 After that review, Ice clarified that usability must not impose fixed workflows. The flexibility section and related acceptance checks record that clarification. Fable's recorded review predates this addition.
-

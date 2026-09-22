@@ -11,6 +11,7 @@ const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:
 const requests: unknown[] = [
   {action:"list",workspaceId:"workspace"},
   {action:"describe",workspaceId:"workspace",datasetId:id(1)},
+  {action:"export",workspaceId:"workspace",datasetId:id(1),savePath:"C:/private/fundraiser.dohc-recovery"},
   {action:"create",workspaceId:"workspace",definition},
   {action:"prepare",workspaceId:"workspace",descriptorPath:"equipment/dataset.json"},
   {action:"approve",workspaceId:"workspace",preparationId:id(5),revisionSha256:"a".repeat(64)},
@@ -52,5 +53,12 @@ describe("dataset CLI", () => {
     expect(result.stdout).toContain("revisionSha256");
     expect(result.stdout).toContain("same input and idempotencyKey");
     expect(send).not.toHaveBeenCalled();
+  });
+  it("requires a chosen export destination and returns no private archive bytes", async () => {
+    const send = vi.fn(async () => ({kind:"exported",savedPath:"C:/private/backup.dohc-recovery"}));
+    const missing = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetId:id(1)})],request:send});
+    expect(missing.exitCode).toBe(1); expect(send).not.toHaveBeenCalled();
+    const saved = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetId:id(1),savePath:"C:/private/backup.dohc-recovery"})],request:send});
+    expect(saved.exitCode).toBe(0); expect(saved.stdout).toContain("savedPath");
   });
 });

@@ -21,6 +21,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
+  /** Resolves current host authority and streams its private recovery archive to an owner-selected destination. */
+  exportArchive?(workspace: W, request: Extract<DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
 }) {
   return async (caller: Caller, raw: unknown) => {
     const input = DatasetRequest.parse(raw);
@@ -28,6 +30,12 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
       current();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
+      if (input.action === "export") {
+        if (!dependencies.exportArchive) throw new Error("Collection recovery export is unavailable. Restart dohc and try again.");
+        const savedPath = await dependencies.exportArchive(operation.workspace, input, operation.signal, current);
+        current();
+        return { kind: "exported" as const, savedPath };
+      }
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
       const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "permissions", "setGrant", "removeGrant", "history"].includes(input.action);
