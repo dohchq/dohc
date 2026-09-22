@@ -202,6 +202,47 @@ it("recovers the new schema without running the migration again",()=>{
     expect(db.applyChangeset(page.events[0].changeset)).toBe(true);expect(db.prepare("SELECT note FROM orders").get()!.note).toBe("after-migration");
   } finally {db.close();}
 });
+
+it("claims a fenced head on a fresh host epoch while retaining retry receipts",()=>{
+  const f=fixture(),saved=f.journal.commitOperation(f.prepare());if(saved.kind!=="committed")throw Error();
+  f.materialize().close();const checkpoint=readFileSync(join(f.directory,"restored.sqlite")),fenced=f.journal.fence({expected:saved.event.cursor,authorize:f.authorize});
+  expect(f.journal.head(f.scope,f.authorize).active).toBe(false);
+  let accounts=0;
+  const input={expected:fenced,hostEpoch:"host-2",approvedRevisionHash:fenced.approvedRevisionHash,
+    source:f.initialization.source,schemaSql:f.initialization.schemaSql,definitionJson:f.initialization.definitionJson,checkpoint,authorize:f.authorize,account(){accounts++;}};
+  const claimed=f.journal.claimInactiveCheckpoint(input);
+  expect(claimed.revision).toBe(fenced.revision+1);expect(claimed.hostEpoch).toBe("host-2");
+  expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
+  expect(f.journal.receipt({...f.prepare(),scope:f.scope})).toEqual(saved.receipt);
+  expect(f.journal.claimInactiveCheckpoint(input)).toEqual(claimed);expect(accounts).toBe(1);
+  expect(f.materialize().prepare("SELECT id FROM orders").all()).toEqual([{id:"order-1"}]);
+  expect(()=>f.journal.claimInactiveCheckpoint({expected:fenced,hostEpoch:"host-3",approvedRevisionHash:fenced.approvedRevisionHash,
+    source:f.initialization.source,schemaSql:f.initialization.schemaSql,definitionJson:f.initialization.definitionJson,checkpoint,authorize:f.authorize})).toThrow(/already active|cursor changed/);
+});
+
+it("refuses changed claim artifacts, authority, capacity, cursor and reused epochs",()=>{
+  const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2"};
+  expect(()=>f.journal.claimInactiveCheckpoint(input)).toThrow("already active");
+  f.journal.fence({expected:f.initial,authorize:f.authorize});
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,hostEpoch:"host-1"})).toThrow("fresh host epoch");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,approvedRevisionHash:digest("new")})).toThrow("approved rules");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,source:"changed"})).toThrow("approved artifacts");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,capacityBytes:4096})).toThrow("reserved capacity");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:{...f.initial,digest:digest("stale")}})).toThrow("cursor changed");
+  const claimed=f.journal.claimInactiveCheckpoint(input);f.journal.fence({expected:claimed,authorize:f.authorize});
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:claimed,hostEpoch:"host-1"})).toThrow("fresh host epoch");
+});
+
+it("rolls back a failed claim and recovers lost claim acknowledgment without repeat accounting",()=>{
+  const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2",account(allocation:{bytes:number}){f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);}};
+  f.journal.fence({expected:f.initial,authorize:f.authorize});
+  f.fault("before");expect(()=>f.journal.claimInactiveCheckpoint(input)).toThrow("power loss");
+  expect(f.journal.head(f.scope,f.authorize).active).toBe(false);expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
+  f.fault("after");expect(()=>f.journal.claimInactiveCheckpoint(input)).toThrow("acknowledgment lost");
+  const charged=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;f.reopen();
+  expect(f.journal.claimInactiveCheckpoint(input)).toEqual(f.journal.head(f.scope,f.authorize).cursor);
+  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(charged);
+});
 it.each(["before","after"] as const)("resolves checkpoint transition fault %s commit",fault=>{
   const f=fixture();const input=migration(f,f.initial);f.fault(fault);expect(()=>f.journal.transitionCheckpoint(input)).toThrow(fault==="before"?"power loss":"acknowledgment");
   f.reopen();expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(fault==="before"?0:1);

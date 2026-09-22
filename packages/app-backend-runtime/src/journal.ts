@@ -105,6 +105,8 @@ export interface DatasetJournal {
   exportBlob(input: { scope: DatasetScope; record: JournalExportRecord; offset: number; length?: number; authorize: Authorize }): Uint8Array;
   initialize(input: InitializeDatasetInput): DatasetCursor;
   transitionCheckpoint(input: TransitionCheckpointInput): DatasetCursor;
+  /** Activate a fenced head on a fresh host epoch without discarding its retry lineage. */
+  claimInactiveCheckpoint(input: TransitionCheckpointInput): DatasetCursor;
   head(scope: DatasetScope, authorize: Authorize): DatasetHead;
   receipt(input: { scope: DatasetScope; callerKey: string; idempotencyKey: string; payloadSha256: string; authorize: Authorize }): JournalReceipt | null;
   commitOperation(input: CommitOperationInput):
@@ -392,6 +394,46 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
           .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,capacityBytes,checkpointId,checkpointSha256,
             next.revision,next.digest,JSON.stringify(expected),expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
         if(Number(changed.changes)!==1)throw new JournalError("conflict","Dataset cursor changed during checkpoint transition.");
+        return next;
+      });
+    },
+    claimInactiveCheckpoint(input) {
+      const expected=cursor(input.expected),hostEpoch=text(input.hostEpoch,256),approvedRevisionHash=digest(input.approvedRevisionHash);
+      if (hostEpoch===expected.hostEpoch) invalid("A claimed dataset requires a fresh host epoch.");
+      const source=text(input.source,256*1024),schemaSql=text(input.schemaSql,256*1024),definitionJson=resultText(input.definitionJson);
+      const checkpoint=input.checkpoint instanceof Uint8Array?copyBytes(input.checkpoint,maxCheckpoint):structuredClone(input.checkpoint),authorize=input.authorize,account=input.account;
+      synchronous(authorize);if(account)synchronous(account);
+      return tx(()=>{
+        callback(authorize);
+        const h=storedHead(expected);
+        if(approvedRevisionHash!==expected.approvedRevisionHash)invalid("Inactive dataset claims cannot change approved rules.");
+        const resolved=checkpoints.resolve(expected,checkpoint),capacityBytes=h.capacityBytes;
+        if(source!==h.source||schemaSql!==h.schemaSql||definitionJson!==h.definitionJson)invalid("Inactive dataset claims cannot change approved artifacts.");
+        if(input.capacityBytes!==undefined&&input.capacityBytes!==capacityBytes)invalid("Inactive dataset claims cannot change reserved capacity.");
+        if(resolved.expectedBytes>capacityBytes)invalid("Checkpoint exceeds reserved capacity.");
+        const next=cursor({...expected,hostEpoch,approvedRevisionHash,revision:integer(expected.revision+1,1),
+          digest:checkpointHash({...expected,hostEpoch,approvedRevisionHash,revision:expected.revision+1},resolved.sha256,source,schemaSql,definitionJson,capacityBytes,expected)});
+        if(h.active&&h.checkpointPrevious&&sameCursor(h.checkpointPrevious,expected)&&sameCursor(h.checkpointCursor,next))return next;
+        if(h.active)throw new JournalError("conflict","Dataset authority is already active.");
+        assertCursor(expected,h.cursor);
+        if(db.prepare("SELECT 1 FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND json_extract(cursor_json,'$.hostEpoch')=? LIMIT 1")
+          .get(expected.workspaceId,expected.datasetId,hostEpoch)||db.prepare("SELECT 1 FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? AND host_epoch=? LIMIT 1")
+          .get(expected.workspaceId,expected.datasetId,hostEpoch))invalid("A claimed dataset requires a fresh host epoch.");
+        const bytes=resolved.storageBytes+Buffer.byteLength(JSON.stringify([next,expected,source,schemaSql,definitionJson]))+1024;
+        if(resolved.stagedCreditBytes&&!account)invalid("Staged checkpoint activation requires quota accounting.");
+        if(account)callback(()=>account(Object.freeze({bytes,capacityBytes,capacityDeltaBytes:0,cursor:next,stagedCreditBytes:resolved.stagedCreditBytes})));
+        callback(authorize);
+        const checkpointId=checkpoints.activate(expected,checkpoint);
+        db.prepare(`INSERT INTO dohc_dataset_checkpoint_history(workspace_id,dataset_id,revision,cursor_json,previous_json,source,schema_sql,
+          definition_json,capacity_bytes,checkpoint_id,checkpoint_sha256)
+          SELECT workspace_id,dataset_id,checkpoint_revision,?,checkpoint_previous_json,source,schema_sql,definition_json,capacity_bytes,checkpoint_id,checkpoint_sha256
+          FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?`).run(JSON.stringify(h.checkpointCursor),expected.workspaceId,expected.datasetId);
+        const changed=db.prepare(`UPDATE dohc_dataset_journals SET active=1,host_epoch=?,approved_revision_hash=?,source=?,schema_sql=?,definition_json=?,
+          revision=?,digest=?,checkpoint_id=?,checkpoint_sha256=?,checkpoint_revision=?,checkpoint_digest=?,checkpoint_previous_json=?
+          WHERE workspace_id=? AND dataset_id=? AND host_epoch=? AND approved_revision_hash=? AND revision=? AND digest=? AND active=0`)
+          .run(hostEpoch,approvedRevisionHash,source,schemaSql,definitionJson,next.revision,next.digest,checkpointId,resolved.sha256,next.revision,next.digest,JSON.stringify(expected),
+            expected.workspaceId,expected.datasetId,expected.hostEpoch,expected.approvedRevisionHash,expected.revision,expected.digest);
+        if(Number(changed.changes)!==1)throw new JournalError("conflict","Dataset claim changed during activation.");
         return next;
       });
     },
