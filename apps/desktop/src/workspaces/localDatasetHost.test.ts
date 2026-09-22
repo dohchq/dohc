@@ -143,6 +143,10 @@ describe("local dataset owner adapter", () => {
       expect(exported.status).toBe(200);expect(exported.headers.get("content-type")).toBe("application/octet-stream");
       const archive=await stageDatasetRecovery({stream:exported.body!,stagingParent:remoteDirectory,limits:{maxTotalBytes:64*1024*1024},expectedManifestSha256:exported.headers.get("x-dohc-dataset-manifest-sha256")!,authorize(){}});
       expect(archive.manifest.sourceState).toBe("active");expect(archive.manifest.entries.some(entry=>entry.kind==="attachment")).toBe(true);await archive.dispose();
+      expect(await readdir(join(remoteDirectory,"recovery"))).toEqual([]);
+      const cancelled=await handler()(new Request(`https://relay/sync/w/datasets/${id(1)}/export`,{headers:{authorization:"Bearer token"}}));
+      const cancelledReader=cancelled.body!.getReader();await cancelledReader.read();await cancelledReader.cancel();
+      expect(await readdir(join(remoteDirectory,"recovery"))).toEqual([]);
       const replica=await createDatasetReplica({directory:join(local.workspaceRoot,"replica"),scope:{workspaceId:"w",datasetId:id(1)},ownerKey:"owner",origin:"https://relay",assertOwner(){}});
       const replicaRequest=async(action:string,body?:unknown)=>{
         if(offline)throw Error("offline");
