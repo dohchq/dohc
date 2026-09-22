@@ -119,6 +119,9 @@ The worker checks consecutive revisions and matching previous digests. The host 
 It aborts the entire transaction for conflicts or undeclared tables, including internal metadata.
 Replay temporarily removes triggers and disables foreign-key actions because the changeset already contains their effects.
 It restores triggers and checks foreign keys before committing, then enables foreign-key enforcement for subsequent operations.
+If intermediate unique constraints reject an otherwise valid net changeset, recovery applies it to a disposable shadow without secondary constraints.
+It then copies the final rows into the unchanged approved schema in one transaction, checking constraints and recomputing generated columns.
+This fallback runs only during replay and leaves ordinary writes unchanged. It uses additional temporary disk space up to the dataset reservation.
 `snapshot(path)` creates an exclusive SQLite checkpoint containing the current scope and cursor, then keeps the worker open.
 It refuses an existing destination. The host publishes the checkpoint and its manifest durably before retiring journal events.
 

@@ -6,6 +6,7 @@ import { authorize, evaluate } from "./guest.js";
 import { AppBackendRuntimeError } from "./protocol.js";
 import { checkCursor, checkDigest, digest, openRequest, PersistentRuntimeError, reject, trustedPath } from "./persistent-protocol.js";
 import { assertReplayableSchema, authorizeMigration, verifyDatasetSchema } from "./migration.js";
+import { replayThroughShadow } from "./replay.js";
 import type { DatasetCursor, OpenRequest, PersistentCommand, PersistentReply, PersistentResult } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -17,6 +18,8 @@ let busy=false;
 const marker="dohc_applied";
 const markerSchema=`CREATE TABLE ${marker}(id INTEGER PRIMARY KEY CHECK(id=1), scope TEXT NOT NULL, revision INTEGER NOT NULL, digest TEXT NOT NULL)`;
 const databaseOptions={allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false};
+// Exported by Node's SQLite binding but missing from the installed Node type declarations.
+const changesetConstraint=(constants as typeof constants & {SQLITE_CHANGESET_CONSTRAINT:number}).SQLITE_CHANGESET_CONSTRAINT;
 
 function noLinks(path:string, mayNotExist=false):void {
   trustedPath(path);
@@ -122,21 +125,26 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     const {changeset,changesetSha256}=command.input;
     if (!(changeset instanceof Uint8Array) || changeset.byteLength>config.limits.databaseBytes || digest(changeset)!==changesetSha256) reject("invalid_input","Invalid committed changeset.");
     const triggers=db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
+    let constraintConflict=false, forbidden=false;
     // The changeset already contains trigger and foreign-key actions from the writer.
     db.exec("PRAGMA foreign_keys=OFF");
     try {
       db.exec("BEGIN IMMEDIATE");transaction=true;
       for (const trigger of triggers) db.exec(`DROP TRIGGER "${String(trigger.name).replaceAll('"','""')}"`);
-      let forbidden=false;
       const applied=changeset.byteLength===0 || db.applyChangeset(changeset,{
         filter:table=>{ const allowed=config.tables.includes(table); if (!allowed) forbidden=true;return allowed; },
-        onConflict:()=>constants.SQLITE_CHANGESET_ABORT,
+        onConflict:kind=>{constraintConflict=kind===changesetConstraint;return constants.SQLITE_CHANGESET_ABORT;},
       });
       if (!applied || forbidden || !db.prepare("PRAGMA foreign_key_check").iterate().next().done) reject("invalid_changeset","The committed changeset cannot be applied to this dataset.");
       for (const trigger of triggers) db.exec(String(trigger.sql));
       writeMarker(command.input);db.exec("COMMIT");transaction=false;
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
-    } catch (error) { rollback();throw error; }
+    } catch (error) {
+      rollback();
+      if(!constraintConflict || forbidden) throw error;
+      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input));
+      cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
+    }
     finally { db.exec("PRAGMA foreign_keys=ON"); }
   }
   if (command.kind==="migrateCheckpoint") {

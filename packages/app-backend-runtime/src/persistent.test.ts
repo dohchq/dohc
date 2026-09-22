@@ -124,6 +124,42 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("replays a valid unique-value swap through a constraint-free shadow",async()=>{
+    await fixture(async({open})=>{
+      const config={schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'a'),(2,'b');",tables:["items"]};
+      const writer=await open(config),recovered=await open(config);
+      const prepared=await writer.prepare({...operation(),source:"globalThis.operations={run(ctx){ctx.db.execute(\"UPDATE items SET value='temp' WHERE id=1\");ctx.db.execute(\"UPDATE items SET value='a' WHERE id=2\");ctx.db.execute(\"UPDATE items SET value='b' WHERE id=1\");return true}}"});
+      const committed=event(prepared);await writer.discard(prepared.proposalId);
+      const cursor=await recovered.apply(committed);
+      const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM items ORDER BY id')}}"});
+      expect(read.result).toEqual([{id:1,value:"b"},{id:2,value:"a"}]);
+    });
+  });
+
+  it("preserves generated columns, bigint values and primary-key semantics during shadow replay",async()=>{
+    await fixture(async({open})=>{
+      for(const [primary,keyA,keyB] of [
+        ["INTEGER PRIMARY KEY","9223372036854775806","9223372036854775807"],
+        ["INTEGER PRIMARY KEY DESC NOT NULL","1","2"],
+        ["TEXT COLLATE NOCASE PRIMARY KEY NOT NULL","'A'","'B'"],
+      ]) {
+        const schemaSql=`CREATE TABLE items(id ${primary}, generated TEXT GENERATED ALWAYS AS (value || '!') STORED,value TEXT NOT NULL UNIQUE,large INTEGER NOT NULL);
+          INSERT INTO items(id,value,large) VALUES(${keyA},'a',9223372036854775806),(${keyB},'b',9223372036854775807);`;
+        const writer=await open({schemaSql}),recovered=await open({schemaSql});
+        const prepared=await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
+          ctx.db.execute("UPDATE items SET value='temp' WHERE id=${keyA}");
+          ctx.db.execute("UPDATE items SET value='a' WHERE id=${keyB}");
+          ctx.db.execute("UPDATE items SET value='b' WHERE id=${keyA}");return true;}}`});
+        const cursor=await recovered.apply(event(prepared));
+        const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT CAST(id AS TEXT) AS id,value,generated,CAST(large AS TEXT) AS large FROM items ORDER BY id')}}"});
+        expect(read.result).toEqual([
+          {id:keyA.replaceAll("'",""),value:"b",generated:"b!",large:"9223372036854775806"},
+          {id:keyB.replaceAll("'",""),value:"a",generated:"a!",large:"9223372036854775807"},
+        ]);
+      }
+    });
+  });
+
   it("replays foreign-key cascades and preserves constraints for the next operation",async()=>{
     await fixture(async({open})=>{
       const config={schemaSql:schemaSql+`CREATE TABLE children(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id) ON UPDATE CASCADE ON DELETE CASCADE);
