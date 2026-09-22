@@ -13,6 +13,7 @@ export interface CollectionFieldsDialogProps {
   onPrepare(change: DatasetSchemaChange, signal: AbortSignal): Promise<DatasetMigrationPreparation>;
   onApprove: CollectionMigrationReviewDialogProps["onApprove"];
   onDiscard: CollectionMigrationReviewDialogProps["onDiscard"];
+  onLoadPreview: CollectionMigrationReviewDialogProps["onLoadPreview"];
   onError: CollectionMigrationReviewDialogProps["onError"];
   onClose(): void;
   onReviewSource(): void;
@@ -69,7 +70,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     finally { if (active.current) { locked.current = false; setPending(false); } }
   }
   if (review) return <CollectionMigrationReviewDialog workspaceId={props.workspaceId} datasetId={props.dataset.datasetId} initialPreparation={review.preparation} generatedChange
-    onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={props.onApprove} onDiscard={props.onDiscard} onClose={props.onClose} onError={props.onError} />;
+    onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={props.onApprove} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
   return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
     onSubmit={event => { event.preventDefault(); void prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
     <h2 id="collection-fields-title" className="m-0 text-sm font-semibold text-ink">Fields and names</h2>

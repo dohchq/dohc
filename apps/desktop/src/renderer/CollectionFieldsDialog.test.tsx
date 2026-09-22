@@ -14,12 +14,15 @@ function preparation(): DatasetMigrationPreparation {
       tables: [{ ...dataset.tables[0]!, sqlName: "people", primaryKey: "name", fields: [{ ...dataset.tables[0]!.fields[0]!, sqlColumn: "name" }] }] } };
   const next = structuredClone(revision); next.revision = 2; next.revisionSha256 = "e".repeat(64);
   next.definition.tables[0]!.fields.push({ fieldId: id(4), name: "Note", type: "text", required: false, unique: false, sqlColumn: "note" });
-  return { preparationId: id(9), previousRevision: revision, revision: next, expected: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: dataset.revisionSha256 },
-    sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64), schemaSql: "schema", operationSource: "source", migrationSql: "ALTER TABLE people ADD note TEXT;", expiresAtMs: Date.now() + 600_000 };
+  const expected = { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: dataset.revisionSha256 };
+  return { preparationId: id(9), previousRevision: revision, revision: next, expected,
+    sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64), schemaSql: "schema", operationSource: "source", migrationSql: "ALTER TABLE people ADD note TEXT;", expiresAtMs: Date.now() + 600_000,
+    candidate: {candidateId: id(10), expected, approvedRevisionHash: next.revisionSha256, checkpointSha256: "a".repeat(64), expiresAtMs: Date.now() + 600_000,
+      preview: {tables: [{table: "people", beforeRows: 0, afterRows: 0, changedRows: 0}], firstPage: {changes: [], nextCursor: null}}} };
 }
 function setup(overrides: Partial<CollectionFieldsDialogProps> = {}) {
   const props: CollectionFieldsDialogProps = { workspaceId: "w", dataset, tableId: id(2), onPrepare: vi.fn(async () => preparation()), onApprove: vi.fn(async () => {}),
-    onDiscard: vi.fn(async () => {}), onClose: vi.fn(), onError: vi.fn(), onReviewSource: vi.fn(), ...overrides };
+    onDiscard: vi.fn(async () => {}), onLoadPreview: vi.fn(async () => ({changes: [], nextCursor: null})), onClose: vi.fn(), onError: vi.fn(), onReviewSource: vi.fn(), ...overrides };
   return { props, ...render(<CollectionFieldsDialog {...props} />) };
 }
 afterEach(cleanup);
@@ -31,7 +34,7 @@ it("adds a field without source paths and approves only the captured revision", 
   await screen.findByText("People · Note");
   expect(props.onPrepare).toHaveBeenCalledWith({ kind: "addField", tableId: id(2), field: { name: "Note", type: "text", required: false, unique: false } }, expect.any(AbortSignal));
   expect(screen.queryByLabelText("Collection definition")).toBeNull();
-  expect(screen.getByText(/Existing records will stay/)).toBeTruthy();
+  expect(screen.getByText(/Approval applies this exact result/)).toBeTruthy();
   fireEvent.click(screen.getByRole("checkbox", { name: /I reviewed this change/ }));
   fireEvent.click(screen.getByRole("button", { name: "Approve change" }));
   await waitFor(() => expect(props.onApprove).toHaveBeenCalledWith({ workspaceId: "w", preparationId: id(9), revisionSha256: "e".repeat(64), approvalDigest: "b".repeat(64) }, expect.any(AbortSignal)));

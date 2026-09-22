@@ -13,6 +13,7 @@ import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
+import type { MigrationDataPreviewProps } from "./CollectionMigrationDataPreview";
 import { DatasetTransferDialog } from "./DatasetTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
@@ -71,6 +72,14 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetId, onError, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
+  const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
+    signal.throwIfAborted();
+    const result = await bridge().dataset({ ...input, action: "migrationPreviewPage" });
+    signal.throwIfAborted();
+    if (result.kind !== "migration-preview-page") throw Error("dohc could not read the data preview. Prepare this review again.");
+    const { kind: _, ...page } = result;
+    return page;
+  };
   const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
     const sequence = request.current;
     signal.throwIfAborted();
@@ -235,6 +244,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
       onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      onLoadPreview={loadMigrationPreview}
       onClose={() => setEditingFields(false)} onReviewSource={() => { setEditingFields(false); setReviewingSchema(true); }}
       onPrepare={async (change, signal) => {
         signal.throwIfAborted();
@@ -257,6 +267,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
       }} />}
     {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
+      onLoadPreview={loadMigrationPreview}
       onClose={() => setReviewingSchema(false)}
       onPrepare={async (input, signal) => {
         signal.throwIfAborted();

@@ -10,11 +10,14 @@ function prep(): DatasetMigrationPreparation {
   const base: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Fundraiser", schemaPath: "schema.sql", operationsPath: "operations.js", tables: [{ tableId: id(2), name: "Registrations", sqlName: "registrations", primaryKey: "record_id", fields: [{ fieldId: id(3), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false }] }], operations: [] };
   const next = structuredClone(base); next.tables[0]!.fields.push({ fieldId: id(4), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false });
   const revision = (definition: DatasetDefinition, number: number): DatasetRevision => ({ datasetId: definition.datasetId, definition, revision: number, revisionSha256: `${number}`.repeat(64), definitionSha256: "b".repeat(64), schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64) });
-  return { preparationId: id(10), previousRevision: revision(base, 1), revision: revision(next, 2), expected: { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: "a".repeat(64), revision: 1, digest: "e".repeat(64) }, sourceDigest: "f".repeat(64), approvalDigest: "1".repeat(64), schemaSql: "CREATE TABLE registrations...", operationSource: "export function create() {}", migrationSql: "ALTER TABLE registrations ADD receipt TEXT;", expiresAtMs: Date.now() + 30_000 };
+  const expected = { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: "a".repeat(64), revision: 1, digest: "e".repeat(64) };
+  return { preparationId: id(10), previousRevision: revision(base, 1), revision: revision(next, 2), expected, sourceDigest: "f".repeat(64), approvalDigest: "1".repeat(64), schemaSql: "CREATE TABLE registrations...", operationSource: "export function create() {}", migrationSql: "ALTER TABLE registrations ADD receipt TEXT;", expiresAtMs: Date.now() + 30_000,
+    candidate: {candidateId: id(11), expected, approvedRevisionHash: "2".repeat(64), checkpointSha256: "c".repeat(64), expiresAtMs: Date.now() + 30_000,
+      preview: {tables: [{table: "registrations", beforeRows: 2, afterRows: 2, changedRows: 2}], firstPage: {changes: [{table: "registrations", kind: "update", key: {id: "one"}, before: {name: "Before"}, after: {name: "After"}}], nextCursor: "next"}}} };
 }
 function setup(overrides: Partial<CollectionMigrationReviewDialogProps> = {}) {
   const onPrepare = vi.fn<CollectionMigrationReviewDialogProps["onPrepare"]>(async () => prep()), onApprove = vi.fn<CollectionMigrationReviewDialogProps["onApprove"]>(async () => undefined), onDiscard = vi.fn<CollectionMigrationReviewDialogProps["onDiscard"]>(async () => undefined), onError = vi.fn(), onClose = vi.fn();
-  const props = { workspaceId: "workspace-a", datasetId: id(1), onClose, onPrepare, onApprove, onDiscard, onError, ...overrides };
+  const props = { workspaceId: "workspace-a", datasetId: id(1), onClose, onPrepare, onApprove, onDiscard, onLoadPreview: vi.fn(async () => ({changes: [], nextCursor: null})), onError, ...overrides };
   return { onPrepare, onApprove, onDiscard, onError, onClose, props, ...render(<CollectionMigrationReviewDialog {...props} />) };
 }
 afterEach(cleanup);
@@ -58,5 +61,25 @@ describe("CollectionMigrationReviewDialog", () => {
     expect(screen.getByText("Fundraiser")).toBeTruthy();
     expect(screen.getAllByText("Community tournament").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("Collection definition")).toBeNull();
+  });
+  it("shows actual record changes and pages the exact preparation", async () => {
+    const onLoadPreview = vi.fn<CollectionMigrationReviewDialogProps["onLoadPreview"]>(async () => ({changes: [{table: "registrations", kind: "delete", key: {id: "two"}, before: {name: "Last record"}, after: null}], nextCursor: null}));
+    setup({initialPreparation: prep(), onLoadPreview});
+    expect(screen.getByText('"Before"')).toBeTruthy(); expect(screen.getByText('"After"')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", {name: "More changes"})); await screen.findByText('"Last record"');
+    expect(onLoadPreview).toHaveBeenCalledWith({workspaceId: "workspace-a", preparationId: id(10), after: "next", limit: 50}, expect.any(AbortSignal));
+  });
+  it("refuses approval when the preview belongs to another checkpoint", () => {
+    const initialPreparation = prep(); initialPreparation.candidate.expected = {...initialPreparation.expected, digest: "0".repeat(64)};
+    const {onApprove} = setup({initialPreparation});
+    fireEvent.click(screen.getByRole("checkbox", {name: /reviewed this change/i}));
+    expect(screen.getByRole("button", {name: "Approve change"}).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/no matching data preview/)).toBeTruthy(); expect(onApprove).not.toHaveBeenCalled();
+  });
+  it("requires a new preview after its candidate expires", async () => {
+    const initialPreparation = prep(); initialPreparation.candidate.expiresAtMs = Date.now() - 1;
+    const {onApprove} = setup({initialPreparation});
+    fireEvent.click(screen.getByRole("checkbox", {name: /reviewed this change/i})); fireEvent.click(screen.getByRole("button", {name: "Approve change"}));
+    expect(await screen.findByText("This review expired. Prepare the change again.")).toBeTruthy(); expect(onApprove).not.toHaveBeenCalled();
   });
 });
