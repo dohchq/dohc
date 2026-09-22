@@ -172,7 +172,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           }
           options.journal.appendCheckpointChunk({stage,index,bytes:buffer.subarray(0,length),authorize});offset+=length;
         }
-        stage=options.journal.sealCheckpoint({stage,authorize});
+        stage=await options.journal.sealMaterializationCheckpoint({stage,authorize});
         options.journal.cacheMaterialization({expected:worker.cursor,checkpoint:stage,authorize,account:allocation=>storage.account({
           scope:lane.scope,stage,bytes:allocation.bytes-allocation.stagedCreditBytes-allocation.releasedBytes})});
         maintenanceWarnings.delete(JSON.stringify(lane.scope));
