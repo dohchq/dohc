@@ -51,8 +51,29 @@ describe("CollectionMigrationReviewDialog", () => {
     let resolve!: (value: DatasetMigrationPreparation) => void; const onPrepare = vi.fn<CollectionMigrationReviewDialogProps["onPrepare"]>((_input, signal) => new Promise<DatasetMigrationPreparation>((res, _reject) => { resolve = res; signal.addEventListener("abort", () => undefined); })); const { props, rerender, onError } = setup({ onPrepare });
     fireEvent.change(screen.getByLabelText("Migration file"), { target: { value: "migrations/002.sql" } }); fireEvent.click(screen.getByRole("button", { name: "Review change" })); rerender(<CollectionMigrationReviewDialog {...props} workspaceId="workspace-b" />); resolve(prep()); await act(async () => undefined); expect(onError).not.toHaveBeenCalled(); expect(screen.queryByText("Registrations · Receipt")).toBeNull();
   });
-  it("discards a prepared review before closing", async () => {
+  it("requests cleanup when closing a prepared review", async () => {
     const { onDiscard, onClose } = setup(); fireEvent.change(screen.getByLabelText("Migration file"), { target: { value: "migrations/002.sql" } }); fireEvent.click(screen.getByRole("button", { name: "Review change" })); await screen.findByText("Registrations · Receipt"); fireEvent.click(screen.getByRole("button", { name: "Discard review" })); await waitFor(() => expect(onDiscard).toHaveBeenCalledWith({ workspaceId: "workspace-a", preparationId: id(10) }, expect.any(AbortSignal))); expect(onClose).toHaveBeenCalledOnce();
+  });
+  it.each(["offline", "expired"])("dismisses without waiting for %s cleanup", async reason => {
+    let reject!: (error: Error) => void;
+    const onDiscard = vi.fn<CollectionMigrationReviewDialogProps["onDiscard"]>(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const initialPreparation = prep(); if (reason === "expired") initialPreparation.expiresAtMs = Date.now() - 1;
+    const { onClose, onError, unmount } = setup({ initialPreparation, onDiscard });
+    if (reason === "offline") fireEvent.click(screen.getByRole("button", { name: "Discard review" }));
+    else fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onDiscard).toHaveBeenCalledOnce());
+    unmount();
+    await act(async () => reject(new Error(reason)));
+    expect(onError).not.toHaveBeenCalled();
+  });
+  it("lets another review start while failed cleanup finishes", async () => {
+    const onDiscard = vi.fn<CollectionMigrationReviewDialogProps["onDiscard"]>().mockRejectedValue(new Error("review expired"));
+    const { onClose, onError } = setup({ initialPreparation: prep(), onDiscard });
+    fireEvent.click(screen.getByRole("button", { name: "Review another change" }));
+    expect(screen.getByRole("button", { name: "Review change" }).hasAttribute("disabled")).toBe(false);
+    await waitFor(() => expect(onDiscard).toHaveBeenCalledOnce());
+    expect(onClose).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
   });
   it("shows a Collection rename in the captured review", () => {
     const initialPreparation=prep();initialPreparation.revision.definition.name="Community tournament";

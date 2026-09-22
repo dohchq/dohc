@@ -98,11 +98,12 @@ function ScopedMigrationReview(props: CollectionMigrationReviewDialogProps) {
   }
   async function discard(close = true): Promise<void> {
     if (locked.current) return;
-    if (!preparation) { if (close) props.onClose(); return; }
-    locked.current = true; setBusy(true); const abort = new AbortController(); active.current = abort;
-    try { await props.onDiscard({ workspaceId: props.workspaceId, preparationId: preparation.preparationId }, abort.signal); if (alive.current && !abort.signal.aborted) { setPreparation(null); setConfirmed(false); if (close) props.onClose(); } }
-    catch (cause) { if (alive.current && !abort.signal.aborted) props.onError("dohc could not discard this Collection review.", cause, () => { if (alive.current) void discard(close); }); }
-    finally { if (alive.current) { locked.current = false; setBusy(false); } }
+    const captured = preparation;
+    setPreparation(null); setConfirmed(false); setInvalid(null);
+    if (close) props.onClose();
+    if (!captured) return;
+    // Dismissal does not wait for remote cleanup. The host also expires every candidate.
+    void Promise.resolve().then(() => props.onDiscard({ workspaceId: props.workspaceId, preparationId: captured.preparationId }, AbortSignal.timeout(10_000))).catch(() => {});
   }
   return <Overlay onClose={busy ? undefined : () => void discard()}><div role="dialog" aria-modal="true" aria-labelledby="collection-migration-title" className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(720px,calc(100vw-32px))] max-w-[calc(100vw-32px)] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
     <div><h2 id="collection-migration-title" className="m-0 text-sm font-semibold text-ink">Review Collection change</h2><p className="m-0 text-[12px] text-muted">{props.generatedChange ? "Review the fields before applying this change." : "Review the captured source before applying it. dohc will not edit the authored operations for you."}</p></div>
