@@ -158,6 +158,13 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         if (result.kind !== "attempt-reconciled") throw Error("dohc could not confirm the cleared retry. Refresh pending responses.");
         onNotice?.("Cleared the saved response's retry");
         return result;
+      }} onCancel={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "cancelAttempt" });
+        signal.throwIfAborted();
+        if (result.kind !== "attempt-cancelled") throw Error("dohc could not confirm cancellation. Refresh pending responses.");
+        onNotice?.("Cancelled the pending response");
+        return result;
       }} />}
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}

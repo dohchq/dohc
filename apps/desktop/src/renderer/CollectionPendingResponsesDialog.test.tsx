@@ -9,7 +9,7 @@ afterEach(cleanup);
 function fixture() {
   const onLoad = vi.fn<CollectionPendingResponsesDialogProps["onLoad"]>().mockResolvedValue({datasetId, entries: [saved], nextAfter: null});
   const onReconcile = vi.fn<CollectionPendingResponsesDialogProps["onReconcile"]>().mockResolvedValue({cleared: true});
-  return {workspaceId: "w", datasetId, name: "Fundraiser", onLoad, onReconcile, onClose: vi.fn(), onError: vi.fn()};
+  return {workspaceId: "w", datasetId, name: "Fundraiser", onLoad, onReconcile, onCancel: vi.fn<CollectionPendingResponsesDialogProps["onCancel"]>().mockResolvedValue({cancelled: true}), onClose: vi.fn(), onError: vi.fn()};
 }
 describe("CollectionPendingResponsesDialog", () => {
   it("requires an explicit warning acknowledgement before clearing the confirmed response", async () => {
@@ -32,6 +32,23 @@ describe("CollectionPendingResponsesDialog", () => {
     await screen.findByText("No saved result is confirmed yet.");
     expect(screen.getByText("Retry in the original app")).toBeTruthy();
     expect(screen.queryByRole("button", {name: "Clear retry"})).toBeNull();
+    expect(props.onCancel).not.toHaveBeenCalled();
+  });
+  it("requires an explicit irreversible cancellation and waits for host confirmation", async () => {
+    const props = fixture(), pending = deferred<{cancelled: true}>();
+    props.onLoad.mockResolvedValue({datasetId, entries: [{...saved, outcome: "unconfirmed", recordedAtMs: null, revision: null}], nextAfter: null});
+    props.onCancel.mockImplementation(() => pending.promise);
+    render(<CollectionPendingResponsesDialog {...props} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Cancel response"}));
+    const confirmation = screen.getByRole("alertdialog");
+    expect(confirmation.textContent).toContain("prevents its old retry from saving later"); expect(confirmation.textContent).toContain("cannot be undone");
+    expect(props.onCancel).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button", {name: "Cancel response"}));
+    expect(props.onCancel).toHaveBeenCalledWith({workspaceId: "w", datasetId, reference: saved.reference, acknowledge: true}, expect.any(AbortSignal));
+    expect(screen.getByText("No saved result is confirmed yet. 1 attached file.")).toBeTruthy();
+    props.onLoad.mockResolvedValue({datasetId, entries: [], nextAfter: null});
+    await act(async () => pending.resolve({cancelled: true}));
+    await screen.findByText("No pending responses. Refresh to check for changes."); expect(props.onReconcile).not.toHaveBeenCalled();
   });
   it("ignores a previous workspace's late response and aborts its request", async () => {
     const props = fixture(), pending = deferred<PendingResponsesPage>();

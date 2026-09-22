@@ -106,3 +106,21 @@ it("keeps archived offline Collections read-only until refresh reaches the host"
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Restore Collection" }).hasAttribute("disabled")).toBe(false));
 });
+
+it("cancels an unconfirmed response only after owner acknowledgement and reports confirmation", async () => {
+  let cancelled = false;
+  backend.dataset.mockImplementation(async input => {
+    if (input.action === "describe") return { kind: "description", dataset };
+    if (input.action === "pendingAttempts") return { kind: "pending-attempts", datasetId: dataset.datasetId, entries: cancelled ? [] : [{ reference: "c".repeat(64), operation: "Submit", recordedAtMs: null, revision: null, outcome: "unconfirmed", attachmentCount: 0 }], nextAfter: null };
+    cancelled = true; return { kind: "attempt-cancelled", cancelled: true };
+  });
+  const onNotice = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onNotice={onNotice} onFormCreated={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Pending responses" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel response" }));
+  expect(backend.dataset.mock.calls.some(([input]) => input.action === "cancelAttempt")).toBe(false);
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel response" }));
+  await screen.findByText("No pending responses. Refresh to check for changes.");
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "cancelAttempt", workspaceId: "workspace-a", datasetId: id(1), reference: "c".repeat(64), acknowledge: true });
+  expect(onNotice).toHaveBeenCalledWith("Cancelled the pending response");
+});
