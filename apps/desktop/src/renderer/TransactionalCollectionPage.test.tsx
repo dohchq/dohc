@@ -31,6 +31,32 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 afterEach(cleanup);
 
 describe("transactional Collection page", () => {
+  it("retries from the original Notice with current copy metadata and the exact request", async () => {
+    let writes = 0;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === read) return { result: page() };
+      if (++writes === 1) throw Error("Lost reply");
+      return { result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } };
+    });
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Change not confirmed");
+    const retry = result.onError.mock.calls[0]![2];
+    result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />);
+    await screen.findByRole("button", { name: "Try again" });
+    await act(async () => retry()); expect(writes).toBe(1);
+    const current = { ...dataset(), operations: dataset().operations.filter(operation => operation.operationId !== remove) };
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={current} copy={{ offline: false, savedAtMs: 2 }} />);
+    await screen.findByRole("button", { name: "Try again" });
+    await act(async () => retry());
+    await screen.findByRole("button", { name: "Undo last edit" });
+    const changes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
+    expect(changes).toHaveLength(2); expect(changes[1]![0]).toEqual(changes[0]![0]);
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
+    expect(result.onNotice).toHaveBeenCalledWith("Saved the edit");
+  });
   it.each([false, true])("invalidates an old revision's pending edit and stale retry after rule changes (in flight: %s)", async inFlight => {
     const pending = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page(request.revision === 1 ? "Alice" : "Current records") }) :

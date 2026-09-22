@@ -186,9 +186,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }, [props.recordsVersion, pending, editor, resourceBusy, busy]);
 
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
+  const currentExecute = useRef(execute);
+  useLayoutEffect(() => { currentExecute.current = execute; });
   async function execute(change: Mutation): Promise<void> {
     if (props.copy?.offline) return;
-    if (!alive.current || priorContract.current !== contractKey || change.invalidated || locked.current || (mutation.current && mutation.current !== change)) return;
+    if (!alive.current || change.invalidated || locked.current || (mutation.current && mutation.current !== change)) return;
+    if (change.request && (change.request.revision !== dataset.revision || change.request.revisionSha256 !== dataset.revisionSha256)) return;
     mutation.current = change; setPending(change); locked.current = true; setBusy(true);
     const abort = new AbortController(); active.current = abort;
     try {
@@ -205,7 +208,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
         if (refused) { mutation.current = null; setPending(null); }
         else closeEditor();
-        onError(refused ? "The collection refused this change." : "dohc could not confirm this change.", cause, refused ? null : () => { if (alive.current) void execute(change); });
+        onError(refused ? "The collection refused this change." : "dohc could not confirm this change.", cause, refused ? null : () => { if (alive.current) void currentExecute.current(change); });
       }
     } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
   }
