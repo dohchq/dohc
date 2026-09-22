@@ -8,6 +8,7 @@ import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervis
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
 import type { LocalDatasetFileRequest, LocalDatasetUpload } from "./localDatasetHost";
+import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/app-backend-runtime/dataset-attempts";
 
 export interface LocalDatasetAppContext { publicationId: string; authorityRevision: number }
 type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
@@ -23,6 +24,7 @@ export function createLocalDatasetApps(options: {
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
   upload(context: LocalDatasetAppContext, input: LocalDatasetUpload): Promise<unknown>;
   file(input: LocalDatasetFileRequest): Promise<unknown>;
+  attempt(context: LocalDatasetAppContext, input: Pick<InvokeDatasetInput, "workspaceId" | "datasetId" | "revision" | "revisionSha256" | "operationId" | "access">, request: DatasetAttemptRequest): unknown;
 }) {
   const { db } = options;
   db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_apps(
@@ -126,7 +128,20 @@ export function createLocalDatasetApps(options: {
       return { publicationId, authorityRevision: checked.row.authority_revision, appRoot: checked.row.app_root, files };
     },
     assertBrowserPublication(publicationId: string, authorityRevision: number) { current(publicationId, authorityRevision); },
-    request(publicationId: string, action: "invoke" | "upload", raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    request(publicationId: string, action: "invoke" | "upload" | "attempt", raw: unknown, signal?: AbortSignal): Promise<unknown> {
+      if (action === "attempt") {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid pending submission request.");
+        const { authorityRevision, operation: operationName, ...request } = raw as Record<string, unknown>;
+        const parsed = parseDatasetAttemptRequest(request);
+        const identity = parseAppBackendInvokeRequest({ authorityRevision, operation: operationName, input: {}, idempotencyKey: "attempt" });
+        return inContext(publicationId, identity.authorityRevision, signal, async context => {
+          const { capability: cap } = current(publicationId, identity.authorityRevision);
+          const operation = cap.operations.find(operation => operation.name === identity.operation && !operation.readOnly);
+          if (!operation) throw new Error("This action is not approved for the app.");
+          return options.attempt(context, { workspaceId: options.workspaceId, datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256,
+            operationId: operation.operationId, access: { kind: "app", appId: publicationId } }, parsed);
+        });
+      }
       if (action === "upload") {
         const input = parseAppBackendUploadRequest(raw);
         return inContext(publicationId, input.authorityRevision, signal, async context => {

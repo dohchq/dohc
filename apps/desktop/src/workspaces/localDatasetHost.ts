@@ -15,6 +15,7 @@ import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupe
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import { compileClosedApp, type ClosedAppBuild, type ClosedAppBuildRequest } from "./closedAppCompiler";
 import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
+import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 
@@ -140,6 +141,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       db.prepare("INSERT OR IGNORE INTO local_dataset_budget VALUES(1,0)").run();
     });
     const journal = createDatasetJournal({ db, transaction });
+    const attempts = createDatasetAttempts({ db, transaction, account: (_scope, bytes) => charge(bytes) });
     const workerDirectory = join(directory, "workers");
     await mkdir(workerDirectory).catch(error => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
     const workerStat = await lstat(workerDirectory);
@@ -348,6 +350,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       invoke: (context, input) => tracked(() => host.invoke(context, { ...input, signal: signal(input.signal) })),
       upload: (context, input) => local.upload(input, context),
       file: input => local.file(input),
+      attempt(context, input, request) {
+        const admitted = host.authorize(context, input);
+        const authority = admitted.authority;
+        if (admitted.operation.readOnly || !authority.appId) throw new Error("This action cannot keep a pending submission.");
+        return attempts.request({ workspaceId, datasetId: input.datasetId, appId: authority.appId, principalKey: authority.principalKey,
+          operationId: input.operationId, revisionSha256: input.revisionSha256 }, request, () => {
+          const current = host.authorize(context, input);
+          if (current.operation.readOnly || JSON.stringify(current.authority) !== JSON.stringify(authority)) throw new Error("This app approval changed. Prepare the app again.");
+        });
+      },
     });
     return { ...local, apps: apps.api };
   } catch (error) {

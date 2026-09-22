@@ -67,6 +67,23 @@ async function fixture() {
 }
 
 describe("local approved dataset apps", () => {
+  it("keeps one exact pending form submission across tabs and restart within its app authority", async () => {
+    const f = await fixture(), invocation = f.invocation();
+    const envelope = { authorityRevision: invocation.authorityRevision, operation: invocation.operation };
+    const first = await f.host.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "save", idempotencyKey: invocation.idempotencyKey, input: invocation.input }) as { attempt: { token: string; input: unknown } };
+    expect(first.attempt.input).toEqual(invocation.input);
+    expect(await f.host.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "save", idempotencyKey: "second-tab", input: { values: { [id(4)]: "Other" } } })).toEqual(first);
+    await expect(f.host.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "clear", token: "A".repeat(43) })).rejects.toThrow(/Another submission/);
+    const other = await f.host.apps.activate(await f.prepareApp("other"), new AbortController().signal);
+    expect(await f.host.apps.request(other.publicationId, "attempt", { authorityRevision: other.authorityRevision, operation: "submit", action: "get" })).toEqual({ attempt: null });
+    await f.host.close();
+    const restarted = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(restarted);
+    expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).toEqual(first);
+    expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "clear", token: first.attempt.token })).toEqual({ attempt: null });
+    await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, operation: "list", action: "get" })).rejects.toThrow(/not approved/);
+    restarted.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).rejects.toThrow(/approval changed/);
+  });
   it("runs a generated form through real loopback transport into its existing Collection", async () => {
     const f = await fixture(), lifetime = new AbortController();
     const launcher = await createLocalAppLaunchHost({ backend: f.host.apps, lifetime: lifetime.signal }); launchers.push(launcher);
