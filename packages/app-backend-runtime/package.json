@@ -14,7 +14,9 @@
     "./recovery": { "types": "./src/recovery.ts", "default": "./dist/recovery.mjs" },
     "./recovery-export": { "types": "./src/recovery-export.ts", "default": "./dist/recovery-export.mjs" },
     "./recovery-import": { "types": "./src/recovery-import.ts", "default": "./dist/recovery-import.mjs" },
-    "./recovery-install": { "types": "./src/recovery-install.ts", "default": "./dist/recovery-install.mjs" }
+    "./recovery-install": { "types": "./src/recovery-install.ts", "default": "./dist/recovery-install.mjs" },
+    "./replica-host": { "types": "./src/replica-host.ts", "default": "./dist/replica-host.mjs" },
+    "./replica": { "types": "./src/replica.ts", "default": "./dist/replica.mjs" }
   },
   "files": ["dist", "src", "README.md"],
   "scripts": { "build": "node scripts/build.mjs", "test": "node scripts/build.mjs && vitest run", "typecheck": "tsc --noEmit" },

@@ -13,6 +13,7 @@ import { validateDatasetRecovery } from "./recovery-import.js";
 import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery-install.js";
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
+import { createDatasetReplicaHost } from "./replica-host.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -295,6 +296,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
       } finally { await validated.dispose(); }
     },
+      ...createDatasetReplicaHost({ journal, owner }),
     async exportRecovery(context: Context, raw: DatasetScope & { signal?: AbortSignal }) {
       const key=scope(raw),recovery=options.recovery;
       if(!recovery)throw new DatasetHostError("invalid","Dataset recovery storage is not configured.");

@@ -7,6 +7,8 @@ await build({
     "recovery-export": fileURLToPath(new URL("../src/recovery-export.ts", import.meta.url)),
     "recovery-import": fileURLToPath(new URL("../src/recovery-import.ts", import.meta.url)),
     "recovery-install": fileURLToPath(new URL("../src/recovery-install.ts", import.meta.url)),
+    "replica-host": fileURLToPath(new URL("../src/replica-host.ts", import.meta.url)),
+    replica: fileURLToPath(new URL("../src/replica.ts", import.meta.url)),
     "dataset-host": fileURLToPath(new URL("../src/dataset-host.ts", import.meta.url)),
     "dataset-attempts": fileURLToPath(new URL("../src/dataset-attempts.ts", import.meta.url)),
     index: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
