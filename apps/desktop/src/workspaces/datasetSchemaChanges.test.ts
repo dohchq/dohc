@@ -44,10 +44,15 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   } }, "owner", { workspaceId: "w" });
   const first = await host.prepare({ descriptorPath: "people/dataset.json", adapter });
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
-  const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
+  const workspace = { workspaceId: "w" };
+  let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
   let alterSources: ((paths: string[]) => void) | undefined;
   const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, migrate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
-  const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => work({ workspace, signal, assertCurrent() {} }),
+  const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => {
+    let active = true;
+    try { return await work({ workspace, signal, scope, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
+    finally { active = false; }
+  }, currentCredentialGeneration: () => credentialGeneration,
     hostForWorkspace: async () => local, ...(remote ? { dataForWorkspace: async () => ({ approvedArtifacts: async (datasetId: string) => host.approvedArtifacts(datasetId), migrate: host.migrate }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
       for (const [path, source] of Object.entries(sources)) { if (files.has(path)) throw new Error("Existing source"); files.set(path, source); }
       alterSources?.(Object.keys(sources));
@@ -56,7 +61,8 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
     const result = await handler("owner", { action: "prepareSchemaChange", workspaceId: "w", datasetId: id(1), revision: current.revision, revisionSha256: current.revisionSha256, change });
     if (result.kind !== "migration-prepared") throw new Error("Expected a review"); return result;
   }
-  return { host, files, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; } };
+  return { host, files, revision, prepare, handler, tamper(fn: (paths: string[]) => void) { alterSources = fn; },
+    changeCredentials() { credentialGeneration++; }, changeScope() { scope = "window:2"; }, changeLifetime() { signal = new AbortController().signal; } };
 }
 const call = (revision: DatasetRevision, operationId: string, input = {}, key = "read") => ({ datasetId: id(1), revision: revision.revision,
   revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: key });
@@ -138,4 +144,42 @@ it("captures remote schema changes without opening the fenced local store and bi
   const changed = await approve(f, review);
   expect(changed.revision.definition.name).toBe("Remote people");
   await expect(f.handler("owner", input)).rejects.toThrow(/review expired/);
+});
+
+it.each(["changeCredentials", "changeScope", "changeLifetime"] as const)("refuses a saved review after %s", async change => {
+  const f = await fixture(definition, true);
+  const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
+  f[change]();
+  await expect(approve(f, review)).rejects.toThrow(/review expired/);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
+it("retains captured review bytes after the preparation operation releases its lease", async () => {
+  const f = await fixture();
+  const review = await f.prepare({ kind: "renameCollection", name: "Reviewed people" });
+  review.revision.definition.name = "Changed after review";
+  const result = await approve(f, review);
+  expect(result.revision.definition.name).toBe("Reviewed people");
+});
+
+it("consumes approval before an uncertain remote migration reply", async () => {
+  const f = await fixture(definition, true);
+  const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
+  const migrate = vi.spyOn(f.host, "migrate").mockRejectedValue(new Error("Remote reply lost"));
+  await expect(approve(f, review)).rejects.toThrow("Remote reply lost");
+  await expect(approve(f, review)).rejects.toThrow(/review expired/);
+  expect(migrate).toHaveBeenCalledTimes(1);
+});
+
+it("refuses a credential change during approval before sending migration SQL", async () => {
+  const f = await fixture(definition, true);
+  const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
+  const approvedArtifacts = f.host.approvedArtifacts;
+  vi.spyOn(f.host, "approvedArtifacts").mockImplementationOnce(datasetId => {
+    f.changeCredentials();
+    return approvedArtifacts(datasetId);
+  });
+  const migrate = vi.spyOn(f.host, "migrate");
+  await expect(approve(f, review)).rejects.toThrow(/server session changed/);
+  expect(migrate).not.toHaveBeenCalled();
 });

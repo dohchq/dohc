@@ -146,7 +146,11 @@ describe("owner Collection migration", () => {
   it("routes owner IPC and CLI review/approval through the same actual host", async () => {
     const { host } = await open(), f = fixture(); await activate(host, f); f.next();
     const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
-    const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => work({ workspace, signal, assertCurrent() {} }),
+    const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => {
+      let active = true;
+      try { return await work({ workspace, signal, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
+      finally { active = false; }
+    },
       hostForWorkspace: async () => host, withAdapter: async (_workspace, work) => work(f.adapter), createSources: async () => {} });
     const prepared = await handler("owner", DatasetRequest.parse({ workspaceId: "w", action: "prepareMigration", datasetId: id(1), descriptorPath: "items/dataset.json", migrationPath: "items/migration.sql" }));
     expect(DatasetResult.parse(prepared).kind).toBe("migration-prepared");

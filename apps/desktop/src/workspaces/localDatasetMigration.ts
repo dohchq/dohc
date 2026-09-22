@@ -34,21 +34,37 @@ const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(p
 const sameCursor = (a: DatasetCursor, b: DatasetCursor) => a.workspaceId === b.workspaceId && a.datasetId === b.datasetId
   && a.hostEpoch === b.hostEpoch && a.approvedRevisionHash === b.approvedRevisionHash && a.revision === b.revision && a.digest === b.digest;
 
-/** Reviews retain captured bytes and the complete data cursor, never paths to reread at approval. */
-export function createLocalDatasetMigrations(dependencies: {
+interface MigrationAuthority {
   workspaceId: string;
   assertCurrent(): void;
   approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
   migrate(input: MigrateDatasetInput): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
-}) {
+}
+type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal };
+
+async function assertMigrationCursor(dependencies: MigrationAuthority, expected: DatasetCursor) {
+  dependencies.assertCurrent();
+  const head = await dependencies.approvedArtifacts(expected.datasetId);
+  dependencies.assertCurrent();
+  if (!head.active || !sameCursor(expected, head.cursor)) throw new Error("This Collection changed after review started. Prepare the change again.");
+}
+
+/** The caller consumes its saved review before entering this fresh approval authority. */
+export async function approveLocalDatasetMigration(dependencies: MigrationAuthority, review: LocalDatasetMigrationPreparation, input: MigrationApproval) {
+  dependencies.assertCurrent(); input.signal?.throwIfAborted();
+  if (review.preparationId !== input.preparationId || review.expiresAtMs <= Date.now() || review.revision.revisionSha256 !== input.revisionSha256 || review.approvalDigest !== input.approvalDigest) {
+    throw new Error("This Collection approval expired or changed. Prepare the change again.");
+  }
+  await assertMigrationCursor(dependencies, review.expected);
+  return dependencies.migrate({ workspaceId: dependencies.workspaceId, revision: review.revision, expected: review.expected,
+    schemaSql: review.schemaSql, operationSource: review.operationSource, migrationSql: review.migrationSql, signal: input.signal });
+}
+
+/** Reviews retain captured bytes and the complete data cursor, never paths to reread at approval. */
+export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
   const pending = new Map<string, LocalDatasetMigrationPreparation>();
   let preparing = 0;
-  async function current(expected: DatasetCursor) {
-    dependencies.assertCurrent();
-    const head = await dependencies.approvedArtifacts(expected.datasetId);
-    dependencies.assertCurrent();
-    if (!head.active || !sameCursor(expected, head.cursor)) throw new Error("This Collection changed after review started. Prepare the change again.");
-  }
+  const current = (expected: DatasetCursor) => assertMigrationCursor(dependencies, expected);
   return {
     async prepareMigration(input: PrepareLocalDatasetMigration): Promise<LocalDatasetMigrationPreparation> {
       dependencies.assertCurrent(); input.signal?.throwIfAborted();
@@ -89,7 +105,7 @@ export function createLocalDatasetMigrations(dependencies: {
         return preparation;
       } finally { preparing--; }
     },
-    async approveMigration(input: { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal }) {
+    async approveMigration(input: MigrationApproval) {
       dependencies.assertCurrent(); input.signal?.throwIfAborted();
       const review = pending.get(input.preparationId);
       if (!review || review.expiresAtMs <= Date.now() || review.revision.revisionSha256 !== input.revisionSha256 || review.approvalDigest !== input.approvalDigest) {
@@ -97,9 +113,7 @@ export function createLocalDatasetMigrations(dependencies: {
       }
       // Consume before the first await: a failed or uncertain outcome requires fresh capture, never repeated SQL.
       pending.delete(input.preparationId);
-      await current(review.expected);
-      return dependencies.migrate({ workspaceId: dependencies.workspaceId, revision: review.revision, expected: review.expected,
-        schemaSql: review.schemaSql, operationSource: review.operationSource, migrationSql: review.migrationSql, signal: input.signal });
+      return approveLocalDatasetMigration(dependencies, review, input);
     },
     discardMigration(preparationId: string) { dependencies.assertCurrent(); pending.delete(preparationId); },
     clear() { pending.clear(); },

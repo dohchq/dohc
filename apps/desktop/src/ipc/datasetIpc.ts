@@ -7,7 +7,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import type { OwnerDatasetData } from "../workspaces/remoteDataset";
-import { createLocalDatasetMigrations } from "../workspaces/localDatasetMigration";
+import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -20,6 +20,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
+  currentCredentialGeneration?(): number;
   namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "invoke" | "upload" | "file">>;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<import("@dohc/cli/dataset").DatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
@@ -27,8 +28,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
 }) {
-  type MigrationReview = ReturnType<typeof createLocalDatasetMigrations>;
-  const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; review: MigrationReview; clear(): void }>();
+  const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
   return async (caller: Caller, raw: unknown) => {
     const input = DatasetRequest.parse(raw);
@@ -72,41 +72,50 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
+      const credentialGeneration = dependencies.currentCredentialGeneration?.();
+      const migrationAuthority = {
+        workspaceId: input.workspaceId,
+        assertCurrent() {
+          current();
+          if (dependencies.currentCredentialGeneration?.() !== credentialGeneration) throw new Error("Your server session changed. Try again.");
+        },
+        approvedArtifacts: (datasetId: string) => data.approvedArtifacts(datasetId),
+        migrate: (value: Parameters<NonNullable<OwnerDatasetData["migrate"]>>[0]) => {
+          migrationAuthority.assertCurrent();
+          if (!data.migrate) throw new Error("Collection rule changes are unavailable on this host.");
+          return data.migrate(value);
+        },
+      };
       if (input.action === "approveMigration" || input.action === "discardMigration") {
         const pending = migrations.get(input.preparationId);
-        if (!pending || pending.caller !== caller || pending.workspaceId !== input.workspaceId || pending.signal !== operation.signal || pending.scope !== operation.scope) {
+        if (!pending || pending.caller !== caller || pending.workspaceId !== input.workspaceId || pending.signal !== operation.signal || pending.scope !== operation.scope || pending.credentialGeneration !== credentialGeneration) {
           throw new Error("This Collection review expired. Prepare the change again.");
         }
         // Consume before any authority read or SQL, including an uncertain remote reply.
         pending.clear();
-        if (input.action === "discardMigration") { pending.review.clear(); return { kind: "migration-discarded" as const }; }
-        const result = await pending.review.approveMigration({ ...input, signal: operation.signal }); current();
+        if (input.action === "discardMigration") return { kind: "migration-discarded" as const };
+        const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, { ...input, signal: operation.signal }); migrationAuthority.assertCurrent();
         return { kind: "migrated" as const, ...result };
       }
       const prepareMigration = async (selection: { datasetId: string; descriptorPath: string; migrationPath: string }) => {
         if (migrations.size + preparingMigrations >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
         preparingMigrations++;
-        const review = createLocalDatasetMigrations({ workspaceId: input.workspaceId, assertCurrent: current,
-          approvedArtifacts: datasetId => data.approvedArtifacts(datasetId),
-          migrate: value => {
-            current();
-            if (!data.migrate) throw new Error("Collection rule changes are unavailable on this host.");
-            return data.migrate(value);
-          },
-        });
+        const review = createLocalDatasetMigrations(migrationAuthority);
         try {
           const prepared = await dependencies.withAdapter(operation.workspace, adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
-          current();
-          const clear = () => { migrations.delete(prepared.preparationId); operation.signal.removeEventListener("abort", expire); clearTimeout(timer); };
-          const expire = () => { clear(); review.clear(); };
+          migrationAuthority.assertCurrent();
+          const { signal } = operation;
+          const preparationId = prepared.preparationId;
+          const clear = () => { migrations.delete(preparationId); signal.removeEventListener("abort", expire); clearTimeout(timer); };
+          const expire = () => { clear(); };
           const timer = setTimeout(expire, Math.max(0, prepared.expiresAtMs - Date.now())); timer.unref();
-          migrations.set(prepared.preparationId, { caller, workspaceId: input.workspaceId, signal: operation.signal, scope: operation.scope, review, clear });
+          migrations.set(prepared.preparationId, { caller, workspaceId: input.workspaceId, signal: operation.signal, scope: operation.scope, credentialGeneration, review: structuredClone(prepared), clear });
           operation.signal.addEventListener("abort", expire, { once: true });
           return prepared;
-        } finally { preparingMigrations--; }
+        } finally { review.clear(); preparingMigrations--; }
       };
       if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
       if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
@@ -175,7 +184,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath });
         current();
         if (prepared.previousRevision.revisionSha256 !== input.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
-          const pending = migrations.get(prepared.preparationId); pending?.clear(); pending?.review.clear();
+          migrations.get(prepared.preparationId)?.clear();
           throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
         }
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
