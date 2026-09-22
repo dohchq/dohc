@@ -251,10 +251,16 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const key = scope(raw); owner(context, key); const state = lifecycle(key);
       revision(key); const limit = raw.limit ?? 50, after = raw.after ?? "";
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid lifecycle page size.");
-      const rows = db.prepare("SELECT app_id,binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id>? ORDER BY app_id LIMIT ?").all(key.workspaceId,key.datasetId,after,limit+1);
-      const apps = rows.slice(0,limit)
-        .map(row => ({ appId: String(row.app_id), binding: JSON.parse(String(row.binding_json)) }));
-      return { ...state, apps, nextCursor: rows.length > limit ? apps.at(-1)!.appId : null };
+      const rows = db.prepare("SELECT app_id,length(CAST(binding_json AS BLOB)) AS bytes FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id>? ORDER BY app_id LIMIT ?").all(key.workspaceId,key.datasetId,after,limit+1);
+      const apps: Array<{ appId: string; binding: AppDatasetBinding }> = []; let bytes = 0;
+      for (const row of rows.slice(0,limit)) {
+        const size = Number(row.bytes) + Buffer.byteLength(String(row.app_id));
+        if (size > 1024 * 1024) throw new DatasetHostError("invalid", "Dataset app binding exceeds its size limit.");
+        if (bytes + size > 1024 * 1024) break;
+        const binding = db.prepare("SELECT binding_json FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId,key.datasetId,row.app_id)!;
+        apps.push({ appId: String(row.app_id), binding: JSON.parse(String(binding.binding_json)) }); bytes += size;
+      }
+      return { ...state, apps, nextCursor: rows.length > apps.length ? apps.at(-1)!.appId : null };
     },
     recoveryStatus(context: Context, raw: DatasetScope & { transferId: string }) {
       const key = scope(raw), recovery = options.recovery;
