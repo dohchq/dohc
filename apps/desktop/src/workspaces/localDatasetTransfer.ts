@@ -4,6 +4,7 @@ import { lstat, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { DatasetCursor, DatasetJournal } from "@dohc/app-backend-runtime/journal";
+import { assertDatasetAttemptsCommitted, initializeDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { encodeRecoveryManifest, recoveryManifestSha256, writeDatasetRecovery, type DatasetRecoveryManifest, type RecoveryEntry, type RecoveryLimits } from "@dohc/app-backend-runtime/recovery";
 
 export interface DatasetTransferReceipt {
@@ -51,6 +52,7 @@ export function createLocalDatasetTransfers(options: {
   exportRecovery(datasetId: string, signal?: AbortSignal): Promise<PreparedExport>;
 }) {
   const { db, journal, transaction, workspaceId } = options;
+  transaction(() => initializeDatasetAttempts(db));
   db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_transfers(
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,transfer_id TEXT NOT NULL UNIQUE,target_origin TEXT NOT NULL,
     source_cursor TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('fenced','ready','imported')),
@@ -98,6 +100,7 @@ export function createLocalDatasetTransfers(options: {
       }
       const head = journal.head({ workspaceId, datasetId: input.datasetId }, options.assertCurrent);
       if (!head.active) throw Error("This Collection has no local write authority. Restore its transfer record before continuing.");
+      assertDatasetAttemptsCommitted(db, {workspaceId, datasetId: input.datasetId});
       const value: StoredTransfer = { workspaceId, datasetId: input.datasetId, transferId: randomUUID(), targetOrigin, sourceCursor: head.cursor,
         state: "fenced", manifestSha256: null, archive: null, receipt: null };
       journal.fence({ expected: head.cursor, authorize: options.assertCurrent });

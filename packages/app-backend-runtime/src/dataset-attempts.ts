@@ -1,10 +1,33 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { parseDatasetAttemptRequest, parseDatasetAttemptResult, type DatasetAttemptResult } from "@dohc/security-contract/dataset-attempts";
-import type { JournalDb } from "./journal.js";
+import type { DatasetScope, JournalDb } from "./journal.js";
 
 export interface DatasetAttemptScope {
   workspaceId: string; datasetId: string; appId: string; principalKey: string; operationId: string;
   revisionSha256: string;
+}
+export function initializeDatasetAttempts(db: JournalDb): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS dohc_dataset_attempts(
+    workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,app_id TEXT NOT NULL,principal_key TEXT NOT NULL,operation_id TEXT NOT NULL,
+    revision_sha256 TEXT NOT NULL,attempt_json TEXT NOT NULL,storage_bytes INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id,dataset_id,app_id,principal_key,operation_id)) STRICT;`);
+}
+/** Runs within the same transaction as the source fence. Uncommitted uploads still belong to that source. */
+export function assertDatasetAttemptsCommitted(db: JournalDb, scope: DatasetScope): void {
+  let after = 0;
+  for (;;) {
+    const rows = db.prepare("SELECT rowid,* FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND rowid>? ORDER BY rowid LIMIT 64").all(scope.workspaceId, scope.datasetId, after);
+    if (!rows.length) return;
+    for (const row of rows) {
+      const attempt = parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!;
+      const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      const callerKey = hash([row.principal_key, {kind: "app", appId: row.app_id}]);
+      const receipt = db.prepare("SELECT payload_sha256 FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=? AND caller_key=? AND idempotency_key=?")
+        .get(scope.workspaceId, scope.datasetId, callerKey, attempt.idempotencyKey);
+      if (!receipt || receipt.payload_sha256 !== hash([row.revision_sha256, row.operation_id, attempt.input])) throw new Error("A submission is unconfirmed. Retry it in the current app before moving this Collection.");
+      after = Number(row.rowid);
+    }
+  }
 }
 function sync<T>(run: () => T): T {
   if (run.constructor.name === "AsyncFunction") throw new Error("Pending submission callbacks must be synchronous.");
@@ -24,10 +47,7 @@ export function createDatasetAttempts(options: {
   const maximum = options.maxAttemptsPerDataset ?? 4096;
   if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 100_000) throw new Error("Invalid pending submission bound.");
   const tx = <T>(run: () => T) => sync(() => options.transaction(() => sync(run)));
-  tx(() => options.db.exec(`CREATE TABLE IF NOT EXISTS dohc_dataset_attempts(
-    workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,app_id TEXT NOT NULL,principal_key TEXT NOT NULL,operation_id TEXT NOT NULL,
-    revision_sha256 TEXT NOT NULL,attempt_json TEXT NOT NULL,storage_bytes INTEGER NOT NULL,
-    PRIMARY KEY(workspace_id,dataset_id,app_id,principal_key,operation_id)) STRICT;`));
+  tx(() => initializeDatasetAttempts(options.db));
   return {
     request(scope: DatasetAttemptScope, raw: unknown, authorize: () => void): DatasetAttemptResult {
       const request = parseDatasetAttemptRequest(raw);

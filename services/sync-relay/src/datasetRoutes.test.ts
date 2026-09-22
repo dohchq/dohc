@@ -449,3 +449,39 @@ it("imports a fenced dataset and its receipt over HTTP with a durable retry rece
     }
   } finally {await archive.dispose();}
 });
+
+
+it("transfers a lost-response attempt and replays it under the same publication without a second row", async () => {
+  const source = await httpFixture(), target = await httpFixture(); await source.activate();
+  const publicationId = source.publish(); await source.http(`${source.path}/binding`, {publicationId, enabled: true});
+  const route = `link/app-publications/${publicationId}/backend`;
+  const uploaded = await (await source.http(`${route}/upload`, upload, source.publicHeaders)).json();
+  const input = {name: "Lost response", fileId: uploaded.file.fileId}, idempotencyKey = "lost-response";
+  const pending = await (await source.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "save", input, idempotencyKey}, source.publicHeaders)).json();
+  // The write commits; the participant has not received its acknowledgement.
+  expect((await source.http(`${route}/invoke`, {authorityRevision: 1, operation: "submit", input, idempotencyKey}, source.publicHeaders)).status).toBe(200);
+  const owner = {kind: "named" as const, workspaceId: "w", userId: "owner"}, scope = {workspaceId: "w", datasetId: id(1)};
+  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)}), cursor = journal.head(scope, () => {}).cursor;
+  journal.fence({expected: cursor, authorize() {}});
+  const archive = await source.host.exportRecovery(owner, scope);
+  try {
+    const chunks = []; for await (const bytes of archive.stream()) chunks.push(bytes);
+    const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
+    const response = await target.handler(new Request(`https://relay/sync/w/datasets/${id(1)}/imports/retry-transfer`, {method: "POST", headers: {
+      authorization: "Bearer owner", "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": manifestSha256,
+      "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body: Buffer.concat(chunks)}));
+    expect(response.status).toBe(200);
+    expect(target.publish()).toBe(publicationId);
+    const restored = await target.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "get"}, target.publicHeaders);
+    expect(restored.status).toBe(200); expect(await restored.json()).toEqual(pending);
+    expect(await (await target.http(`${route}/invoke`, {authorityRevision: 1, operation: "submit", input: pending.attempt.input, idempotencyKey: pending.attempt.idempotencyKey}, target.publicHeaders)).json()).toMatchObject({replayed: true});
+    expect(await (await target.invoke()).json()).toMatchObject({result: [{name: "Lost response", receipt: uploaded.file.fileId}]});
+    const anotherPublication = target.publish("b".repeat(64));
+    const refused = await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true});
+    expect(refused.status).toBe(409);
+    const before = Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
+    expect((await target.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "clear", token: pending.attempt.token}, target.publicHeaders)).status).toBe(200);
+    expect(Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes)).toBeLessThan(before);
+    expect((await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true})).status).toBe(200);
+  } finally {await archive.dispose();}
+});

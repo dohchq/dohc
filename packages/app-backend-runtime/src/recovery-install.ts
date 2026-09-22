@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb, JournalExportRecord, CheckpointStage } from "./journal.js";
 import { readValidatedBlob, type ValidatedDatasetRecovery, type RecoveryBlob } from "./recovery-import.js";
 import type { RecoveryAttachment } from "./recovery-export.js";
+import { initializeDatasetAttempts } from "./dataset-attempts.js";
 
 export interface RecoveryImportReceipt {
   transferId: string;
@@ -33,6 +34,7 @@ function identity(value: string) { if (typeof value !== "string" || !value.lengt
 export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions<Context>) {
   const { db, journal } = options;
   const tx = <T>(run: () => T): T => sync(() => options.transaction(() => sync(run)));
+  tx(() => initializeDatasetAttempts(db));
   tx(() => db.exec(`
     CREATE TABLE IF NOT EXISTS dohc_dataset_imports(
       import_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,manifest_hash TEXT NOT NULL,
@@ -199,6 +201,14 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
           db.prepare(`INSERT INTO dohc_dataset_bindings SELECT ?,?,json_extract(body,'$.appId'),json_extract(body,'$.bindingJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='binding'`).run(scope.workspaceId, scope.datasetId, importId);
           db.prepare(`INSERT INTO dohc_dataset_data_grants SELECT ?,?,json_extract(body,'$.principalKey'),json_extract(body,'$.grantJson'),json_extract(body,'$.token') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='grant'`).run(scope.workspaceId, scope.datasetId, importId);
           db.prepare(`INSERT INTO dohc_dataset_lifecycle SELECT ?,?,json_extract(body,'$.archived'),json_extract(body,'$.generation'),json_extract(body,'$.reason'),json_extract(body,'$.archivedAtMs') FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='lifecycle'`).run(scope.workspaceId, scope.datasetId, importId);
+          for (const row of db.prepare("SELECT body FROM dohc_dataset_import_metadata WHERE import_id=? AND json_extract(body,'$.kind')='attempt'").all(importId)) {
+            const m = JSON.parse(String(row.body)) as Extract<import("./recovery-import.js").RecoveryMetadata, {kind: "attempt"}>;
+            const json = JSON.stringify({attempt: m.attempt});
+            const bytes = Buffer.byteLength(json) + [scope.workspaceId, scope.datasetId, m.appId, m.principalKey, m.operationId].reduce((sum, part) => sum + Buffer.byteLength(part), 0) + 512;
+            // Metadata staging already reserved its body; charge only the final storage difference.
+            account(context, scope, bytes - Buffer.byteLength(String(row.body)) - 512);
+            db.prepare("INSERT INTO dohc_dataset_attempts VALUES(?,?,?,?,?,?,?,?)").run(scope.workspaceId, scope.datasetId, m.appId, m.principalKey, m.operationId, m.revisionSha256, json, bytes);
+          }
           if (options.commitAttachments) sync(() => options.commitAttachments!(context, { ...scope, importId }));
           db.prepare("UPDATE dohc_dataset_imports SET phase='installed' WHERE import_id=?").run(importId);
           db.prepare("DELETE FROM dohc_dataset_import_records WHERE import_id=?").run(importId);

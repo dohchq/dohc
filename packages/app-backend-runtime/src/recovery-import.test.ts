@@ -12,6 +12,7 @@ import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecover
 import { validateDatasetRecovery, readValidatedBlob } from "./recovery-import";
 import { parseRecoveryJournalRecord } from "./recovery-record";
 import { createRecoveryInstaller } from "./recovery-install";
+import { createDatasetAttempts } from "./dataset-attempts";
 
 const hash = (v: Uint8Array | string) => createHash("sha256").update(v).digest("hex");
 vi.setConfig({ testTimeout: 30_000 });
@@ -24,7 +25,7 @@ const definition: DatasetDefinition = { formatVersion:1,datasetId:id(1),name:"It
 const limits = { maxTotalBytes: 16*1024*1024 };
 const cleanups: Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
-async function fixture(large = false){
+async function fixture(large = false, mutable = false){
   const directory=await mkdtemp(join(tmpdir(),"dohc-recovery-import-test-")), db=new DatabaseSync(join(directory,"host.sqlite")), seedPath=join(directory,"seed.sqlite"), seed=new DatabaseSync(seedPath);
   seed.exec(schemaSql);
   if (large) {
@@ -34,15 +35,15 @@ async function fixture(large = false){
     seed.exec("COMMIT");
   }
   const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
-  const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:source});
+  const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition: mutable ? {...definition, operations: definition.operations.map(operation => ({...operation, readOnly: false, kind: "action" as const}))} : definition,revision:1,schemaSql,operationSource:source});
   db.exec("CREATE TABLE dohc_dataset_lifecycle(workspace_id,dataset_id,archived,generation,reason,archived_at_ms); CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   const authorize=()=>{}, checkpoint=await readFile(seedPath);
   let head=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize, ...(large ? { capacityBytes:128*1024*1024 } : {})});
   cleanups.push(async()=>{seed.close();db.close();if(!resolve(directory).startsWith(`${resolve(tmpdir())}${sep}dohc-recovery-import-test-`))throw Error("unsafe temp path");await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
-  function add(value: string, attached: string[] = []) {
+  function add(value: string, attached: string[] = [], retry?: {callerKey: string; payloadSha256: string}) {
     const session=seed.createSession({table:"items"}); seed.prepare("INSERT INTO items(value) VALUES(?)").run(value); const changeset=session.changeset(); session.close();
-    const result=journal.commitOperation({expected:head,proposalId:value,operation:"read",callerKey:"owner",idempotencyKey:value,payloadSha256:hash(value),resultJson:JSON.stringify({value}),changeset,changesetSha256:hash(changeset),attachedFileIds:attached,authorize,accountAndAttach(){}});
+    const result=journal.commitOperation({expected:head,proposalId:value,operation:"read",callerKey:retry?.callerKey ?? "owner",idempotencyKey:value,payloadSha256:retry?.payloadSha256 ?? hash(value),resultJson:JSON.stringify({value}),changeset,changesetSha256:hash(changeset),attachedFileIds:attached,authorize,accountAndAttach(){}});
     if(result.kind!=="committed")throw Error("unexpected replay");head=result.event.cursor;return result.event;
   }
   async function migrate(){
@@ -59,7 +60,7 @@ async function fixture(large = false){
     const staged=await stageDatasetRecovery({stream:prepared.stream(),stagingParent:directory,limits:exportLimits,authorize,expectedManifestSha256:recoveryManifestSha256(prepared.manifest,exportLimits)});
     await prepared.dispose(); return staged;
   }
-  return {directory,db,seed,journal,scope,revision,authorize,add,migrate,stage,head:()=>head};
+  return {directory,db,seed,journal,scope,revision,authorize,add,migrate,stage,transaction,head:()=>head};
 }
 async function alter(staged:StagedDatasetRecovery,id:string,change:(bytes:Buffer)=>Buffer){
   const file=staged.files.find(f=>f.entry.id===id)!;const bytes=change(await readFile(file.path));await writeFile(file.path,bytes);file.entry.byteLength=bytes.length;file.entry.sha256=hash(bytes);
@@ -198,4 +199,27 @@ it("rejects attached bytes whose metadata differs from the original association"
 it("checks exported metadata digest formulas against real journal records",async()=>{
   const f=await fixture();f.add("first");await f.migrate();f.add("last");
   for(const r of f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize}))expect(parseRecoveryJournalRecord(r)).toEqual(r);
+});
+
+
+it("rejects tampered or duplicate retained submission metadata before installation", async () => {
+  const f = await fixture(false, true), attemptScope = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}}), input = {name: "First"};
+  attempts.request(attemptScope, {action: "save", idempotencyKey: "first", input}, f.authorize);
+  f.add("first", [], {callerKey: hash(JSON.stringify([attemptScope.principalKey, {kind: "app", appId: attemptScope.appId}])), payloadSha256: hash(JSON.stringify([attemptScope.revisionSha256, attemptScope.operationId, input]))});
+  const tampered = await f.stage();
+  await alter(tampered, "history", bytes => changeHistory(bytes, record => {if (record.kind === "attempt") record.attempt.input = {name: "Changed"};}));
+  await expect(validateDatasetRecovery({staged: tampered, authorize: f.authorize})).rejects.toThrow("matching committed outcome");
+  const duplicate = await f.stage();
+  await alter(duplicate, "history", bytes => {
+    let offset = 8;
+    while (offset < bytes.length) {
+      const start = offset, length = bytes.readUInt32BE(offset); offset += 4;
+      const record = JSON.parse(bytes.subarray(offset, offset + length).toString()); offset += length;
+      if (record.kind === "attempt") return Buffer.concat([bytes.subarray(0, offset), bytes.subarray(start, offset), bytes.subarray(offset)]);
+      if (record.kind === "event" || record.kind === "checkpoint") offset += record.byteLength;
+    }
+    throw Error("Missing attempt metadata");
+  });
+  await expect(validateDatasetRecovery({staged: duplicate, authorize: f.authorize})).rejects.toThrow(/UNIQUE/);
 });

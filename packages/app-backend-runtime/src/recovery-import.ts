@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseDatasetRevision, parseDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
+import { parseDatasetAttemptResult, type DatasetPendingAttempt } from "@dohc/security-contract/dataset-attempts";
 import { openPersistentAppBackend, type PersistentAppBackend, type PersistentRuntimeOptions } from "./persistent.js";
 import type { DatasetCursor, JournalExportRecord } from "./journal.js";
 import type { StagedDatasetRecovery } from "./recovery.js";
@@ -39,6 +40,7 @@ export type RecoveryMetadata =
   | ({ kind: "catalog-revision" } & RecoveryCatalog)
   | { kind: "binding"; appId: string; bindingJson: string; token: string }
   | { kind: "grant"; principalKey: string; grantJson: string; token: string }
+  | { kind: "attempt"; appId: string; principalKey: string; operationId: string; revisionSha256: string; attempt: DatasetPendingAttempt }
   | { kind: "attachment"; file: { fileId: string; name: string; contentType: string; byteLength: number; sha256: string; revision: number } };
 export interface ValidatedDatasetRecovery {
   manifest: StagedDatasetRecovery["manifest"];
@@ -107,7 +109,8 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
     CREATE TABLE metadata(seq INTEGER PRIMARY KEY,body TEXT NOT NULL);
     CREATE TABLE catalogs(hash TEXT PRIMARY KEY,revision INTEGER UNIQUE,body TEXT NOT NULL,compiled TEXT NOT NULL);
     CREATE TABLE used_catalogs(hash TEXT PRIMARY KEY);
-    CREATE TABLE receipts(caller TEXT,key TEXT,PRIMARY KEY(caller,key));
+    CREATE TABLE receipts(caller TEXT,key TEXT,payload TEXT,PRIMARY KEY(caller,key));
+    CREATE TABLE attempts(app TEXT,principal TEXT,operation TEXT,PRIMARY KEY(app,principal,operation));
     CREATE TABLE references_(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
     CREATE TABLE permissions(kind TEXT,id TEXT,PRIMARY KEY(kind,id));`);
@@ -116,7 +119,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
   options.signal?.addEventListener("abort", abort);
   const dispose = async () => { if (closed) return; closed = true; options.signal?.removeEventListener("abort", abort); await worker?.close(); index.close(); await rm(work, { recursive: true, force: true }); await staged.dispose(); };
   const maxRecords = recoveryInteger(options.maxRecords ?? 1_000_000, 1), maxEvent = recoveryInteger(options.maxEventBytes ?? 16 * CHUNK, 1, 128 * CHUNK);
-  let count = 0, frameCount = 0, catalog: RecoveryCatalog | undefined, currentCheckpoint: JournalExportRecord | undefined, previous: DatasetCursor | null = null;
+  let count = 0, frameCount = 0, attemptBytes = 0, catalog: RecoveryCatalog | undefined, currentCheckpoint: JournalExportRecord | undefined, previous: DatasetCursor | null = null;
   const rawMetadata = (body: RecoveryMetadata) => index.prepare("INSERT INTO metadata(body) VALUES(?)").run(JSON.stringify(body));
   const getCatalog = (hash: string) => {
     const row = index.prepare("SELECT body,compiled FROM catalogs WHERE hash=?").get(hash);
@@ -149,7 +152,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           JSON.stringify(parseDatasetRevision(JSON.parse(record.definitionJson))) !== JSON.stringify(approval.revision)) fail("checkpoint artifacts differ from original approval.");
     } else {
       if (!previous || record.previousDigest !== previous.digest || c.hostEpoch !== previous.hostEpoch || c.approvedRevisionHash !== previous.approvedRevisionHash) fail("event chain identity differs.");
-      index.prepare("INSERT INTO receipts VALUES(?,?)").run(record.callerKey, record.idempotencyKey);
+      index.prepare("INSERT INTO receipts VALUES(?,?,?)").run(record.callerKey, record.idempotencyKey, record.payloadSha256);
       for (const id of record.attachedFileIds) index.prepare("INSERT OR IGNORE INTO references_ VALUES(?,?)").run(id, c.revision);
     }
     index.prepare("INSERT INTO records VALUES(?,?,?,?,?)").run(c.revision, JSON.stringify(record), blob.path, blob.offset, blob.byteLength); previous = c;
@@ -190,6 +193,16 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           const generation = recoveryInteger(raw.generation), archivedAtMs = raw.archivedAtMs === null ? null : recoveryInteger(raw.archivedAtMs);
           index.prepare("INSERT INTO permissions VALUES('lifecycle','lifecycle')").run();
           rawMetadata({ kind: "lifecycle", archived: raw.archived, generation, reason: raw.reason, archivedAtMs });
+        } else if (raw.kind === "attempt") {
+          recoveryObject(raw, ["kind", "appId", "principalKey", "operationId", "revisionSha256", "attempt"]);
+          const appId = recoveryText(raw.appId, 256), principalKey = recoveryText(raw.principalKey, 1024), operationId = recoveryText(raw.operationId, 256), revisionSha256 = recoveryDigest(raw.revisionSha256);
+          const attempt = parseDatasetAttemptResult({attempt: raw.attempt}).attempt;
+          if (!attempt) fail("empty retained submission.");
+          attemptBytes += length;
+          if (attemptBytes > 8 * 1024 * 1024) fail("retained submissions exceed their byte limit.");
+          index.prepare("INSERT INTO attempts VALUES(?,?,?)").run(appId, principalKey, operationId);
+          if (Number(index.prepare("SELECT COUNT(*) AS n FROM attempts").get()!.n) > 4096) fail("too many retained submissions.");
+          rawMetadata({kind: "attempt", appId, principalKey, operationId, revisionSha256, attempt});
         } else if (raw.kind === "attachment") {
           recoveryObject(raw, ["kind", "file"]); const file = recoveryObject(raw.file, ["fileId", "name", "contentType", "byteLength", "sha256", "revision"]);
           const id = recoveryText(file.fileId, 128); if (!/^[A-Za-z0-9_-]{16,128}$/.test(id)) fail("invalid file identity.");
@@ -227,6 +240,13 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
         const grant = recoveryObject(JSON.parse(m.grantJson), ["operationIds", "discover", "revision", "revisionSha256"]), approved = getCatalog(String(grant.revisionSha256)).revision;
         if (grant.revision !== approved.revision || typeof grant.discover !== "boolean" || !Array.isArray(grant.operationIds) || new Set(grant.operationIds).size !== grant.operationIds.length ||
             grant.operationIds.some(id => !approved.definition.operations.some(op => op.operationId === id))) fail("invalid retained data grant.");
+      }
+      if (m.kind === "attempt") {
+        const approved = getCatalog(m.revisionSha256).revision;
+        if (!approved.definition.operations.some(operation => operation.operationId === m.operationId && !operation.readOnly)) fail("retained submission operation differs.");
+        const callerKey = hash(JSON.stringify([m.principalKey, {kind: "app", appId: m.appId}]));
+        const receipt = index.prepare("SELECT payload FROM receipts WHERE caller=? AND key=?").get(callerKey, m.attempt.idempotencyKey);
+        if (!receipt || receipt.payload !== hash(JSON.stringify([m.revisionSha256, m.operationId, m.attempt.input]))) fail("retained submission has no matching committed outcome.");
       }
     }
     const records = function* (): Iterable<ValidatedRecoveryJournal> {

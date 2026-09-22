@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, open, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
+import { parseDatasetAttemptResult, type DatasetPendingAttempt } from "@dohc/security-contract/dataset-attempts";
+import { assertDatasetAttemptsCommitted, initializeDatasetAttempts } from "./dataset-attempts.js";
 import type { DatasetCursor, DatasetJournal, DatasetScope, JournalDb, JournalExportRecord } from "./journal.js";
 import { encodeRecoveryManifest, RECOVERY_CHUNK_BYTES, writeDatasetRecovery, type DatasetRecoveryManifest, type RecoveryEntry, type RecoveryLimits } from "./recovery.js";
 
@@ -36,6 +38,7 @@ export type DatasetRecoveryRecord =
   | { kind: "binding"; appId: string; bindingJson: string; token: string }
   | { kind: "grant"; principalKey: string; grantJson: string; token: string }
   | { kind: "attachment"; file: RecoveryAttachment }
+  | { kind: "attempt"; appId: string; principalKey: string; operationId: string; revisionSha256: string; attempt: DatasetPendingAttempt }
   | JournalExportRecord;
 
 function sync<T>(run: () => T): T {
@@ -58,6 +61,13 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
   if(!Number.isSafeInteger(options.limits.maxTotalBytes)||options.limits.maxTotalBytes<1)throw new Error("Invalid dataset export storage reservation.");
   const authorize = () => { options.signal?.throwIfAborted(); sync(options.authorize); };
   const pinned = journal.captureExport({ scope, authorize, capture(cursor) {
+    initializeDatasetAttempts(db);
+    assertDatasetAttemptsCommitted(db, scope);
+    const attemptSize = db.prepare("SELECT COALESCE(SUM(storage_bytes),0) AS bytes,COUNT(*) AS count FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId)!;
+    if (Number(attemptSize.bytes) > 8 * 1024 * 1024 || Number(attemptSize.count) > 4096) throw new Error("Dataset export pending submissions exceed their bound.");
+    const attempts = db.prepare("SELECT * FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? ORDER BY app_id,principal_key,operation_id").all(scope.workspaceId, scope.datasetId)
+      .map(row => ({kind: "attempt" as const, appId: String(row.app_id), principalKey: String(row.principal_key), operationId: String(row.operation_id),
+        revisionSha256: String(row.revision_sha256), attempt: parseDatasetAttemptResult(JSON.parse(String(row.attempt_json))).attempt!}));
     const catalog = db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
     if (!catalog) throw new Error("Dataset catalog is missing.");
     const revisionJson = String(catalog.revision_json), artifactsJson = String(catalog.artifacts_json);
@@ -78,7 +88,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
     const attachments=files.map(file=>({...file}));
     const sourceState = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)?.active === 1 ? "active" as const : "fenced" as const;
     const lifecycle = db.prepare("SELECT archived,generation,reason,archived_at_ms FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId);
-    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
+    return { revision, revisionJson, artifactsJson, bindings, grants, attachments, sourceState, attempts, lifecycle: lifecycle ? { kind: "lifecycle" as const, archived: lifecycle.archived === 1, generation: Number(lifecycle.generation), reason: String(lifecycle.reason), archivedAtMs: lifecycle.archived_at_ms === null ? null : Number(lifecycle.archived_at_ms) } : null };
   } });
   if (pinned.captured.revision.revisionSha256 !== pinned.cursor.approvedRevisionHash) throw new Error("Dataset catalog and journal approval differ.");
   const attachments = pinned.captured.attachments;
@@ -121,6 +131,7 @@ export async function prepareDatasetRecoveryExport(options: DatasetExportOptions
       yield encodeDatasetRecoveryRecord({kind:"current-checkpoint",checkpoint:pinned.checkpoint});
       for(const row of [...pinned.captured.bindings,...pinned.captured.grants])yield encodeDatasetRecoveryRecord(row);
       if(pinned.captured.lifecycle)yield encodeDatasetRecoveryRecord(pinned.captured.lifecycle);
+      for(const row of pinned.captured.attempts)yield encodeDatasetRecoveryRecord(row);
       let after=0;
       for(;;){authorize();const row=db.prepare("SELECT revision,revision_json,artifacts_json FROM dohc_dataset_catalog_history WHERE workspace_id=? AND dataset_id=? AND revision>? AND revision<? ORDER BY revision LIMIT 1")
           .get(scope.workspaceId,scope.datasetId,after,pinned.captured.revision.revision);

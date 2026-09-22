@@ -14,6 +14,7 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
+import { initializeDatasetAttempts } from "./dataset-attempts.js";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 export class DatasetHostError extends Error {
@@ -109,6 +110,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   const { db, journal } = options;
   const transaction = <T>(run: () => T): T => synchronous(() => options.transaction(() => synchronous(run)));
+  transaction(() => initializeDatasetAttempts(db));
   transaction(() => db.exec(`
     CREATE TABLE IF NOT EXISTS dohc_dataset_catalog (
       workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, revision_json TEXT NOT NULL,
@@ -384,6 +386,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
           db.prepare("DELETE FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").run(key.workspaceId, key.datasetId, appId);
         }
         else {
+          if (!existing && db.prepare("SELECT 1 FROM dohc_dataset_attempts WHERE workspace_id=? AND dataset_id=? AND app_id!=? LIMIT 1").get(key.workspaceId, key.datasetId, appId)) {
+            throw new DatasetHostError("conflict", "A response is pending in another app. Confirm it there before publishing this app.");
+          }
           const binding = parseDatasetBinding(raw.binding, approved);
           const json = JSON.stringify(binding);
           if (options.accountMetadata) synchronous(() => options.accountMetadata!(context, { ...key, bytes: Buffer.byteLength(json) + Buffer.byteLength(appId) + 256 - previousBytes }));
