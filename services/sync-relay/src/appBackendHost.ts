@@ -11,6 +11,7 @@ import { activateAppBackend, commitAppBackendOperation, exportAppBackend, findAp
   type AppBackendRecoveryBundle, type AppBackendSnapshot } from "./storage/appBackendData";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 import { targetVersionId, visibleSharePath } from "./shareFilter";
+import type { AppBackendAdmissionScope } from "./appBackendAdmission";
 
 export type { AppBackendAuth } from "./appBackendAuthority";
 export interface AppBackendHostOptions {
@@ -293,6 +294,15 @@ export function createAppBackendHost(options: AppBackendHostOptions) {
       return {file, bytes};
     });
   }
-  return {activate, invoke, upload, readFile, describe, helper, export: exportData, restore, descriptor, blob};
+  function authorizeAdmission(auth: AppBackendAuth, publicationId: string): AppBackendAdmissionScope {
+    return storage.readTx(() => {
+      const value = authority(auth, publicationId, undefined);
+      return {dataset: JSON.stringify([value.workspaceId, value.capability.dataPath]),
+        participant: JSON.stringify([value.receiptCaller.grantId, value.receiptCaller.principalId]),
+        ...(value.caller.kind === "link" ? {link: JSON.stringify([value.workspaceId, value.caller.grantId])} : {}),
+        organizer: value.caller.kind === "owner" || (value.caller.kind === "named" && value.caller.helper && value.caller.access === "edit")};
+    });
+  }
+  return {activate, invoke, upload, readFile, describe, helper, export: exportData, restore, descriptor, blob, authorizeAdmission};
 }
 export type AppBackendHost = ReturnType<typeof createAppBackendHost>;

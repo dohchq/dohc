@@ -1,6 +1,7 @@
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { createAppBackendRoutes, type AppBackendRoute } from "./appBackendRoutes";
+import type { AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes, type OwnerAppPublicationRoute } from "./ownerAppPublicationRoutes";
@@ -77,6 +78,7 @@ export interface CreateSyncRelayHandlerOptions {
   appCollectionPolicy?: AppCollectionPolicy;
   appBackendsEnabled?: boolean;
   appBackendMaxParticipantsPerGrant?: number;
+  appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
@@ -164,6 +166,7 @@ export function createSyncRelayHandler({
   appCollectionPolicy,
   appBackendsEnabled = false,
   appBackendMaxParticipantsPerGrant,
+  appBackendAdmissionLimits,
   ownerRestoreHost = () => undefined,
   storage,
   resolveActor,
@@ -212,6 +215,7 @@ export function createSyncRelayHandler({
   if (appBackendsEnabled && !appPublicationLimits) throw new TypeError("App backends require app publications.");
   const respondToAppBackend = appBackendsEnabled ? createAppBackendRoutes(
     storage.createAppBackendHost({limits: appPublicationLimits!, nowMs, maxParticipantsPerGrant:appBackendMaxParticipantsPerGrant}), storage.unavailable,
+    {limits: appBackendAdmissionLimits, nowMs},
   ) : undefined;
   if (publicEditRelease && (!linkKey || !shareWebOrigin || !relayExchangeKey || !namedBrowserSessionLimits)) {
     throw new TypeError("Public Edit release requires link credentials, viewer origin, relay exchange, and named browser sessions.");
@@ -404,11 +408,7 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
-  const requireLinkRead = (
-    request: Request,
-    capabilityRateLimiter: TokenBucketLimiter,
-    grantRateLimiter: TokenBucketLimiter,
-  ) => {
+  const requireLinkCapability = (request: Request) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
       request.headers.get("authorization") ?? "",
@@ -422,6 +422,14 @@ export function createSyncRelayHandler({
       nowMs: nowMs(),
     });
     if (!capability) throw invalidLinkCapability();
+    return {capabilityToken, capability};
+  };
+  const requireLinkRead = (
+    request: Request,
+    capabilityRateLimiter: TokenBucketLimiter,
+    grantRateLimiter: TokenBucketLimiter,
+  ) => {
+    const {capabilityToken, capability} = requireLinkCapability(request);
     const admittedAtMs = nowMs();
     if (
       !capabilityRateLimiter.allow(
@@ -618,7 +626,7 @@ export function createSyncRelayHandler({
         if (!respondToAppBackend) throw notFound();
         if (!route.workspaceId) {
           if (!linkKey || request.headers.has("cookie")) throw notFound();
-          const {capability} = requireLinkRead(request, linkReadRateLimiter, linkGrantReadRateLimiter);
+          const {capability} = requireLinkCapability(request);
           const secret = request.headers.get("x-dohc-link-profile-secret");
           if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
           return await respondToAppBackend(request, route, {kind:"link", capabilityHash:capability.session.capabilityHash,

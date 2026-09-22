@@ -1,4 +1,5 @@
-import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
+import { readBoundedJson } from "@dohc/service-http";
+import { createAppBackendAdmission, type AppBackendAdmissionLimits } from "./appBackendAdmission";
 import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES, parseAppBackendInvokeRequest,
   parseAppBackendJson, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppBackendAuth, AppBackendHost } from "./appBackendHost";
@@ -33,19 +34,18 @@ function encodeBinary(value: unknown): unknown {
 }
 
 /** Authentication is resolved by the relay before this bounded operation transport. */
-export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortSignal) {
-  const rate = new TokenBucketLimiter(30, 0.5, 2048);
-  let pending = 0;
+export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortSignal,
+  options: {limits?: Partial<AppBackendAdmissionLimits>; nowMs?: () => number} = {}) {
+  const admit = createAppBackendAdmission(options.limits);
+  const nowMs = options.nowMs ?? Date.now;
   return async (request: Request, route: AppBackendRoute, auth: AppBackendAuth): Promise<Response> => {
-    const key = auth.kind === "link" ? auth.capabilityHash : auth.userId;
-    if (pending >= 8 || !rate.allow(key, Date.now())) throw relayError("link_read_rate_limited");
     const get = route.action === "descriptor" || route.action === "blob";
     if (request.method !== (get ? "GET" : "POST")) throw relayError("method_not_allowed");
     if (auth.kind === "link" && !["invoke", "upload", "file"].includes(route.action)) throw notFound();
     const url = new URL(request.url);
     if (route.action !== "blob" && url.search) throw badRequest("App requests do not accept a query.");
     const signal = AbortSignal.any([request.signal, unavailable, AbortSignal.timeout(30_000)]);
-    pending++;
+    const release = admit(host.authorizeAdmission(auth, route.publicationId), route.action, nowMs());
     try {
       signal.throwIfAborted();
       if (route.action === "descriptor") return Response.json(host.descriptor(auth, route.publicationId, signal), {headers});
@@ -98,6 +98,6 @@ export function createAppBackendRoutes(host: AppBackendHost, unavailable: AbortS
         return Response.json({code:error.refusal.code,message:error.refusal.message}, {status:409,headers});
       }
       throw error;
-    } finally { pending--; }
+    } finally { release(); }
   };
 }
