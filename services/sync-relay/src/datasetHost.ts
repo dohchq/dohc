@@ -223,6 +223,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       accountMigration(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
       accountCheckpointStage(_auth, allocation) { account(allocation.scope.workspaceId, allocation.scope.datasetId, allocation.bytes); },
       accountMetadata(_auth, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+      deleteResources(_auth, key) {
+        storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
+      },
       operationResources(_auth, request) { enroll(request.workspaceId, request.datasetId, request.authority); return files.resources(request, request.authority, request.input); },
     });
     storage.tx(() => storage.db.exec(`DROP TRIGGER IF EXISTS sync_relay_dataset_delete;
@@ -247,7 +250,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_import_records WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
         DELETE FROM dohc_dataset_import_metadata WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
         DELETE FROM dohc_dataset_import_checkpoints WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
+        DELETE FROM dohc_dataset_recovered_permissions WHERE import_id IN (SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);
         DELETE FROM dohc_dataset_imports WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_review_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
     return {
@@ -259,6 +264,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       },
       describe: host.describe, list: host.list, approvedArtifacts: host.approvedArtifacts, permissions: host.permissions, history: host.history, publication,
       lifecycle: host.lifecycle, archiveDataset: host.archiveDataset, restoreDataset: host.restoreDataset,
+      deletePreview: host.deletePreview, deleteDataset: host.deleteDataset, deletionStatus: host.deletionStatus,
       pendingAttempts: host.pendingAttempts, reconcileAttempt: host.reconcileAttempt, cancelAttempt: host.cancelAttempt,
       exportRecovery: host.exportRecovery, recoveryImportStatus: host.recoveryStatus,
       async importRecovery(auth: AppBackendAuth, input: Parameters<typeof host.importRecovery>[1]) {

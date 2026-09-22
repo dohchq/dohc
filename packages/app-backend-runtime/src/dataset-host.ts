@@ -36,7 +36,7 @@ export interface DatasetHostOptions<Context> {
   db: JournalDb;
   transaction: <T>(run: () => T) => T;
   journal: DatasetJournal;
-  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>; migrate(input: DatasetMigration): Promise<DatasetCursor> };
+  supervisor: { invoke(input: DatasetInvocation): Promise<DatasetInvocationResult>; migrate(input: DatasetMigration): Promise<DatasetCursor>; retire?(scope: DatasetScope): Promise<void> };
   /** Synchronous. Validate current workspace membership or current app credential here. */
   /** datasetId is absent only for workspace catalog discovery. */
   resolveAuthority(context: Context, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority;
@@ -47,6 +47,8 @@ export interface DatasetHostOptions<Context> {
   accountCreation?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number }): void;
   /** Signed retained-byte delta; runs in the binding or grant transaction. */
   accountMetadata?(context: Context, allocation: DatasetScope & { bytes: number }): void;
+  /** Remove host-private resources and refund their ledger inside the destruction transaction. */
+  deleteResources?(context: Context, scope: DatasetScope): void;
   /** Checkpoint retention and signed catalog replacement delta, in the transition transaction. */
   accountMigration?(context: Context, allocation: DatasetScope & { bytes: number; capacityBytes: number; capacityDeltaBytes: number }): void;
   /** Signed staging reservation; use the same retained-byte counter as accountMigration. */
@@ -105,7 +107,7 @@ function access(input: DatasetAccess = { kind: "data" }): DatasetAccess {
 
 /** Captures approved source once. Every consumer uses that source and current host authority. */
 export function createDatasetHost<Context>(options: DatasetHostOptions<Context>) {
-  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources]) {
+  for (const callback of [options.transaction, options.resolveAuthority, options.accountCreation, options.accountMetadata, options.accountMigration, options.accountCheckpointStage, options.operationResources, options.deleteResources]) {
     if (callback?.constructor.name === "AsyncFunction") throw new Error("Dataset host callbacks must be synchronous.");
   }
   const { db, journal } = options;
@@ -132,7 +134,24 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       workspace_id TEXT NOT NULL, dataset_id TEXT NOT NULL, archived INTEGER NOT NULL CHECK(archived IN(0,1)),
       generation INTEGER NOT NULL, reason TEXT NOT NULL, archived_at_ms INTEGER,
       PRIMARY KEY(workspace_id,dataset_id)) STRICT;
+    CREATE TABLE IF NOT EXISTS dohc_dataset_review_generations (
+      workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,generation INTEGER NOT NULL,
+      PRIMARY KEY(workspace_id,dataset_id)) STRICT;
   `));
+  transaction(() => {
+    for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle"]) {
+      for (const operation of ["INSERT", "UPDATE", "DELETE"]) {
+        const row = operation === "DELETE" ? "OLD" : "NEW";
+        db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_review_${operation} AFTER ${operation} ON ${table} BEGIN
+          INSERT INTO dohc_dataset_review_generations VALUES(${row}.workspace_id,${row}.dataset_id,1)
+          ON CONFLICT(workspace_id,dataset_id) DO UPDATE SET generation=generation+1; END;`);
+      }
+    }
+  });
+  function reviewToken(key: DatasetScope, cursor: DatasetCursor) {
+    const generation = db.prepare("SELECT generation FROM dohc_dataset_review_generations WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)?.generation ?? 0;
+    return hash(JSON.stringify([cursor.workspaceId,cursor.datasetId,cursor.hostEpoch,cursor.approvedRevisionHash,cursor.revision,cursor.digest,generation]));
+  }
   function authority(context: Context, key: { workspaceId: string; datasetId?: string }, through: DatasetAccess): DatasetAuthority {
     const result = synchronous(() => options.resolveAuthority(context, { ...key, access: through }));
     const verified = { caller: parseAppBackendCaller(result.caller), principalKey: text(result.principalKey),
@@ -223,6 +242,38 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         }) })), operations };
   }
   const host = {
+    deletionStatus(context: Context, raw: DatasetScope) {
+      const key = scope(raw); owner(context,key);
+      return { deleted: Boolean(db.prepare("SELECT 1 FROM dohc_dataset_deletions WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) };
+    },
+    deletePreview(context: Context, raw: DatasetScope & { after?: string; limit?: number }) {
+      const key = scope(raw);
+      return journal.captureExport({ scope: key, authorize: () => { owner(context,key); }, capture(cursor) {
+        if (db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)?.active !== 1)
+          throw new DatasetHostError("conflict", "Delete this Collection at its current host.");
+        return { ...host.lifecycle(context,raw), name: revision(key).definition.name, cursor,
+          reviewToken: reviewToken(key,cursor), irreversible: true as const };
+      } }).captured;
+    },
+    async deleteDataset(context: Context, raw: DatasetScope & { expected: DatasetCursor; reviewToken: string; acknowledge: true }) {
+      const key = scope(raw), expected = structuredClone(raw.expected);
+      if (raw.acknowledge !== true || expected.workspaceId !== key.workspaceId || expected.datasetId !== key.datasetId)
+        throw new DatasetHostError("invalid", "Review the Collection before permanently deleting it.");
+      journal.destroy({ expected, authorize: () => { owner(context,key); }, cleanup() {
+          revision(key);
+          if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
+          if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
+          if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dohc_dataset_imports'").get()) {
+            for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
+              db.prepare(`DELETE FROM ${table} WHERE import_id IN(SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`).run(key.workspaceId,key.datasetId);
+            db.prepare("DELETE FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?").run(key.workspaceId,key.datasetId);
+          }
+          for (const table of ["dohc_dataset_bindings", "dohc_dataset_data_grants", "dohc_dataset_lifecycle", "dohc_dataset_catalog", "dohc_dataset_catalog_history", "dohc_dataset_attempts", "dohc_dataset_cancelled_attempts", "dohc_dataset_review_generations"])
+            db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(key.workspaceId,key.datasetId);
+      } });
+      await options.supervisor.retire?.(key);
+      return { deleted: true as const, datasetId: key.datasetId };
+    },
     archiveDataset(context: Context, raw: DatasetScope & { reason?: string }) {
       const key = scope(raw), reason = raw.reason === undefined ? "archived by owner" : text(raw.reason, 1024);
       return transaction(() => {
@@ -295,7 +346,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         const key = scope(validated.manifest.cursor);
         if (key.workspaceId !== raw.workspaceId) throw new DatasetHostError("invalid", "This recovery file belongs to another workspace.");
-        const assertAbsent = () => { authorize(); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
+        const assertAbsent = () => { journal.assertNotDeleted(key,authorize); if (db.prepare("SELECT 1 FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId) || db.prepare("SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId)) throw new DatasetHostError("conflict", "This Collection already exists. Recovery does not replace existing data."); };
         assertAbsent();
         return { transferId: raw.transferId, manifestSha256: raw.manifestSha256, sourceCursor: structuredClone(validated.manifest.cursor),
           revision: parseDatasetRevision(JSON.parse(validated.catalog.revisionJson)), dispose: () => validated.dispose(),
@@ -351,6 +402,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const schemaSql = raw.schemaSql, source = raw.operationSource, capacityBytes = raw.capacityBytes, signal = raw.signal;
       const captured = owner(context, key), ownerToken = JSON.stringify(captured);
       const authorize = () => { signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      journal.assertNotDeleted(key,authorize);
       const existing = db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
       if (existing) {
         const current = parseDatasetRevision(JSON.parse(String(existing.revision_json)));

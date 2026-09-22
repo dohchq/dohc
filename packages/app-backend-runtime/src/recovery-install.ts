@@ -59,7 +59,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       ...(row.target_json ? { targetCursor: JSON.parse(String(row.target_json)) } : {}) };
   }
   function find(scope: DatasetScope, transferId: string, authorize: () => void) {
-    authorize(); return db.prepare("SELECT * FROM dohc_dataset_imports WHERE import_id=? AND workspace_id=? AND dataset_id=?").get(identity(transferId), scope.workspaceId, scope.datasetId);
+    journal.assertNotDeleted(scope,authorize); return db.prepare("SELECT * FROM dohc_dataset_imports WHERE import_id=? AND workspace_id=? AND dataset_id=?").get(identity(transferId), scope.workspaceId, scope.datasetId);
   }
   async function discard(context: Context, input: DatasetScope & { transferId: string; authorize(): void }) {
     const row = tx(() => {
@@ -119,7 +119,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
       const importId = identity(input.transferId), ownerToken = randomUUID();
       if (!/^[a-f0-9]{64}$/.test(input.manifestSha256)) throw new Error("Invalid recovery manifest digest.");
       const prior = tx(() => {
-        input.authorize(); const previous = db.prepare("SELECT * FROM dohc_dataset_imports WHERE import_id=?").get(importId);
+        journal.assertNotDeleted(scope,input.authorize); const previous = db.prepare("SELECT * FROM dohc_dataset_imports WHERE import_id=?").get(importId);
         if (previous) {
           if (previous.workspace_id !== scope.workspaceId || previous.dataset_id !== scope.datasetId || previous.manifest_hash !== input.manifestSha256 || !same(JSON.parse(String(previous.source_json)), recovery.manifest.cursor)) throw new Error("Recovery import identity conflicts.");
           if (previous.phase !== "installed" && previous.phase !== "claimed") throw new Error("Recovery import is incomplete; discard it before retrying.");

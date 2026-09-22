@@ -67,6 +67,24 @@ async function fixture(startupExclusive = false) {
     async reopen() {await host.close(); host = await create();}};
 }
 
+it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
+  await f.invoke(link,id(5),{name:"Deleted"},publicationId);
+  const preview = f.host.deletePreview(owner,scope);
+  const request = {...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
+  await expect(f.host.deleteDataset(link,request)).rejects.toThrow();
+  const usage = Number(f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId,scope.datasetId)!.storage_bytes);
+  const before = workspaceUsageBytes(f.storage,"w");
+  await expect(f.host.deleteDataset(owner,request)).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
+  expect(workspaceUsageBytes(f.storage,"w")).toBe(before-usage);
+  for(const table of ["dohc_dataset_catalog","dohc_dataset_bindings","dohc_dataset_events","dohc_dataset_checkpoint_chunks","sync_relay_dataset_files","sync_relay_dataset_usage"])
+    expect(f.storage.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
+  expect(f.storage.db.prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId)).toBeTruthy();
+  await f.reopen();
+  await expect(f.activate()).rejects.toThrow("deleted");
+  await expect(f.invoke(link,id(5),{name:"Deleted"},publicationId)).rejects.toThrow();
+});
+
 it.each([false, true])("reclaims abandoned checkpoint quota only with exclusive startup ownership (%s)", async startupExclusive => {
   const f = await fixture(startupExclusive); await f.activate(); await f.host.close();
   const before = workspaceUsageBytes(f.storage, "w");

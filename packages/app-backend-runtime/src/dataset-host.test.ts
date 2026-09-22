@@ -68,6 +68,46 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   return { host, db, journal, supervisor, activate, invoke, binding, transaction };
 }
 
+it("requires current owner review of both data and affected apps before permanent deletion", async () => {
+  const f = await fixture(); await f.activate();
+  const first = f.host.deletePreview("owner",scope);
+  expect(() => f.host.deletePreview("helper",scope)).toThrow("not permitted");
+  const request = {...scope,expected:first.cursor,reviewToken:first.reviewToken,acknowledge:true as const};
+  await expect(f.host.deleteDataset("owner",{...request,acknowledge:false as true})).rejects.toThrow("Review");
+  await expect(f.host.deleteDataset("helper",request)).rejects.toThrow("not permitted");
+  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
+  await expect(f.host.deleteDataset("owner",request)).rejects.toThrow("access changed");
+  const next = f.host.deletePreview("owner",{...scope,limit:1});
+  expect(next.apps).toMatchObject([{appId:"form"}]);
+  await f.invoke("owner",id(6),{value:"changed"});
+  await expect(f.host.deleteDataset("owner",{...request,expected:next.cursor,reviewToken:next.reviewToken})).rejects.toThrow("cursor changed");
+  f.host.archiveDataset("owner",scope);
+  const current = f.host.deletePreview("owner",scope);
+  await expect(f.host.deleteDataset("owner",{...request,expected:current.cursor,reviewToken:current.reviewToken})).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
+  expect(f.host.list("owner",{workspaceId:scope.workspaceId,includeArchived:true}).datasets).toEqual([]);
+  for (const table of ["dohc_dataset_catalog","dohc_dataset_bindings","dohc_dataset_events","dohc_dataset_receipts","dohc_dataset_checkpoints","dohc_dataset_attempts","dohc_dataset_lifecycle"])
+    expect(f.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
+  expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(1);
+  await expect(f.activate()).rejects.toThrow("deleted");
+  await expect(f.invoke("owner",id(6),{value:"changed"})).rejects.toThrow();
+});
+
+it("rolls permanent deletion and its tombstone back if private-resource cleanup fails", async () => {
+  const f = await fixture({deleteResources() { throw new Error("cleanup failed"); }}); await f.activate();
+  const preview = f.host.deletePreview("owner",scope);
+  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("cleanup failed");
+  expect(f.host.deletePreview("owner",scope).cursor).toEqual(preview.cursor);
+  expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(0);
+});
+
+it("rejects deletion at a fenced former authority", async () => {
+  const f = await fixture(); await f.activate();
+  const preview = f.host.deletePreview("owner",scope);
+  f.journal.fence({expected:preview.cursor,authorize(){}});
+  expect(() => f.host.deletePreview("owner",scope)).toThrow("current host");
+  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("fenced");
+});
+
 it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
   const f = await fixture(); await f.activate();
   for (const key of ["secret-retry-1", "secret-retry-2", "secret-retry-3"]) await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "private payload" }, idempotencyKey: key });

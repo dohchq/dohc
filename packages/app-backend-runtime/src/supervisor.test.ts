@@ -69,6 +69,25 @@ function launcher(hook: (command: any, controls: { stop(): void; deliver(): void
   };
 }
 
+it("retires active and queued operations after permanent deletion without reviving their worker", async () => {
+  let entered!: () => void;
+  const running = new Promise<void>(resolve => { entered = resolve; });
+  const f = await fixture({launch:launcher((command,controls) => {
+    if (command.command.kind === "prepare") { entered(); return; }
+    controls.deliver();
+  })});
+  const first = f.invoke({id:"first",value:"private"});
+  const firstCheck = expect(first).rejects.toThrow();
+  await running;
+  const queued = f.invoke({id:"queued",value:"private"},{idempotencyKey:"queued"});
+  const queuedCheck = expect(queued).rejects.toThrow("deleted");
+  f.journal.destroy({expected:f.journal.head(f.scope,f.authorize).cursor,authorize:f.authorize});
+  await f.supervisor.retire(f.scope);
+  await Promise.all([firstCheck,queuedCheck]);
+  await expect(f.invoke({id:"retry",value:"private"})).rejects.toThrow("deleted");
+  expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_events").get()!.n).toBe(0);
+});
+
 it("serializes concurrent writes and reuses a worker without copying the database", async () => {
   let launches = 0;
   const f = await fixture({ launch: launcher((command, controls) => { if (command.command.kind === "open") launches++; controls.deliver(); }) });

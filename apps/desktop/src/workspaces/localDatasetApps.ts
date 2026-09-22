@@ -18,7 +18,7 @@ const hash = (value: string | Uint8Array) => createHash("sha256").update(value).
 /** Uses the dataset authority database. No app gets the owner data API or source artifacts. */
 export function createLocalDatasetApps(options: {
   db: JournalDb; workspaceId: string; ownerId: string;
-  assertCurrent(): void; charge(bytes: number): void;
+  assertCurrent(): void; charge(datasetId: string, bytes: number): void;
   approved(datasetId: string): { revision: DatasetRevision; active: boolean };
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
@@ -91,7 +91,8 @@ export function createLocalDatasetApps(options: {
           db.prepare("DELETE FROM local_dataset_app_artifacts WHERE publication_id=?").run(existing.publication_id);
           db.prepare("DELETE FROM local_dataset_apps WHERE publication_id=?").run(existing.publication_id);
         }
-        options.charge(storageBytes - (existing?.storage_bytes ?? 0));
+        if (existing) options.charge(existing.dataset_id,-existing.storage_bytes);
+        options.charge(verified.datasetId,storageBytes);
         db.prepare("INSERT INTO local_dataset_apps VALUES(?,?,?,?,?,?,1)").run(publicationId, candidate.appRoot, verified.datasetId, authorityRevision, json, storageBytes);
         for (const file of files) db.prepare("INSERT INTO local_dataset_app_artifacts VALUES(?,?,?)").run(publicationId, file.path, file.bytes);
       });

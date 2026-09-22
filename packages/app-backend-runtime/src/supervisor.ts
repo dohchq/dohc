@@ -362,6 +362,21 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         return enqueue(input,bytes,lane=>migrate(lane,input));
       }catch(error){return Promise.reject(error);}
     },
+    /** Called after the authority has durably deleted the dataset. */
+    async retire(raw: DatasetScope): Promise<void> {
+      const scope = copyScope(raw), key = JSON.stringify(scope), lane = lanes.get(key);
+      if (!lane) return;
+      if (lane.idle) { clearTimeout(lane.idle); lane.idle = undefined; }
+      for (const job of lane.queue.splice(0)) {
+        queuedCount--; queuedBytes -= job.bytes; clearTimeout(job.timeout);
+        job.signal?.removeEventListener("abort",job.abort); job.reject(new Error("Dataset was permanently deleted."));
+      }
+      if (lane.active && lane.worker) await lane.worker.runtime.abort("Dataset was permanently deleted.").catch(() => {});
+      await lane.done;
+      if (lane.idle) clearTimeout(lane.idle);
+      await stopWorker(lane);
+      if (lanes.get(key) === lane) lanes.delete(key);
+    },
     async close(): Promise<void> {
       closed = true;
       for (const lane of lanes.values()) {

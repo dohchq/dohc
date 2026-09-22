@@ -76,7 +76,7 @@ it("reclaims abandoned checkpoint reservations before exposing a restarted local
     const transaction = <T,>(work: () => T): T => { db.exec("BEGIN IMMEDIATE"); try {const value = work(); db.exec("COMMIT"); return value;} catch(error) {db.exec("ROLLBACK"); throw error;} };
     const journal = createDatasetJournal({ db, transaction });
     const scope = {workspaceId: "w", datasetId: id(1)};
-    const account = ({bytes}: {bytes: number}) => { db.prepare("UPDATE local_dataset_budget SET bytes=bytes+?").run(bytes); };
+    const account = ({bytes}: {bytes: number}) => { db.prepare("UPDATE local_dataset_budget SET bytes=bytes+?").run(bytes); db.prepare("INSERT INTO local_dataset_usage VALUES(?,?) ON CONFLICT(dataset_id) DO UPDATE SET bytes=bytes+excluded.bytes").run(scope.datasetId,bytes); };
     const pinned = journal.stageCheckpoint({scope,expectedBytes: 30,sha256: digest(new Uint8Array(30)),authorize() {},account});
     db.prepare("INSERT INTO dohc_dataset_import_checkpoints VALUES(?,?,?,?)").run("pending-import",pinned.stageId,JSON.stringify(pinned),"head");
     journal.stageCheckpoint({scope,expectedBytes: 100,sha256: digest(new Uint8Array(100)),authorize() {},account});
@@ -95,6 +95,50 @@ afterEach(async () => {
 });
 
 describe("local dataset owner adapter", () => {
+  it("refunds only the deleted Collection and preserves another Collection across restart", async () => {
+    const first = await open(); await activate(first.host);
+    const secondSources = sources();
+    secondSources.files.set("items/dataset.json",JSON.stringify({...definition,datasetId:id(20),name:"Other items"}));
+    const second = await activate(first.host,secondSources);
+    await first.host.action({datasetId:id(20),revision:1,revisionSha256:second.revision.revisionSha256,operationId:id(6),idempotencyKey:"other",input:{name:"Keep"}});
+    const preview = first.host.deletePreview({datasetId:id(1)});
+    await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
+    await first.host.close();
+    const db = new DatabaseSync(join(first.workspaceRoot,".dohc","datasets","state.sqlite"));
+    try {
+      const budget = Number(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes);
+      expect(budget).toBeGreaterThan(1024*1024);
+      expect(db.prepare("SELECT bytes FROM local_dataset_usage WHERE dataset_id=?").get(id(20))!.bytes).toBe(budget);
+    } finally { db.close(); }
+    const restarted = await open({workspaceRoot:first.workspaceRoot});
+    expect(restarted.host.list().datasets.map(row=>row.datasetId)).toEqual([id(20)]);
+    expect((await restarted.host.query({datasetId:id(20),revision:1,revisionSha256:second.revision.revisionSha256,operationId:id(5),idempotencyKey:"read",input:{}})).result).toMatchObject([{name:"Keep"}]);
+  });
+
+  it("permanently deletes records, uploads and workers, refunds storage, and preserves source and saved exports", async () => {
+    const first = await open(), approved = await activate(first.host);
+    const sourcePath = join(first.workspaceRoot,"keep.txt"); await writeFile(sourcePath,"workspace source");
+    const uploaded = await first.host.upload({datasetId:id(1),revision:1,revisionSha256:approved.revision.revisionSha256,idempotencyKey:"delete-file",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:Buffer.from("%PDF-delete").toString("base64")});
+    await first.host.action(call(approved,id(6),"delete-write",{name:"Saved",fileId:uploaded.file.fileId}));
+    const archive = await first.host.prepareExport(id(1)), backupPath = join(first.workspaceRoot,"saved.dohc-recovery");
+    await writeDatasetRecoveryExport({path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    const preview = first.host.deletePreview({datasetId:id(1)});
+    await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
+    expect(first.host.list({includeArchived:true}).datasets).toEqual([]);
+    expect(await readFile(sourcePath,"utf8")).toBe("workspace source");
+    expect((await readFile(backupPath)).length).toBeGreaterThan(0);
+    await expect(first.host.prepareRecovery({sourcePath:backupPath})).rejects.toThrow("deleted");
+    await first.host.close();
+    const db = new DatabaseSync(join(first.workspaceRoot,".dohc","datasets","state.sqlite"));
+    try {
+      expect(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes).toBe(0);
+      for(const table of ["local_dataset_files","local_dataset_usage","dohc_dataset_journals","dohc_dataset_checkpoint_chunks"])
+        expect(db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
+    } finally { db.close(); }
+    const restarted = await open({workspaceRoot:first.workspaceRoot});
+    expect(restarted.host.list().datasets).toEqual([]);
+    await expect(activate(restarted.host)).rejects.toThrow("deleted");
+  });
   it("restores a chosen active backup only after owner claim and preserves files and retry history", async () => {
     const sourceHost = await open(), approved = await activate(sourceHost.host);
     const bytesBase64 = Buffer.from("%PDF-recovery-receipt").toString("base64");
