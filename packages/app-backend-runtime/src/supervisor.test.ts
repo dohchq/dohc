@@ -411,15 +411,31 @@ it("keeps committed writes successful when materialization quota is exhausted",a
   expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
 });
 
-it("flushes idle workers with host authority after the request credential expires",async()=>{
+it("creates threshold caches with host authority after the request credential expires",async()=>{
   let cached!:()=>void;
   const installed=new Promise<void>(resolve=>cached=resolve);
-  const f=await fixture({idleMs:10,maintenanceStorage:{authorize(){},account(){}},transform:journal=>({...journal,cacheMaterialization(input){const value=journal.cacheMaterialization(input);cached();return value;}})});
+  const f=await fixture({materializationEvents:1,maintenanceStorage:{authorize(){},account(){}},transform:journal=>({...journal,cacheMaterialization(input){const value=journal.cacheMaterialization(input);cached();return value;}})});
   await f.invoke({id:"one",value:"saved"});
   f.db.prepare("UPDATE grants SET allowed=0").run();
   await installed;
   expect(f.journal.materialization({scope:f.scope,authorize(){}})?.cursor.revision).toBe(1);
   expect(f.journal.head(f.scope,()=>{}).cursor.revision).toBe(1);
+});
+
+it("evicts an idle worker without snapshotting a single event below the cache threshold",async()=>{
+  let closed!:()=>void,snapshots=0;
+  const idleClosed=new Promise<void>(resolve=>closed=resolve);
+  const f=await fixture({idleMs:10,maintenanceStorage:{authorize(){},account(){}},launch:launcher((command,controls)=>{
+    if(command.command.kind==="snapshot")snapshots++;
+    if(command.command.kind==="close")closed();
+    controls.deliver();
+  })});
+  await f.invoke({id:"one",value:"saved"});
+  await idleClosed;
+  expect(snapshots).toBe(0);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"one",value:"saved"}]);
+  expect(snapshots).toBe(0);
 });
 
 

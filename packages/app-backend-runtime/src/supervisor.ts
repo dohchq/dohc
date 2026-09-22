@@ -130,7 +130,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     maintenanceWarnings.add(key);
     try {options.onMaintenanceError?.({...scope},error);} catch { /* Diagnostics cannot change a committed response. */ }
   }
-  async function maintainMaterialization(lane:Lane,force=false):Promise<void> {
+  async function maintainMaterialization(lane:Lane):Promise<void> {
     const storage=options.maintenanceStorage,worker=lane.worker;
     if(!storage||!worker||closed||blockedMaintenance.has(JSON.stringify(lane.scope)))return;
     const reservations:CheckpointStage[]=[];
@@ -145,7 +145,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(!current.active||!sameCursor(current.cursor,worker.cursor))throw new Error("Dataset changed during materialization maintenance.");
       const previous=options.journal.materialization({scope:lane.scope,authorize});
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
-      if(worker.cursor.revision<=after||(!force&&worker.cursor.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0)))return;
+      if(worker.cursor.revision<Math.max(after+materializationEvents,lane.nextMaterializationRevision??0))return;
       lane.nextMaterializationRevision=worker.cursor.revision+materializationEvents;
       // Account the physical snapshot before SQLite creates it, including its overlap with chunk staging.
       reservations.push(options.journal.stageCheckpoint({scope:lane.scope,expectedBytes:current.capacityBytes,
@@ -525,7 +525,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         lane.idle = setTimeout(() => {
           lane.active=true;
           lane.done=(async()=>{
-            try {await maintainMaterialization(lane,true);await stopWorker(lane);}
+            try {await maintainMaterialization(lane);await stopWorker(lane);}
             finally {lane.active=false;pump(lane);}
           })();
           // close observes cleanup failures; timers must not reject without a handler.
