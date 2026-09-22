@@ -27,7 +27,7 @@ const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name
   ] };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
-async function fixture(initial: DatasetDefinition = definition) {
+async function fixture(initial: DatasetDefinition = definition, remote = false) {
   const root = await mkdtemp(join(tmpdir(), "dohc-schema-evolution-"));
   const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024 });
   cleanup.push(async () => { await host.close(); await rm(root, { recursive: true, force: true }); });
@@ -46,8 +46,9 @@ async function fixture(initial: DatasetDefinition = definition) {
   const revision = await host.approve({ preparationId: first.preparationId, revisionSha256: first.revision.revisionSha256 });
   const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
   let alterSources: ((paths: string[]) => void) | undefined;
+  const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, migrate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
   const handler = createDatasetHandler({ withWorkspaceOperation: async (_caller, _id, work) => work({ workspace, signal, assertCurrent() {} }),
-    hostForWorkspace: async () => host, withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
+    hostForWorkspace: async () => local, ...(remote ? { dataForWorkspace: async () => ({ approvedArtifacts: async (datasetId: string) => host.approvedArtifacts(datasetId), migrate: host.migrate }) as unknown as import("./remoteDataset").OwnerDatasetData } : {}), withAdapter: async (_workspace, work) => work(adapter), createSources: async (_workspace, sources) => {
       for (const [path, source] of Object.entries(sources)) { if (files.has(path)) throw new Error("Existing source"); files.set(path, source); }
       alterSources?.(Object.keys(sources));
     } });
@@ -127,4 +128,14 @@ it("updates the default no-agent Collection actions so new fields are visible an
   await f.host.action(call(next.revision,create.operationId,{values:{[field.fieldId]:"Visible"}},"native"));
   const result=(await f.host.query(call(next.revision,read.operationId))).result as {rows:Array<{values:Record<string,unknown>}>};
   expect(result.rows[0]!.values[field.fieldId]).toBe("Visible");
+});
+
+it("captures remote schema changes without opening the fenced local store and binds approval to the caller", async () => {
+  const f = await fixture(definition, true);
+  const review = await f.prepare({ kind: "renameCollection", name: "Remote people" });
+  const input = { action: "approveMigration", workspaceId: "w", preparationId: review.preparationId, revisionSha256: review.revision.revisionSha256, approvalDigest: review.approvalDigest };
+  await expect(f.handler("another owner session", input)).rejects.toThrow(/review expired/);
+  const changed = await approve(f, review);
+  expect(changed.revision.definition.name).toBe("Remote people");
+  await expect(f.handler("owner", input)).rejects.toThrow(/review expired/);
 });

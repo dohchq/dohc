@@ -62,5 +62,11 @@ it("manages the authoritative relay Collection through the desktop owner adapter
     expect(await data.invoke({ ...pinned, operationId: id(7), input: {}, idempotencyKey: "read" })).toMatchObject({ result: [{ name: "Mom", receipt: file.fileId }] });
     expect(await data.file({ ...pinned, action: "file", fileId: file.fileId })).toEqual({ file, bytesBase64 });
     await expect(data.invoke({ ...submit, input: {}, idempotencyKey: "missing" })).rejects.toMatchObject({ refusal: { code: "name_required", message: "Enter your name." } });
+    const previous = await data.approvedArtifacts(id(1));
+    const renamed = describeDatasetRevision({ definition: { ...definition, name: "Guests" }, revision: 2, schemaSql, operationSource });
+    const migrated = await data.migrate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor });
+    expect(migrated.revision).toEqual(renamed);
+    expect((await data.describe(id(1))).name).toBe("Guests");
+    await expect(data.migrate!({ workspaceId: "w", revision: renamed, schemaSql, operationSource, migrationSql: "SELECT 1;", expected: previous.cursor })).rejects.toThrow();
   } finally { controller.abort(); await host.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); }
 });
