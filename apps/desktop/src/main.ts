@@ -7,6 +7,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readAppBackendResponse } from "./ipc/readAppBackendResponse";
+import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
@@ -947,7 +948,10 @@ async function relayShareJsonWithCredentials<T>(
     );
   }
   const backendAction = /\/app-publications\/[a-f0-9]{64}\/backend\/([a-z]+)$/.exec(path)?.[1];
-  const data = (backendAction
+  const datasetRoute = /^\/sync\/[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+  const data = (datasetRoute
+    ? await readDatasetResponse(response, datasetRoute[2] ?? (datasetRoute[1] ? "describe" : "list"), init?.signal ?? new AbortController().signal)
+    : backendAction
     ? await readAppBackendResponse(response, backendAction, init?.signal ?? new AbortController().signal)
     : options && "retainRestoreConflict" in options
     ? await readOwnerRestoreResponse(response)

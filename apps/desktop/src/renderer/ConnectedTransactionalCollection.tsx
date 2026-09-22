@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { bridge } from "./bridge";
-import { TransactionalCollectionPage } from "./TransactionalCollectionPage";
+import { TransactionalCollectionPage, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import { CollectionActionDialog } from "./CollectionActionDialog";
 import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -23,6 +24,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
+  const [customAction, setCustomAction] = useState<string | null>(null);
+  const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
   const request = useRef(0);
@@ -41,13 +44,22 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     } finally { if (sequence === request.current) setLoading(false); }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
+  const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    const result = await bridge().dataset({ ...input, action: "invoke" });
+    signal.throwIfAborted();
+    if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
+    if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
+    return result;
+  };
   if (!dataset) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <span className="text-sm text-muted">{loading ? "Opening collection…" : "Open this collection to see its records."}</span>
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
   </div>;
-  return <><TransactionalCollectionPage workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+  return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
     onCreateForm={() => setCreatingForm(true)}
     onReviewSchema={() => setReviewingSchema(true)}
+    onCustomAction={setCustomAction}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {
       signal.throwIfAborted();
@@ -86,14 +98,9 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
         return { value, label: display(label ? row.values[label.fieldId] : value) || String(value) };
       }), hasMore: page.nextCursor !== null };
     }}
-    invoke={async (input, signal) => {
-      signal.throwIfAborted();
-      const result = await bridge().dataset({ ...input, action: "invoke" });
-      signal.throwIfAborted();
-      if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
-      if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
-      return result;
-    }} />
+    invoke={invoke} />
+    {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invoke}
+      onError={onError} onClose={() => setCustomAction(null)} onCompleted={() => setRecordsVersion(value => value + 1)} />}
     {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
       onClose={() => setReviewingSchema(false)}
       onPrepare={async (input, signal) => {
