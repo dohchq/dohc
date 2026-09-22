@@ -152,4 +152,30 @@ describe("link transitions derived from a grant", () => {
     expect(storage.mintLinkHandoffCode({ code: code("held"), guard: () => true })).toBe(true);
     expect(redeem()).toMatchObject({ ok: true, grant: { grantId: "redeemed", parentGrantId: "link" } });
   });
+
+  it("return an existing named grant from a handoff code only while it is current", async () => {
+    const { storage, raw } = await fixture();
+    const code = { codeId: "held", codeHash: "held-hash", grantId: "link", generation: 1, mintedAtMs: 10, expiresAtMs: 100 };
+    const redeem = () => storage.redeemLinkHandoffCode({
+      codeHash: "held-hash", principalUserId: "holder", redeemedAtMs: 20, mintGrantId: () => "unused", guard: () => true,
+    });
+    const setLinkAccess = (access: string) =>
+      raw.prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = 'link'").run(access);
+
+    // The holder's Edit dependent outranks its View link at first redemption.
+    setLinkAccess("view");
+    expect(storage.mintLinkHandoffCode({ code, guard: () => true })).toBe(true);
+    expect(redeem()).toEqual({ ok: false });
+    expect(storage.hasLinkHandoffCode("held-hash")).toBe(false);
+
+    // The same drift after a successful first redemption refuses the replay.
+    setLinkAccess("edit");
+    expect(storage.mintLinkHandoffCode({ code, guard: () => true })).toBe(true);
+    expect(redeem()).toMatchObject({ ok: true, grant: { grantId: "dependent" } });
+    expect(redeem()).toMatchObject({ ok: true, grant: { grantId: "dependent" } });
+    setLinkAccess("view");
+    expect(redeem()).toEqual({ ok: false });
+    expect(storage.hasLinkHandoffCode("held-hash")).toBe(false);
+    expect(storage.getShareGrant("unused")).toBeNull();
+  });
 });

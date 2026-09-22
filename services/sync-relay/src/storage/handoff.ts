@@ -170,15 +170,17 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
       });
       if (!current || !isShareAccessValue(current.grant.access)) return refuseAndConsume();
       const { share, grant: parent } = current;
-      if (code.resultGrantId !== null) {
+      // A first redemption and its replay return a named grant only while it is current.
+      const currentNamedGrant = (grantId: string): SyncRelayShareGrantRow | null => {
         const grant = readCurrentShareGrant(storage, {
-          grantId: code.resultGrantId,
+          grantId,
           principal: { kind: "user", userId: input.principalUserId },
         })?.grant;
-        if (!grant || !isShareAccessValue(grant.access)) {
-          deleteCode();
-          return { ok: false };
-        }
+        return grant && isShareAccessValue(grant.access) ? grant : null;
+      };
+      if (code.resultGrantId !== null) {
+        const grant = currentNamedGrant(code.resultGrantId);
+        if (!grant) return refuseAndConsume();
         return { ok: true, shareId: grant.shareId, grant };
       }
 
@@ -204,8 +206,10 @@ export function redeemLinkHandoffCode(storage: StorageContext, input: {
         (dependent) => dependent.status === "active",
       );
       if (existing) {
-        if (!recordResultGrant(existing.grantId)) return { ok: false };
-        return { ok: true, shareId: share.shareId, grant: existing };
+        const grant = currentNamedGrant(existing.grantId);
+        if (!grant) return refuseAndConsume();
+        if (!recordResultGrant(grant.grantId)) return { ok: false };
+        return { ok: true, shareId: share.shareId, grant };
       }
 
       const activeDependentCount = Number(
