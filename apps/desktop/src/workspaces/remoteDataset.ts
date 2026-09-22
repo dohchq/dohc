@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetLifecyclePage, DatasetLifecycleState } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -13,8 +13,11 @@ import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatas
 
 export interface OwnerDatasetData {
   history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
-  list(input: { after?: string; limit?: number }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
-  describe(datasetId: string): Promise<DatasetDescription>;
+  list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
+  describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
+  lifecycle?(input: { datasetId: string; after?: string; limit?: number }): Promise<DatasetLifecyclePage>;
+  archive?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
+  restore?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
   approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
   invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
   upload(input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; replayed: boolean }>;
@@ -50,6 +53,12 @@ export function createRemoteDatasetData(input: {
     signal.throwIfAborted(); return value;
   });
   return {
+    async lifecycle(value) {
+      const query = new URLSearchParams(); if(value.after)query.set("after",value.after); if(value.limit)query.set("limit",String(value.limit));
+      return DatasetLifecyclePage.parse(await request(`${path(value.datasetId)}/lifecycle${query.size ? `?${query}` : ""}`));
+    },
+    async archive(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/archive`, {})); },
+    async restore(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/restore`, {})); },
     async permissions(value) {
       const query = new URLSearchParams();
       if (value.after) query.set("after", value.after);
@@ -72,6 +81,7 @@ export function createRemoteDatasetData(input: {
     },
     async list(page) {
       const query = new URLSearchParams();
+      if (page.includeArchived !== undefined) query.set("includeArchived", String(page.includeArchived));
       if (page.after) query.set("after", identity.parse(page.after));
       if (page.limit !== undefined) query.set("limit", String(z.number().int().min(1).max(100).parse(page.limit)));
       const raw = await request(`${base}${query.size ? `?${query}` : ""}`);
@@ -80,8 +90,8 @@ export function createRemoteDatasetData(input: {
         (result.nextCursor !== null && result.nextCursor !== result.datasets.at(-1)?.datasetId)) throw new Error("The Collection list changed. Reload it.");
       return { datasets: result.datasets, nextCursor: result.nextCursor };
     },
-    async describe(datasetId) {
-      const result = parseDatasetDescription(await request(path(datasetId)));
+    async describe(datasetId, options) {
+      const result = parseDatasetDescription(await request(`${path(datasetId)}${options?.includeArchived ? "?includeArchived=true" : ""}`));
       if (result.datasetId !== datasetId) throw new Error("The server returned a different Collection.");
       return result;
     },
@@ -193,7 +203,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -202,11 +212,29 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
   };
   return {
     async list(page) {
-      const localPage = await local.list(page), localRows = await Promise.all(localPage.datasets.map(async row => ({ row, authority: await target(row.datasetId) })));
-      const remoteRows = await Promise.all(localRows.map(async ({ row, authority }) => authority === local ? row : await authority.describe(row.datasetId)));
-      return { datasets: remoteRows, nextCursor: localPage.nextCursor };
+      const limit = page.limit ?? 50, datasets: DatasetDescription[] = []; let after = page.after;
+      // Local rows index transferred identities, including ones archived before transfer.
+      // Fetch authority metadata before deciding whether an identity belongs in this view.
+      for (let scannedPages = 0; ; scannedPages++) {
+        const localPage = await local.list({ after, limit, includeArchived: true });
+        for (let index = 0; index < localPage.datasets.length; index++) {
+          const row = localPage.datasets[index]!, authority = await target(row.datasetId);
+          const current = authority === local ? row : await authority.describe(row.datasetId, { includeArchived: true });
+          after = row.datasetId;
+          if (!page.includeArchived && current.archived) continue;
+          datasets.push(current);
+          if (datasets.length === limit) return { datasets, nextCursor: index + 1 < localPage.datasets.length || localPage.nextCursor ? after : null };
+        }
+        if (!localPage.nextCursor) return { datasets, nextCursor: null };
+        if (localPage.nextCursor <= (page.after ?? "") || localPage.nextCursor !== localPage.datasets.at(-1)?.datasetId) throw new Error("The Collection list changed. Reload it.");
+        if (scannedPages === 3) return { datasets, nextCursor: localPage.nextCursor };
+        after = localPage.nextCursor;
+      }
     },
-    describe: async datasetId => (await target(datasetId)).describe(datasetId),
+    describe: async (datasetId, options) => (await target(datasetId)).describe(datasetId, options),
+    lifecycle: async value => { const authority = await target(value.datasetId); if (!authority.lifecycle) throw new Error("Collection archive controls are unavailable."); return authority.lifecycle(value); },
+    archive: async value => { const authority = await target(value.datasetId); if (!authority.archive) throw new Error("Collection archive controls are unavailable."); return authority.archive(value); },
+    restore: async value => { const authority = await target(value.datasetId); if (!authority.restore) throw new Error("Collection restore controls are unavailable."); return authority.restore(value); },
     history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
     invoke: async value => (await target(value.datasetId)).invoke(value),

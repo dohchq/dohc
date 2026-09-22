@@ -5,7 +5,7 @@ import type { DatasetTransferStatus } from "./localDatasetTransfer";
 const localId = "00000000-0000-4000-8000-000000000001", remoteId = "00000000-0000-4000-8000-000000000002";
 const marker = { workspaceId: "w", datasetId: remoteId, targetOrigin: "https://sharing.example", state: "imported", receipt: {} } as DatasetTransferStatus;
 function fixture() {
-  const local = { list: vi.fn(async () => ({ datasets: [{ datasetId: localId, name: "Local" }, { datasetId: remoteId, name: "Old local copy" }], nextCursor: remoteId })),
+  const local = { list: vi.fn(async () => ({ datasets: [{ datasetId: localId, name: "Local" }, { datasetId: remoteId, name: "Old local copy" }], nextCursor: null })),
     invoke: vi.fn(), describe: vi.fn(), approvedArtifacts: vi.fn(), upload: vi.fn(), file: vi.fn() } as unknown as OwnerDatasetData;
   const remote = { list: vi.fn(), invoke: vi.fn(async () => ({ result: "shared", revision: 5, replayed: false })), describe: vi.fn(async () => ({ datasetId: remoteId, name: "Shared" })),
     approvedArtifacts: vi.fn(), upload: vi.fn(), file: vi.fn() } as unknown as OwnerDatasetData;
@@ -16,7 +16,7 @@ function fixture() {
 
 it("uses one durable dataset route for discovery, owner operations, files and approved rules", async () => {
   const f = fixture();
-  expect(await f.data.list({ limit: 10 })).toEqual({ datasets: [{ datasetId: localId, name: "Local" }, { datasetId: remoteId, name: "Shared" }], nextCursor: remoteId });
+  expect(await f.data.list({ limit: 10 })).toEqual({ datasets: [{ datasetId: localId, name: "Local" }, { datasetId: remoteId, name: "Shared" }], nextCursor: null });
   const input = { datasetId: remoteId, revision: 1, revisionSha256: "a".repeat(64), operationId: localId, input: {}, idempotencyKey: "retry" };
   expect(await f.data.invoke(input)).toMatchObject({ result: "shared" });
   expect(f.local.invoke).not.toHaveBeenCalled();
@@ -28,6 +28,18 @@ it("uses one durable dataset route for discovery, owner operations, files and ap
   expect(f.connect).toHaveBeenCalledWith("https://sharing.example");
   await f.data.invoke({ ...input, datasetId: localId });
   expect(f.local.invoke).toHaveBeenCalled();
+});
+
+it("uses remote archive state and routes lifecycle changes without touching the fenced local host", async () => {
+  const f = fixture();
+  vi.mocked(f.remote.describe).mockResolvedValue({ datasetId: remoteId, name: "Shared", archived: true } as never);
+  f.remote.archive = vi.fn(async () => ({ archived: true, generation: 1 }));
+  f.remote.restore = vi.fn(async () => ({ archived: false, generation: 2 }));
+  expect((await f.data.list({ limit: 10 })).datasets.map(row => row.datasetId)).toEqual([localId]);
+  expect((await f.data.list({ includeArchived: true })).datasets).toMatchObject([{ datasetId: localId }, { datasetId: remoteId, archived: true }]);
+  expect(f.remote.describe).toHaveBeenCalledWith(remoteId, { includeArchived: true });
+  await f.data.archive!({ datasetId: remoteId }); await f.data.restore!({ datasetId: remoteId });
+  expect(f.remote.archive).toHaveBeenCalledWith({ datasetId: remoteId }); expect(f.remote.restore).toHaveBeenCalledWith({ datasetId: remoteId });
 });
 
 it.each(["fenced", "ready"] as const)("refuses %s transfers without contacting either writable authority", async state => {

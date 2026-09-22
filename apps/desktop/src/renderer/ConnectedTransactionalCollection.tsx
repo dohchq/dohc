@@ -12,6 +12,7 @@ import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDial
 import { DatasetCsvTransferDialog } from "./DatasetCsvTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
+import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -21,11 +22,12 @@ export interface ConnectedTransactionalCollectionProps {
   tableId: string;
   onError(fallback: string, error: unknown, retry?: (() => void) | null): void;
   onFormCreated(appRoot: string): void;
+  onLifecycleChanged?(): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetId}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCreated, onLifecycleChanged, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
@@ -36,6 +38,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
   const [exportingRecovery, setExportingRecovery] = useState(false);
+  const [archiving, setArchiving] = useState(false), [restoring, setRestoring] = useState(false);
+  const restoreLock = useRef(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
@@ -44,7 +48,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     const sequence = ++request.current;
     setLoading(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetId, action: "describe" });
+      const result = await bridge().dataset({ workspaceId, datasetId, action: "describe", ...(owner ? { includeArchived: true } : {}) });
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       setDataset(result.dataset);
@@ -53,7 +57,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       setDataset(null);
       onError("Could not open this Collection.", error, () => { void refresh(); });
     } finally { if (sequence === request.current) setLoading(false); }
-  }, [workspaceId, datasetId, onError]);
+  }, [workspaceId, datasetId, onError, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
   const invoke = async (input: TransactionalInvoke, signal: AbortSignal) => {
     signal.throwIfAborted();
@@ -67,7 +71,20 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     <span className="text-sm text-muted">{loading ? "Opening collection…" : "Open this collection to see its records."}</span>
     {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
   </div>;
+  async function restore() {
+    if (restoreLock.current || !owner) return;
+    restoreLock.current = true; const sequence = request.current; setRestoring(true);
+    try {
+      const result = await bridge().dataset({ workspaceId, datasetId, action: "restore" });
+      if (sequence !== request.current) return;
+      if (result.kind !== "lifecycle-updated" || result.archived) throw Error("dohc could not confirm the restore. Refresh the Collection.");
+      onLifecycleChanged?.(); await refresh();
+    } catch (error) { if (sequence === request.current) onError("Could not restore this Collection.", error, () => { void restore(); }); }
+    finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
+  }
+  if (dataset.archived) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6"><h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2><p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>{owner && <SecondaryButton disabled={restoring} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}</div>;
   return <><TransactionalCollectionPage key={recordsVersion} workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+    onArchive={owner ? () => setArchiving(true) : undefined}
     onCreateForm={owner ? () => setCreatingForm(true) : undefined}
     onTransferCsv={owner ? () => setTransferringCsv(true) : undefined}
     onHistory={owner ? () => setViewingHistory(true) : undefined}
@@ -114,6 +131,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       }), hasMore: page.nextCursor !== null };
     }}
     invoke={invoke} />
+    {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
+      onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();

@@ -44,3 +44,13 @@ describe("connected CSV transfers", () => {
     expect(screen.queryByText("Saved in this workspace: old-report.json")).toBeNull(); expect(props.onError).not.toHaveBeenCalled();
   });
 });
+
+it("opens archived metadata without running records and offers owner restore", async () => {
+  backend.dataset.mockImplementation(async input => input.action === "describe" ? { kind: "description", dataset: { ...dataset, archived: true, operations: [] } } : { kind: "lifecycle-updated", archived: false, generation: 2 });
+  const onLifecycleChanged = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetId={id(1)} tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onLifecycleChanged={onLifecycleChanged} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Restore Collection" }));
+  await waitFor(() => expect(onLifecycleChanged).toHaveBeenCalledOnce());
+  expect(backend.dataset.mock.calls.some(([input]) => input.action === "invoke")).toBe(false);
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "describe", workspaceId: "workspace-a", datasetId: id(1), includeArchived: true });
+});

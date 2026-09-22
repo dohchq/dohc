@@ -41,8 +41,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw new Error("Open the original workspace to manage this Collection.");
         const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
         current();
-        if (input.action === "list") { const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
-        if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+        if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...page }; }
+        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
         if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
         if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
         if (input.action === "invoke") {
@@ -53,9 +53,11 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
+      if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
+      if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
       if (input.action === "history") {
         if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
         const result = await data.history(input); current(); return { kind: "history" as const, ...result };
@@ -68,8 +70,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (!("setGrant" in data) || !data.setGrant) throw new Error("Publish this Collection before managing shared access.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
       }
-      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
-      if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
+      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current(); return { kind: "list" as const, ...result }; }
+      if (input.action === "describe") { const dataset = await data.describe(input.datasetId, { includeArchived: input.includeArchived }); current(); return { kind: "description" as const, dataset }; }
       if (input.action === "upload") {
         const description = await data.describe(input.datasetId);
         current();

@@ -237,6 +237,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     restoreDataset(context: Context, raw: DatasetScope) {
       const key = scope(raw);
       return transaction(() => {
+        revision(key);
         owner(context, key); const state = lifecycle(key), head = db.prepare("SELECT active FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
         if (!state.archived) return { archived: false, generation: state.generation };
         if (!head || head.active !== 1) throw new DatasetHostError("conflict", "A fenced dataset cannot be restored in place.");
@@ -419,10 +420,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         owner(context, key);
       });
     },
-    describe(context: Context, raw: DatasetScope): DatasetDescription {
-      const key = scope(raw), permitted = permissions(context, key, { kind: "data" });
+    describe(context: Context, raw: DatasetScope & { includeArchived?: boolean }): DatasetDescription {
+      const key = scope(raw);
+      if (raw.includeArchived) owner(context, key);
+      const permitted = permissions(context, key, { kind: "data" }, raw.includeArchived === true);
       if (!permitted.discover) denied();
-      return describePermission(permitted);
+      const archived = lifecycle(key).archived;
+      return { ...describePermission(permitted), archived, ...(archived ? { operations: [] } : {}) };
     },
     list(context: Context, raw: { workspaceId: string; after?: string; limit?: number; includeArchived?: boolean }): { datasets: Array<DatasetDescription & { archived: boolean }>; nextCursor: string | null } {
       const workspaceId = text(raw.workspaceId), after = raw.after === undefined ? "" : text(raw.after), limit = raw.limit ?? 50;
@@ -454,7 +458,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     approvedArtifacts(context: Context, raw: DatasetScope) {
       const key = scope(raw);
       const current = journal.head(key, () => { owner(context, key); });
-      return { revision: revision(key), ...artifacts(key), active: current.active, cursor: current.cursor };
+      return { revision: revision(key), ...artifacts(key), active: current.active && !lifecycle(key).archived, cursor: current.cursor };
     },
     history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number }) {
       const key = scope(raw), limit = raw.limit ?? 50;

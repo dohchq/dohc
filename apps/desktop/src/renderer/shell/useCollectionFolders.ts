@@ -25,21 +25,24 @@ export function useCollectionFolders(
   const datasets = dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const datasetRequest = useRef(0);
+  const [archiveView, setArchiveView] = useState<{ workspaceId: string; enabled: boolean }>({ workspaceId, enabled: false });
+  const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
+  const setIncludeArchived = useCallback((enabled: boolean) => { datasetRequest.current++; setDataState(null); setArchiveView({ workspaceId, enabled }); }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
     const request = ++datasetRequest.current;
-    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50 });
+    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, ...(includeArchived ? { includeArchived: true } : {}) });
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor });
-  }, [workspaceId]);
+  }, [workspaceId, includeArchived]);
   const loadMoreDatasets = useCallback(async () => {
     if (!nextDataset) return;
     const request = ++datasetRequest.current;
-    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, after: nextDataset });
+    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, after: nextDataset, ...(includeArchived ? { includeArchived: true } : {}) });
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState(current => ({ workspaceId, datasets: [...(current?.workspaceId === workspaceId ? current.datasets : []), ...result.datasets], nextCursor: result.nextCursor }));
-  }, [workspaceId, nextDataset]);
+  }, [workspaceId, nextDataset, includeArchived]);
   const refreshCollections = useCallback(async () => {
     const request = ++collectionsRequest.current;
     try {
@@ -66,5 +69,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived };
 }

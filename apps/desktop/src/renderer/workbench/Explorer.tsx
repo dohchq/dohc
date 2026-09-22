@@ -118,7 +118,9 @@ export interface ExplorerProps {
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
-  dataCollections?: Array<{ datasetId: string; tableId: string; name: string }>;
+  dataCollections?: Array<{ datasetId: string; tableId: string; name: string; archived?: boolean }>;
+  includeArchivedCollections?: boolean;
+  onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetId: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -1576,14 +1578,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {!!props.dataCollections?.length && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.dataCollections.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
+          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink"
             onClick={() => props.onOpenDataCollection?.(collection.datasetId, collection.tableId)}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>
+            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
+          {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
         </section>}
         <section
           data-testid="open-editors-section"

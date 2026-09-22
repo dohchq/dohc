@@ -1397,7 +1397,7 @@ export function DesktopWorkspaceShell(props: {
   const isShareView = Boolean(props.workspace.shareView);
   // Owner live documents require this workspace's server connection.
   const liveDocumentsAvailable = !isShareView && workspaceSynced;
-  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets } = useCollectionFolders(
+  const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
     isShareView,
@@ -2307,7 +2307,7 @@ export function DesktopWorkspaceShell(props: {
   });
   const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
     ? chatEditors.get(focusedTabPath).nav : undefined;
-  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, tableId: table.tableId, name: table.name }))), [datasets]);
+  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.map(table => [transactionalCollectionTabPath(table.datasetId, table.tableId), table.name] as const),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
@@ -4207,6 +4207,8 @@ export function DesktopWorkspaceShell(props: {
         collectionFolders={collectionFolders}
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
+        includeArchivedCollections={includeArchived}
+        onIncludeArchivedCollections={isShareView ? undefined : setIncludeArchived}
         onOpenDataCollection={(datasetId, tableId) => openVirtualTab(transactionalCollectionTabPath(datasetId, tableId))}
         onMoreDataCollections={nextDataset ? () => { void loadMoreDatasets().catch(error => reportShellError("Could not read Collections.", error)); } : undefined}
         onBeginChanges={beginDraftOperation}
@@ -5253,6 +5255,7 @@ export function DesktopWorkspaceShell(props: {
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
                   owner={!isShareView}
+                  onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={reportShellError}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));

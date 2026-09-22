@@ -282,8 +282,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           pending.delete(input.preparationId); return approved;
         });
       },
-      list(input: {after?: string; limit?: number} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
-      describe(datasetId: string) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId}); },
+      list(input: {after?: string; limit?: number; includeArchived?: boolean} = {}) { assertCurrent(); return host.list(owner, {workspaceId, ...input}); },
+      describe(datasetId: string, input: { includeArchived?: boolean } = {}) { assertCurrent(); return host.describe(owner, {workspaceId, datasetId, ...input}); },
+      lifecycle(input: { datasetId: string; after?: string; limit?: number }) { assertCurrent(); return host.lifecycle(owner, { workspaceId, ...input }); },
+      archive(input: { datasetId: string }) { assertCurrent(); return host.archiveDataset(owner, { workspaceId, datasetId: input.datasetId }); },
+      restore(input: { datasetId: string }) { assertCurrent(); return host.restoreDataset(owner, { workspaceId, datasetId: input.datasetId }); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       prepareExport(datasetId: string, input: { signal?: AbortSignal } = {}) {

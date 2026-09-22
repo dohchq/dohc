@@ -42,6 +42,16 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   expect(f.host.list).not.toHaveBeenCalled();
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
 });
+
+it("routes lifecycle changes to current authority and refuses shared recipients", async () => {
+  const remote = { archive: vi.fn(async () => ({ archived: true, generation: 1 })), restore: vi.fn(async () => ({ archived: false, generation: 2 })), lifecycle: vi.fn(async () => ({ archived: false, generation: 0, reason: "", apps: [], nextCursor: null })) } as unknown as OwnerDatasetData;
+  const f = fixture(remote);
+  expect(await f.handler("window", { workspaceId: "workspace", datasetId, action: "archive" })).toMatchObject({ kind: "lifecycle-updated", archived: true });
+  expect(remote.archive).toHaveBeenCalled();
+  f.workspace.shareView = {};
+  await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "restore" })).rejects.toThrow("original workspace");
+  expect(remote.restore).not.toHaveBeenCalled();
+});
 it("routes history to shared authority and rejects stale history replies", async () => {
   const page = { datasetId, headRevision: 0, entries: [], nextBeforeRevision: null };
   const remote = { history: vi.fn(async () => page) } as unknown as OwnerDatasetData;

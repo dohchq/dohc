@@ -87,6 +87,8 @@ export interface AppDatasetCapability extends AppDatasetBinding {
 }
 /** Grant-filtered metadata for Collection controls and agent discovery. */
 export interface DatasetDescription {
+  /** Present on owner lifecycle discovery; archived data cannot run actions. */
+  archived?: boolean;
   datasetId: string;
   name: string;
   revision: number;
@@ -244,8 +246,10 @@ export function parseDatasetDefinition(value: unknown): DatasetDefinition {
 }
 
 export function parseDatasetDescription(value: unknown): DatasetDescription {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "name", "revision", "revisionSha256", "tables", "operations"]);
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["datasetId", "name", "revision", "revisionSha256", "tables", "operations"], ["archived"]);
+  if (row.archived !== undefined && typeof row.archived !== "boolean") fail();
   const result: DatasetDescription = {
+    ...(row.archived === undefined ? {} : { archived: row.archived }),
     datasetId: uuid(row.datasetId), name: text(row.name), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     tables: boundedArray(row.tables, DATASET_MAX_TABLES).map(value => {
       const table = record(value, ["tableId", "name", "fields"]);
