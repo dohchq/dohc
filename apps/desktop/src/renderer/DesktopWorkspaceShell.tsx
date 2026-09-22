@@ -5252,7 +5252,11 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="collection" />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetId={groupDataCollection.datasetId} tableId={groupDataCollection.tableId}
-                  onError={reportShellError} />
+                  onError={reportShellError}
+                  onFormCreated={appRoot => {
+                    void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
+                    openVirtualTab(siteTabPath(appRoot));
+                  }} />
               </Suspense>
             ) : isCollectionTabPath(tabPath) ? (
               groupCollectionPath ? (
