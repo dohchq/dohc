@@ -46,6 +46,7 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
     } else if (request.kind === "validate") {
       verifySchema(db,request);
       if(request.journaled) verifyDatasetSchema(db,request.schemaSql,request.tables,request.limits);
+      else {
       const expected = new DatabaseSync(join(request.directory,"expected.sqlite"),{allowExtension:false,enableForeignKeyConstraints:true,enableDoubleQuotedStringLiterals:false});
       try {
         expected.exec(`PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; PRAGMA max_page_count=${Math.floor(request.limits.databaseBytes / 4096)}`);
@@ -58,6 +59,7 @@ async function handle(request: ChildRequest): Promise<ChildReply> {
         const integrity=db.prepare("PRAGMA integrity_check(1)").get();
         if (integrity?.integrity_check !== "ok" || db.prepare("PRAGMA foreign_key_check").iterate().next().done !== true) throw new Error("App database integrity check failed.");
       } finally { expected.close(); }
+      }
     } else {
       verifySchema(db, request);
       const session = db.createSession();
