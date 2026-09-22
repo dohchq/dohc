@@ -3006,6 +3006,7 @@ const chatWrites = createChatWrites({
   findWorkspace,
   warmCredentials: warmCredentialCache,
   currentCredentials: () => cachedCredentials,
+  currentCredentialGeneration: () => credentialCacheGeneration,
   localUserDisplayName,
   agentDisplayName: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",

@@ -415,6 +415,7 @@ describe("CLI socket server", () => {
           serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
           userId: "verified-user-id", email: "sam@test.invalid", token: "token",
         }),
+        currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         localReactorFallbackId: () => "install-local-user-id",

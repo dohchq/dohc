@@ -133,6 +133,7 @@ function fixture(kind: ScopeKind = "local") {
   const chatWrites = createChatWrites({
     findWorkspace: () => ({ ...workspace, remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" } }),
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
+    currentCredentialGeneration: () => 0,
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,

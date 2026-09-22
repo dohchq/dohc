@@ -53,6 +53,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   const chatWrites = createChatWrites({
     findWorkspace: (id) => rows.get(id) ?? null,
     warmCredentials: async () => undefined,
+    currentCredentialGeneration: () => 0,
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",

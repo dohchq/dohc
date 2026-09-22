@@ -83,6 +83,8 @@ function fixture() {
     }),
   };
   let credentials: CloudCredentials | null = signedIn("user-1");
+  // The credential cache bumps its generation whenever it replaces a session.
+  let generation = 1;
   const warmCredentials = vi.fn(async () => {
     await reach("warm");
   });
@@ -96,6 +98,7 @@ function fixture() {
     findWorkspace: () => row,
     warmCredentials,
     currentCredentials: () => credentials,
+    currentCredentialGeneration: () => generation,
     localUserDisplayName: () => "Sam",
     agentDisplayName: async () => "Nova",
     localReactorFallbackId: () => "local-id",
@@ -108,7 +111,10 @@ function fixture() {
   });
   return {
     events, row, reactions, store, warmCredentials, effects, writes, place, attachments,
-    setCredentials: (value: CloudCredentials | null) => { credentials = value; },
+    setCredentials: (value: CloudCredentials | null) => {
+      credentials = value;
+      generation += 1;
+    },
     holdAt(point: Pause) {
       const hold = { entered: deferred(), held: deferred() };
       holds.set(point, hold);
@@ -182,7 +188,7 @@ describe("chat writes", () => {
     test.row.sharedChannels = [joined];
     test.events.length = 0;
     await test.writeEach.send();
-    expect(test.events).toEqual(["channel", "wire", "warm", "attachments", "write"]);
+    expect(test.events).toEqual(["warm", "channel", "wire", "attachments", "write"]);
   });
 
   for (const grant of ["read-only", "ended"] as const) {
@@ -279,13 +285,71 @@ describe("chat writes", () => {
       expectNothingWritten(test);
     });
 
-    it("refuses when a channel was joined after the target resolved without a lookup", async () => {
+    // Admission skipped the wire id lookup because nothing was joined. A join
+    // before the row makes the lookup necessary, and the write does it then.
+    it("writes to a local thread when an unrelated channel is joined mid-write", async () => {
       const test = fixture();
       test.attachments.mockImplementationOnce(async () => {
-        test.row.sharedChannels = [joined];
+        test.row.sharedChannels = [{ ...joined, channelWireId: "elsewhere", access: "read-only" }];
         return [];
       });
-      await expect(test.writeEach.send()).rejects.toThrow("This shared channel changed. Try again.");
+      await expect(test.writeEach.send()).resolves.toMatchObject({ authorUserId: "user-1" });
+      expect(test.events).toEqual(["warm", "channel", "wire", "write"]);
+    });
+
+    it("enforces the grant when the target's own channel is joined mid-write", async () => {
+      const test = fixture();
+      test.attachments.mockImplementationOnce(async () => {
+        test.row.sharedChannels = [{ ...joined, access: "read-only" }];
+        return [];
+      });
+      await expect(test.writeEach.send()).rejects.toThrow("This shared channel is read-only for you.");
+      expectNothingWritten(test);
+    });
+
+    // The final check must share a synchronous block with the store call. A
+    // continuation chained on the attachment promise runs after the module's
+    // own await of it, so it lands wherever the module next yields.
+    it.each([
+      ["send", "a sign-out", "Sign in to your server to send a message in this shared channel."],
+      ["send", "a read-only downgrade", "This shared channel is read-only for you."],
+      ["start", "a sign-out", "Sign in to your server to send a message in this shared channel."],
+      ["start", "a read-only downgrade", "This shared channel is read-only for you."],
+    ] as const)("refuses %s after %s chained on its attachments", async (kind, change, refusal) => {
+      const test = fixture();
+      test.row.sharedChannels = [joined];
+      const ready = Promise.resolve([]);
+      test.attachments.mockImplementationOnce(() => {
+        void ready.then(() => undefined).then(() => {
+          if (change === "a sign-out") test.setCredentials(null);
+          else test.row.sharedChannels = [{ ...joined, access: "read-only" }];
+        });
+        return ready;
+      });
+      await expect(test.writeEach[kind]()).rejects.toThrow(refusal);
+      expectNothingWritten(test);
+    });
+
+    it.each(["send", "decide", "toggle"] as const)("refuses %s when the same account's session is replaced during target resolution", async (kind) => {
+      const test = fixture();
+      test.row.sharedChannels = [joined];
+      const hold = test.holdAt("wire");
+      const outcome = test.writeEach[kind]().catch((error: unknown) => error);
+      await hold.entered.promise;
+      test.setCredentials(signedIn("user-1"));
+      hold.held.resolve();
+      expect(await outcome).toMatchObject({ message: "Your server session changed. Try again." });
+      expectNothingWritten(test);
+    });
+
+    it("refuses a message when the same account's session is replaced during attachments", async () => {
+      const test = fixture();
+      const hold = test.holdAt("attachments");
+      const outcome = test.writeEach.send().catch((error: unknown) => error);
+      await hold.entered.promise;
+      test.setCredentials(signedIn("user-1"));
+      hold.held.resolve();
+      expect(await outcome).toMatchObject({ message: "Your server session changed. Try again." });
       expectNothingWritten(test);
     });
   });
