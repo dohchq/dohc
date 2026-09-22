@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
-import { fixture as appFixture, limits, owner } from "./appBackendTestFixture";
+import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";

@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { resolveAppDatasetCapability, type DatasetDefinition } from "@dohc/security-contract/dataset";
-import { fixture, limits } from "./appBackendTestFixture";
+import { fixture, limits } from "./datasetTestFixture";
 import { createSyncRelayHandler } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
