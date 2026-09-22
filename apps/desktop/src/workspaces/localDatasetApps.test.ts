@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { generateDatasetSources } from "./datasetGenerator";
@@ -205,4 +206,29 @@ describe("local approved dataset apps", () => {
     delete input.input.values[id(5)];
     expect(await f.host.apps.request(restricted.publicationId, "invoke", input)).toMatchObject({ replayed: false });
   });
+});
+
+
+it("keeps local form uploads, submissions and selected fields working through rename and restart", async () => {
+  const f = await fixture();
+  const restricted=await f.host.apps.activate(await f.prepareApp("restricted",[id(6)],[id(4)]),new AbortController().signal);
+  const admin=await f.host.apps.activate(await f.prepareApp("admin",[id(7),id(8)]),new AbortController().signal);
+  const original=f.host.approvedArtifacts(id(1)), renamed=structuredClone(original.revision.definition);
+  renamed.tables[0].fields[1].name="Full name";
+  const revision=describeDatasetRevision({definition:renamed,revision:2,schemaSql:original.schemaSql,operationSource:original.operationSource});
+  const preview=await f.host.prepareMigrationCandidate({workspaceId:"w",revision,schemaSql:original.schemaSql,operationSource:original.operationSource,expected:original.cursor,migrationSql:"SELECT 1;"});
+  await f.host.approveMigrationCandidate({workspaceId:"w",datasetId:id(1),candidateId:preview.candidateId,checkpointSha256:preview.checkpointSha256});
+  expect(f.host.apps.list("app")).toMatchObject([{active:true,datasetCapability:{revision:1}}]);
+  const uploaded=await f.host.apps.request(f.published.publicationId,"upload",{authorityRevision:1,idempotencyKey:"renamed-receipt",name:"receipt.pdf",contentType:"application/pdf",bytesBase64:"JVBERi0="}) as {file:{fileId:string}};
+  const invoke=f.invocation(); invoke.input.values[id(5)]=uploaded.file.fileId;
+  const first=await f.host.apps.request(f.published.publicationId,"invoke",invoke);
+  await f.host.close();
+  const restarted=await createLocalDatasetHost({workspaceId:"w",workspaceRoot:f.workspaceRoot}); hosts.push(restarted);
+  expect(restarted.apps.browserPublication(f.published.publicationId)).toBeDefined();
+  expect(await restarted.apps.request(f.published.publicationId,"invoke",invoke)).toEqual({...first as object,replayed:true});
+  await expect(restarted.apps.request(restricted.publicationId,"invoke",{...invoke,authorityRevision:restricted.authorityRevision})).rejects.toThrow("cannot submit those fields");
+  expect(await restarted.apps.readBrowserFile(admin.publicationId,{authorityRevision:admin.authorityRevision,fileId:uploaded.file.fileId,operation:"fileRead",input:{fileId:uploaded.file.fileId}})).toMatchObject({bytesBase64:"JVBERi0="});
+  expect(await restarted.apps.request(f.published.publicationId,"invoke",f.invocation("Next","after-restart"))).toMatchObject({replayed:false});
+  restarted.apps.withdraw(f.published.publicationId,1);
+  await expect(restarted.apps.request(f.published.publicationId,"invoke",invoke)).rejects.toThrow("approval changed");
 });

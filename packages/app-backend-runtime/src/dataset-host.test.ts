@@ -274,7 +274,7 @@ it("intersects admin app operations with the explicit data grant and refuses sta
   await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
   await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("not permitted");
   expect(() => f.host.describe("helper", scope)).toThrow("not permitted");
-  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("stale");
+  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("needs approval");
 });
 
 it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
@@ -569,4 +569,56 @@ it("rolls cancellation and its storage delta back together when accounting fails
   expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toThrow("accounting refused");
   expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
   expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
+});
+
+
+it("keeps original app and helper grants working through display renames, including saved retries and revocation", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding([id(6),id(7)])});
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
+  const bindings = f.db.prepare("SELECT * FROM dohc_dataset_bindings").all();
+  const grants = f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all();
+  const first = await f.invoke("friend",id(6),{value:"saved"},"form");
+  for (const number of [2,3]) {
+    const next = structuredClone(definition); next.name = `Orders ${number}`; next.tables[0].name = "Entries"; next.tables[0].fields[1].name = "Label";
+    next.schemaPath = `revisions/${number}/schema.sql`; next.operationsPath = `revisions/${number}/operations.js`;
+    const revision = describeDatasetRevision({definition:next,revision:number,schemaSql,operationSource});
+    await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
+    expect((await f.invoke("friend",id(6),{value:"saved"},"form"))).toMatchObject({...first,replayed:true});
+    expect((await f.invoke("helper",id(7),{},"form")).result).toMatchObject([{value:"saved"}]);
+    expect(f.host.describe("helper",scope).tables[0].fields.find(field=>field.fieldId===id(4))?.name).toBe("Label");
+  }
+  expect(f.host.permissions("owner",scope).permissions.map(permission=>permission.current)).toEqual([true,true]);
+  expect(f.db.prepare("SELECT * FROM dohc_dataset_bindings").all()).toEqual(bindings);
+  expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
+  await expect(f.invoke("friend",id(9),{},"form")).rejects.toThrow("not permitted");
+  await expect(f.host.invoke("friend",{...scope,revision:1,revisionSha256:"0".repeat(64),operationId:id(6),input:{value:"forged"},idempotencyKey:"forged",access:{kind:"app",appId:"form"}})).rejects.toThrow("needs approval");
+  f.host.setBinding("owner",{...scope,appId:"form",binding:null});
+  await expect(f.invoke("friend",id(6),{value:"saved"},"form")).rejects.toThrow("not permitted");
+});
+
+it.each(["fields","access","constraint","source"])("requires reapproval after a %s change, even when later restored", async change => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
+  const next = structuredClone(definition);
+  if(change === "fields") next.operations[0].fieldIds.push(id(5));
+  if(change === "access") next.operations[1].access = "link";
+  if(change === "constraint") next.tables[0].fields[1].required = false;
+  const source = change === "source" ? operationSource+"\n// edited rule" : operationSource;
+  const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource:source});
+  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:source,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
+  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("needs approval");
+  const restored = describeDatasetRevision({definition,revision:3,schemaSql,operationSource});
+  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision:restored,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
+  await expect(f.invoke("friend",id(6),{value:"still refused"},"form")).rejects.toThrow("needs approval");
+});
+
+it("refuses display continuity when identical source compiles to different executable bytes", async () => {
+  let compiler = 1;
+  const f = await fixture({compileOperations:source=>source+`\n// compiler ${compiler}`}); await f.activate();
+  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
+  compiler = 2;
+  const revision = describeDatasetRevision({definition:{...definition,name:"Renamed"},revision:2,schemaSql,operationSource});
+  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
+  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("needs approval");
 });

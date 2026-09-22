@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
+import { resolveCompatibleDatasetRevision, createDatasetHost, DatasetHostError, type DatasetAuthority, type DatasetAccess, type DatasetHostOptions, type DatasetDataGrant } from "@dohc/app-backend-runtime/dataset-host";
 import type { AppBackendJson, AppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
-import { parseDatasetRevision, verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
+import { verifyAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import type { StorageContext } from "./storage/context";
@@ -135,11 +135,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     return {candidate, authorityRevision: Number(row.authority_revision), authority: {...authority, authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision]))}};
   }
   function capability(candidate: AppPublicationCandidate, workspaceId: string, datasetId: string): AppDatasetCapability {
-    const row = storage.db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
-    if (!row) throw notFound();
     const requested = candidate.capabilities.find(value => value.kind === "dataset" && value.datasetId === datasetId);
-    if (!requested) throw notFound();
-    return verifyAppDatasetCapability(requested, parseDatasetRevision(JSON.parse(String(row.revision_json))));
+    if (!requested || requested.kind !== "dataset") throw notFound();
+    return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(storage.db,{workspaceId,datasetId},requested));
   }
   function app(auth: AppBackendAuth, workspaceId: string, datasetId: string, appId: string) {
     current();
@@ -308,7 +306,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           if (!latest || latest.authorityRevision !== input.authorityRevision ||
             JSON.stringify(host.authorize(auth, scope).authority) !== JSON.stringify(captured.authority)) throw notFound();
           const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
-          if (!head || head.active !== 1 || head.approved_revision_hash !== scope.revisionSha256) throw notFound();
+          if (!head || head.active !== 1 || head.approved_revision_hash !== host.authorize(auth, scope).revision.revisionSha256) throw notFound();
         });
       },
       upload(auth: AppBackendAuth, publicationId: string, input: AppBackendUploadRequest, signal?: AbortSignal) {
@@ -329,7 +327,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           const checked = host.authorize(auth, {...scope, operationId: captured.operation.operationId});
           if (JSON.stringify(checked.authority) !== JSON.stringify(captured.authority)) throw notFound();
           const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(workspaceId, datasetId);
-          if (!head || head.active !== 1 || head.approved_revision_hash !== scope.revisionSha256) throw notFound();
+          if (!head || head.active !== 1 || head.approved_revision_hash !== checked.revision.revisionSha256) throw notFound();
         });
       },
       ownerUpload(auth: AppBackendAuth, input: Omit<AppBackendUploadRequest, "authorityRevision"> & {workspaceId: string; datasetId: string; revision: number; revisionSha256: string}, signal?: AbortSignal) {
@@ -355,7 +353,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           signal?.throwIfAborted(); current();
           if (JSON.stringify(host.authorize(auth, request).authority) !== JSON.stringify(admitted.authority)) throw notFound();
           const head = storage.db.prepare("SELECT active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(scope.workspaceId, scope.datasetId);
-          if (!head || head.active !== 1 || head.approved_revision_hash !== input.revisionSha256) throw notFound();
+          if (!head || head.active !== 1 || head.approved_revision_hash !== host.authorize(auth,request).revision.revisionSha256) throw notFound();
         });
       },
       dataReadFile(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; revision: number; revisionSha256: string; fileId: string; fieldId: string; operationId: string; input: AppBackendJson}, signal?: AbortSignal) {

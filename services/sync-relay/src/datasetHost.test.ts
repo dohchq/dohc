@@ -251,3 +251,30 @@ it("refuses publication withdrawal and storage shutdown before further data disc
   expect(() => f.host.list(owner, {workspaceId: "w"})).toThrow("closed");
   await expect(f.invoke(owner, id(6))).rejects.toThrow("closed");
 });
+
+
+it("keeps a published form and its original capability alive after a field rename without republishing", async () => {
+  const f = await fixture(); await f.activate();
+  const publicationId = f.publish(), link = f.link("rename-friend");
+  const published = f.host.publication(link,publicationId)!;
+  await f.invoke(link,id(5),{name:"Before rename"},publicationId,"before");
+  const next = structuredClone(definition); next.tables[0].fields[1].name = "Full name";
+  next.schemaPath="registrations/revision-2/schema.sql"; next.operationsPath="registrations/revision-2/operations.js";
+  const renamed = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
+  const renamePreview = await f.host.prepareMigration(owner,{workspaceId:"w",revision:renamed,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
+  await f.host.approveMigration(owner,{...scope,candidateId:renamePreview.candidateId,checkpointSha256:renamePreview.checkpointSha256});
+  expect(f.host.publication(link,publicationId)!.capability).toEqual(published.capability);
+  expect(f.host.publication(link,publicationId)!.authorityRevision).toBe(published.authorityRevision);
+  await expect(f.invoke(link,id(5),{name:"After rename"},publicationId,"after")).resolves.toMatchObject({result:{accepted:true}});
+  await expect(f.invoke(link,id(5),{name:"Before rename"},publicationId,"before")).resolves.toMatchObject({replayed:true});
+  expect((await f.invoke(owner,id(6),{},undefined,"read")).result).toHaveLength(2);
+  await f.reopen();
+  expect(f.host.publication(link,publicationId)!.capability).toEqual(published.capability);
+  await expect(f.invoke(link,id(5),{name:"After restart"},publicationId,"restart")).resolves.toMatchObject({result:{accepted:true}});
+  next.operations[0].fieldIds.push(id(3));
+  const widened = describeDatasetRevision({definition:next,revision:3,schemaSql,operationSource});
+  const widenPreview = await f.host.prepareMigration(owner,{workspaceId:"w",revision:widened,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
+  await f.host.approveMigration(owner,{...scope,candidateId:widenPreview.candidateId,checkpointSha256:widenPreview.checkpointSha256});
+  expect(()=>f.host.publication(link,publicationId)).toThrow("needs approval");
+  await expect(f.invoke(link,id(5),{name:"Forbidden"},publicationId,"forbidden")).rejects.toThrow();
+});

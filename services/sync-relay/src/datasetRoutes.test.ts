@@ -529,3 +529,27 @@ it("requires an owner and a current, acknowledged deletion review", async () => 
   expect((await f.invoke()).status).not.toBe(200);
   expect((await f.activate()).status).not.toBe(200);
 });
+
+
+it("keeps published upload, saved submission, and protected file paths working after a display rename", async () => {
+  const f = await attachmentsFixture(); await f.bind(true);
+  const next = structuredClone(definition); next.tables[0].fields[1].name="Full name";
+  const renamed = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
+  const artifacts=await (await f.http(`${f.path}/artifacts`)).json();
+  const prepared=await f.http(`${f.path}/prepare-migration`,{revision:renamed,schemaSql,operationSource,expected:artifacts.cursor,migrationSql:"SELECT 1;"});
+  expect(prepared.status).toBe(200); const candidate=await prepared.json();
+  expect((await f.http(`${f.path}/approve-migration`,{candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256})).status).toBe(200);
+  const uploaded=await f.app("upload",upload); expect(uploaded.status).toBe(200); const {file}=await uploaded.json();
+  const input={name:"After rename",fileId:file.fileId}, identity={authorityRevision:1,operation:"submit"};
+  const saved=await f.app("attempt",{...identity,action:"save",idempotencyKey:"renamed-submit",input}); expect(saved.status).toBe(200);
+  const attempt=await saved.json();
+  expect((await f.app("invoke",{...identity,input,idempotencyKey:"renamed-submit"})).status).toBe(200);
+  expect(await (await f.app("invoke",{...identity,input,idempotencyKey:"renamed-submit"})).json()).toMatchObject({replayed:true});
+  expect((await f.app("attempt",{...identity,action:"clear",token:attempt.attempt.token})).status).toBe(200);
+  const read={authorityRevision:1,operation:"receipt",fileId:file.fileId,input:{fileId:file.fileId}};
+  expect(await (await f.named("file",read)).json()).toEqual({file,bytesBase64:upload.bytesBase64});
+  expect((await f.app("file",read)).status).toBe(404);
+  await f.bind(false);
+  expect((await f.named("file",read)).status).toBe(404);
+  expect((await f.app("upload",upload)).status).toBe(404);
+});

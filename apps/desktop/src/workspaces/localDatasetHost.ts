@@ -10,7 +10,7 @@ import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { appBackendFileSignatureMatches, parseAppBackendUploadRequest, parseAppBackendFile, type AppBackendFile } from "@dohc/security-contract/app-backend";
 import { parseDatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
+import { resolveCompatibleDatasetRevision, createDatasetHost, type DatasetHostOptions } from "@dohc/app-backend-runtime/dataset-host";
 import { createDatasetJournal, type JournalDb } from "@dohc/app-backend-runtime/journal";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
@@ -323,7 +323,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     function checkRevision(input: Pick<LocalDatasetInvocation, "datasetId" | "revision" | "revisionSha256">) {
       assertCurrent();
       const description = host.describe(owner, {workspaceId, datasetId: input.datasetId});
-      if (input.revision !== description.revision || input.revisionSha256 !== description.revisionSha256) throw new Error("Collection rules changed. Reload the Collection.");
+      resolveCompatibleDatasetRevision(db,{workspaceId,datasetId:input.datasetId},input);
       return description;
     }
     function checkInvocation(input: LocalDatasetInvocation, readOnly?: boolean) {
@@ -401,7 +401,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           const now = Date.now();
           return transaction(() => {
             const head = journal.head({workspaceId, datasetId:input.datasetId}, () => { authorize(); });
-            if (!head.active || head.cursor.approvedRevisionHash !== input.revisionSha256) throw new Error("Collection authority changed. Reload the Collection.");
+            if (!head.active || head.cursor.approvedRevisionHash !== checkRevision(input).revisionSha256) throw new Error("Collection authority changed. Reload the Collection.");
             const stale = db.prepare("SELECT file_id, storage_bytes FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND attached_revision IS NULL AND expires_at_ms<=?").all(workspaceId, input.datasetId, now);
             for (const row of stale) { db.prepare("DELETE FROM local_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NULL").run(workspaceId, input.datasetId, String(row.file_id)); charge(input.datasetId,-Number(row.storage_bytes)); }
             const key = JSON.stringify([workspaceId, input.datasetId, principal, parsed.idempotencyKey]);
