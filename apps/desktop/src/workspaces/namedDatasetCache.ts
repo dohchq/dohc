@@ -6,7 +6,7 @@ import { z } from "zod";
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const savedPage = z.object({ key: digest, value: z.unknown(), savedAtMs: z.number().int().nonnegative() }).strict();
-const savedScope = z.object({ key: digest, fingerprint: digest, pages: z.array(savedPage).max(512) }).strict();
+const savedScope = z.object({ key: digest, localAuthority: digest, fingerprint: digest, pages: z.array(savedPage).max(512) }).strict();
 const savedFile = z.object({ version: z.literal(1), owner: digest, scopes: z.array(savedScope).max(128) }).strict();
 type Saved = z.infer<typeof savedFile>;
 export type NamedDatasetPageCache = {
@@ -69,10 +69,18 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
         if (hadOwner || loaded || next === null) { state = null; loaded = true; await persist(); }
       });
     },
-    scope(input: { owner: string; binding: unknown; assertCurrent(): void }): NamedDatasetPageCache {
-      const key = hash(input.binding);
+    scope(input: { owner: string; binding: unknown; localAuthority?: unknown; assertCurrent(): void }): NamedDatasetPageCache {
+      const key = hash(input.binding), localAuthority = hash(input.localAuthority ?? null);
       const current = () => { input.assertCurrent(); if (closed || owner !== input.owner) throw Error("Your server account changed. Reopen the shared workspace."); };
-      const run = <T>(work: () => Promise<T>) => enqueue(async () => { current(); await load(); current(); const result = await work(); current(); return result; });
+      const run = <T>(work: () => Promise<T>) => enqueue(async () => {
+        current(); await load(); current();
+        if (scope() && scope()!.localAuthority !== localAuthority) {
+          epochs.set(key, epoch() + 1);
+          state!.scopes = state!.scopes.filter(value => value.key !== key);
+          await persist();
+        }
+        const result = await work(); current(); return result;
+      });
       const epoch = () => epochs.get(key) ?? 0;
       const scope = () => state?.scopes.find(value => value.key === key);
       return {
@@ -86,7 +94,7 @@ export function createNamedDatasetCacheRegistry(options: { directory(): string; 
           state ??= { version: 1, owner: input.owner, scopes: [] };
           state.scopes = state.scopes.filter(value => value.key !== key);
           if (state.scopes.length === 128) state.scopes.shift();
-          state.scopes.push({ key, fingerprint, pages: [] });
+          state.scopes.push({ key, localAuthority, fingerprint, pages: [] });
           await persist();
         }),
         read: request => run(async () => {
