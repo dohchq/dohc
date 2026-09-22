@@ -39,6 +39,7 @@ CREATE TABLE attendees (
   role TEXT NOT NULL CHECK (role IN ('player','spectator')),
   name TEXT NOT NULL,
   name_key TEXT NOT NULL,
+  reclub_synced INTEGER NOT NULL DEFAULT 0 CHECK (reclub_synced IN (0,1) AND (role='player' OR reclub_synced=0)),
   UNIQUE (registration_id, session_id, name_key)
 );
 CREATE INDEX registration_listing ON registrations(created_at_ms DESC,id DESC);

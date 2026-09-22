@@ -7,7 +7,7 @@ import {
 } from "./client.ts";
 import type {
   AttendeeRow, FileReply, ManualEntryInput, OnlinePaymentMethod, PaymentMethod, PaymentTotal, PublicSession, RegisterInput, RegisterResult,
-  RegistrationRow, RegistrationStatus, RegistrationSummary, Role, RosterInput, SessionId, SetStatusInput, StatusResult,
+  RegistrationRow, RegistrationStatus, RegistrationSummary, Role, RosterInput, SessionId, SetPlayerReclubInput, SetStatusInput, StatusResult,
 } from "./ui-types.ts";
 
 // ---------- shared vocabulary ----------
@@ -51,8 +51,11 @@ const nameKey = (value: string) => value.trim().replace(/\s+/g, " ").normalize("
 export function normalizeMobile(value: string): string | null {
   if (value.length > 24 || !/^[\d+()\s-]+$/.test(value)) return null;
   let digits = value.replace(/[()\s-]/g, "");
-  if (/^09\d{9}$/.test(digits)) digits = "+63" + digits.slice(1);
-  return /^\+639\d{9}$/.test(digits) ? digits : null;
+  if (digits.startsWith("00")) digits = "+" + digits.slice(2);
+  if (/^0(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+63" + digits.slice(1);
+  if (/^63(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+" + digits;
+  if (/^(?:9\d{9}|817\d{7})$/.test(digits)) digits = "+63" + digits;
+  return /^\+63(?:817|90[5-9]|9[1-9]\d)\d{7}$/.test(digits) ? digits : null;
 }
 export function fullName(value: string): string | null {
   if (value.length > 150 || /[\r\n]/.test(value)) return null;
@@ -742,7 +745,38 @@ function createOrganizerView(client: FundraiserClient): View {
     const attendeeMore = button("Load more", { class: "secondary", click: () => { if (attendeeNext !== null) void loadAttendees(attendeeNext); } });
     attendeeSessionSelect.addEventListener("change", () => { attendeeSession = attendeeSessionSelect.value; void loadAttendees(0); });
     attendeeStatusSelect.addEventListener("change", () => { attendeeStatus = attendeeStatusSelect.value; void loadAttendees(0); });
-    attendeeTable.append(el("thead", {}, el("tr", {}, ...["Name", "Role", "Session", "Registered by", "Mobile", "Status"].map(label => el("th", { scope: "col" }, label)))), attendeeBody);
+    attendeeTable.append(el("thead", {}, el("tr", {}, ...["Name", "Role", "Session", "Registered by", "Mobile", "Status", "ReClub checklist"].map(label => el("th", { scope: "col" }, label)))), attendeeBody);
+    const reclubChanges = new Map<string, {key: string; input: SetPlayerReclubInput; busy: boolean; error?: string; retry?: boolean}>();
+    async function saveReclub(person: AttendeeRow): Promise<void> {
+      let change = reclubChanges.get(person.id);
+      if (change?.busy) return;
+      if (!change?.retry) change = {key: mutationKey("reclub"), input: {attendeeId: person.id, synced: !person.reclubSynced}, busy: false};
+      change.busy = true; change.error = undefined; reclubChanges.set(person.id, change);
+      const current = generation;
+      renderAttendees();
+      try {
+        const result = await client.setPlayerReclub(change.input, change.key);
+        if (current !== generation) return;
+        reclubChanges.delete(person.id);
+        attendees = attendees.map(row => row.id === person.id ? {...row, reclubSynced: result.synced} : row);
+        renderAttendees();
+        // Reload with a newer request token so an earlier read cannot restore the old flag.
+        void loadAttendees(0);
+      } catch (error) {
+        if (current !== generation) return;
+        change.busy = false; change.retry = uncertain(error); change.error = describe(error, ORGANIZER_MESSAGES);
+        renderAttendees();
+      }
+    }
+    function reclubControl(person: AttendeeRow): HTMLElement {
+      if (person.role !== "player") return el("span", {}, "Not applicable");
+      const change = reclubChanges.get(person.id);
+      return el("div", {}, button(change?.busy ? "Saving…" : change?.retry ? "Retry checklist update" : person.reclubSynced ? "Added to ReClub" : "Mark added to ReClub", {
+        class: "secondary", disabled: change?.busy, "aria-pressed": String(person.reclubSynced),
+        "aria-label": `${change?.retry ? "Retry ReClub update for" : "ReClub checklist for"} ${person.name}, ${sessionName(person.sessionId)}`,
+        "data-focus-key": `reclub-${person.id}`, click: () => void saveReclub(person),
+      }), change?.error ? notice(change.error, "error") : null);
+    }
     async function loadAttendees(offset: number): Promise<void> {
       const seq = ++attendeeSeq, current = generation;
       attendeesLoaded = true; attendeeMessage.replaceChildren(); attendeeMore.disabled = true;
@@ -766,7 +800,8 @@ function createOrganizerView(client: FundraiserClient): View {
         el("td", { "data-label": "Session" }, sessionName(person.sessionId)),
         el("td", { "data-label": "Registered by" }, person.contactName),
         el("td", { "data-label": "Mobile" }, person.mobile || "Not provided"),
-        el("td", { "data-label": "Status" }, pill(person.status)))));
+        el("td", { "data-label": "Status" }, pill(person.status)),
+        el("td", { "data-label": "ReClub checklist" }, reclubControl(person)))));
       attendeeTable.hidden = attendees.length === 0;
       const players = attendees.filter(person => person.role === "player").length;
       rerender(attendeeFoot, attendees.length
@@ -862,6 +897,7 @@ function createOrganizerView(client: FundraiserClient): View {
         el("div", { class: "toolbar" }, field("Status", filterSelect), searchForm), listMessage, listTable, listFoot),
       attendees: el("div", { role: "tabpanel", id: "panel-attendees", "aria-labelledby": "tab-attendees", hidden: true },
         el("p", { class: "hint" }, "Rejected registrations are excluded."),
+        el("p", { class: "hint" }, "Mark each player after adding them to ReClub. This checklist does not send data to ReClub."),
         el("div", { class: "toolbar" }, field("Session", attendeeSessionSelect), field("Status", attendeeStatusSelect)), attendeeMessage, attendeeTable, attendeeFoot),
       entry: el("div", { role: "tabpanel", id: "panel-entry", "aria-labelledby": "tab-entry", hidden: true }, entryForm),
     };

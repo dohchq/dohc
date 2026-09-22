@@ -34,6 +34,10 @@ Organizer lists omit these recovery secrets.
 
 Organizers can search registrations, inspect receipts, update payment status, and enter manual or ReClub registrations.
 ReClub is an entry label, not an integration. Manual entries may omit a phone number and receipt.
+The attendee list has a ReClub checklist for each player in each session.
+Organizers mark players after adding them to ReClub outside dohc. They can undo each mark.
+Marks remain separate across players and sessions, and survive rejection and restoration of a registration.
+The checklist excludes spectators and rejected registrations. Private participant status lookups omit it.
 Pay-at-venue entries reserve slots and require cash as their planned payment method.
 An organizer must select the actual payment method when marking those entries verified.
 
@@ -58,7 +62,7 @@ The app needs no backend imports, external database account, or storage bucket c
 
 The example tests execute the source in the actual isolated runtime with SQLite.
 They cover both-session rollback, capacity release and restoration, stale edits, private lookup, receipt attachment,
-manual entries, organizer checks, server-calculated totals, and the maximum 272-attendee roster.
+manual entries, organizer checks, server-calculated totals, the ReClub checklist, and the maximum 272-attendee roster.
 
 From the repository root, run:
 

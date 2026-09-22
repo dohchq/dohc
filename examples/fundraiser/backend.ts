@@ -202,12 +202,22 @@
     const selected = input.sessionId === undefined ? "" : session(ctx, input.sessionId);
     const filter = input.status === undefined ? "" : status(ctx, input.status);
     const search = tableSearch(ctx, input);
-    const rows = ctx.db.query("SELECT a.id,a.registration_id,a.session_id,a.role,a.name,r.full_name,r.mobile,r.status FROM attendees a JOIN registrations r ON r.id=a.registration_id WHERE (?='' OR a.session_id=?) AND (?='' OR r.status=?) AND r.status<>'rejected' AND (?='' OR instr(lower(a.name),lower(?))>0 OR instr(lower(r.full_name),lower(?))>0 OR instr(r.mobile,?)>0) ORDER BY a.session_id,a.role,a.name,a.id LIMIT ? OFFSET ?",
+    const rows = ctx.db.query("SELECT a.id,a.registration_id,a.session_id,a.role,a.name,a.reclub_synced,r.full_name,r.mobile,r.status FROM attendees a JOIN registrations r ON r.id=a.registration_id WHERE (?='' OR a.session_id=?) AND (?='' OR r.status=?) AND r.status<>'rejected' AND (?='' OR instr(lower(a.name),lower(?))>0 OR instr(lower(r.full_name),lower(?))>0 OR instr(r.mobile,?)>0) ORDER BY a.session_id,a.role,a.name,a.id LIMIT ? OFFSET ?",
       [selected, selected, filter, filter, search, search, search, search, limit + 1, offset]);
     return {records: rows.slice(0, limit).map(row => ({
       id: row.id, registrationId: row.registration_id, sessionId: row.session_id, role: row.role,
-      name: row.name, contactName: row.full_name, mobile: row.mobile, status: row.status,
+      name: row.name, contactName: row.full_name, mobile: row.mobile, status: row.status, reclubSynced: row.reclub_synced === 1,
     })), nextOffset: rows.length > limit ? offset + limit : null};
+  }
+  function setPlayerReclub(ctx, input) {
+    organizer(ctx); object(ctx, input);
+    if (typeof input.attendeeId !== "string" || !input.attendeeId || input.attendeeId.length > 160 || typeof input.synced !== "boolean") {
+      invalid(ctx, "Choose a player and a ReClub checklist status.");
+    }
+    const changed = ctx.db.execute("UPDATE attendees SET reclub_synced=? WHERE id=? AND role='player' AND registration_id IN (SELECT id FROM registrations WHERE status<>'rejected')",
+      [input.synced ? 1 : 0, input.attendeeId]).changes;
+    if (changed !== 1) ctx.refuse("not_found", "This player is unavailable. Refresh the attendee list.");
+    return {attendeeId: input.attendeeId, synced: input.synced};
   }
   function totals(ctx) {
     organizer(ctx);
@@ -241,6 +251,6 @@
   function tableRegistrations(ctx, input) { return {rows: listRegistrations(ctx, input).records}; }
   function tableRegistrationSessions(ctx, input) { return {rows: listRegistrationSessions(ctx, input).records}; }
   function tableAttendees(ctx, input) { return {rows: attendees(ctx, input).records}; }
-  globalThis.operations = {listPublicSessions, register, lookupStatus, listRegistrations, attendees, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions,
+  globalThis.operations = {listPublicSessions, register, lookupStatus, listRegistrations, attendees, setPlayerReclub, totals, setStatus, updateRegistration, manualEntry, receiptAccess, listRegistrationSessions,
     tableSessions, tableRegistrations, tableRegistrationSessions, tableAttendees};
 }());

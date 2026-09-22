@@ -35,8 +35,9 @@ export interface PaymentTotal {
   paymentMethod: PaymentMethod; verified: number; pending: number; rejected: number; dueAtVenue: number; total: number;
 }
 export interface AttendeeRow extends Attendee {
-  registrationId: string; contactName: string; mobile: string; status: RegistrationStatus;
+  registrationId: string; contactName: string; mobile: string; status: RegistrationStatus; reclubSynced: boolean;
 }
+export interface SetPlayerReclubInput { attendeeId: string; synced: boolean }
 export interface AttendeePage { records: AttendeeRow[]; nextOffset: number | null }
 
 // Context is supplied by the isolated operation host, never by request input.

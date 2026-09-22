@@ -102,10 +102,48 @@ describe("fundraiser app operations", () => {
   it("refuses hidden organizer operations for public callers and named nonhelpers", async () => {
     const f = await fixture();
     for (const caller of [participant, {...helper, helper: false}, {...helper, access: "view"}]) {
-      for (const operation of ["listRegistrations", "setStatus", "updateRegistration", "manualEntry", "attendees", "totals", "receiptAccess", "listRegistrationSessions"]) {
+      for (const operation of ["listRegistrations", "setStatus", "updateRegistration", "manualEntry", "attendees", "setPlayerReclub", "totals", "receiptAccess", "listRegistrationSessions"]) {
         await expect(f.call(operation, {}, {caller})).rejects.toMatchObject({refusal: {code: "forbidden"}});
       }
     }
+  }, 30000);
+
+  it("keeps ReClub checklist changes on individual players and sessions without changing registration or capacity", async () => {
+    const f = await fixture();
+    const accepted = row((await f.call("register", registration([
+      {sessionId: "s1", players: ["First Player", "Second Player"], spectators: ["Watching Friend"]},
+      {sessionId: "s2", players: ["First Player"], spectators: []},
+    ]))).result);
+    const initial = row((await f.call("attendees", {}, {caller: helper, readOnly: true})).result).records;
+    expect(initial.every((person: {reclubSynced: boolean}) => person.reclubSynced === false)).toBe(true);
+    const first = initial.find((person: {name: string; sessionId: string}) => person.name === "First Player" && person.sessionId === "s1");
+    const second = initial.find((person: {name: string}) => person.name === "Second Player");
+    const spectator = initial.find((person: {role: string}) => person.role === "spectator");
+    for (const person of [first, second]) {
+      expect((await f.call("setPlayerReclub", {attendeeId: person.id, synced: true}, {caller: helper})).result)
+        .toEqual({attendeeId: person.id, synced: true});
+    }
+    const table = row((await f.call("tableAttendees", {}, {caller: owner, readOnly: true})).result).rows;
+    expect(table.filter((person: {reclubSynced: boolean}) => person.reclubSynced).map((person: {id: string}) => person.id)).toEqual([first.id, second.id]);
+    expect(table.find((person: {sessionId: string}) => person.sessionId === "s2").reclubSynced).toBe(false);
+    await f.call("setPlayerReclub", {attendeeId: first.id, synced: false}, {caller: owner});
+    const before = Buffer.from(f.database);
+    for (const attendeeId of [spectator.id, "missing"]) {
+      await expect(f.call("setPlayerReclub", {attendeeId, synced: true}, {caller: helper})).rejects.toMatchObject({refusal: {code: "not_found"}});
+    }
+    await expect(f.call("setPlayerReclub", {attendeeId: first.id, synced: "true"}, {caller: helper})).rejects.toMatchObject({refusal: {code: "invalid_input"}});
+    await expect(f.call("setPlayerReclub", {attendeeId: first.id, synced: true}, {caller: helper, readOnly: true})).rejects.toThrow();
+    expect(Buffer.from(f.database)).toEqual(before);
+    const publicStatus = row((await f.call("lookupStatus", {token: accepted.statusToken}, {readOnly: true})).result);
+    expect(publicStatus).toMatchObject({status: "pending_verification", version: 1, total: 3150});
+    expect(publicStatus.attendees.every((person: object) => !("reclubSynced" in person))).toBe(true);
+    expect(rows((await f.call("listPublicSessions", {}, {readOnly: true})).result).map(value => value.available)).toEqual([34, 35]);
+    await f.call("setStatus", {id: accepted.id, status: "rejected", expectedVersion: 1}, {caller: helper});
+    await expect(f.call("setPlayerReclub", {attendeeId: second.id, synced: false}, {caller: helper})).rejects.toMatchObject({refusal: {code: "not_found"}});
+    await f.call("setStatus", {id: accepted.id, status: "verified", expectedVersion: 2}, {caller: helper});
+    const restored = row((await f.call("attendees", {}, {caller: helper, readOnly: true})).result).records;
+    expect(restored.find((person: {id: string}) => person.id === second.id).reclubSynced).toBe(true);
+    expect(restored.find((person: {id: string}) => person.id === first.id).reclubSynced).toBe(false);
   }, 30000);
 
   it("validates duplicate names, mobile formats and receipt metadata before accepting", async () => {

@@ -14,6 +14,7 @@
       {"name": "listRegistrations", "access": "helper", "readOnly": true},
       {"name": "listRegistrationSessions", "access": "helper", "readOnly": true},
       {"name": "attendees", "access": "helper", "readOnly": true},
+      {"name": "setPlayerReclub", "access": "helper", "readOnly": false},
       {"name": "totals", "access": "helper", "readOnly": true},
       {"name": "receiptAccess", "access": "helper", "readOnly": true},
       {"name": "setStatus", "access": "helper", "readOnly": false},

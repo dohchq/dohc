@@ -6,7 +6,7 @@ import {
   BackendError, createFundraiserClient, createRegistrationAttempt, submitRegistration, type BackendPort, type FundraiserClient,
 } from "../../../../examples/fundraiser/client";
 import { EXAMPLE_NOTICE, fullName, mountFundraiser, normalizeMobile } from "../../../../examples/fundraiser/frontend";
-import type { PublicSession, RegisterResult, RegistrationRow } from "../../../../examples/fundraiser/ui-types";
+import type { AttendeeRow, PublicSession, RegisterResult, RegistrationRow } from "../../../../examples/fundraiser/ui-types";
 
 // jsdom Blobs may lack arrayBuffer(); the app reads receipts through it.
 if (typeof Blob.prototype.arrayBuffer !== "function") {
@@ -41,6 +41,7 @@ function fakeClient(overrides: Partial<FundraiserClient> = {}): FundraiserClient
     setStatus: vi.fn<FundraiserClient["setStatus"]>(async () => ({ ...row, status: "verified", version: 4 })),
     manualEntry: vi.fn<FundraiserClient["manualEntry"]>(async () => ({ result: row, revision: 1, replayed: false })),
     attendees: vi.fn<FundraiserClient["attendees"]>(async () => ({ records: [], nextOffset: null })),
+    setPlayerReclub: vi.fn<FundraiserClient["setPlayerReclub"]>(async input => input),
     totals: vi.fn<FundraiserClient["totals"]>(async () => []),
     receipt: vi.fn<FundraiserClient["receipt"]>(async () => ({ file: uploaded.file, bytesBase64: "iVBORw0KGgo=" })),
     close: vi.fn(),
@@ -80,8 +81,34 @@ it("validates contact details the way the backend does", () => {
   expect(normalizeMobile("0917 123 4567")).toBe("+639171234567");
   expect(normalizeMobile("+63 (917) 123-4567")).toBe("+639171234567");
   expect(normalizeMobile("12345")).toBeNull();
+  for (const value of ["639171234567", "9171234567", "00639171234567"]) expect(normalizeMobile(value)).toBe("+639171234567");
+  expect(normalizeMobile("08171234567")).toBe("+638171234567");
+  expect(normalizeMobile("09001234567")).toBeNull();
   expect(fullName("  Ana   Cruz ")).toBe("Ana Cruz");
   expect(fullName("Ana")).toBeNull();
+});
+
+it("shows the per-player ReClub checklist and retries an uncertain update with the same request", async () => {
+  const person: AttendeeRow = {id: "player-1", registrationId: row.id, sessionId: "s1", role: "player", name: "Ana Cruz", contactName: row.fullName, mobile: row.mobile, status: row.status, reclubSynced: false};
+  const spectator: AttendeeRow = {...person, id: "spectator-1", role: "spectator", name: "Ben Reyes"};
+  const setPlayerReclub = vi.fn<FundraiserClient["setPlayerReclub"]>()
+    .mockRejectedValueOnce(new BackendError(503))
+    .mockResolvedValue({attendeeId: person.id, synced: true});
+  const client = fakeClient({setPlayerReclub, attendees: vi.fn<FundraiserClient["attendees"]>()
+    .mockResolvedValueOnce({records: [person, spectator], nextOffset: null})
+    .mockResolvedValue({records: [{...person, reclubSynced: true}, spectator], nextOffset: null})});
+  mount(client);
+  fireEvent.click(screen.getByRole("button", {name: "Organizer"}));
+  fireEvent.click(await screen.findByRole("tab", {name: "Attendees"}));
+  fireEvent.click(await screen.findByRole("button", {name: "ReClub checklist for Ana Cruz, Session 1"}));
+  const retry = await screen.findByRole("button", {name: "Retry ReClub update for Ana Cruz, Session 1"});
+  expect(screen.queryByRole("button", {name: /ReClub checklist for Ben/})).toBeNull();
+  expect(screen.getByText("Not applicable")).toBeTruthy();
+  fireEvent.click(retry);
+  await screen.findByText("Added to ReClub");
+  expect(setPlayerReclub.mock.calls[0]).toEqual([{attendeeId: person.id, synced: true}, expect.stringMatching(/^reclub:/)]);
+  expect(setPlayerReclub.mock.calls[1]).toEqual(setPlayerReclub.mock.calls[0]);
+  expect(screen.getByRole("button", {name: "ReClub checklist for Ana Cruz, Session 1"}).getAttribute("aria-pressed")).toBe("true");
 });
 
 it("retries a registration with the same keys and skips a confirmed upload", async () => {

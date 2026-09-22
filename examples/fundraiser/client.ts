@@ -1,6 +1,6 @@
 import type {
   AttendeePage, AttendeesInput, FileReply, InvokeReply, ListRegistrationsInput, ManualEntryInput, PaymentTotal, PublicSession,
-  RegisterInput, RegisterResult, RegistrationPage, RegistrationSummary, SetStatusInput, StatusResult, UploadReply,
+  RegisterInput, RegisterResult, RegistrationPage, RegistrationSummary, SetPlayerReclubInput, SetStatusInput, StatusResult, UploadReply,
 } from "./ui-types.ts";
 
 export type BackendStatus = 400 | 404 | 409 | 413 | 429 | 503;
@@ -123,6 +123,7 @@ export interface FundraiserClient {
   setStatus(input: SetStatusInput, idempotencyKey: string): Promise<RegistrationSummary>;
   manualEntry(input: ManualEntryInput, idempotencyKey: string): Promise<InvokeReply<RegistrationSummary>>;
   attendees(input: AttendeesInput): Promise<AttendeePage>;
+  setPlayerReclub(input: SetPlayerReclubInput, idempotencyKey: string): Promise<SetPlayerReclubInput>;
   totals(): Promise<PaymentTotal[]>;
   receipt(registrationId: string): Promise<FileReply>;
   close(): void;
@@ -140,6 +141,7 @@ export function createFundraiserClient(port: BackendPort = connectBackend()): Fu
     setStatus: async (input, key) => (await port.invoke<RegistrationSummary>("setStatus", input, key)).result,
     manualEntry: (input, key) => port.invoke<RegistrationSummary>("manualEntry", input, key),
     attendees: input => read("attendees", input),
+    setPlayerReclub: async (input, key) => (await port.invoke<SetPlayerReclubInput>("setPlayerReclub", input, key)).result,
     totals: () => read("totals", {}),
     receipt: async id => port.file((await read<{ fileId: string }>("receiptAccess", { id })).fileId, "receiptAccess", { id }),
     close: () => port.close(),

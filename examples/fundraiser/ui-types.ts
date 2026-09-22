@@ -37,7 +37,8 @@ export interface SetStatusInput { id: string; status: RegistrationStatus; expect
 export interface PaymentTotal {
   paymentMethod: PaymentMethod; verified: number; pending: number; rejected: number; dueAtVenue: number; total: number;
 }
-export interface AttendeeRow extends Attendee { registrationId: string; contactName: string; mobile: string; status: RegistrationStatus }
+export interface AttendeeRow extends Attendee { registrationId: string; contactName: string; mobile: string; status: RegistrationStatus; reclubSynced: boolean }
+export interface SetPlayerReclubInput { attendeeId: string; synced: boolean }
 export interface AttendeePage { records: AttendeeRow[]; nextOffset: number | null }
 export interface AttendeesInput { sessionId?: SessionId; status?: RegistrationStatus; offset?: number; limit?: number }
 
