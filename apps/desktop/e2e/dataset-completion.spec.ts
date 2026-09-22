@@ -156,10 +156,14 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(collection.getByRole("button", { name: /^Edit Participant for record / })).toHaveCount(2);
 
     // The approved app still uses the previous display label and binding. No republish.
+    await form.getByRole("button", { name: "Submit another response", exact: true }).click();
+    await expect(form.getByLabel("Name", { exact: false })).toBeEnabled();
     await guest.reload();
     await form.getByLabel("Name", { exact: false }).fill("After field rename");
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
+    await form.getByRole("button", { name: "Submit another response", exact: true }).click();
+    await expect(form.getByLabel("Name", { exact: false })).toBeEnabled();
     await guest.reload();
     await form.getByLabel("Name", { exact: false }).fill("Blocked participant");
     await form.getByRole("button", { name: "Submit", exact: true }).click();
