@@ -320,6 +320,15 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {creatingForm && <CreateDatasetFormDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId}
       onClose={() => setCreatingForm(false)} onError={onError}
       onLoadPreview={loadMigrationPreview}
+      onLoadSource={async signal => {
+        signal.throwIfAborted();
+        const sequence = request.current;
+        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetId, revisionSha256: dataset.revisionSha256 });
+        signal.throwIfAborted();
+        if (sequence !== request.current) throw Error("The Collection changed. Review its current rules again.");
+        if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
+        return { path: result.revision.definition.operationsPath, source: result.operationSource, sha256: result.revision.operationsSha256 };
+      }}
       onPrepareChoices={async (input, signal) => {
         signal.throwIfAborted();
         const sequence = request.current;
