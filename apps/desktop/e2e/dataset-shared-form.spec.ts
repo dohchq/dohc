@@ -14,10 +14,12 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
   const exchangeKey = randomBytes(32).toString("base64url");
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let relay: SyncRelayHandle | null = null;
+  let relayDiagnostics: SyncRelayHandle["diagnostics"] | undefined;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   try {
     relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
+    relayDiagnostics = relay.diagnostics;
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
     expect(claim.ok).toBe(true);
     await seedWorkspaceManifest(workspace, workspaceId);
@@ -91,7 +93,10 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
       flow: "Desktop Collection and generated form → source share → main publication and transfer → guest → owner → offline restart." }, null, 2), contentType: "application/json" });
   } finally {
     try { await shared?.close(); } finally {
-      try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+      try { await relay?.stop(); } finally {
+        if (relayDiagnostics) await info.attach("relay logs", { body: JSON.stringify(relayDiagnostics(), null, 2), contentType: "application/json" });
+        await cleanupDesktopWorkspace(desktop, workspace);
+      }
     }
   }
 });

@@ -17,6 +17,7 @@ export interface SyncRelayHandle {
   port: number;
   dbPath: string;
   stop(): Promise<void>;
+  diagnostics(): { stdout: string; stderr: string };
 }
 
 export interface SyncRelayLinkBoundary {
@@ -61,9 +62,9 @@ export async function spawnSyncRelay(input: {
     },
   );
 
+  let stdout = "";
+  let stderr = "";
   const baseUrl = await new Promise<string>((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
       reject(
@@ -96,6 +97,7 @@ export async function spawnSyncRelay(input: {
     baseUrl,
     port,
     dbPath: input.dbPath,
+    diagnostics: () => ({ stdout, stderr }),
     stop: () =>
       new Promise<void>((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) {
