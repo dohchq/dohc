@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDatasetAttempts, type DatasetAttemptScope } from "./dataset-attempts.js";
-import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
+import { parseDatasetAttemptRequest, parseDatasetAttemptResult } from "@dohc/security-contract/dataset-attempts";
 const open: DatabaseSync[] = [];
 const scope: DatasetAttemptScope = { workspaceId: "workspace", datasetId: "dataset", appId: "publication", principalKey: "participant", operationId: "create", revisionSha256: "a".repeat(64) };
 function fixture(maxAttemptsPerDataset = 4096) {
@@ -42,5 +42,10 @@ describe("durable submission attempts", () => {
     expect(() => parseDatasetAttemptRequest({ action: "save", idempotencyKey: "first", input: "x".repeat(65536) })).toThrow();
     const f = fixture(1); f.attempts.request(scope, { action: "save", idempotencyKey: "first", input: {} }, () => {});
     expect(() => f.attempts.request({ ...scope, principalKey: "other" }, { action: "save", idempotencyKey: "second", input: {} }, () => {})).toThrow("too many");
+  });
+  it("rejects trailing newlines in retry identities and compare tokens", () => {
+    expect(() => parseDatasetAttemptRequest({ action: "save", idempotencyKey: "first\n", input: {} })).toThrow();
+    expect(() => parseDatasetAttemptRequest({ action: "clear", token: "t".repeat(43) + "\n" })).toThrow();
+    expect(() => parseDatasetAttemptResult({ attempt: { token: "t".repeat(43) + "\n", idempotencyKey: "first", input: {} } })).toThrow();
   });
 });
