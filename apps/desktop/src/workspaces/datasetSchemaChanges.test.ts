@@ -188,3 +188,31 @@ it("refuses a credential change during approval before sending migration SQL", a
   await expect(approve(f, review)).rejects.toThrow(/server session changed/);
   expect(migrate).not.toHaveBeenCalled();
 });
+
+it.each([false, true])("reviews public relation choices on the current authority before activating them (remote=%s)", async remote => {
+  const initial = structuredClone(definition);
+  initial.tables[0]!.fields.push({ fieldId: id(10), name: "Referral", sqlColumn: "referral", type: "relation", required: false, unique: false,
+    relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } });
+  const f = await fixture(initial, remote);
+  const added = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "relation-choice-record"));
+  const result = await f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetId: id(1),
+    revision: f.revision.revision, revisionSha256: f.revision.revisionSha256, tableId: id(2), fieldId: id(10), labelFieldId: id(4) });
+  if (result.kind !== "migration-prepared") throw Error("Expected explicit choice review");
+  const choice = result.revision.definition.operations.at(-1)!;
+  expect(choice).toMatchObject({ access: "link", readOnly: true, fieldIds: [id(3), id(4)] });
+  expect(f.host.approvedArtifacts(id(1)).revision.revisionSha256).toBe(f.revision.revisionSha256);
+  expect(result.operationSource.startsWith(generateDatasetSources(initial).files[initial.operationsPath]!)).toBe(true);
+  const next = await approve(f, result);
+  const response = await f.host.query(call(next.revision, choice.operationId, { limit: 10 }, "relation-choice-read"));
+  expect(response.result).toEqual({ rows: [{ id: (added.result as { id: string }).id,
+    values: { [id(3)]: (added.result as { id: string }).id, [id(4)]: "Ada" } }], nextCursor: null });
+  expect(next.revision.definition.operations.slice(0, f.revision.definition.operations.length)).toEqual(f.revision.definition.operations);
+});
+
+it("refuses stale relation exposure requests before writing source", async () => {
+  const f = await fixture();
+  const before = f.files.size;
+  await expect(f.handler("owner", { action: "prepareRelationChoices", workspaceId: "w", datasetId: id(1), revision: 1,
+    revisionSha256: "0".repeat(64), tableId: id(2), fieldId: id(4), labelFieldId: id(4) })).rejects.toThrow("Collection rules changed");
+  expect(f.files.size).toBe(before);
+});
