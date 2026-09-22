@@ -1,18 +1,21 @@
 import type { utilityProcess } from "electron";
 import { createAppBackendRuntime, type AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 
-/** Electron's runAsNode fuse is disabled; guest work uses a utility process. */
-export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityProcess, "fork">, entryPath?: string) {
-  const launch: AppRuntimeLauncher = options => {
+/** Electron's runAsNode fuse is disabled; both runtime lifetimes use utility processes. */
+export function createDesktopAppRuntimeLauncher(
+  processes: Pick<typeof utilityProcess, "fork">,
+  closeAfterReply: boolean,
+): AppRuntimeLauncher {
+  return options => {
     const child = processes.fork(options.entryPath, [], {
       cwd: options.cwd, env: {}, stdio: "ignore", execArgv: ["--max-old-space-size=96"],
-      serviceName: "dohc app operation",
+      serviceName: "dohc app data",
     });
     let stopping = false;
     child.once("spawn", () => { if (stopping) child.kill(); });
     child.on("message", message => {
       options.onMessage(message);
-      child.postMessage({ kind: "close" });
+      if (closeAfterReply) child.postMessage({ kind: "close" });
     });
     child.once("exit", code => options.onExit(code));
     child.once("error", () => options.onError(new Error("The app operation process failed.")));
@@ -21,5 +24,9 @@ export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityPro
       kill() { stopping = true; child.kill(); },
     };
   };
+}
+
+export function createDesktopAppBackendRuntime(processes: Pick<typeof utilityProcess, "fork">, entryPath?: string) {
+  const launch = createDesktopAppRuntimeLauncher(processes, true);
   return createAppBackendRuntime({ launch, ...(entryPath ? { entryPath } : {}) });
 }
