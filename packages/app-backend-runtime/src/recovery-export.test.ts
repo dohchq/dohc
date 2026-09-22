@@ -9,6 +9,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal } from "./journal.ts";
 import { prepareDatasetRecoveryExport } from "./recovery-export.ts";
 import { recoveryManifestSha256, stageDatasetRecovery } from "./recovery.ts";
+import { cancelDatasetAttempt, createDatasetAttempts, reviewDatasetAttempts } from "./dataset-attempts.ts";
 const hash=(value:string|Uint8Array)=>createHash("sha256").update(value).digest("hex");
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
@@ -29,7 +30,7 @@ async function fixture(){const directory=await mkdtemp(join(tmpdir(),"dohc-expor
   const cursor=journal.initialize({scope,hostEpoch:"host",approvedRevisionHash:revision.revisionSha256,source,schemaSql,definitionJson:JSON.stringify(revision),checkpoint,authorize});
   cleanups.push(async()=>{db.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});});
   function commit(expected=cursor,key="request"){return journal.commitOperation({expected,proposalId:key,operation:"read",callerKey:"owner",idempotencyKey:key,payloadSha256:hash(key),resultJson:"{}",changeset:new Uint8Array(),changesetSha256:hash(new Uint8Array()),attachedFileIds:[],authorize});}
-  return{db,journal,scope,revision,cursor,directory,checkpoint,authorize,commit,revoke(){allowed=false;}};
+  return{db,journal,scope,revision,cursor,directory,checkpoint,authorize,commit,transaction,revoke(){allowed=false;}};
 }
 it("streams an empty dataset with its approved originals and no fabricated event",async()=>{
   const f=await fixture(),limits={maxTotalBytes:10*1024*1024};
@@ -49,4 +50,27 @@ it("does not label an export complete when a committed attachment is absent",asy
   const f=await fixture();f.journal.commitOperation({expected:f.cursor,proposalId:"attachment",operation:"create",callerKey:"owner",idempotencyKey:"attachment",payloadSha256:hash("attachment"),resultJson:"{}",changeset:new Uint8Array(),changesetSha256:hash(new Uint8Array()),attachedFileIds:["receipt_file_0001"],authorize:f.authorize,accountAndAttach(){}});
   await expect(prepareDatasetRecoveryExport({...f,directory:join(f.directory,"exports"),limits:{maxTotalBytes:10*1024*1024}})).rejects.toThrow("attachment inventory");
   expect(await readdir(join(f.directory,"exports"))).toEqual([]);
+});
+it("rejects tombstone-only changes during export before fencing the source", async () => {
+  const f = await fixture();
+  const prepared = await prepareDatasetRecoveryExport({ ...f, directory: join(f.directory, "exports"), limits: { maxTotalBytes: 10 * 1024 * 1024 } });
+  const stream = prepared.stream();
+  try {
+    expect(() => prepared.assertUnchanged()).not.toThrow();
+    expect((await stream.next()).done).toBe(false);
+    const attempts = createDatasetAttempts({ db: f.db, transaction: f.transaction, account() {} });
+    const scope = { ...f.scope, appId: "form", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256 };
+    attempts.request(scope, { action: "save", idempotencyKey: "abandoned", input: { value: "private" } }, f.authorize);
+    const reference = reviewDatasetAttempts(f.db, f.scope).entries[0]!.reference;
+    f.transaction(() => cancelDatasetAttempt(f.db, f.scope, reference));
+    for await (const _chunk of stream) { /* Complete the pinned archive before the transfer fence. */ }
+    expect(reviewDatasetAttempts(f.db, f.scope).entries).toEqual([]);
+    expect(f.journal.head(f.scope, f.authorize).cursor).toEqual(prepared.manifest.cursor);
+    expect(f.db.prepare("SELECT COUNT(*) AS count FROM dohc_dataset_cancelled_attempts").get()!.count).toBe(1);
+    expect(() => {
+      prepared.assertUnchanged();
+      f.journal.fence({ expected: prepared.manifest.cursor, authorize: f.authorize });
+    }).toThrow("changed while it was being exported");
+    expect(f.journal.head(f.scope, f.authorize).active).toBe(true);
+  } finally { await stream.return(); await prepared.dispose(); }
 });
