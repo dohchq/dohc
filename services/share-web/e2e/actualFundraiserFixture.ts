@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCookies } from "better-auth/cookies";
+import { transform } from "esbuild";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { APP_PUBLICATION_LIMITS, prepareOwnerAppPublication } from "../../../apps/desktop/src/workspaces/ownerAppPublication";
@@ -21,11 +24,16 @@ export const syntheticReceipt = Buffer.from("%PDF-1.7 synthetic fundraiser recei
 export async function actualFundraiserFixture() {
   const manifestBytes = readFileSync(new URL("../../../examples/fundraiser/app.publish.json", import.meta.url));
   const manifest = JSON.parse(manifestBytes.toString());
+  const definition = parseDatasetDefinition(JSON.parse(readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url), "utf8")));
+  const schemaSql = readFileSync(new URL("../../../examples/fundraiser/schema.sql", import.meta.url), "utf8");
+  const operationSource = readFileSync(new URL("../../../examples/fundraiser/backend.ts", import.meta.url), "utf8");
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
   for (const path of manifest.inputs as string[]) sources.set(path, readFileSync(new URL(`../../../examples/${path}`, import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
+      async resolveDatasetRevision() { return revision; },
       adapter: {
         async captureSourceMetadata({workspaceId,versionId,paths}) {
           const files = [...paths].sort().map(path => {
@@ -39,30 +47,35 @@ export async function actualFundraiserFixture() {
     });
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;
+  const datasetHost=await storage.createDatasetHost({directory:join(directory,"workers"),limits:APP_PUBLICATION_LIMITS,
+    compileOperations:async source=>(await transform(source,{loader:"ts",target:"es2022"})).code,
+    onShutdownError(error){throw error;}});
   const linkKey="fundraiser-browser-link-key-with-thirty-two-bytes",exchangeKey="fundraiser-browser-relay-exchange-key-with-thirty-two-bytes";
   const secret="S".repeat(43),profile="P".repeat(43);
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
   storage.createFileLinkShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:JSON.stringify({paths:["fundraiser"],versionId:null}),createdAtMs:1},
     grant:{grantId:"g",shareId:"s",principalKind:"link",principalUserId:null,principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null},
     credential:{credentialId:"credential",grantId:"g",secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
-  const publication=storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g",generation:1,ownerUserId:"owner",candidate:prepared.candidate,
-    limits:APP_PUBLICATION_LIMITS,nowMs:Date.now(),blobs:prepared.files.map(file=>({sha256:file.sha256,bytes:file.bytes}))});
-  const publicationId=publication.publicationId;
-  storage.tx(()=>storage.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('helper','s','user','helper-user',NULL,'edit',1,'active',1,NULL,NULL)").run());
+  storage.tx(()=>storage.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES('helper','s','user','helper-user',NULL,'view',1,'active',1,NULL,NULL)").run());
   const accountCookie=`${getCookies({baseURL:viewerOrigin}).sessionToken.name}=synthetic-organizer-session`;
   let signedIn=false;
-  const relay=createSyncRelayHandler({storage,appPublicationLimits:APP_PUBLICATION_LIMITS,appBackendsEnabled:true,linkKey,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,
+  const relay=createSyncRelayHandler({storage,datasetHost,appPublicationLimits:APP_PUBLICATION_LIMITS,appBackendsEnabled:true,linkKey,relayExchangeKey:exchangeKey,shareWebOrigin:viewerOrigin,
     resolveActor(request,workspaceId) {
       if(request.headers.get("authorization")==="Bearer owner")return {workspaceId,userId:"owner"};
       if(signedIn&&request.headers.get("cookie")===accountCookie)return {workspaceId,userId:"helper-user"};
       throw new UnauthorizedError();
     }});
   const owner=async(action:string,body:unknown)=>{
-    const response=await relay(new Request(`https://relay.example.org/sync/w/app-publications/${publicationId}/backend/${action}`,{method:"POST",headers:{authorization:"Bearer owner","content-type":"application/json"},body:JSON.stringify(body)}));
+    const response=await relay(new Request(`https://relay.example.org/sync/w/datasets/${definition.datasetId}/${action}`,{method:"POST",headers:{authorization:"Bearer owner","content-type":"application/json"},body:JSON.stringify(body)}));
     if(!response.ok)throw Error(`Owner ${action}: ${response.status} ${await response.text()}`);return response.json();
   };
-  await owner("activate",{authorityRevision:1});
-  await owner("helper",{authorityRevision:1,grantId:"helper",enabled:true});
+  await owner("activate",{revision,schemaSql,operationSource,capacityBytes:1024*1024});
+  const publication=storage.publishAppPublication({workspaceId:"w",shareId:"s",grantId:"g",generation:1,ownerUserId:"owner",candidate:prepared.candidate,
+    limits:APP_PUBLICATION_LIMITS,nowMs:Date.now(),blobs:prepared.files.map(file=>({sha256:file.sha256,bytes:file.bytes}))});
+  const publicationId=publication.publicationId;
+  await owner("binding",{publicationId,enabled:true});
+  await owner("grants",{grantId:"helper",grant:{revision:1,revisionSha256:revision.revisionSha256,
+    operationIds:definition.operations.filter(operation=>operation.access==="helper").map(operation=>operation.operationId),discover:false}});
   const calls:Array<{operation:string;status:number;named:boolean}>=[];
   const application=createShareWebApplication({relayUrl:"https://relay.example.org",publicRelayUrl:"https://relay.example.org",relayExchangeKey:exchangeKey,
     publicHosts:new Set(["viewer.example.com"]),newProfileSecret:()=>profile,appLaunch:{viewerOrigin,appDomain:"example.net"},
@@ -82,6 +95,8 @@ export async function actualFundraiserFixture() {
     },
   });
   return {application,publicationId,secret,calls,compiler:prepared.candidate.compilerIdentity,
-    ownerRead:(operation:string,input:unknown={})=>owner("invoke",{authorityRevision:1,operation,input,idempotencyKey:randomUUID()}),
-    close(){storage.close();rmSync(directory,{recursive:true,force:true});}};
+    field:(table:string,column:string)=>definition.tables.find(value=>value.sqlName===table)!.fields.find(field=>field.sqlColumn===column)!.fieldId,
+    ownerRead:(operation:string,input:unknown={})=>owner("invoke",{revision:1,revisionSha256:revision.revisionSha256,
+      operationId:definition.operations.find(value=>value.name===operation)!.operationId,input,idempotencyKey:randomUUID()}),
+    async close(){await datasetHost.close();storage.close();rmSync(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}};
 }

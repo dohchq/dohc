@@ -119,14 +119,21 @@ $cert.Dispose();$rsa.Dispose()`;
     await admin.getByRole("tab",{name:"Attendees",exact:true}).click();
     try { await expect(admin.getByRole("cell",{name:"Venue Friend",exact:true}).first()).toBeVisible(); }
     catch(error) { console.log("Organizer state",await admin.locator("body").innerText(),JSON.stringify(f.calls));throw error; }
+    const checklist=admin.getByRole("button",{name:"ReClub checklist for First Player, Session 1",exact:true});
+    await expect(checklist).toHaveAttribute("aria-pressed","false");
+    await checklist.click();await expect(checklist).toHaveAttribute("aria-pressed","true");
+    const checklistRows=await f.ownerRead("tableAttendees",{filters:[{fieldId:f.field("attendees","name"),value:"First Player"}]});
+    expect(checklistRows.result.rows).toHaveLength(1);
+    expect(checklistRows.result.rows[0].values[f.field("attendees","reclub_synced")]).toBe(true);
+    await checklist.click();await expect(checklist).toHaveAttribute("aria-pressed","false");
     await organizer.setViewportSize({width:390,height:844});await organizer.emulateMedia({colorScheme:"dark"});
     await organizer.screenshot({path:info.outputPath("fundraiser-organizer-mobile-dark.png")});
     expect(await admin.locator("body").evaluate(body=>body.scrollWidth<=innerWidth)).toBe(true);
     expect((await f.ownerRead("attendees")).result.records).toHaveLength(4);
-    const table=await f.ownerRead("tableRegistrations",{offset:0,limit:50,search:"Venue"});
+    const table=await f.ownerRead("tableRegistrations",{limit:50,search:"Venue"});
     expect(table.result.rows).toHaveLength(1);
-    expect(table.result.rows[0]).toMatchObject({fullName:"Venue Friend",status:"pay_at_venue",total:300});
+    expect(table.result.rows[0]).toMatchObject({values:{[f.field("registrations","full_name")]:"Venue Friend",[f.field("registrations","status")]:"pay_at_venue",[f.field("registrations","total_php")]:300}});
     expect(f.compiler.recipe).toBe("dohc-closed-app-v2");expect(failures).toEqual([]);
     await info.attach("real-backend-operations",{body:JSON.stringify(f.calls,null,2),contentType:"application/json"});
-  }finally{await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));f.close();}
+  }finally{await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await f.close();}
 });
