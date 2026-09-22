@@ -20,6 +20,7 @@ import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { writeDatasetRecoveryExport } from "./workspaces/datasetRecoveryExport";
@@ -4158,7 +4159,11 @@ function registerIpcHandlers(): void {
           assertCurrent: () => { lifetime.throwIfAborted(); },
           runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(datasetRuntimePath, "child.mjs") },
           persistentRuntime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, false), entryPath: join(datasetRuntimePath, "persistent-child.mjs") },
-          compile: ownerPublicationDependencies.compile,
+          compile: (source, path, signal) => {
+            if (process.platform !== "win32" || process.arch !== "x64") throw new Error("Creating Collection actions currently requires Windows x64.");
+            return compileDatasetOperations(source, path, { signal,
+              executablePath: join(pluginResourcesBasePath(), "app-compiler", "node_modules", "@esbuild", "win32-x64", "esbuild.exe") });
+          },
         });
         localDatasetHosts.set(lifetime, pending);
         activeDatasetHosts.add(pending);
