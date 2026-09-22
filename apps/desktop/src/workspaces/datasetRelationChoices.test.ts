@@ -25,6 +25,11 @@ const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, o
 const generate = () => generateDatasetRelationChoices({ revision, schemaSql, operationSource, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
 
 describe("public relation choice source", () => {
+  it("explains authored action maps that cannot accept another action", () => {
+    const locked = "globalThis.operations = Object.freeze({});";
+    const result = generateDatasetRelationChoices({ revision, schemaSql, operationSource: locked, tableId: id(6), fieldId: id(8), labelFieldId: id(4) });
+    expect(() => runInNewContext(result.operationSource, {})).toThrow(/locks its action source/);
+  });
   it("preserves authored source and existing operations, adds only reviewed public key/label read", () => {
     const next = generate();
     expect(next.operationSource.startsWith(operationSource + "\n;")).toBe(true);

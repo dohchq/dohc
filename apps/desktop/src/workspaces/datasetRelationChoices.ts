@@ -28,6 +28,9 @@ export function generateDatasetRelationChoices(input: { revision: DatasetRevisio
 }
 
 const READ_SOURCE = String.raw`
+if (globalThis.operations === null || typeof globalThis.operations !== 'object' || !Object.isExtensible(globalThis.operations)) {
+  throw new Error('This Collection locks its action source. Edit the source to add public choices, then review the change.');
+}
 globalThis.operations[settings.name] = (ctx, input) => {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const invalid = () => ctx.refuse('invalid_input', 'Check the choice search and try again.');
@@ -50,7 +53,7 @@ globalThis.operations[settings.name] = (ctx, input) => {
     (terms.length ? ' WHERE ' + terms.join(' AND ') : '') + ' ORDER BY ' + settings.key + ' LIMIT ?', params);
   const more = rows.length > limit; if (more) rows.pop();
   const last = rows[rows.length - 1];
-  return { rows: rows.map(row => ({ id: row.choice_key, values: { [settings.keyFieldId]: row.choice_key, [settings.labelFieldId]: row.choice_label ?? row.choice_key } })),
+  return { rows: rows.map(row => ({ id: row.choice_key, values: { [settings.keyFieldId]: row.choice_key, [settings.labelFieldId]: row.choice_label === null || row.choice_label === '' ? row.choice_key : row.choice_label } })),
     nextCursor: more ? { id: last.choice_key, value: last.choice_key } : null };
 };
 `;
