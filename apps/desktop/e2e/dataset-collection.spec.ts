@@ -93,7 +93,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await expect(latest.getByText('"Synthetic participant"', { exact: true })).toBeVisible();
     await desktop.page.screenshot({ path: test.info().outputPath("collection-durable-undo.png") });
     await latest.getByRole("button", { name: "Undo edit", exact: true }).click();
-    await expect(history.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
+    await expect(reopened.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");
     await history.getByRole("button", { name: "Close", exact: true }).click();
     await expect(history).toBeHidden();
     await expect(reopened.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");

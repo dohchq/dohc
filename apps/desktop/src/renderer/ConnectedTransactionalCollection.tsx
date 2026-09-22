@@ -16,6 +16,7 @@ import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDial
 import type { MigrationDataPreviewProps } from "./CollectionMigrationDataPreview";
 import { DatasetTransferDialog } from "./DatasetTransferDialog";
 import { CollectionHistoryDialog } from "./CollectionHistoryDialog";
+import { useCollectionHistoryUndo } from "./useCollectionHistoryUndo";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
@@ -90,6 +91,8 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     if (sequence === request.current) setCopy(result.copy);
     return result;
   };
+  const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, invoke, onError,
+    onChanged: () => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); } });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
     const result = await bridge().dataset({ action: "export", workspaceId, datasetId });
@@ -215,7 +218,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
     {archiving && <CollectionArchiveDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
       onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
     {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
-      onUndo={invoke} onChanged={() => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); }}
+      onUndo={input => { void historyUndo.run(input); }} pendingUndo={historyUndo.pending} undoBusy={historyUndo.busy} refreshVersion={recordsVersion}
       onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
         signal.throwIfAborted();
         const result = await bridge().dataset({ ...input, action: "history" });
