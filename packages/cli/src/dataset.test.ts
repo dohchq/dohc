@@ -9,6 +9,8 @@ const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:
   tables:[{tableId:id(2),name:"Equipment",sqlName:"equipment",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"text",required:true,unique:true}]}],
   operations:[{operationId:id(4),name:"list",label:"List equipment",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}]};
 const requests: unknown[] = [
+  {action:"pendingAttempts",workspaceId:"workspace",datasetId:id(1),after:0,limit:10},
+  {action:"reconcileAttempt",workspaceId:"workspace",datasetId:id(1),reference:"b".repeat(64),acknowledge:true},
   {action:"archive",workspaceId:"workspace",datasetId:id(1)},
   {action:"restore",workspaceId:"workspace",datasetId:id(1)},
   {action:"lifecycle",workspaceId:"workspace",datasetId:id(1),limit:50},

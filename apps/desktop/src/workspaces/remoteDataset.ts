@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetLifecyclePage, DatasetLifecycleState } from "@dohc/cli/dataset";
+import { DatasetCursor as CursorSchema, DatasetInvocationResult, DatasetResult, DatasetPermissionsPage, DatasetHistoryPage, DatasetLifecyclePage, DatasetLifecycleState, DatasetPendingAttemptsPage } from "@dohc/cli/dataset";
 import type { DatasetRequest } from "@dohc/cli/dataset";
 import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -18,6 +18,8 @@ export interface OwnerDatasetData {
   lifecycle?(input: { datasetId: string; after?: string; limit?: number }): Promise<DatasetLifecyclePage>;
   archive?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
   restore?(input: { datasetId: string }): Promise<DatasetLifecycleState>;
+  pendingAttempts?(input: { datasetId: string; after?: number; limit?: number }): Promise<DatasetPendingAttemptsPage>;
+  reconcileAttempt?(input: { datasetId: string; reference: string; acknowledge: true }): Promise<{ cleared: true }>;
   approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
   invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
   upload(input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal }): Promise<{ file: AppBackendFile; replayed: boolean }>;
@@ -59,6 +61,8 @@ export function createRemoteDatasetData(input: {
     },
     async archive(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/archive`, {})); },
     async restore(value) { return DatasetLifecycleState.parse(await request(`${path(value.datasetId)}/restore`, {})); },
+    async pendingAttempts(value) { const query = new URLSearchParams(); if(value.after)query.set("after",String(value.after)); if(value.limit)query.set("limit",String(value.limit)); return DatasetPendingAttemptsPage.parse(await request(`${path(value.datasetId)}/pending-attempts${query.size ? `?${query}` : ""}`)); },
+    async reconcileAttempt(value) { return z.object({ cleared: z.literal(true) }).strict().parse(await request(`${path(value.datasetId)}/reconcile-attempt`, { reference: value.reference, acknowledge: value.acknowledge })); },
     async permissions(value) {
       const query = new URLSearchParams();
       if (value.after) query.set("after", value.after);
@@ -203,7 +207,7 @@ export interface DatasetAuthorityRoute {
 }
 
 /** Routes every operation for a transferred dataset to its target origin. Fenced transfers never fall back locally. */
-export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore">, route: DatasetAuthorityRoute): OwnerDatasetData {
+export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<import("./localDatasetHost").LocalDatasetHost, "list" | "describe" | "approvedArtifacts" | "invoke" | "upload" | "file" | "history" | "lifecycle" | "archive" | "restore" | "pendingAttempts" | "reconcileAttempt">, route: DatasetAuthorityRoute): OwnerDatasetData {
   const target = async (datasetId: string) => {
     const marker = await route.status(datasetId);
     if (!marker) return local;
@@ -235,6 +239,8 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     lifecycle: async value => { const authority = await target(value.datasetId); if (!authority.lifecycle) throw new Error("Collection archive controls are unavailable."); return authority.lifecycle(value); },
     archive: async value => { const authority = await target(value.datasetId); if (!authority.archive) throw new Error("Collection archive controls are unavailable."); return authority.archive(value); },
     restore: async value => { const authority = await target(value.datasetId); if (!authority.restore) throw new Error("Collection restore controls are unavailable."); return authority.restore(value); },
+    pendingAttempts: async value => { const authority = await target(value.datasetId); if (!authority.pendingAttempts) throw new Error("Pending submission review is unavailable."); return authority.pendingAttempts(value); },
+    reconcileAttempt: async value => { const authority = await target(value.datasetId); if (!authority.reconcileAttempt) throw new Error("Pending submission review is unavailable."); return authority.reconcileAttempt(value); },
     history: async value => (await target(value.datasetId)).history(value),
     approvedArtifacts: async datasetId => (await target(datasetId)).approvedArtifacts(datasetId),
     invoke: async value => (await target(value.datasetId)).invoke(value),

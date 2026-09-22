@@ -52,6 +52,16 @@ it("routes lifecycle changes to current authority and refuses shared recipients"
   await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "restore" })).rejects.toThrow("original workspace");
   expect(remote.restore).not.toHaveBeenCalled();
 });
+
+it("routes pending submission review to current authority and rejects acknowledgement spoofing", async () => {
+  const remote = { pendingAttempts: vi.fn(async () => ({ datasetId, entries: [], nextAfter: null })), reconcileAttempt: vi.fn(async () => ({ cleared: true })) } as unknown as OwnerDatasetData;
+  const f = fixture(remote);
+  expect(await f.handler("window", { workspaceId: "workspace", datasetId, action: "pendingAttempts" })).toMatchObject({ kind: "pending-attempts" });
+  await expect(f.handler("window", { workspaceId: "workspace", datasetId, action: "reconcileAttempt", reference: "a".repeat(64), acknowledge: false })).rejects.toThrow();
+  expect(remote.reconcileAttempt).not.toHaveBeenCalled();
+  await f.handler("window", { workspaceId: "workspace", datasetId, action: "reconcileAttempt", reference: "a".repeat(64), acknowledge: true });
+  expect(remote.reconcileAttempt).toHaveBeenCalledOnce();
+});
 it("routes history to shared authority and rejects stale history replies", async () => {
   const page = { datasetId, headRevision: 0, entries: [], nextBeforeRevision: null };
   const remote = { history: vi.fn(async () => page) } as unknown as OwnerDatasetData;

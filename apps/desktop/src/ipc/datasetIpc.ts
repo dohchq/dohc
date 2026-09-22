@@ -53,11 +53,13 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
       if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
+      if(input.action === "pendingAttempts") { if(!data.pendingAttempts)throw new Error("Pending submission review is unavailable."); const result=await data.pendingAttempts(input);current();return {kind:"pending-attempts" as const,...result}; }
+      if(input.action === "reconcileAttempt") { if(!data.reconcileAttempt)throw new Error("Pending submission review is unavailable."); const result=await data.reconcileAttempt(input);current();return {kind:"attempt-reconciled" as const,...result}; }
       if (input.action === "history") {
         if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
         const result = await data.history(input); current(); return { kind: "history" as const, ...result };

@@ -48,6 +48,8 @@ export const DatasetLifecyclePage = z.object({ archived: z.boolean(), generation
   nextCursor: z.string().min(1).max(256).nullable() }).strict();
 export type DatasetLifecyclePage = z.infer<typeof DatasetLifecyclePage>;
 export type DatasetLifecycleState = z.infer<typeof DatasetLifecycleState>;
+export const DatasetPendingAttemptsPage = z.object({ datasetId: identity, entries: z.array(z.object({ reference: sha256, operation: z.string().min(1).max(200), recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000).nullable(), revision: z.number().int().positive().nullable(), outcome: z.enum(["committed", "unconfirmed"]), attachmentCount: z.number().int().nonnegative() }).strict()).max(100), nextAfter: z.number().int().positive().nullable() }).strict();
+export type DatasetPendingAttemptsPage = z.infer<typeof DatasetPendingAttemptsPage>;
 export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("history"), beforeRevision: z.number().int().positive().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("list"), after: identity.optional(), limit: z.number().int().min(1).max(100).optional(), includeArchived: z.boolean().optional() }).strict(),
@@ -55,6 +57,8 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("lifecycle"), after: z.string().min(1).max(256).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("archive") }).strict(),
   z.object({ ...selection, action: z.literal("restore") }).strict(),
+  z.object({ ...selection, action: z.literal("pendingAttempts"), after: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
+  z.object({ ...selection, action: z.literal("reconcileAttempt"), reference: sha256, acknowledge: z.literal(true) }).strict(),
   z.object({ ...selection, action: z.literal("permissions"), after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant }).strict(),
   z.object({ ...selection, action: z.literal("removeGrant"), principalKey: z.string().min(1).max(256) }).strict(),
@@ -103,6 +107,8 @@ const description = z.unknown().transform((value, context) => {
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetLifecyclePage.extend({ kind: z.literal("lifecycle") }).strict(),
   DatasetLifecycleState.extend({ kind: z.literal("lifecycle-updated") }).strict(),
+  DatasetPendingAttemptsPage.extend({ kind: z.literal("pending-attempts") }).strict(),
+  z.object({ kind: z.literal("attempt-reconciled"), cleared: z.literal(true) }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description }).strict(),
