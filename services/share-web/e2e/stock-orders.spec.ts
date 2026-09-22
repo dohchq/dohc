@@ -93,6 +93,38 @@ test("stock orders use custom apps, relations, transactions, and attachments thr
     await inventory.getByRole("button",{name:"Refresh stock",exact:true}).click();
     await expect(inventory.locator('[data-item-id="shirt-s"]')).toContainText("20 available");
     await expect(inventory.locator('[data-item-id="shirt-m"]')).toContainText("20 available");
+    await form.getByRole("button",{name:"Place another order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    await form.getByLabel("Your name",{exact:true}).fill("Refused Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("1000");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("no longer has enough stock");
+    await shopPage.reload();
+    await form.getByRole("button",{name:"Discard pending order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("It may already be saved");
+    await form.getByRole("button",{name:"Discard this order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    let loseSaveReply = true;
+    await shopPage.route("**/backend", async route => {
+      const input = route.request().postDataJSON();
+      if (loseSaveReply && input.op === "backend.attempt" && input.request.action === "save") {
+        loseSaveReply = false; const response = await route.fetch(); expect(response.status()).toBe(200);
+        await route.fulfill({status:503,body:""});
+      } else await route.continue();
+    });
+    await form.getByLabel("Your name",{exact:true}).fill("Lost Save Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("1");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await form.getByRole("button",{name:"Discard pending order",exact:true}).click();
+    await form.getByRole("button",{name:"Discard this order",exact:true}).click();
+    await expect(form.getByRole("button",{name:"Place order",exact:true})).toBeEnabled();
+    await form.getByLabel("Your name",{exact:true}).fill("Corrected Customer");
+    await form.getByLabel("Quantity: Fundraiser shirt, small",{exact:true}).fill("2");
+    await form.getByRole("button",{name:"Place order",exact:true}).click();
+    await expect(form.getByRole("status")).toContainText("Order saved");
+    const finalOrders = (await ownerRead("tableOrders")).result as any;
+    expect(finalOrders.rows).toHaveLength(2);
+    expect(finalOrders.rows.map((row:any)=>row.values[field("orders","customer_name")]).sort()).toEqual(["Corrected Customer","Synthetic Shop Customer"]);
     await info.attach("collection-agent-records",{body:JSON.stringify({rows,lines,agent}),contentType:"application/json"});
   } finally {await context.close();lifetime.abort();await launcher.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 });

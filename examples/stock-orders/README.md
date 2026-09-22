@@ -10,7 +10,10 @@ If one item lacks stock, the entire order refuses.
 Orders can attach an optional receipt. The uploaded file becomes private order data in the same transaction.
 The form saves its exact request through dohc before placing the order. Reopening offers that request for retry.
 Keep the page open while uploading; an unfinished upload has not saved the draft yet.
-The example keeps one saved order per browser and app. It has no checkout or payment processing.
+The example keeps one saved order per browser and app. **Place another order** clears a confirmed request before starting again.
+**Discard pending order** warns about unknown outcomes, checks the saved request, and clears its matching token before accepting corrections.
+If that check fails or another tab changed the request, the existing order stays pending.
+The example has no checkout or payment processing.
 
 Organizers call `listOrders`, `listOrderItems`, `receiptAccess`, and `setStatus`.
 Cancelling an order returns its stock. Restoring it requires enough stock for every item.
