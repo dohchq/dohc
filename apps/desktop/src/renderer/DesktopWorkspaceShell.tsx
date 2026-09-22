@@ -783,6 +783,7 @@ export function DesktopWorkspaceShell(props: {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSuccessNotice,
     dismissShellError,
     retryShellError,
   } = useShellError(workspaceId);
@@ -4364,8 +4365,9 @@ export function DesktopWorkspaceShell(props: {
     () =>
       shellErrors.map((error) => ({
         id: error.id,
+        ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
-        details: errorDetails([["Error", error.message], ...reportFacts()]),
+        details: errorDetails([[error.tone === "success" ? "Notice" : "Error", error.message], ...reportFacts()]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,
@@ -5261,7 +5263,7 @@ export function DesktopWorkspaceShell(props: {
                   owner={!isShareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={reportShellError}
-                  onNotice={showShellNotice}
+                  onNotice={showSuccessNotice}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));
@@ -5841,7 +5843,7 @@ export function DesktopWorkspaceShell(props: {
           onRestored={(datasetId, tableId) => {
             if (workspaceIdRef.current !== workspaceId) return;
             openVirtualTab(transactionalCollectionTabPath(datasetId, tableId));
-            showShellNotice("Restored the Collection. Sharing stays off.");
+            showSuccessNotice("Restored the Collection. Sharing stays off.");
             void refreshDatasets().catch(error => {
               if (workspaceIdRef.current === workspaceId) reportShellError("Could not refresh Collections.", error);
             });

@@ -12,6 +12,7 @@ export const SHELL_ERROR_MAX_CHARS = 500;
 // value the user can see owes them a way to ask again (AGENTS.md), so a
 // retry rides with it; errors that are already over carry none.
 export interface ShellError {
+  tone?: "success";
   id: string;
   message: string;
   retry: (() => void) | null;
@@ -144,6 +145,10 @@ export function useShellError(workspaceId: string) {
     (message: string) => push({ message, retry: null }),
     [push],
   );
+  const showSuccessNotice = useCallback(
+    (message: string) => push({ message, retry: null, tone: "success" }),
+    [push],
+  );
   // The toast closes; the row in Notices stays.
   const hideShellError = useCallback((id: string) => {
     setShellErrors((current) =>
@@ -173,6 +178,7 @@ export function useShellError(workspaceId: string) {
     showSingletonTabSplitError,
     clearEditorGroupRefusalError,
     showShellError,
+    showSuccessNotice,
     hideShellError,
     dismissShellError,
     retryShellError,
