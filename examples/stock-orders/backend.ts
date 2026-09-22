@@ -40,7 +40,8 @@
       totalCents += line.quantity * line.unitPriceCents;
     }
     if (!Number.isSafeInteger(totalCents)) invalid(ctx, "The order total is too large.");
-    ctx.db.execute("INSERT INTO orders(id,customer_name,status,total_cents,version,created_at_ms) VALUES(?,?,'pending',?,1,?)", [ctx.requestId, input.customerName.trim(), totalCents, ctx.nowMs]);
+    const receipt = input.receiptFileId === undefined ? null : ctx.files.attach(input.receiptFileId);
+    ctx.db.execute("INSERT INTO orders(id,customer_name,status,total_cents,receipt_file_id,version,created_at_ms) VALUES(?,?,'pending',?,?,1,?)", [ctx.requestId, input.customerName.trim(), totalCents, receipt ? receipt.fileId : null, ctx.nowMs]);
     for (const line of lines) ctx.db.execute("INSERT INTO order_items(id,order_id,item_id,quantity,unit_price_cents) VALUES(?,?,?,?,?)", [ctx.requestId + "_" + line.itemId, ctx.requestId, line.itemId, line.quantity, line.unitPriceCents]);
     return {id: ctx.requestId, status: "pending", totalCents, version: 1};
   }
@@ -55,6 +56,13 @@
     const {limit, offset} = page(ctx, input);
     const rows = ctx.db.query("SELECT id,order_id AS orderId,item_id AS itemId,quantity,unit_price_cents AS unitPriceCents FROM order_items ORDER BY id LIMIT ? OFFSET ?", [limit + 1, offset]);
     return {records: rows.slice(0, limit), nextOffset: rows.length > limit ? offset + limit : null};
+  }
+  function receiptAccess(ctx, input) {
+    organizer(ctx); object(ctx, input);
+    if (typeof input.id !== "string") invalid(ctx, "Choose an order.");
+    const order = ctx.db.query("SELECT receipt_file_id FROM orders WHERE id=?", [input.id])[0];
+    if (!order || !order.receipt_file_id) ctx.refuse("not_found", "This order has no receipt.");
+    return {fileId: order.receipt_file_id};
   }
   function setStatus(ctx, input) {
     organizer(ctx); object(ctx, input);
@@ -141,5 +149,6 @@
     const changed = setStatus(ctx, {id: input.id, expectedVersion: input.expectedVersion, status: input.values[fieldId]});
     return {id: changed.id, version: changed.version, priorValues: {[fieldId]: before.status}};
   }
-  globalThis.operations = {editOrderStatus, listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder, tableItems, tableOrders, tableOrderItems};
+  collectionTables.tableOrders.fields.push({fieldId: "f0020000-0000-4000-8000-000000000030", sqlColumn: "receipt_file_id", type: "attachment"});
+  globalThis.operations = {receiptAccess, editOrderStatus, listItems, placeOrder, listOrders, listOrderItems, setStatus, updateOrder, tableItems, tableOrders, tableOrderItems};
 }());

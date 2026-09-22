@@ -10,6 +10,7 @@ CREATE TABLE orders (
   customer_name TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending','confirmed','cancelled')),
   total_cents INTEGER NOT NULL CHECK (total_cents > 0),
+  receipt_file_id TEXT,
   version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
   created_at_ms INTEGER NOT NULL
 );

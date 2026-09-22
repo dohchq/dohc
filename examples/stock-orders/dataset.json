@@ -103,6 +103,14 @@
           "type": "number",
           "required": true,
           "unique": false
+        },
+        {
+          "fieldId": "f0020000-0000-4000-8000-000000000030",
+          "name": "Receipt",
+          "sqlColumn": "receipt_file_id",
+          "type": "attachment",
+          "required": false,
+          "unique": false
         }
       ]
     },
@@ -169,6 +177,16 @@
   ],
   "operations": [
     {
+      "operationId": "f0020000-0000-4000-8000-000000000031",
+      "name": "receiptAccess",
+      "label": "Read receipt",
+      "tableId": "f0020000-0000-4000-8000-000000000007",
+      "kind": "action",
+      "access": "helper",
+      "readOnly": true,
+      "fieldIds": []
+    },
+    {
       "operationId": "f0020000-0000-4000-8000-000000000020",
       "name": "tableItems",
       "label": "Read items",
@@ -197,7 +215,8 @@
         "f0020000-0000-4000-8000-000000000010",
         "f0020000-0000-4000-8000-000000000011",
         "f0020000-0000-4000-8000-000000000012",
-        "f0020000-0000-4000-8000-000000000013"
+        "f0020000-0000-4000-8000-000000000013",
+        "f0020000-0000-4000-8000-000000000030"
       ]
     },
     {

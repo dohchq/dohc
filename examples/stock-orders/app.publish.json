@@ -1,0 +1,19 @@
+{
+  "entryPath": "stock-orders/frontend.ts",
+  "inputs": [
+    "stock-orders/frontend.ts",
+    "stock-orders/client.ts",
+    "stock-orders/frontend.css"
+  ],
+  "packageMap": {},
+  "dataset": {
+    "kind": "dataset",
+    "datasetId": "f0020000-0000-4000-8000-000000000001",
+    "revision": 1,
+    "revisionSha256": "dd10b192b3faa1600f6eb250afb3c34db651a61f80d3ddca3221e9d93cc8b162",
+    "operationIds": [
+      "f0020000-0000-4000-8000-000000000023",
+      "f0020000-0000-4000-8000-000000000024"
+    ]
+  }
+}
