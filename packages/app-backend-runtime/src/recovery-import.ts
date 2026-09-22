@@ -43,8 +43,10 @@ export interface ValidatedDatasetRecovery {
   manifest: StagedDatasetRecovery["manifest"];
   catalog: RecoveryCatalog;
   checkpoint: ValidatedRecoveryJournal;
+  headCheckpoint: { blob: RecoveryBlob; sha256: string; byteLength: number; cursor: DatasetCursor; source: string; schemaSql: string; definitionJson: string; capacityBytes: number };
   records(): Iterable<ValidatedRecoveryJournal>;
   metadata(): Iterable<RecoveryMetadata>;
+  attachments(): Iterable<{ file: Extract<RecoveryMetadata, {kind:"attachment"}>["file"]; blob: RecoveryBlob }>;
   /** Removes the private validation index and the original transport stage. */
   dispose(): Promise<void>;
 }
@@ -247,11 +249,30 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
           changeset: await readRange(item.blob, maxEvent) });
       }
     }
+    if (!worker || currentCheckpoint.kind !== "checkpoint") fail("recovered head has no materialized checkpoint.");
+    const headPath = join(work, "head.sqlite");
+    await worker.migrateCheckpoint({ path: headPath, schemaSql: currentCheckpoint.schemaSql,
+      tables: original.revision.definition.tables.map(t => t.sqlName), migrationSql: "SELECT 1;" });
+    const headBlob = Object.freeze({ path: headPath, offset: 0, byteLength: (await lstat(headPath)).size });
+    const headHash = await blobHash(headBlob, authorize);
+    validatedBlobs.set(headBlob, { sha256: headHash, authorize() { if (closed) fail("validation was disposed."); authorize(); } });
     await worker?.close(); worker = undefined; authorize();
     if (workerDirectory) { await rm(workerDirectory, { recursive: true, force: true }); workerDirectory = undefined; }
     const checkpointBlob = Object.freeze({ path: checkpoint.path, offset: 0, byteLength: checkpoint.entry.byteLength });
     validatedBlobs.set(checkpointBlob, { sha256: checkpoint.entry.sha256, authorize() { if (closed) fail("validation was disposed."); authorize(); } });
-    return { manifest: staged.manifest, catalog, checkpoint: { record: currentCheckpoint, blob: checkpointBlob }, records,
+    return { manifest: staged.manifest, catalog, checkpoint: { record: currentCheckpoint, blob: checkpointBlob },
+      headCheckpoint: { blob: headBlob, sha256: headHash, byteLength: headBlob.byteLength, cursor: staged.manifest.cursor,
+        source: currentCheckpoint.source, schemaSql: currentCheckpoint.schemaSql, definitionJson: currentCheckpoint.definitionJson, capacityBytes: currentCheckpoint.capacityBytes }, records,
+      attachments: function* () {
+        for (const row of index.prepare("SELECT body FROM metadata ORDER BY seq").iterate()) {
+          authorize(); const metadata = JSON.parse(String(row.body)) as RecoveryMetadata;
+          if (metadata.kind !== "attachment") continue;
+          const stagedFile = staged.files.find(item => item.entry.kind === "attachment" && item.entry.id === `attachment:${metadata.file.fileId}`)!;
+          const blob = Object.freeze({ path: stagedFile.path, offset: 0, byteLength: metadata.file.byteLength });
+          validatedBlobs.set(blob, { sha256: metadata.file.sha256, authorize() { if (closed) fail("validation was disposed."); authorize(); } });
+          yield { file: metadata.file, blob };
+        }
+      },
       metadata: function* () { for (const row of index.prepare("SELECT body FROM metadata ORDER BY seq").iterate()) { authorize(); yield JSON.parse(String(row.body)) as RecoveryMetadata; } }, dispose };
   } catch (error) { await dispose(); throw error; }
 }

@@ -79,8 +79,19 @@ it("replays actual changesets across a same-schema revision and preserves old re
   const staged=await f.stage({fileId,bytes:Uint8Array.of(137,80,78,71),revision:first.cursor.revision}),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
   expect([...valid.records()].map(item=>[item.record.kind,item.record.cursor.revision])).toEqual([["checkpoint",0],["event",1],["checkpoint",2],["event",3]]);
   expect([...valid.records()].filter(item=>item.record.kind==="event").map(item=>item.record.kind==="event"&&item.record.idempotencyKey)).toEqual(["first","tail"]);
-  expect([...valid.metadata()].filter(item=>item.kind==="attachment")).toMatchObject([{file:{fileId,revision:1}}]);await valid.dispose();
+  expect([...valid.metadata()].filter(item=>item.kind==="attachment")).toMatchObject([{file:{fileId,revision:1}}]);
+  const attachment=[...valid.attachments()][0]!;const parts=[];for await(const bytes of readValidatedBlob(attachment.blob))parts.push(bytes);
+  expect(Buffer.concat(parts)).toEqual(Buffer.from([137,80,78,71]));await valid.dispose();
 });
+it("retains a marker-free materialized head for a fresh target epoch",async()=>{
+  const f=await fixture();f.add("first");f.add("second");const staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
+  const materialized=new DatabaseSync(valid.headCheckpoint.blob.path,{readOnly:true});
+  try{expect(materialized.prepare("SELECT value FROM items ORDER BY id").all().map(row=>row.value)).toEqual(["first","second"]);
+    expect(materialized.prepare("SELECT name FROM sqlite_schema WHERE name LIKE 'dohc_%'").all()).toEqual([]);
+  }finally{materialized.close();}
+  const sha=createHash("sha256");for await(const chunk of readValidatedBlob(valid.headCheckpoint.blob))sha.update(chunk);
+  expect(sha.digest("hex")).toBe(valid.headCheckpoint.sha256);expect(valid.headCheckpoint.cursor).toEqual(f.head());await valid.dispose();
+}, 30_000);
 it("rejects source tampering even after the transport hash is replaced",async()=>{
   const f=await fixture(),staged=await f.stage();await alter(staged,"artifact:source",()=>Buffer.from("globalThis.operations={};"));
   await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("source artifact");
@@ -96,7 +107,7 @@ it("rejects malformed original artifacts, truncated history, and a changed chain
     const staged=await f.stage();await alter(staged,"history",mutation);await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow();
     await expect(readdir(staged.directory)).rejects.toThrow();
   }
-});
+}, 30_000);
 it("rejects attached bytes whose metadata differs from the original association",async()=>{
   const f=await fixture(),fileId="receipt_file_0001",event=f.add("first",[fileId]);const staged=await f.stage({fileId,bytes:Uint8Array.of(1,2,3),revision:event.cursor.revision});
   await alter(staged,`attachment:${fileId}`,()=>Uint8Array.of(9,9,9) as Buffer);
