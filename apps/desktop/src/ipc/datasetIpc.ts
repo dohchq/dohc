@@ -6,6 +6,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
@@ -15,6 +16,8 @@ type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; asser
 export function createDatasetHandler<Caller, W extends Workspace, O extends Operation<W>>(dependencies: {
   withWorkspaceOperation<T>(caller: Caller, workspaceId: string, work: (operation: O) => Promise<T>): Promise<T>;
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
+  /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
+  dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal): Promise<void>;
@@ -27,8 +30,10 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Open the original workspace to manage this Collection.");
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
-      if (input.action === "list") return { kind: "list" as const, ...host.list({ after: input.after, limit: input.limit }) };
-      if (input.action === "describe") return { kind: "description" as const, dataset: host.describe(input.datasetId) };
+      const data = dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
+      current();
+      if (input.action === "list") { const result = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...result }; }
+      if (input.action === "describe") { const dataset = await data.describe(input.datasetId); current(); return { kind: "description" as const, dataset }; }
       if (input.action === "upload") {
         const description = host.describe(input.datasetId);
         if (!description.tables.some(table => table.fields.some(field => field.fieldId === input.fieldId && field.type === "attachment")) ||
@@ -43,7 +48,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return { kind: "file" as const, ...result };
       }
       if (input.action === "createForm") {
-        const approved = host.approvedArtifacts(input.datasetId);
+        const approved = await data.approvedArtifacts(input.datasetId);
+        current();
         if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) {
           throw new Error("Collection rules changed. Reload the Collection before creating a form.");
         }
@@ -51,7 +57,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
         await dependencies.createSources(operation.workspace, files, operation.signal);
         current();
-        const latest = host.approvedArtifacts(input.datasetId);
+        const latest = await data.approvedArtifacts(input.datasetId);
+        current();
         if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
           throw new Error("Collection rules changed. The form source was saved. Reload the Collection before approving the form.");
         }
@@ -71,7 +78,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "invoke") {
         try {
-          const result = await host.invoke({ ...input, signal: operation.signal });
+          const result = await data.invoke({ ...input, signal: operation.signal });
           current();
           return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
         } catch (error) {

@@ -3,9 +3,10 @@ import { createDatasetHandler } from "./datasetIpc";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
-function fixture() {
+function fixture(remote?: OwnerDatasetData) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -25,6 +26,7 @@ function fixture() {
       return work({ workspace, signal: abort.signal, assertCurrent() { if (!current) throw Error("stale workspace"); } });
     },
     hostForWorkspace: vi.fn(async () => host as unknown as LocalDatasetHost),
+    ...(remote ? { dataForWorkspace: async () => remote } : {}),
     withAdapter: vi.fn(), createSources,
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetId, revision: 1, revisionSha256: revision.revisionSha256,
@@ -37,6 +39,16 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   await expect(f.handler("window", { action: "list", workspaceId: "elsewhere" })).rejects.toThrow("wrong workspace");
   expect(f.host.list).not.toHaveBeenCalled();
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
+});
+it("routes owner reads and writes to shared authority without falling back locally", async () => {
+  const remote = { list: vi.fn(async () => ({ datasets: [], nextCursor: null })), invoke: vi.fn(async () => { throw Error("shared server offline"); }) } as unknown as OwnerDatasetData;
+  const f = fixture(remote);
+  expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toMatchObject({ kind: "list" });
+  expect(remote.list).toHaveBeenCalled();
+  expect(f.host.list).not.toHaveBeenCalled();
+  await expect(f.handler("window", { action: "invoke", workspaceId: "workspace", datasetId,
+    operationId: datasetId, revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "retry" })).rejects.toThrow("shared server offline");
+  expect(f.host.invoke).not.toHaveBeenCalled();
 });
 it("refuses stale workspace results after an asynchronous invocation", async () => {
   const f = fixture();

@@ -1,0 +1,79 @@
+import { z } from "zod";
+import { DatasetInvocationResult, DatasetResult } from "@dohc/cli/dataset";
+import { parseDatasetDescription, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
+import type { LocalDatasetInvocation } from "./localDatasetHost";
+import type { CloudCredentials } from "./cloudCredentialStore";
+import { credentialScopedOperation } from "./credentialScopedOperation";
+
+export interface OwnerDatasetData {
+  list(input: { after?: string; limit?: number }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
+  describe(datasetId: string): Promise<DatasetDescription>;
+  approvedArtifacts(datasetId: string): Promise<{ revision: DatasetRevision; schemaSql: string; operationSource: string; active: boolean; cursor: DatasetCursor }>;
+  invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
+}
+const identity = z.string().uuid();
+const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
+const artifacts = z.object({
+  revision: z.unknown().transform(value => parseDatasetRevision(value)),
+  schemaSql: z.string().min(1).max(256 * 1024), operationSource: z.string().min(1).max(256 * 1024), active: z.boolean(),
+  cursor: z.object({ workspaceId: z.string().min(1), datasetId: identity, hostEpoch: z.string().min(1), approvedRevisionHash: sha256,
+    revision: z.number().int().nonnegative(), digest: sha256 }).strict(),
+}).strict();
+
+/** A remote authority is never replaced by a local fallback when the server is unavailable. */
+export function createRemoteDatasetData(input: {
+  workspaceId: string; credentials: CloudCredentials; credentialGeneration: number; signal: AbortSignal;
+  currentCredentialGeneration(): number; assertCurrent(): void;
+  relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
+}): OwnerDatasetData {
+  const session = credentialScopedOperation({ capturedGeneration: input.credentialGeneration,
+    currentGeneration: input.currentCredentialGeneration, assertCurrent() { input.signal.throwIfAborted(); input.assertCurrent(); } });
+  const base = `/sync/${encodeURIComponent(input.workspaceId)}/datasets`;
+  const path = (datasetId: string) => `${base}/${identity.parse(datasetId)}`;
+  const request = (url: string, body?: unknown, signal = input.signal) => session.run(async () => {
+    signal.throwIfAborted();
+    const value = await input.relayJson(input.credentials, url, { signal, method: body === undefined ? "GET" : "POST",
+      ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) });
+    signal.throwIfAborted(); return value;
+  });
+  return {
+    async list(page) {
+      const query = new URLSearchParams();
+      if (page.after) query.set("after", identity.parse(page.after));
+      if (page.limit !== undefined) query.set("limit", String(z.number().int().min(1).max(100).parse(page.limit)));
+      const raw = await request(`${base}${query.size ? `?${query}` : ""}`);
+      const result = DatasetResult.parse({ ...(raw as object), kind: "list" });
+      if (result.kind !== "list" || result.datasets.some((row, index) => row.datasetId <= (index ? result.datasets[index - 1]!.datasetId : page.after ?? "")) ||
+        (result.nextCursor !== null && result.nextCursor !== result.datasets.at(-1)?.datasetId)) throw new Error("The Collection list changed. Reload it.");
+      return { datasets: result.datasets, nextCursor: result.nextCursor };
+    },
+    async describe(datasetId) {
+      const result = parseDatasetDescription(await request(path(datasetId)));
+      if (result.datasetId !== datasetId) throw new Error("The server returned a different Collection.");
+      return result;
+    },
+    async approvedArtifacts(datasetId) {
+      const result = artifacts.parse(await request(`${path(datasetId)}/artifacts`));
+      verifyDatasetArtifacts(result);
+      if (result.revision.datasetId !== datasetId || result.cursor.datasetId !== datasetId || result.cursor.workspaceId !== input.workspaceId ||
+        result.cursor.approvedRevisionHash !== result.revision.revisionSha256) throw new Error("The server returned different Collection rules.");
+      return result;
+    },
+    async invoke(invocation) {
+      const { datasetId, revision, revisionSha256, operationId, idempotencyKey } = invocation;
+      const signal = invocation.signal ? AbortSignal.any([input.signal, invocation.signal]) : input.signal;
+      return DatasetInvocationResult.parse(await request(`${path(datasetId)}/invoke`,
+        { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey }, signal));
+    },
+  };
+}
+
+export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, "approvedArtifacts">, binding: AppDatasetBinding): Promise<DatasetRevision> {
+  const approved = await data.approvedArtifacts(binding.datasetId);
+  if (!approved.active || approved.revision.revision !== binding.revision || approved.revision.revisionSha256 !== binding.revisionSha256) {
+    throw new Error("Collection rules changed. Reload the Collection and prepare the app again.");
+  }
+  return approved.revision;
+}

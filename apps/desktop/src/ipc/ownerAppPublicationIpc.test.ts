@@ -5,6 +5,8 @@ import { APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } fro
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
 import { registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const prepareInput = { action: "prepare", workspaceId: "w", appRoot: "app", shareId: "s", grantId: "g" };
@@ -65,6 +67,26 @@ function harness() {
 
 const collection = { kind: "collection-create", collectionPath: "app/responses", allowedFields: ["name", "destination"], requiredFields: ["destination"], readFields: ["name", "destination"] };
 const collectionSchema = "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+function withDataset(h: ReturnType<typeof harness>) {
+  const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Responses", schemaPath: "private/schema.sql", operationsPath: "private/actions.js",
+    tables: [{ tableId: id(2), name: "Responses", sqlName: "responses", primaryKey: "id", fields: [
+      { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      { fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
+    ] }], operations: [{ operationId: id(5), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] }] };
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE" });
+  const approved = { revision, schemaSql: "PRIVATE_SQL", operationSource: "PRIVATE_SOURCE", active: true,
+    cursor: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
+  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {},
+    dataset: { kind: "dataset", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationIds: [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
+  const original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    if (args[1].endsWith("/artifacts")) return approved;
+    if (args[1].endsWith("/backend/activate")) return { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(1) };
+    return original(...args);
+  });
+  return { ...h, approved };
+}
 function withCollection(h: ReturnType<typeof harness>, declaration = collection) {
   h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "app/index.js", inputs: ["app/index.js"], packageMap: {}, collection: declaration })));
   h.source.set(`${declaration.collectionPath}/collection.yaml`, Buffer.from(collectionSchema));
@@ -72,6 +94,30 @@ function withCollection(h: ReturnType<typeof harness>, declaration = collection)
 }
 
 describe("owner app publication", () => {
+  it("prepares a shared Collection app from trusted rules and activates only its binding", async () => {
+    const h = withDataset(harness());
+    const prepared = await h.prepare();
+    expect(prepared.capabilities[0]).toMatchObject({ kind: "dataset", operations: [{ name: "submit", access: "link" }] });
+    expect(prepared.sourcePaths).toEqual(["app/app.publish.json", "app/index.js"]);
+    expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 1 });
+    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/artifacts"))).toHaveLength(2);
+    expect(h.relay.mock.calls.some(call => call[1].endsWith("/collection-approval") || call[1].endsWith(`/datasets/${id(1)}/activate`))).toBe(false);
+    expect(h.relay.mock.calls.at(-1)![1]).toMatch(/backend\/activate$/);
+  });
+  it("rejects a changed or offline dataset before uploading any public artifacts", async () => {
+    const h = withDataset(harness()), prepared = await h.prepare();
+    h.approved.active = false;
+    await expect(h.approve(prepared)).rejects.toThrow(/rules changed/);
+    expect(h.upload).not.toHaveBeenCalled();
+    expect(h.relay.mock.calls.some(call => call[1].endsWith("/app-publications"))).toBe(false);
+  });
+  it("reports an app published without confirmed Collection access", async () => {
+    const h = withDataset(harness()), prepared = await h.prepare();
+    const original = h.relay.getMockImplementation()!;
+    h.relay.mockImplementation(async (...args) => args[1].endsWith("/backend/activate")
+      ? { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(99) } : original(...args));
+    await expect(h.approve(prepared)).rejects.toThrow(/app is published.*Collection access/);
+  });
   it("captures and reviews the exact selected collection before granting access", async () => {
     const h = withCollection(harness());
     const prepared = await h.prepare();
