@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { createDatasetJournal, type JournalDb, type CheckpointStage } from "./journal.ts";
@@ -40,7 +41,58 @@ function stage(f: ReturnType<typeof fixture>, bytes: Uint8Array, accounted = tru
   for (let offset = 0, index = 0; offset < bytes.byteLength; offset += chunkBytes, index++) f.journal.appendCheckpointChunk({ stage: staged, index, bytes: bytes.subarray(offset, offset + chunkBytes), authorize });
   return f.journal.sealCheckpoint({ stage: staged, authorize });
 }
+function pendingStage(f:ReturnType<typeof fixture>,bytes:Uint8Array,sha256=hash(bytes)) {
+  const staged=f.journal.stageCheckpoint({scope,expectedBytes:bytes.byteLength,sha256,authorize,account:f.account});
+  for(let offset=0,index=0;offset<bytes.byteLength;offset+=chunkBytes,index++)
+    f.journal.appendCheckpointChunk({stage:staged,index,bytes:bytes.subarray(offset,offset+chunkBytes),authorize});
+  return staged;
+}
 const initialization = { scope, hostEpoch: "host", approvedRevisionHash: hash("rules"), source: "globalThis.operations={};", schemaSql: "CREATE TABLE data(id INTEGER PRIMARY KEY);", definitionJson: "{}", authorize };
+
+it("seals materialization chunks across I/O turns with no open transaction",async()=>{
+  const f=fixture(),bytes=new Uint8Array(3*chunkBytes+7).fill(17),staged=pendingStage(f,bytes);
+  let settled=false;
+  const sealing=f.journal.sealMaterializationCheckpoint({stage:staged,authorize}).then(value=>{settled=true;return value;});
+  await yieldToIo();
+  expect(settled).toBe(false);
+  f.transaction(()=>f.db.exec("UPDATE quota SET bytes=bytes"));
+  // Caller-owned input cannot retarget the remaining chunk reads after yielding.
+  staged.scope.datasetId="another";staged.stageId="another-stage";staged.sha256=hash("wrong");
+  const sealed=await sealing;
+  expect(sealed.scope).toEqual(scope);expect(sealed.sha256).toBe(hash(bytes));expect(sealed.sealed).toBe(true);
+  expect(f.largestRead).toBeLessThanOrEqual(chunkBytes);
+  expect(f.journal.checkpointStages({workspaceId:scope.workspaceId,authorize})).toEqual([sealed]);
+});
+it.each(["revoke","discard","delete","sync seal"])("rejects async cache sealing after concurrent %s",async change=>{
+  const f=fixture(),staged=pendingStage(f,new Uint8Array(3*chunkBytes).fill(9));
+  const expected=f.journal.initialize({...initialization,checkpoint:new Uint8Array()});
+  let allowed=true;
+  const sealing=f.journal.sealMaterializationCheckpoint({stage:staged,authorize(){if(!allowed)throw Error("revoked");}});
+  const rejected=expect(sealing).rejects.toThrow();
+  await yieldToIo();
+  if(change==="revoke")allowed=false;
+  if(change==="discard")f.journal.discardCheckpoint({stage:staged,authorize,account:f.account});
+  if(change==="delete")f.journal.destroy({expected,authorize});
+  if(change==="sync seal")f.journal.sealCheckpoint({stage:staged,authorize});
+  await rejected;
+  if(change==="revoke")expect(f.journal.checkpointStages({workspaceId:scope.workspaceId,authorize})[0].sealed).toBe(false);
+  if(change==="discard"||change==="delete")expect(f.journal.checkpointStages({workspaceId:scope.workspaceId,authorize})).toEqual([]);
+});
+it.each(["chunk","digest"])("rejects materialization seal with damaged %s",async damage=>{
+  const f=fixture(),bytes=new Uint8Array(chunkBytes+3).fill(7),staged=pendingStage(f,bytes,damage==="digest"?hash("wrong"):hash(bytes));
+  if(damage==="chunk")f.db.prepare("UPDATE dohc_dataset_checkpoint_chunks SET bytes=zeroblob(3) WHERE stage_id=? AND chunk_index=1").run(staged.stageId);
+  await expect(f.journal.sealMaterializationCheckpoint({stage:staged,authorize})).rejects.toThrow("integrity");
+  expect(f.journal.checkpointStages({workspaceId:scope.workspaceId,authorize})[0].sealed).toBe(false);
+});
+it("requires synchronous authorization and rolls back thenable authorization side effects",async()=>{
+  const f=fixture(),staged=pendingStage(f,new Uint8Array(0));let ran=false;
+  await expect(f.journal.sealMaterializationCheckpoint({stage:staged,authorize:async()=>{ran=true;}})).rejects.toThrow("synchronous");
+  expect(ran).toBe(false);
+  const before=f.balance();
+  await expect(f.journal.sealMaterializationCheckpoint({stage:staged,authorize:()=>{f.account({bytes:7});return {then(){}};}})).rejects.toThrow("synchronous");
+  expect(f.balance()).toBe(before);
+  expect((await f.journal.sealMaterializationCheckpoint({stage:staged,authorize})).sealed).toBe(true);
+});
 
 it("streams a 100 MiB staged checkpoint and arbitrary chunk boundaries without a checkpoint-sized SQL read", () => {
   const f = fixture(), piece = new Uint8Array(chunkBytes).fill(73), digest = createHash("sha256");

@@ -108,6 +108,7 @@ export interface DatasetJournal {
   stageCheckpoint(input: { scope: DatasetScope; expectedBytes: number; sha256: string; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): CheckpointStage;
   appendCheckpointChunk(input: { stage: CheckpointStage; index: number; bytes: Uint8Array; authorize: Authorize }): void;
   sealCheckpoint(input: { stage: CheckpointStage; authorize: Authorize }): CheckpointStage;
+  sealMaterializationCheckpoint(input: { stage: CheckpointStage; authorize: Authorize }): Promise<CheckpointStage>;
   discardCheckpoint(input: { stage: CheckpointStage; authorize: Authorize; account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown }): void;
   checkpointStages(input: { workspaceId: string; after?: string; limit?: number; authorize: Authorize }): CheckpointStage[];
   /** Startup only, while the host exclusively owns the store and has admitted no operations. */
@@ -399,6 +400,10 @@ export function createDatasetJournal(options: JournalOptions): DatasetJournal {
     },
     appendCheckpointChunk: checkpoints.appendCheckpointChunk,
     sealCheckpoint: checkpoints.sealCheckpoint,
+    sealMaterializationCheckpoint(input) {
+      const stage=structuredClone(input.stage),key=scope(stage.scope),authorize=input.authorize;
+      return checkpoints.sealMaterializationCheckpoint({stage,authorize:()=>{callback(authorize);notDeleted(key);}});
+    },
     discardCheckpoint: checkpoints.discardCheckpoint,
     checkpointStages: checkpoints.checkpointStages,
     reclaimCheckpointStages: checkpoints.reclaimCheckpointStages,

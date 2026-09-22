@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import type { DatasetScope, JournalDb } from "./journal.js";
 
 /** Scoped, immutable manifest. Only the journal accepts this host-created handle. */
@@ -112,6 +113,36 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
       callback(input.authorize); return manifest({ ...value, state: 1 });
     });
   }
+  async function sealMaterializationCheckpoint(input: { stage: CheckpointStage; authorize: Authorize }): Promise<CheckpointStage> {
+    const stage=structuredClone(input.stage),authorize=input.authorize;
+    synchronous(authorize);
+    const readPending=() => {
+      callback(authorize);
+      const value=row(stage);
+      if(value.state!==0)throw new Error("Materialization checkpoint is no longer pending.");
+      if(value.next_index!==stage.chunkCount)throw new Error("Checkpoint chunks are incomplete.");
+      return value;
+    };
+    const initial=tx(readPending),hash=createHash("sha256");
+    for(let index=0;index<initial.next_index;index++) {
+      tx(()=>{
+        const value=readPending();
+        if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("Checkpoint stage changed.");
+        hash.update(chunk(value,index));
+        callback(authorize);
+      });
+      await yieldToIo();
+    }
+    const sha256=hash.digest("hex");
+    return tx(()=>{
+      const value=readPending();
+      if(value.reserved_bytes!==initial.reserved_bytes)throw new Error("Checkpoint stage changed.");
+      if(sha256!==value.sha256)throw new Error("Checkpoint integrity check failed.");
+      db.prepare("UPDATE dohc_dataset_checkpoints SET state=1 WHERE stage_id=?").run(value.stage_id);
+      callback(authorize);
+      return manifest({...value,state:1});
+    });
+  }
   function storageBytes(length: number) { return length + Math.ceil(length / CHECKPOINT_CHUNK_BYTES) * 128 + 512; }
   function discard(value: StageRow, account?: (allocation: Readonly<CheckpointStageAllocation>) => unknown) {
     if (value.state === 2) throw new Error("Active checkpoints cannot be discarded.");
@@ -122,7 +153,7 @@ export function createCheckpointStorage(db: JournalDb, transaction: <T>(work: ()
     db.prepare("DELETE FROM dohc_dataset_checkpoints WHERE stage_id=?").run(value.stage_id);
   }
   return {
-    stageCheckpoint, appendCheckpointChunk, sealCheckpoint,
+    stageCheckpoint, appendCheckpointChunk, sealCheckpoint, sealMaterializationCheckpoint,
     /** Called only inside the journal's authorized permanent-deletion transaction. */
     destroy(key: DatasetScope) {
       db.prepare(`DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN
