@@ -6,9 +6,12 @@ import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD_REQUEST_BYTES,
   parseAppBackendInvokeRequest, parseAppBackendUploadRequest, parseAppBackendRefusal } from "@dohc/security-contract/app-backend";
-import type { LocalAppBackendHost } from "./localAppBackend";
-
-type Backend = Pick<LocalAppBackendHost, "browserPublication" | "assertBrowserPublication" | "request" | "readBrowserFile">;
+export interface LocalAppLaunchBackend {
+  browserPublication(publicationId: string): { authorityRevision: number; files: Parameters<typeof createAppDocument>[0] };
+  assertBrowserPublication(publicationId: string, authorityRevision: number): void;
+  request(publicationId: string, action: "invoke" | "upload", input: unknown, signal?: AbortSignal): Promise<unknown>;
+  readBrowserFile(publicationId: string, input: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown>;
+}
 export interface LocalAppLaunchHost {
   launch(publicationId: string, signal: AbortSignal): Promise<string>;
   close(): Promise<void>;
@@ -35,7 +38,7 @@ async function readJson(request: IncomingMessage, maxBytes: number, signal: Abor
 }
 
 /** Each approved local app gets its own loopback origin and an opaque, credential-free child frame. */
-export async function createLocalAppLaunchHost(options: { backend: Backend; lifetime: AbortSignal }): Promise<LocalAppLaunchHost> {
+export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunchBackend; lifetime: AbortSignal }): Promise<LocalAppLaunchHost> {
   options.lifetime.throwIfAborted();
   const sessions = new Set<() => Promise<void>>();
   let closed = false, preparing = 0, staged = 0;

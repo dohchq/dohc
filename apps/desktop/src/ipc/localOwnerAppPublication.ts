@@ -6,24 +6,37 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import type { LocalAppBackendHost } from "../workspaces/localAppBackend";
+import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 
 export function createLocalOwnerAppPublicationHandler<Workspace extends { workspaceId: string }, Operation extends { workspace: Workspace; signal: AbortSignal; session?: { generation: number }; scope?: string; assertCurrent(): void }>(deps: {
   localForWorkspace(workspace: Workspace, signal: AbortSignal): Promise<Pick<LocalAppBackendHost, "activate" | "list">>;
+  datasetForWorkspace?(workspace: Workspace, signal: AbortSignal): Promise<Pick<LocalDatasetHost, "approvedArtifacts" | "apps">>;
   flushCapture(workspace: Workspace): Promise<void>;
   withAdapter<T>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   launchLocal?(workspace: Workspace, publicationId: string, signal: AbortSignal): Promise<string>;
+  launchLocalDataset?(workspace: Workspace, publicationId: string, signal: AbortSignal): Promise<string>;
 }) {
   type Prepared = Awaited<ReturnType<typeof prepareLocalAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; workspaceId: string; callerKey: string; scope: string; signal: AbortSignal; digest: string; clear(): void }>();
   const preparing = new Set<string>();
   return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null> => {
-    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel") return null;
+    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" && input.action !== "withdraw") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
+    if (input.action === "withdraw") {
+      const local = deps.datasetForWorkspace ? await deps.datasetForWorkspace(operation.workspace, operation.signal) : null; current();
+      if (!local?.apps.has(input.publicationId)) return null;
+      const result = local.apps.withdraw(input.publicationId, input.expectedAuthorityRevision); current();
+      return OwnerAppPublicationResult.parse({ kind: "withdrawn", ...result });
+    }
     if (input.action === "launchLocal") {
-      if (!deps.launchLocal) throw new Error("Local app launch is unavailable. Restart dohc and try again.");
-      const url = await deps.launchLocal(operation.workspace, input.publicationId, operation.signal); current();
+      const dataset = deps.datasetForWorkspace ? await deps.datasetForWorkspace(operation.workspace, operation.signal) : null;
+      current();
+      const isDataset = dataset?.apps.has(input.publicationId) === true;
+      const launch = isDataset ? deps.launchLocalDataset : deps.launchLocal;
+      if (!launch) throw new Error("Local app launch is unavailable. Restart dohc and try again.");
+      const url = await launch(operation.workspace, input.publicationId, operation.signal); current();
       const parsed = new URL(url);
       if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" || !parsed.port || parsed.username || parsed.password) throw new Error("The local app launcher returned an invalid address.");
       return OwnerAppPublicationResult.parse({ kind: "localLaunched", publicationId: input.publicationId, url });
@@ -35,8 +48,16 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       if (input.action === "cancel") { entry.clear(); return { kind: "cancelled" }; }
       if (input.candidateDigest !== entry.digest) throw new Error("The app candidate changed. Review it again.");
       entry.clear();
-      const local = await deps.localForWorkspace(operation.workspace, operation.signal); current();
-      const result = await local.activate(entry.prepared, operation.signal, { initialize: input.initialize !== false }); current();
+      let result: { publicationId: string; authorityRevision: number };
+      if (entry.prepared.candidate.capabilities[0]?.kind === "dataset") {
+        if (!deps.datasetForWorkspace) throw new Error("Collection apps are unavailable. Restart dohc and try again.");
+        const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
+        result = await local.apps.activate(entry.prepared, operation.signal);
+      } else {
+        const local = await deps.localForWorkspace(operation.workspace, operation.signal); current();
+        result = await local.activate(entry.prepared, operation.signal, { initialize: input.initialize !== false });
+      }
+      current();
       return OwnerAppPublicationResult.parse({ kind: "published", publicationId: result.publicationId, authorityRevision: result.authorityRevision, local: true });
     }
     if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
@@ -44,7 +65,8 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       const local = await deps.localForWorkspace(operation.workspace, operation.signal); current();
       const publications = local.list(input.appRoot).map(row => ({ publicationId: row.publicationId, authorityRevision: row.authorityRevision,
         appRoot: row.appRoot, sourceRevision: row.sourceRevision, backendCapability: row.backendCapability, active: row.active && !row.sharedPublicationId }));
-      return OwnerAppPublicationResult.parse({ kind: "localListed", publications });
+      const datasets = deps.datasetForWorkspace ? await deps.datasetForWorkspace(operation.workspace, operation.signal) : null; current();
+      return OwnerAppPublicationResult.parse({ kind: "localListed", publications: [...publications, ...(datasets?.apps.list(input.appRoot) ?? [])] });
     }
     if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
     for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();
@@ -54,11 +76,17 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       await deps.flushCapture(operation.workspace); current();
       const prepared = await deps.withAdapter(operation.workspace, adapter => prepareLocalAppPublication(input, {
         adapter, signal: operation.signal, assertCurrent: current, compile: deps.compile,
+        resolveDatasetRevision: deps.datasetForWorkspace ? async binding => {
+          const local = await deps.datasetForWorkspace!(operation.workspace, operation.signal); current();
+          const approved = local.approvedArtifacts(binding.datasetId);
+          if (!approved.active) throw new Error("This Collection is unavailable on this device.");
+          return approved.revision;
+        } : undefined,
       }));
       current();
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const candidate = prepared.candidate;
-      if (candidate.capabilities[0]?.kind !== "app-backend") throw new Error("This app has no backend declaration. Add one before preparing local app data.");
+      if (candidate.capabilities[0]?.kind !== "app-backend" && candidate.capabilities[0]?.kind !== "dataset") throw new Error("Connect this app to a Collection before preparing app data.");
       const approvalId = randomUUID(), digest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
       const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();

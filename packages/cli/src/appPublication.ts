@@ -2,6 +2,7 @@ import { z } from "zod";
 import { parseAppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { parseAppBackendCapability } from "@dohc/security-contract/app-backend";
 import { OwnerAppBackendCapability } from "./appBackend";
+import { parseAppDatasetCapability } from "@dohc/security-contract/dataset";
 
 const id = z.string().min(1).max(200);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -11,10 +12,16 @@ const OwnerAppCollectionCapability = z.unknown().transform((value, context) => {
 });
 const OwnerAppCapability = z.unknown().transform((value, context) => {
   try {
+    if (value && typeof value === "object" && "kind" in value && value.kind === "dataset") return parseAppDatasetCapability(value);
     return value && typeof value === "object" && "kind" in value && value.kind === "app-backend"
       ? parseAppBackendCapability(value) : parseAppCollectionCapability(value);
   } catch { context.addIssue({ code: "custom", message: "Invalid app capability." }); return z.NEVER; }
 });
+const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
+  try { return parseAppDatasetCapability(value); }
+  catch { context.addIssue({ code: "custom", message: "Invalid dataset capability." }); return z.NEVER; }
+});
+const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, active: z.boolean() };
 const publication = { publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), backendCapability: z.union([OwnerAppBackendCapability, z.literal("unavailable")]).nullable() };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
@@ -35,9 +42,10 @@ export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
 export type OwnerAppPublicationRequest = z.infer<typeof OwnerAppPublicationRequest>;
 export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
-  z.object({ kind: z.literal("localListed"), publications: z.array(z.object({ publicationId: hash,
-    authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash,
-    backendCapability: OwnerAppBackendCapability, active: z.boolean() }).strict()).max(64) }).strict(),
+  z.object({ kind: z.literal("localListed"), publications: z.array(z.union([
+    z.object({ ...localPublication, backendCapability: OwnerAppBackendCapability }).strict(),
+    z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
+  ])).max(64) }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
   z.object({ kind: z.literal("prepared"), approvalId: z.string().uuid(), candidateDigest: hash,
     appRoot: z.string().min(1).max(1024), versionId: id, sourceRevision: hash,

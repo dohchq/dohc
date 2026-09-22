@@ -70,6 +70,18 @@ describe("owner app publication", () => {
     api.publishOwnerApp.mockImplementation(answer);
   });
 
+  it("reviews a bound Collection app without presenting another response database", async () => {
+    const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1, revisionSha256: "a".repeat(64),
+      operationIds: ["00000000-0000-4000-8000-000000000002"], operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepareLocal" ? { ...prepared, local: true, capabilities: [datasetCapability] } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await screen.findByRole("heading", { name: "Review app for this device" });
+    expect(screen.getByTestId("app-publication-capability").textContent).toContain("responses appear in the same Collection");
+    expect(screen.getByText("Approving this app grants these actions. It does not change the Collection's rules.")).toBeTruthy();
+    expect(screen.getByTestId("app-publication-capability").textContent).not.toContain("private store");
+  });
+
   it("reviews exact source and network consequences before approval", async () => {
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await review();

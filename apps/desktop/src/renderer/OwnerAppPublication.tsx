@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import type { AppBackendCapability, AppBackendOperation } from "@dohc/security-contract/app-backend";
+import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
@@ -33,6 +34,22 @@ function BackendSummary({ capability }: { capability: AppBackendCapability | nul
 function OperationNames({ operations }: { operations: AppBackendOperation[] }) {
   if (operations.length === 0) return <>None</>;
   return <>{operations.map((operation, index) => <span key={operation.name}>{index ? ", " : ""}<span className="font-mono">{operation.name}</span> ({operation.readOnly ? "reads only" : "changes data"})</span>)}</>;
+}
+
+function DatasetApproval({ capability }: { capability: AppDatasetCapability }) {
+  return <div data-testid="app-publication-capability" className="space-y-2">
+    <p className="m-0">This app uses the Collection's approved actions. Its responses appear in the same Collection.</p>
+    <dl className="m-0 space-y-1 text-[12px]">
+      <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Helper actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "helper")} /></dd></div>
+      <div><dt className="inline font-medium text-ink">Owner actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "owner")} /></dd></div>
+    </dl>
+    <p className="m-0 text-[12px]">Approving this app grants these actions. It does not change the Collection's rules.</p>
+    <details className="text-[12px]"><summary className="cursor-pointer">Collection revision</summary>
+      <p className="break-all font-mono">{capability.datasetId} · {capability.revision}</p>
+      <p className="break-all font-mono">{capability.revisionSha256}</p>
+    </details>
+  </div>;
 }
 
 function BackendApproval({ capability, local }: { capability: AppBackendCapability; local: boolean }) {
@@ -286,7 +303,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
     } finally { if (alive.current && mine === request.current) setBusy(null); }
   };
 
-  const withdraw = async (publication: Publication) => {
+  const withdraw = async (publication: Publication | LocalPublication, local = false) => {
     if (busy || responsesBusy) return;
     const mine = ++request.current;
     setBusy("withdraw"); setBusyPublicationId(publication.publicationId); setError(null);
@@ -294,9 +311,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
       const result = await api.publishOwnerApp({ action: "withdraw", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "withdrawn") throw new Error("dohc could not confirm that this publication ended. Try again.");
-      setPublicationsReload(value => value + 1);
-      setNotice("App unpublished. The share link still works for its other shared content.");
-    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not unpublish the app. Try again.")); setPublicationsReload(value => value + 1); } }
+      if (local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1);
+      setNotice(local ? "App approval removed. Prepare the app again to restore access." : "App unpublished. The share link still works for its other shared content.");
+    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not end app access. Try again.")); if (local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1); } }
     finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
   const revokeCollection = async (publication: Publication) => {
@@ -365,7 +382,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "app-backend" ? <BackendApproval key={capability.dataPath} capability={capability} local={prepared.local === true} /> :<div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "app-backend" ? <BackendApproval key={capability.dataPath} capability={capability} local={prepared.local === true} /> : capability.kind === "dataset" ? <DatasetApproval key={capability.datasetId} capability={capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
             <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
             <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
               <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
@@ -397,15 +414,16 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void }) {
                   <div className="min-w-0 text-[12px] text-muted">
                     <p className="m-0">{publication.active ? "Approved on this device" : "Inactive on this device"} · <span className="font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</span></p>
                     {publication.active ? null : <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>}
-                    <BackendSummary capability={publication.backendCapability} />
+                    {"datasetCapability" in publication ? <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval capability={publication.datasetCapability} /></details> : <BackendSummary capability={publication.backendCapability} />}
                   </div>
-                  {publication.active ? <SecondaryButton className="shrink-0" disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton> : null}
+                  {publication.active ? <div className="flex shrink-0 flex-col gap-2"><SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton>
+                    {"datasetCapability" in publication ? <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void withdraw(publication, true)}>Remove approval</SecondaryButton> : null}</div> : null}
                 </li>)}
               </ul>}
         </div>
         {localPublications.filter(publication => publication.active).map(publication => <div key={publication.publicationId}>
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">This device · Source {publication.sourceRevision.slice(0, 12)}</p>
-          <OwnerAppBackend workspaceId={props.workspaceId} publicationId={publication.publicationId} capability={publication.backendCapability} local disabled={localLoading || !!busy} onError={reportError} />
+          {"datasetCapability" in publication ? <p className="text-[12px] text-muted">Open the Collection to view and manage its records.</p> : <OwnerAppBackend workspaceId={props.workspaceId} publicationId={publication.publicationId} capability={publication.backendCapability} local disabled={localLoading || !!busy} onError={reportError} />}
         </div>)}
         <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Publications</h3>

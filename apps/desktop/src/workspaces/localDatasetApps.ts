@@ -1,0 +1,163 @@
+import { createHash } from "node:crypto";
+import { parseAppPublicationCandidate, verifyAppDatasetCapability, type AppDatasetCapability, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { parseAppBackendInvokeRequest, parseAppBackendJson, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
+import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
+import type { DatasetAccess, DatasetAuthority, InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
+import type { JournalDb } from "@dohc/app-backend-runtime/journal";
+import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
+import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
+import type { ClosedAppBuild } from "./closedAppCompiler";
+import type { LocalDatasetFileRequest, LocalDatasetUpload } from "./localDatasetHost";
+
+export interface LocalDatasetAppContext { publicationId: string; authorityRevision: number }
+type Prepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
+type Row = { publication_id: string; app_root: string; dataset_id: string; authority_revision: number; candidate: string; storage_bytes: number; active: number };
+const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+
+/** Uses the dataset authority database. No app gets the owner data API or source artifacts. */
+export function createLocalDatasetApps(options: {
+  db: JournalDb; workspaceId: string; ownerId: string;
+  assertCurrent(): void; charge(bytes: number): void;
+  approved(datasetId: string): { revision: DatasetRevision; active: boolean };
+  bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
+  invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
+  upload(context: LocalDatasetAppContext, input: LocalDatasetUpload): Promise<unknown>;
+  file(input: LocalDatasetFileRequest): Promise<unknown>;
+}) {
+  const { db } = options;
+  db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_apps(
+    publication_id TEXT PRIMARY KEY, app_root TEXT NOT NULL UNIQUE, dataset_id TEXT NOT NULL,
+    authority_revision INTEGER NOT NULL, candidate TEXT NOT NULL, storage_bytes INTEGER NOT NULL, active INTEGER NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS local_dataset_app_artifacts(
+    publication_id TEXT NOT NULL REFERENCES local_dataset_apps(publication_id) ON DELETE CASCADE,
+    path TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(publication_id,path)) STRICT;`);
+  const contexts = new WeakSet<LocalDatasetAppContext>();
+  function row(id: string, expected?: number): Row {
+    options.assertCurrent();
+    const result = db.prepare("SELECT * FROM local_dataset_apps WHERE publication_id=?").get(id) as Row | undefined;
+    if (!result || !result.active || (expected !== undefined && expected !== result.authority_revision)) throw new Error("This app approval changed. Prepare the app again.");
+    return result;
+  }
+  function capability(value: Row): AppDatasetCapability {
+    const candidate = parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS);
+    const current = options.approved(value.dataset_id);
+    if (!current.active) throw new Error("This Collection is unavailable on this device.");
+    return verifyAppDatasetCapability(candidate.capabilities[0], current.revision);
+  }
+  function current(id: string, expected?: number) { const value = row(id, expected); return { row: value, capability: capability(value) }; }
+  function resolveAuthority(context: LocalDatasetAppContext, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority {
+    if (!contexts.has(context) || request.workspaceId !== options.workspaceId || request.access.kind !== "app" || request.access.appId !== context.publicationId) throw new Error("App access is not permitted.");
+    const checked = current(context.publicationId, context.authorityRevision);
+    if (request.datasetId !== checked.row.dataset_id) throw new Error("App access is not permitted.");
+    return { caller: { kind: "owner", userId: options.ownerId }, principalKey: `${options.ownerId}:app:${context.publicationId}`,
+      appId: context.publicationId, authorityToken: String(context.authorityRevision) };
+  }
+  async function inContext<T>(id: string, expected: number, signal: AbortSignal | undefined, work: (context: LocalDatasetAppContext) => Promise<T>): Promise<T> {
+    signal?.throwIfAborted(); current(id, expected);
+    const context = Object.freeze({ publicationId: id, authorityRevision: expected }); contexts.add(context);
+    try { const result = await work(context); signal?.throwIfAborted(); current(id, expected); return result; }
+    finally { contexts.delete(context); }
+  }
+  const api = {
+    async activate(prepared: Prepared, signal: AbortSignal) {
+      options.assertCurrent(); signal.throwIfAborted();
+      const candidate = parseAppPublicationCandidate(prepared.candidate, APP_PUBLICATION_LIMITS);
+      const declared = candidate.capabilities[0];
+      if (declared?.kind !== "dataset") throw new Error("Choose an app connected to a Collection.");
+      const approved = options.approved(declared.datasetId);
+      if (!approved.active) throw new Error("This Collection is unavailable on this device.");
+      const verified = verifyAppDatasetCapability(declared, approved.revision);
+      if (prepared.files.length !== candidate.files.length) throw new Error("App bundle files changed. Prepare the app again.");
+      const files = candidate.files.map(metadata => {
+        const matches = prepared.files.filter(file => file.path === metadata.path);
+        const file = matches[0];
+        if (matches.length !== 1 || !file || file.bytes.byteLength !== metadata.byteLength || hash(file.bytes) !== metadata.sha256) throw new Error("App bundle files changed. Prepare the app again.");
+        return { path: file.path, bytes: Uint8Array.from(file.bytes) };
+      });
+      const json = JSON.stringify(candidate), publicationId = hash(JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]));
+      const existing = db.prepare("SELECT * FROM local_dataset_apps WHERE app_root=?").get(candidate.appRoot) as Row | undefined;
+      if (existing?.publication_id === publicationId && existing.active) return { publicationId, authorityRevision: existing.authority_revision };
+      if (!existing && Number(db.prepare("SELECT count(*) AS count FROM local_dataset_apps").get()!.count) >= 64) throw new Error("Remove an app before approving another one.");
+      const authorityRevision = (existing?.authority_revision ?? 0) + 1;
+      const storageBytes = Buffer.byteLength(json) + files.reduce((sum, file) => sum + file.bytes.byteLength, 0) + 512;
+      const { operations: _, ...binding } = verified;
+      options.bind(verified.datasetId, publicationId, binding, () => {
+        signal.throwIfAborted(); options.assertCurrent();
+        if (existing) {
+          // Both binding changes and the replacement share this synchronous authority transaction.
+          if (existing.publication_id !== publicationId) options.bind(existing.dataset_id, existing.publication_id, null, () => {});
+          db.prepare("DELETE FROM local_dataset_app_artifacts WHERE publication_id=?").run(existing.publication_id);
+          db.prepare("DELETE FROM local_dataset_apps WHERE publication_id=?").run(existing.publication_id);
+        }
+        options.charge(storageBytes - (existing?.storage_bytes ?? 0));
+        db.prepare("INSERT INTO local_dataset_apps VALUES(?,?,?,?,?,?,1)").run(publicationId, candidate.appRoot, verified.datasetId, authorityRevision, json, storageBytes);
+        for (const file of files) db.prepare("INSERT INTO local_dataset_app_artifacts VALUES(?,?,?)").run(publicationId, file.path, file.bytes);
+      });
+      current(publicationId, authorityRevision);
+      return { publicationId, authorityRevision };
+    },
+    list(appRoot: string) {
+      options.assertCurrent();
+      return (db.prepare("SELECT * FROM local_dataset_apps WHERE app_root=?").all(appRoot) as Row[]).map(value => {
+        const candidate = parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS);
+        const declared = candidate.capabilities[0];
+        if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
+        let active = false; try { current(value.publication_id, value.authority_revision); active = true; } catch {}
+        return { publicationId: value.publication_id, authorityRevision: value.authority_revision, appRoot: value.app_root,
+          sourceRevision: candidate.sourceRevision, datasetCapability: declared, active };
+      });
+    },
+    has(publicationId: string) { options.assertCurrent(); return !!db.prepare("SELECT 1 FROM local_dataset_apps WHERE publication_id=?").get(publicationId); },
+    withdraw(publicationId: string, authorityRevision: number) {
+      const checked = current(publicationId, authorityRevision);
+      options.bind(checked.row.dataset_id, publicationId, null, () => {
+        row(publicationId, authorityRevision);
+        db.prepare("UPDATE local_dataset_apps SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(publicationId);
+      });
+      return { publicationId, authorityRevision: authorityRevision + 1 };
+    },
+    browserPublication(publicationId: string) {
+      const checked = current(publicationId), candidate = parseAppPublicationCandidate(JSON.parse(checked.row.candidate), APP_PUBLICATION_LIMITS);
+      const files = candidate.files.map(metadata => {
+        const stored = db.prepare("SELECT content FROM local_dataset_app_artifacts WHERE publication_id=? AND path=?").get(publicationId, metadata.path);
+        if (!stored || !(stored.content instanceof Uint8Array) || stored.content.byteLength !== metadata.byteLength || hash(stored.content) !== metadata.sha256) throw new Error("App bundle integrity check failed.");
+        return { ...metadata, bytes: Uint8Array.from(stored.content) };
+      });
+      return { publicationId, authorityRevision: checked.row.authority_revision, appRoot: checked.row.app_root, files };
+    },
+    assertBrowserPublication(publicationId: string, authorityRevision: number) { current(publicationId, authorityRevision); },
+    request(publicationId: string, action: "invoke" | "upload", raw: unknown, signal?: AbortSignal): Promise<unknown> {
+      if (action === "upload") {
+        const input = parseAppBackendUploadRequest(raw);
+        return inContext(publicationId, input.authorityRevision, signal, async context => {
+          const { capability: cap } = current(publicationId, input.authorityRevision);
+          if (!cap.operations.some(operation => !operation.readOnly)) throw new Error("This app cannot upload files.");
+          return options.upload(context, { datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256, ...input, signal });
+        });
+      }
+      const input = parseAppBackendInvokeRequest(raw);
+      return inContext(publicationId, input.authorityRevision, signal, async context => {
+        const { capability: cap } = current(publicationId, input.authorityRevision);
+        const operation = cap.operations.find(operation => operation.name === input.operation);
+        if (!operation) throw new Error("This action is not approved for the app.");
+        return options.invoke(context, { workspaceId: options.workspaceId, datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256,
+          operationId: operation.operationId, idempotencyKey: input.idempotencyKey, input: input.input, access: { kind: "app", appId: publicationId }, signal });
+      });
+    },
+    readBrowserFile(publicationId: string, raw: { authorityRevision: number; fileId: string; operation: string; input: unknown }, signal?: AbortSignal): Promise<unknown> {
+      const input = parseAppBackendInvokeRequest({ authorityRevision: raw.authorityRevision, operation: raw.operation, input: raw.input, idempotencyKey: "file-read" });
+      return inContext(publicationId, input.authorityRevision, signal, async context => {
+        const { capability: cap } = current(publicationId, input.authorityRevision);
+        const operation = cap.operations.find(operation => operation.name === input.operation && operation.readOnly);
+        if (!operation || typeof raw.fileId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(raw.fileId)) throw new Error("Choose an approved read action for this file.");
+        const result = await options.invoke(context, { workspaceId: options.workspaceId, datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256,
+          operationId: operation.operationId, idempotencyKey: "file-read", input: input.input, access: { kind: "app", appId: publicationId }, signal });
+        const contains = (value: unknown): boolean => value === raw.fileId || (Array.isArray(value) ? value.some(contains) : !!value && typeof value === "object" && Object.values(value).some(contains));
+        if (!contains(parseAppBackendJson(result.result))) throw new Error("This action does not grant access to the file.");
+        current(publicationId, input.authorityRevision);
+        return options.file({ datasetId: cap.datasetId, revision: cap.revision, revisionSha256: cap.revisionSha256, fileId: raw.fileId, signal });
+      });
+    },
+  };
+  return { api, resolveAuthority };
+}

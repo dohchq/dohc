@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
 import { createLocalOwnerAppPublicationHandler } from "./localOwnerAppPublication";
+import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 
 vi.mock("../workspaces/ownerAppPublication", () => ({ prepareLocalAppPublication: vi.fn() }));
 const hash = "a".repeat(64);
@@ -10,7 +11,7 @@ const capability = { kind: "app-backend" as const, dataPath: "data.sqlite", back
 const candidate: AppPublicationCandidate = { appRoot: "app", entryPath: "app/main.ts", packageMap: {}, versionId: "main", sourceRevision: hash, sourceDigest: hash,
   dependencyLockDigest: hash, bundleDigest: hash, buildDigest: hash, compilerIdentity: { recipe: "test", version: "test", binarySha256: hash },
   inputs: [{ path: "app/main.ts", sha256: hash, byteLength: 1 }], dependencies: ["app/main.ts"], files: [], capabilities: [capability] };
-function harness() {
+function harness(dataset?: Pick<LocalDatasetHost, "approvedArtifacts" | "apps">) {
   const controller = new AbortController();
   const workspace = { workspaceId: "w" };
   const operation = { workspace, signal: controller.signal, scope: "session-1", assertCurrent: vi.fn() };
@@ -18,7 +19,9 @@ function harness() {
   const local = { activate, list: vi.fn(() => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, backendCapability: capability, sharedPublicationId: null, capability, active: true, revision: 1 }]) };
   const localForWorkspace = vi.fn(async () => local);
   const launchLocal = vi.fn(async () => "http://127.0.0.1:43210/bootstrap#handoff");
-  const handler = createLocalOwnerAppPublicationHandler({ localForWorkspace, launchLocal,
+  const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
+  const handler = createLocalOwnerAppPublicationHandler({ localForWorkspace, launchLocal, launchLocalDataset,
+    datasetForWorkspace: dataset ? async () => dataset : undefined,
     flushCapture: vi.fn(async () => {}), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
   const prepare = async () => {
@@ -26,7 +29,7 @@ function harness() {
     if (result?.kind !== "prepared") throw new Error("Expected preparation.");
     return result;
   };
-  return { controller, operation, activate, localForWorkspace, launchLocal, handler, prepare };
+  return { controller, operation, activate, localForWorkspace, launchLocal, launchLocalDataset, handler, prepare };
 }
 afterEach(() => vi.clearAllMocks());
 describe("local app publication review", () => {
@@ -63,5 +66,25 @@ describe("local app publication review", () => {
     await expect(h.handler(request, "caller", h.operation)).rejects.toThrow(/invalid address/);
     h.launchLocal.mockImplementationOnce(async () => { h.controller.abort(); return "http://127.0.0.1:43210/bootstrap#handoff"; });
     await expect(h.handler(request, "caller", h.operation)).rejects.toThrow();
+  });
+
+  it("approves and launches bound apps through the dataset host without activating a backend", async () => {
+    const datasetCapability = { kind: "dataset" as const, datasetId: "00000000-0000-4000-8000-000000000001", revision: 1,
+      revisionSha256: hash, operationIds: ["00000000-0000-4000-8000-000000000002"],
+      operations: [{ operationId: "00000000-0000-4000-8000-000000000002", name: "submit", access: "link" as const, readOnly: false }] };
+    const activate = vi.fn(async () => ({ publicationId: hash, authorityRevision: 1 }));
+    const dataset = { approvedArtifacts: vi.fn(), apps: { activate, has: () => true, list: () => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, active: true, datasetCapability }] } } as unknown as Pick<LocalDatasetHost, "approvedArtifacts" | "apps">;
+    const h = harness(dataset);
+    const bound = { ...candidate, capabilities: [datasetCapability] };
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: bound, files: [] });
+    const review = await h.prepare();
+    expect(review.capabilities).toEqual([datasetCapability]);
+    expect(vi.mocked(prepareLocalAppPublication).mock.calls.at(-1)![1].resolveDatasetRevision).toBeTypeOf("function");
+    await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation);
+    expect(activate).toHaveBeenCalledWith({ candidate: bound, files: [] }, h.operation.signal);
+    expect(h.activate).not.toHaveBeenCalled();
+    await h.handler({ action: "launchLocal", workspaceId: "w", publicationId: hash }, "caller", h.operation);
+    expect(h.launchLocalDataset).toHaveBeenCalled(); expect(h.launchLocal).not.toHaveBeenCalled();
+    expect(await h.handler({ action: "listLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation)).toMatchObject({ kind: "localListed", publications: [{ backendCapability: capability }, { datasetCapability }] });
   });
 });
