@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { DATASET_MAX_FIELDS, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetFormSources, type DatasetFormInput } from "./datasetFormGenerator";
 import { compileClosedApp } from "./closedAppCompiler";
 
@@ -38,12 +38,12 @@ describe("dataset form generation", () => {
     expect(() => generate({ fieldIds })).toThrow();
   });
 
-  it("rejects nonpublic actions and relations with a custom app path", () => {
+  it("rejects nonpublic create actions and relations without explicit public choices", () => {
     const privateRevision = structuredClone(approvedRevision); privateRevision.definition.operations[0]!.access = "owner";
     expect(() => generate({ approvedRevision: privateRevision })).toThrow(/public create/);
     const related = structuredClone(approvedRevision);
     related.definition.tables[0]!.fields[1] = { ...related.definition.tables[0]!.fields[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
-    expect(() => generate({ approvedRevision: related })).toThrow(/custom app/);
+    expect(() => generate({ approvedRevision: related })).toThrow(/public read/);
   });
 
   it("permits omitted defaulted fields and safely embeds hostile labels", () => {
@@ -52,5 +52,36 @@ describe("dataset form generation", () => {
     const { files } = generate({ approvedRevision: value, fieldIds: [id(5)] });
     expect(files["frontend.js"]).not.toContain("</script>");
     expect(files["frontend.js"]).toContain("\\u003c/script>");
+  });
+
+  it("supports the complete dataset field envelope, including multiple upload fields", () => {
+    const value = structuredClone(approvedRevision);
+    value.definition.tables[0]!.fields = Array.from({ length: DATASET_MAX_FIELDS }, (_, index) => ({
+      fieldId: id(100 + index), name: `Field ${index}`, sqlColumn: index === 0 ? "id" : `field_${index}`,
+      type: index > 125 ? "attachment" as const : "text" as const, required: index === 0, unique: index === 0,
+    }));
+    const fieldIds = value.definition.tables[0]!.fields.map(field => field.fieldId);
+    value.definition.operations[0]!.fieldIds = fieldIds;
+    const { files } = generate({ approvedRevision: value, fieldIds });
+    expect(JSON.parse(files["app.publish.json"]!).dataset.createFields[0].fieldIds).toHaveLength(DATASET_MAX_FIELDS);
+    expect(files["frontend.js"]).toContain('"name":"Field 127"');
+  });
+
+  it("binds explicitly chosen public relation operations without embedding private data or source", () => {
+    const value = structuredClone(approvedRevision);
+    value.definition.tables[0]!.fields[1] = { ...value.definition.tables[0]!.fields[1]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    value.definition.operations.push({ operationId: id(8), name: "choices", label: "Public choices", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3)] });
+    const relationChoices = [{ fieldId: id(4), operationId: id(8), labelFieldId: id(3) }];
+    const files = generate({ approvedRevision: value, relationChoices }).files;
+    expect(JSON.parse(files["app.publish.json"]!).dataset.operationIds).toEqual([id(7), id(8)]);
+    expect(files["frontend.js"]).toContain('"operation":"choices"');
+    expect(files["frontend.js"]).not.toMatch(/PRIVATE_SQL|PRIVATE_RULES|Private note/);
+    for (const access of ["owner", "helper"] as const) {
+      value.definition.operations[1]!.access = access;
+      expect(() => generate({ approvedRevision: value, relationChoices })).toThrow(/public read/);
+    }
+    value.definition.operations[1]!.access = "link";
+    value.definition.operations[1]!.fieldIds.push(id(6));
+    expect(() => generate({ approvedRevision: value, relationChoices })).toThrow(/key and label/);
   });
 });

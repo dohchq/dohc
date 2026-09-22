@@ -4,7 +4,8 @@ import { FORM_CSS } from "./datasetFormStyles";
 export interface DatasetFormField {
   fieldId: string;
   name: string;
-  type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment";
+  type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation";
+  relation?: { operation: string; keyFieldId: string; labelFieldId: string; keyType: "text" | "number"; many: boolean };
   options?: string[];
   required: boolean;
   omitWhenEmpty: boolean;
@@ -39,13 +40,13 @@ const controls = definition.fields.map((field, index) => {
   const id = "field-" + index;
   const label = element("label", field.name + (field.required ? " *" : ""));
   label.htmlFor = id;
-  const choice = field.type === "select" || field.type === "multi-select";
+  const choice = field.type === "select" || field.type === "multi-select" || field.type === "relation";
   const control = element(choice ? "select" : "input");
   control.id = id; control.name = id;
   // A required boolean must have a value; false is a valid value.
   control.required = field.required && field.type !== "checkbox";
   if (choice) {
-    control.multiple = field.type === "multi-select";
+    control.multiple = field.type === "multi-select" || field.relation?.many === true;
     if (!control.multiple) { const empty = element("option", "Choose an option"); empty.value = ""; control.append(empty); }
     for (const value of field.options || []) { const option = element("option", value); option.value = value; control.append(option); }
   } else {
@@ -63,8 +64,16 @@ const controls = definition.fields.map((field, index) => {
   control.addEventListener("input", () => { control.setCustomValidity(""); control.removeAttribute("aria-invalid"); error.hidden = true; });
   if (field.type === "checkbox") wrapper.append(control, label, error);
   else wrapper.append(label, control, error);
+  let search, searchButton, more;
+  if (field.relation) {
+    search = element("input"); search.type = "search"; search.maxLength = 200;
+    search.setAttribute("aria-label", "Search " + field.name);
+    searchButton = element("button", "Search"); searchButton.type = "button";
+    more = element("button", "More choices"); more.type = "button"; more.hidden = true;
+    wrapper.append(search, searchButton, more);
+  }
   fields.append(wrapper);
-  return { field, control, error };
+  return { field, control, error, search, searchButton, more, cursor: null };
 });
 const submit = element("button", "Submit"); submit.type = "submit";
 const status = element("p"); status.className = "status"; status.setAttribute("role", "status");
@@ -105,6 +114,10 @@ const receiveChannel = event => {
         finish({ fileId: value.file.fileId }); return;
       }
       if (pending.message.op === "backend.invoke" && record(value.result) &&
+          controls.some(item => item.field.relation?.operation === pending.message.operation)) {
+        finish({ page: value.result }); return;
+      }
+      if (pending.message.op === "backend.invoke" && record(value.result) &&
           ((typeof value.result.id === "string" && value.result.id.length > 0) || Number.isSafeInteger(value.result.id)) &&
           Number.isSafeInteger(value.revision) && value.revision >= 0 && typeof value.replayed === "boolean") {
         finish({ saved: true }); return;
@@ -128,6 +141,11 @@ const receiveChannel = event => {
         if (value === undefined || value === null) continue;
         if (field.type === "attachment") continue;
         if (field.type === "checkbox") control.checked = value === true;
+        else if (field.relation) {
+          for (const key of field.relation.many && Array.isArray(value) ? value : [value]) {
+            const option = element("option", String(key)); option.value = String(key); option.selected = true; control.append(option);
+          }
+        }
         else if (field.type === "multi-select") { for (const option of control.options) option.selected = Array.isArray(value) && value.includes(option.value); }
         else if (field.type === "select") control.value = String(value);
         else control.value = String(value);
@@ -136,6 +154,7 @@ const receiveChannel = event => {
       submit.textContent = "Try again";
     }
     ready = true; fields.disabled = !!attempt; submit.disabled = false;
+    if (!attempt) void loadRelations();
   });
 };
 window.addEventListener("message", receiveChannel);
@@ -144,12 +163,60 @@ const request = message => new Promise(resolve => {
     timer: setTimeout(() => finish({ uncertain: true }), 30000) };
   send();
 });
+const loadChoices = async (item, after = null) => {
+  const relation = item.field.relation;
+  const result = await request({ op: "backend.invoke", operation: relation.operation,
+    idempotencyKey: "choices:" + crypto.randomUUID(),
+    input: { limit: 50, ...(after ? { after } : {}), ...(item.search.value ? { search: item.search.value } : {}) } });
+  const page = result.page;
+  const scalar = value => relation.keyType === "number" ? typeof value === "number" && Number.isFinite(value) : typeof value === "string" && value.length > 0;
+  if (!record(page) || Object.keys(page).some(key => !["rows", "nextCursor"].includes(key)) || !Array.isArray(page.rows) || page.rows.length > 50 ||
+      !(page.nextCursor === null || record(page.nextCursor) && Object.keys(page.nextCursor).every(key => ["id", "value"].includes(key)) &&
+        ["string", "number"].includes(typeof page.nextCursor.id) && ["string", "number"].includes(typeof page.nextCursor.value)) ||
+      page.rows.some(row => !record(row) || Object.keys(row).some(key => !["id", "version", "values"].includes(key)) || !record(row.values) ||
+        Object.keys(row.values).some(key => ![relation.keyFieldId, relation.labelFieldId].includes(key)) || !scalar(row.values[relation.keyFieldId]) ||
+        !["string", "number"].includes(typeof row.values[relation.labelFieldId]))) {
+    item.error.textContent = "Choices could not load. Search to try again."; item.error.hidden = false; return;
+  }
+  const selected = [...item.control.selectedOptions].filter(option => option.value);
+  item.control.replaceChildren();
+  if (!item.control.multiple) { const empty = element("option", "Choose an option"); empty.value = ""; item.control.append(empty); }
+  for (const option of selected) item.control.append(option);
+  for (const row of page.rows) {
+    const key = String(row.values[relation.keyFieldId]);
+    if ([...item.control.options].some(option => option.value === key)) continue;
+    const option = element("option", String(row.values[relation.labelFieldId])); option.value = key; item.control.append(option);
+  }
+  item.cursor = page.nextCursor; item.more.hidden = item.cursor === null; item.error.hidden = true;
+};
+const loadRelations = async () => {
+  const related = controls.filter(item => item.field.relation);
+  if (!related.length) return;
+  busy = true; fields.disabled = true; submit.disabled = true;
+  for (const item of related) await loadChoices(item);
+  busy = false; fields.disabled = false; submit.disabled = false;
+};
+for (const item of controls.filter(item => item.field.relation)) {
+  const load = async more => {
+    if (!ready || busy || attempt || received) return;
+    busy = true; fields.disabled = true; submit.disabled = true;
+    await loadChoices(item, more ? item.cursor : null);
+    busy = false; fields.disabled = false; submit.disabled = false;
+  };
+  item.searchButton.addEventListener("click", () => void load(false));
+  item.more.addEventListener("click", () => void load(true));
+}
 const readDraft = () => {
-  const values = {}; let upload, invalid;
+  const values = {}, uploads = []; let invalid;
   for (const { field, control, error } of controls) {
     let value = field.type === "checkbox" ? control.checked : field.type === "multi-select" ? [...control.selectedOptions].map(option => option.value)
       : field.type === "attachment" ? control.files[0] || null : control.value || null;
+    if (field.relation) {
+      const convert = value => field.relation.keyType === "number" ? Number(value) : value;
+      value = field.relation.many ? [...control.selectedOptions].map(option => convert(option.value)) : control.value ? convert(control.value) : null;
+    }
     let message = "";
+    if (field.relation?.many && value.length > 100) message = "Choose 100 related records or fewer.";
     if (field.required && (value === null || (Array.isArray(value) && !value.length))) message = "Complete this required field.";
     if (field.type === "number" && value !== null) {
       value = Number(value);
@@ -163,7 +230,7 @@ const readDraft = () => {
     if (typeof value === "string" && value.length > 2000) message = "Use 2000 characters or fewer.";
     if (field.type === "attachment" && value !== null) {
       if (value.size < 1 || value.size > definition.uploadBytes) message = "Choose a nonempty file up to 5 MB.";
-      else upload = { fieldId: field.fieldId, file: value };
+      else uploads.push({ fieldId: field.fieldId, file: value });
     } else if (!(value === null && field.omitWhenEmpty)) values[field.fieldId] = value;
     if (message) {
       error.textContent = message; error.hidden = false; control.setCustomValidity(message);
@@ -171,10 +238,11 @@ const readDraft = () => {
     }
   }
   if (invalid) { invalid.focus(); invalid.reportValidity(); return; }
-  if (new TextEncoder().encode(JSON.stringify({ values })).byteLength > definition.inputBytes - 256) {
+  const boundedValues = { ...values, ...Object.fromEntries(uploads.map(upload => [upload.fieldId, "x".repeat(128)])) };
+  if (new TextEncoder().encode(JSON.stringify({ values: boundedValues })).byteLength > definition.inputBytes) {
     status.textContent = "Your response is too long. Shorten the answers and try again."; status.focus(); return;
   }
-  return { values, upload };
+  return { values, uploads };
 };
 const readFile = file => new Promise(resolve => {
   const reader = new FileReader();
@@ -206,10 +274,10 @@ form.addEventListener("submit", async event => {
   }
   busy = true; fields.disabled = true; submit.disabled = true; submit.textContent = "Submitting\u2026";
   status.textContent = "Sending your response. Keep this page open until it is confirmed.";
-  if (attempt.upload) {
-    const upload = attempt.upload;
+  while (attempt.uploads?.length) {
+    const upload = attempt.uploads[0];
     if (!upload.bytesBase64) upload.bytesBase64 = await readFile(upload.file);
-    const result = upload.bytesBase64 ? await request({ op: "backend.upload", idempotencyKey: attempt.key + ":file",
+    const result = upload.bytesBase64 ? await request({ op: "backend.upload", idempotencyKey: attempt.key + ":file:" + upload.fieldId,
       name: upload.file.name, contentType: upload.file.type || "application/octet-stream", bytesBase64: upload.bytesBase64 }) : { refused: true };
     if (!result.fileId) {
       busy = false; submit.disabled = false; submit.textContent = "Try again";
@@ -217,7 +285,7 @@ form.addEventListener("submit", async event => {
       else status.textContent = "The file upload is unconfirmed. Try again with the same file. Keep this page open.";
       status.focus(); return;
     }
-    attempt.values[upload.fieldId] = result.fileId; attempt.upload = undefined;
+    attempt.values[upload.fieldId] = result.fileId; attempt.uploads.shift();
   }
   const saved = await saveAttempt();
   if (!saved.saved) {
@@ -247,5 +315,6 @@ another.addEventListener("click", async () => {
   if (!await clearAttempt()) { busy = false; another.disabled = false; status.textContent = "The pending response is still stored. Try again to clear it."; status.focus(); return; }
   form.reset(); fields.disabled = false; form.hidden = false; intro.hidden = false; another.hidden = true; received = false; attempt = undefined;
   status.textContent = ""; submit.textContent = "Submit"; another.disabled = false; busy = false; (controls[0]?.control || submit).focus();
+  void loadRelations();
 });
 `;

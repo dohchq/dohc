@@ -10,6 +10,31 @@ Create a transactional Collection in the Data section, then choose **Create form
 Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
 
+Forms support multiple file fields and the full 128-field table envelope, without a separate form-field ceiling.
+Each file can contain up to 5 MiB. The form uploads files sequentially with separate retry identities.
+The combined response, including file references, must fit the 64 KiB operation input limit.
+The form checks this bound before uploading. It stores the completed response before invoking its create action.
+After an uncertain submission or reload, retrying uses that same stored response and request identity.
+
+The 128-field limit bounds table metadata, validation, generated controls, and operation field grants.
+It is the current tested product envelope, not a SQLite column limit or an unlimited-capacity claim.
+Dataset descriptors also remain bounded to 256 KiB, and generated operation source must fit its existing compilation limit.
+Larger answers can exhaust the input bound before all fields reach their individual text limits.
+
+For a related-record field, choose an approved public read action and its label under **Public choices**.
+The action must belong to the relation's target table and declare only its key and label fields.
+This grants the complete action, including its actual returned output. Declared fields do not enforce output filtering on authored code.
+Choose **Review action source** before sharing; never expose a private read action as a shortcut.
+The picker reads choices when opened, searches the selected action, and pages without a total count.
+Relations currently connect tables within one dataset. Separate datasets do not receive implicit access to each other.
+
+If no suitable action exists, expand **Create public choices**, select a public label, and choose **Review public choices**.
+This prepares a read action that returns every target record's key and selected label, with no other fields.
+Search matches only the selected label. An empty label displays the key.
+Review and approve the change, then reopen **Create form** and select the new action.
+The new action preserves existing custom source and records. Existing apps require review for the changed executable revision.
+Creating the action does not publish an app or add the action to existing app grants.
+
 Creating and compiling Collection actions currently requires the Windows x64 desktop build.
 The relay's Node runtime portability does not establish desktop creation support on other platforms.
 

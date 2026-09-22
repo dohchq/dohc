@@ -36,7 +36,7 @@ describe("CreateDatasetFormDialog", () => {
     const description = dataset(); description.tables[0]!.fields[1]!.required = false;
     const { onCreate } = setup({ dataset: description });
     for (const label of ["Name", "Note", "Receipt"]) fireEvent.click(screen.getByLabelText(label)); submit();
-    expect(screen.getByRole("alert").textContent).toContain("1 to 24"); expect(onCreate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain("1 to 128"); expect(onCreate).not.toHaveBeenCalled();
   });
   it("resets fields when choosing another approved public create action", async () => {
     const description = dataset(); description.operations.push({ ...description.operations[0]!, operationId: id(8), label: "Quick note", fieldIds: [id(5)] });
@@ -44,11 +44,11 @@ describe("CreateDatasetFormDialog", () => {
     expect(screen.queryByLabelText("Name")).toBeNull(); submit();
     await waitFor(() => expect(onCreate).toHaveBeenCalledOnce()); expect(onCreate.mock.calls[0]![0]).toMatchObject({ createOperationId: id(8), fieldIds: [id(5)] });
   });
-  it("refuses more than one file and required related-record fields", () => {
+  it("accepts multiple file fields and refuses relations without explicit public choices", async () => {
     const description = dataset(); description.tables[0]!.fields[2]!.type = "attachment";
-    const result = setup({ dataset: description }); submit(); expect(screen.getByRole("alert").textContent).toContain("1 file field");
+    const result = setup({ dataset: description }); submit(); await waitFor(() => expect(result.onCreate).toHaveBeenCalledOnce());
     const related = dataset(); related.tables[0]!.fields[1]!.type = "relation";
-    result.rerender(<CreateDatasetFormDialog {...result.props} dataset={related} />); submit(); expect(screen.getByRole("alert").textContent).toContain("related records"); expect(result.onCreate).not.toHaveBeenCalled();
+    result.rerender(<CreateDatasetFormDialog {...result.props} dataset={related} />); submit(); expect(screen.getByRole("alert").textContent).toContain("related-record"); expect(result.onCreate).toHaveBeenCalledOnce();
   });
   it("reports failures through Notices and retries the captured request", async () => {
     const failure = new Error("Source folder exists.");
@@ -59,6 +59,39 @@ describe("CreateDatasetFormDialog", () => {
     fireEvent.change(screen.getByLabelText("Form title"), { target: { value: "Changed draft" } });
     await act(async () => onError.mock.calls[0]![2]!());
     expect(onCreate.mock.calls[1]![0]).toEqual(onCreate.mock.calls[0]![0]);
+  });
+  it("requires explicit public choice selection, discloses the complete action, and exposes source review", async () => {
+    const description = dataset();
+    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    description.operations.push({ operationId: id(8), name: "choices", label: "Read choices", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3), id(4)] });
+    description.operations.push({ operationId: id(9), name: "private", label: "Private read", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4)] });
+    const onLoadSource = vi.fn(async () => ({ path: "approved/actions.js", source: "globalThis.operations = {};", sha256: "b".repeat(64) }));
+    const { onCreate } = setup({ dataset: description, onLoadSource });
+    fireEvent.click(screen.getByLabelText("Note")); submit();
+    expect(onCreate).not.toHaveBeenCalled(); expect(screen.getByRole("alert").textContent).toContain("public read");
+    expect(screen.queryByRole("option", { name: /Private read/ })).toBeNull();
+    expect(screen.getByText(/complete output/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Review action source" }));
+    await waitFor(() => expect(screen.getByText("globalThis.operations = {};")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Public choices for Note"), { target: { value: `${id(8)}:${id(4)}` } }); submit();
+    await waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    expect(onCreate.mock.calls[0]![0].relationChoices).toEqual([{ fieldId: id(5), operationId: id(8), labelFieldId: id(4) }]);
+  });
+  it("offers reviewed public-choice creation and preserves the selected label in retries", async () => {
+    const description = dataset();
+    description.tables[0]!.fields[2] = { ...description.tables[0]!.fields[2]!, type: "relation", relation: { datasetId: id(1), tableId: id(2), fieldId: id(3), many: false } };
+    const onPrepareChoices = vi.fn<NonNullable<CreateDatasetFormDialogProps["onPrepareChoices"]>>().mockRejectedValue(new Error("Host unavailable"));
+    const { onError } = setup({ dataset: description, onPrepareChoices });
+    fireEvent.click(screen.getByLabelText("Note"));
+    expect(screen.getByText(/every related record/)).toBeTruthy();
+    expect(screen.getByText(/Existing apps need review/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Public label for Note"), { target: { value: id(4) } });
+    fireEvent.click(screen.getByRole("button", { name: "Review public choices" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onPrepareChoices.mock.calls[0]![0]).toEqual({ fieldId: id(5), labelFieldId: id(4) });
+    fireEvent.change(screen.getByLabelText("Public label for Note"), { target: { value: id(3) } });
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(onPrepareChoices.mock.calls[1]![0]).toEqual(onPrepareChoices.mock.calls[0]![0]);
   });
   it("aborts stale work and drops its error after workspace changes", async () => {
     const pending = deferred<void>(); const onCreate = vi.fn<CreateDatasetFormDialogProps["onCreate"]>(() => pending.promise);
