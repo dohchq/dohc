@@ -499,3 +499,25 @@ it("transfers a lost-response attempt and replays it under the same publication 
     expect((await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true})).status).toBe(200);
   } finally {await archive.dispose();}
 });
+
+it("requires an owner and a current, acknowledged deletion review", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId=f.publish(); await f.http(`${f.path}/binding`,{publicationId,enabled:true});
+  const response=await f.http(`${f.path}/delete-preview?limit=1`); expect(response.status).toBe(200);
+  const preview=await response.json(); expect(preview).toMatchObject({name:"Requests",irreversible:true,apps:[{appId:publicationId}]});
+  const request={expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true};
+  for(const user of ["helper","stranger"]){
+    expect((await f.http(`${f.path}/delete-preview`,undefined,{authorization:`Bearer ${user}`})).status).toBe(404);
+    expect((await f.http(`${f.path}/delete`,request,{authorization:`Bearer ${user}`})).status).toBe(404);
+  }
+  expect((await f.http(`${f.path}/delete-preview?limit=101`)).status).toBe(400);
+  expect((await f.http(`${f.path}/delete-preview?limit=1&limit=2`)).status).toBe(400);
+  for(const invalid of [{...request,acknowledge:false},{...request,acknowledge:undefined},{...request,reviewToken:undefined},
+    {...request,expected:{...preview.cursor,datasetId:id(9)}},{...request,force:true}]) expect((await f.http(`${f.path}/delete`,invalid)).status).toBe(400);
+  await f.http(`${f.path}/invoke`,{revision:1,revisionSha256:revision.revisionSha256,operationId:id(5),input:{name:"Latest"},idempotencyKey:"latest"});
+  expect((await f.http(`${f.path}/delete`,request)).status).toBe(409);
+  const current=await (await f.http(`${f.path}/delete-preview`)).json();
+  expect(await (await f.http(`${f.path}/delete`,{expected:current.cursor,reviewToken:current.reviewToken,acknowledge:true})).json()).toEqual({deleted:true,datasetId:id(1)});
+  expect((await f.invoke()).status).not.toBe(200);
+  expect((await f.activate()).status).not.toBe(200);
+});

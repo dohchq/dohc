@@ -1,4 +1,4 @@
-import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetDeletePreview, DatasetDeleted } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -72,7 +72,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor};
       }
       if (input.action === "discardRecovery") { await host.discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareMigration", "approveMigration"].includes(input.action);
       const data = readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : host;
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
@@ -117,6 +117,19 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           return prepared;
         } finally { review.clear(); preparingMigrations--; }
       };
+      if (input.action === "deletePreview") {
+        if (!data.deletePreview) throw new Error("Collection deletion is unavailable. Update dohc and try again.");
+        const result = DatasetDeletePreview.parse(await data.deletePreview(input)); current();
+        if (result.cursor.workspaceId !== input.workspaceId || result.cursor.datasetId !== input.datasetId) throw new Error("This deletion review belongs to another Collection.");
+        return { kind: "delete-preview" as const, ...result };
+      }
+      if (input.action === "delete") {
+        if (input.expected.workspaceId !== input.workspaceId || input.expected.datasetId !== input.datasetId) throw new Error("This deletion belongs to another Collection.");
+        if (!data.deleteDataset) throw new Error("Collection deletion is unavailable. Update dohc and try again.");
+        const result = DatasetDeleted.parse(await data.deleteDataset(input)); current();
+        if (result.datasetId !== input.datasetId) throw new Error("dohc did not confirm this Collection deletion. Refresh the Collection.");
+        return { kind: "deleted" as const, ...result };
+      }
       if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
       if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
       if(input.action === "pendingAttempts") { if(!data.pendingAttempts)throw new Error("Pending submission review is unavailable."); const result=await data.pendingAttempts(input);current();return {kind:"pending-attempts" as const,...result}; }

@@ -357,7 +357,7 @@ export function parseCliArguments(
   const [family, verb, ...tokens] = global.tokens;
   if (family === "dataset") {
     const [json, ...rest] = tokens;
-    if (!verb || !json || rest.length) fail("usage: dohc dataset <list|describe|history|lifecycle|archive|restore|pendingAttempts|reconcileAttempt|cancelAttempt|create|prepare|approve|discard|invoke> '<JSON>'");
+    if (!verb || !json || rest.length) fail("usage: dohc dataset <list|describe|history|lifecycle|archive|restore|deletePreview|delete|pendingAttempts|reconcileAttempt|cancelAttempt|create|prepare|approve|discard|invoke> '<JSON>'");
     try {
       const value: unknown = JSON.parse(json);
       if (!value || typeof value !== "object" || Array.isArray(value) || ("action" in value && value.action !== verb)) fail("dataset arguments must match the requested action");

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "./remoteDataset";
+import { createRemoteDatasetData, createDatasetAuthorityRouter, resolveRemoteDatasetRevision } from "./remoteDataset";
+import type { OwnerDatasetData } from "./remoteDataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Responses", schemaPath: "private/schema.sql", operationsPath: "private/actions.js",
@@ -130,4 +131,36 @@ describe("remote Collection authority", () => {
     f.relay.mockResolvedValueOnce({ file, bytesBase64: Buffer.from("wrong").toString("base64") });
     await expect(f.data.file({ action: "file", workspaceId: "workspace", ...invocation, fileId: file.fileId })).rejects.toThrow(/different Collection file/);
   });
+});
+
+it("checks the deletion review scope, token, acknowledgment and returned identity", async () => {
+  const f = fixture(), preview = {cursor:approved.cursor, reviewToken:"c".repeat(64),name:"Responses",archived:false,generation:0,reason:"",apps:[],nextCursor:null,irreversible:true};
+  f.relay.mockResolvedValue(preview);
+  expect(await f.data.deletePreview!({datasetId:id(1),limit:1})).toEqual(preview);
+  expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/delete-preview?limit=1`);
+  f.relay.mockResolvedValue({...preview,cursor:{...approved.cursor,workspaceId:"other"}});
+  await expect(f.data.deletePreview!({datasetId:id(1)})).rejects.toThrow();
+  const value = {datasetId:id(1),expected:approved.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
+  f.relay.mockResolvedValue({deleted:true,datasetId:id(1)});
+  expect(await f.data.deleteDataset!(value)).toEqual({deleted:true,datasetId:id(1)});
+  expect(JSON.parse(String(f.relay.mock.calls.at(-1)![2].body))).toEqual({expected:approved.cursor,reviewToken:preview.reviewToken,acknowledge:true});
+  const calls = f.relay.mock.calls.length;
+  await expect(f.data.deleteDataset!({...value,expected:{...approved.cursor,datasetId:id(9)}})).rejects.toThrow();
+  await expect(f.data.deleteDataset!({...value,acknowledge:false as never})).rejects.toThrow();
+  expect(f.relay).toHaveBeenCalledTimes(calls);
+  f.relay.mockResolvedValue({deleted:true,datasetId:id(9)});
+  await expect(f.data.deleteDataset!(value)).rejects.toThrow(/did not confirm/);
+});
+it("does not fall back to a transferred local dataset when deletion is unavailable remotely", async () => {
+  const local = {deleteDataset:vi.fn(),deletePreview:vi.fn()} as unknown as OwnerDatasetData;
+  const remote = {deleteDataset:vi.fn(async()=>{throw Error("offline");}),deletePreview:vi.fn(async()=>{throw Error("offline");})} as unknown as OwnerDatasetData;
+  const data = createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  await expect(data.deletePreview!({datasetId:id(1)})).rejects.toThrow("offline");
+  await expect(data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true})).rejects.toThrow("offline");
+  expect(local.deletePreview).not.toHaveBeenCalled(); expect(local.deleteDataset).not.toHaveBeenCalled();
+});
+it.each(["credential","workspace","abort"])("discards a late deletion response after %s changes", async kind => {
+  const f = fixture();
+  f.relay.mockImplementation(async()=>{if(kind==="credential")f.switchCredential();if(kind==="workspace")f.switchWorkspace();if(kind==="abort")f.controller.abort();return {deleted:true,datasetId:id(1)};});
+  await expect(f.data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true})).rejects.toThrow();
 });

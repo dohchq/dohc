@@ -158,3 +158,22 @@ it("keeps recovery owner-only and rejects mismatched approval scope",async()=>{
  await expect(f.handler("window",{workspaceId:"workspace",action:"prepareRecovery",sourcePath:"C:/private/backup.dohc-recovery"})).rejects.toThrow(/original workspace/);
  expect(f.host.prepareRecovery).toHaveBeenCalledOnce();
 });
+
+it("routes deletion to current authority and rejects stale replies or another Collection cursor", async () => {
+  const cursor = {workspaceId:"workspace",datasetId,hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
+  const preview = {cursor,reviewToken:"c".repeat(64),name:"Responses",archived:false,generation:0,reason:"",apps:[],nextCursor:null,irreversible:true};
+  const remote = {deletePreview:vi.fn(async()=>preview),deleteDataset:vi.fn(async()=>({deleted:true,datasetId}))} as unknown as OwnerDatasetData;
+  const f = fixture(remote), request = {action:"delete",workspaceId:"workspace",datasetId,expected:cursor,reviewToken:preview.reviewToken,acknowledge:true};
+  expect(await f.handler("window",{action:"deletePreview",workspaceId:"workspace",datasetId})).toEqual({kind:"delete-preview",...preview});
+  await expect(f.handler("window",{...request,expected:{...cursor,workspaceId:"other"}})).rejects.toThrow(/another Collection/);
+  expect(remote.deleteDataset).not.toHaveBeenCalled();
+  expect(await f.handler("window",request)).toEqual({kind:"deleted",deleted:true,datasetId});
+  vi.mocked(remote.deleteDataset!).mockImplementation(async()=>{f.stale();return {deleted:true,datasetId};});
+  await expect(f.handler("window",request)).rejects.toThrow("stale workspace");
+});
+it("refuses shared-view deletion before reaching owner data", async () => {
+  const remote = {deleteDataset:vi.fn(),deletePreview:vi.fn()} as unknown as OwnerDatasetData;
+  const f = fixture(remote); f.workspace.shareView={shareId:"shared"};
+  await expect(f.handler("window",{action:"deletePreview",workspaceId:"workspace",datasetId})).rejects.toThrow(/original workspace/);
+  expect(remote.deletePreview).not.toHaveBeenCalled();
+});

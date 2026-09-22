@@ -8,7 +8,10 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}
 const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:"equipment/schema.sql",operationsPath:"equipment/actions.ts",
   tables:[{tableId:id(2),name:"Equipment",sqlName:"equipment",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"text",required:true,unique:true}]}],
   operations:[{operationId:id(4),name:"list",label:"List equipment",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3)]}]};
+const cursor = {workspaceId:"workspace",datasetId:id(1),hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
 const requests: unknown[] = [
+  {action:"deletePreview",workspaceId:"workspace",datasetId:id(1),limit:10},
+  {action:"delete",workspaceId:"workspace",datasetId:id(1),expected:cursor,reviewToken:"c".repeat(64),acknowledge:true},
   {action:"cancelAttempt",workspaceId:"workspace",datasetId:id(1),reference:"b".repeat(64),acknowledge:true},
   {action:"pendingAttempts",workspaceId:"workspace",datasetId:id(1),after:0,limit:10},
   {action:"reconcileAttempt",workspaceId:"workspace",datasetId:id(1),reference:"b".repeat(64),acknowledge:true},
@@ -74,4 +77,16 @@ describe("dataset CLI", () => {
     const saved = await executeCli({argv:["dataset","export",JSON.stringify({workspaceId:"workspace",datasetId:id(1),savePath:"C:/private/backup.dohc-recovery"})],request:send});
     expect(saved.exitCode).toBe(0); expect(saved.stdout).toContain("savedPath");
   });
+});
+
+it("requires an exact deletion review and explicit acknowledgment before transport", async () => {
+  const request = {workspaceId:"workspace",datasetId:id(1),expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
+  const send = vi.fn(async () => ({kind:"deleted",deleted:true,datasetId:id(1)}));
+  for (const invalid of [{...request,acknowledge:false},{...request,acknowledge:undefined},{...request,expected:undefined},
+    {...request,expected:{...cursor,digest:"invalid"}},{...request,reviewToken:undefined},{...request,force:true}]) {
+    expect((await executeCli({argv:["dataset","delete",JSON.stringify(invalid)],request:send})).exitCode).toBe(1);
+  }
+  expect(send).not.toHaveBeenCalled();
+  expect((await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send})).exitCode).toBe(0);
+  expect(() => parseCliResult("dataset",{kind:"deleted",deleted:true,datasetId:id(1),records:[]})).toThrow();
 });

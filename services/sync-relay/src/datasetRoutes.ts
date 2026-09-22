@@ -18,7 +18,7 @@ export interface DatasetRoute {
   datasetId?: string;
   transferId?: string;
   named?: boolean;
-  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt";
+  action: "list" | "activate" | "describe" | "artifacts" | "invoke" | "migrate" | "permissions" | "grant" | "binding" | "upload" | "file" | "history" | "import" | "export" | "lifecycle" | "archive" | "restore" | "pending-attempts" | "reconcile-attempt" | "cancel-attempt" | "delete-preview" | "delete";
 }
 const headers = {"cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin", "x-content-type-options": "nosniff"};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -88,13 +88,13 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         return await response(() => host.importRecovery(auth, {...scope, manifestSha256, sourceCursor, stream: stream(), activate: true, signal}));
       } finally {release();}
     }
-    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts"].includes(route.action);
+    const read = ["list", "describe", "artifacts", "permissions", "history", "lifecycle", "pending-attempts", "delete-preview"].includes(route.action);
     if (request.method !== (read ? "GET" : "POST")) throw relayError("method_not_allowed");
     const query = new URL(request.url).searchParams;
     const allowedQuery = route.action === "history" ? ["beforeRevision", "limit"]
       : route.action === "list" ? ["after", "limit", "includeArchived"]
       : route.action === "describe" ? ["includeArchived"]
-      : route.action === "permissions" || route.action === "lifecycle" || route.action === "pending-attempts" ? ["after", "limit"] : [];
+      : route.action === "permissions" || route.action === "lifecycle" || route.action === "pending-attempts" || route.action === "delete-preview" ? ["after", "limit"] : [];
     if ([...query.keys()].some(key => !allowedQuery.includes(key)) || allowedQuery.some(key => query.getAll(key).length > 1) ||
       (query.has("includeArchived") && !["true", "false"].includes(query.get("includeArchived")!))) throw badRequest("Invalid dataset query.");
     const signal = AbortSignal.any([request.signal, storage.unavailable, AbortSignal.timeout(30_000)]);
@@ -113,6 +113,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         const includeArchived = query.get("includeArchived") === "true";
         if (route.action === "list") return host.list(auth, {workspaceId: route.workspaceId, ...page, includeArchived});
         if (route.action === "describe") return host.describe(auth, {...scope, includeArchived});
+        if (route.action === "delete-preview") {
+          if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
+          if (page.limit !== undefined && page.limit > 100) throw badRequest("Invalid deletion preview page size.");
+          return host.deletePreview(auth, {...scope, ...page});
+        }
         if (route.action === "lifecycle") return host.lifecycle(auth, {...scope, ...page});
         if (route.action === "artifacts") return host.approvedArtifacts(auth, scope);
         if (route.action === "permissions") return host.permissions(auth, {...scope, ...page});
@@ -123,6 +128,15 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           if (body.acknowledge !== true) throw badRequest("Attempt reconciliation requires acknowledgment.");
           const input = {...scope, reference: digest(body.reference), acknowledge: true as const};
           return route.action === "cancel-attempt" ? host.cancelAttempt(auth, input) : host.reconcileAttempt(auth, input);
+        }
+        if (route.action === "delete") {
+          if (!storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId)) throw notFound();
+          const body = record(raw, ["expected", "reviewToken", "acknowledge"]);
+          if (body.acknowledge !== true) throw badRequest("Permanent deletion requires acknowledgment.");
+          const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
+          if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
+          return host.deleteDataset(auth, {...scope, acknowledge: true, reviewToken: digest(body.reviewToken), expected: {...scope, hostEpoch: text(expected.hostEpoch),
+            approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
         }
         if (route.action === "archive" || route.action === "restore") {
           record(raw, []);
