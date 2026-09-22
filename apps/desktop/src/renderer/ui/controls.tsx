@@ -27,15 +27,18 @@ const compactSecondaryButtonClass =
   "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
 
 /** Filled brand-accent CTA — at most one per surface. */
-export function PrimaryButton({ className, type, size, ...rest }: ActionButtonProps) {
-  return (
-    <button
-      type={type ?? "button"}
-      className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
-      {...rest}
-    />
-  );
-}
+export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
+  function PrimaryButton({ className, type, size, ...rest }, ref) {
+    return (
+      <button
+        ref={ref}
+        type={type ?? "button"}
+        className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
+        {...rest}
+      />
+    );
+  },
+);
 
 /** Quiet bordered action — the default button. */
 export function SecondaryButton({ className, type, size, ...rest }: ActionButtonProps) {

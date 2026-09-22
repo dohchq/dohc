@@ -64,7 +64,7 @@ function PublicationControl(props: PublicationProps) {
     trigger.current?.focus();
   };
   return <>
-    {props.triggerLabel ? <button ref={trigger} type="button" className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90" onClick={() => setOpen(true)}>{props.triggerLabel}</button> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
+    {props.triggerLabel ? <PrimaryButton ref={trigger} onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton ref={trigger} data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
     </IconButton>}
     {open ? <PublicationDialog {...props} onClose={close} /> : null}
