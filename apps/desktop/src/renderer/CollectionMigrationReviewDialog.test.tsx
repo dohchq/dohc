@@ -51,5 +51,12 @@ describe("CollectionMigrationReviewDialog", () => {
   it("discards a prepared review before closing", async () => {
     const { onDiscard, onClose } = setup(); fireEvent.change(screen.getByLabelText("Migration file"), { target: { value: "migrations/002.sql" } }); fireEvent.click(screen.getByRole("button", { name: "Review change" })); await screen.findByText("Registrations · Receipt"); fireEvent.click(screen.getByRole("button", { name: "Discard review" })); await waitFor(() => expect(onDiscard).toHaveBeenCalledWith({ workspaceId: "workspace-a", preparationId: id(10) }, expect.any(AbortSignal))); expect(onClose).toHaveBeenCalledOnce();
   });
+  it("shows a Collection rename in the captured review", () => {
+    const initialPreparation=prep();initialPreparation.revision.definition.name="Community tournament";
+    setup({initialPreparation,generatedChange:true});
+    expect(screen.getByText("Collection name changed")).toBeTruthy();
+    expect(screen.getByText("Fundraiser")).toBeTruthy();
+    expect(screen.getAllByText("Community tournament").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("Collection definition")).toBeNull();
+  });
 });
-

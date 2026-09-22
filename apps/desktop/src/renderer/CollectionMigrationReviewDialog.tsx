@@ -30,6 +30,7 @@ function fieldSummary(field: DatasetField): string {
 function validPath(path: string): boolean { return isShareablePath(path) && /^[A-Za-z0-9_@./-]+$/.test(path) && path.length <= 1024; }
 function changes(before: DatasetRevision, after: DatasetRevision): Change[] {
   const output: Change[] = [], beforeTables = new Map(before.definition.tables.map(table => [table.tableId, table])), afterTables = new Map(after.definition.tables.map(table => [table.tableId, table]));
+  if (before.definition.name !== after.definition.name) output.push({ kind: "changed", table: after.definition.name, field: "", detail: "Collection name changed", before: before.definition.name, after: after.definition.name });
   for (const table of after.definition.tables) {
     const old = beforeTables.get(table.tableId);
     if (!old) { output.push({ kind: "added", table: table.name, field: "", detail: "Table added" }); for (const field of table.fields) output.push({ kind: "added", table: table.name, field: field.name, detail: "Field added", after: fieldSummary(field) }); continue; }
