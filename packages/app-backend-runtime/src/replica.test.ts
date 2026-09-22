@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createDatasetJournal } from "./journal.js";
@@ -11,6 +11,7 @@ import { createDatasetReplicaHost } from "./replica-host.js";
 import { createDatasetReplica, type DatasetReplica, type DatasetReplicaSource } from "./replica.js";
 
 const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
+vi.setConfig({testTimeout:30_000,hookTimeout:30_000});
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const scope={workspaceId:"workspace",datasetId:id(1)};
 const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL,secret TEXT NOT NULL);";

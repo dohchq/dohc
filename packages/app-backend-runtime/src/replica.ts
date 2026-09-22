@@ -32,7 +32,9 @@ export async function createDatasetReplica(options: {
   await mkdir(root, { recursive: true });
   if ((await lstat(root)).isSymbolicLink() || resolve(await realpath(root)) !== root) throw Error("Collection copy storage changed.");
   const db = new DatabaseSync(join(root, "replica.sqlite"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS copy(id INTEGER PRIMARY KEY CHECK(id=1),binding TEXT NOT NULL,state TEXT NOT NULL) STRICT;");
+  try {
+    db.exec("PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS copy(id INTEGER PRIMARY KEY CHECK(id=1),binding TEXT NOT NULL,state TEXT NOT NULL) STRICT; BEGIN IMMEDIATE; COMMIT;");
+  } catch(error) {db.close();throw error;}
   const binding = hash(JSON.stringify([options.scope, options.ownerKey, new URL(options.origin).origin]));
   const maximum = options.maxCheckpointBytes ?? 128 * CHUNK;
   let closed = false, revoked = false, pending: Promise<unknown> = Promise.resolve();
@@ -95,6 +97,15 @@ export async function createDatasetReplica(options: {
     const kept=read()?.snapshot;
     for(const name of await readdir(root)) if (/^[a-f0-9-]{36}\.sqlite$/.test(name) && name!==kept) await rm(join(root,name),{force:true});
   }
+  try {
+    read();
+    for(const name of await readdir(root))if(/^(work|read)-[A-Za-z0-9]{6}$/.test(name)){
+      const path=join(root,name),info=await lstat(path);
+      if(!info.isDirectory()||info.isSymbolicLink()||resolve(await realpath(path))!==path)throw Error("Collection copy storage changed.");
+      await rm(path,{recursive:true,force:true});
+    }
+    await cleanup();
+  } catch(error){db.close();throw error;}
   return {
     state(): DatasetReplicaState|null { const value=read(); return value ? {cursor:value.cursor,checkpoint:value.checkpoint,savedAtMs:value.savedAtMs} : null; },
     catchUp(source: DatasetReplicaSource, signal?: AbortSignal) {
@@ -104,16 +115,17 @@ export async function createDatasetReplica(options: {
         if(!sameScope(through,options.scope)||initial.kind!=="checkpoint"||!sameEpoch(initial.cursor,through)||initial.cursor.revision>through.revision||initial.byteLength>maximum) throw Error("The server returned another Collection checkpoint.");
         let saved=read();
         if(saved && saved.cursor.revision>through.revision) throw Error("The sharing server is behind this Collection copy.");
+        if(saved && equalRecoveryCursor(saved.cursor,through)) return {cursor:saved.cursor,checkpoint:saved.checkpoint,savedAtMs:saved.savedAtMs};
         const scratch=await mkdtemp(join(root,"work-"));
-        let active:PersistentAppBackend|undefined, checkpoint=saved?.checkpoint??initial, cursor=saved?.cursor??initial.cursor;
+        let active:PersistentAppBackend|undefined,activeDirectory:string|undefined, checkpoint=saved?.checkpoint??initial, cursor=saved?.cursor??initial.cursor;
         try {
           if(saved) {
             if(await digestFile(join(root,saved.snapshot),signal)!==saved.sha256) throw Error("The Collection copy changed. Download it again.");
-            const directory=await mkdtemp(join(scratch,"worker-")); active=await worker(checkpoint,cursor,join(root,saved.snapshot),directory);
+            activeDirectory=await mkdtemp(join(scratch,"worker-")); active=await worker(checkpoint,cursor,join(root,saved.snapshot),activeDirectory);
           } else {
             checkpoint=initial;cursor=initial.cursor;
-            const path=await download(source,checkpoint,scratch,signal),directory=await mkdtemp(join(scratch,"worker-"));
-            active=await worker(checkpoint,cursor,path,directory); saved=await persist(active,checkpoint,cursor,signal);
+            const path=await download(source,checkpoint,scratch,signal);activeDirectory=await mkdtemp(join(scratch,"worker-"));
+            active=await worker(checkpoint,cursor,path,activeDirectory);await rm(path,{force:true});saved=await persist(active,checkpoint,cursor,signal);await cleanup();
           }
           while(!equalRecoveryCursor(cursor,through)) {
             const page=await source.page({through,after:cursor,limit:32,signal}); authorize(signal);
@@ -124,7 +136,9 @@ export async function createDatasetReplica(options: {
               if(record.kind==="checkpoint") {
                 if(!record.previous||!equalRecoveryCursor(record.previous,cursor)||record.byteLength>maximum) throw Error("The Collection checkpoint does not continue this copy.");
                 const path=await download(source,record,scratch,signal),directory=await mkdtemp(join(scratch,"worker-"));
-                const next=await worker(record,record.cursor,path,directory); await active.close();active=next;checkpoint=record;
+                const next=await worker(record,record.cursor,path,directory);await rm(path,{force:true});await active.close();
+                const previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
+                if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});
               } else {
                 if(!sameEpoch(record.cursor,cursor)||record.previousDigest!==cursor.digest) throw Error("The Collection writer changed without a checkpoint.");
                 const bytes=new Uint8Array(record.byteLength);let offset=0;
@@ -135,7 +149,7 @@ export async function createDatasetReplica(options: {
               }
               cursor=record.cursor;
             }
-            saved=await persist(active,checkpoint,cursor,signal);
+            saved=await persist(active,checkpoint,cursor,signal);await cleanup();
           }
           await cleanup();return {cursor: saved!.cursor,checkpoint:saved!.checkpoint,savedAtMs:saved!.savedAtMs};
         } finally {await active?.close();await rm(scratch,{recursive:true,force:true});}
