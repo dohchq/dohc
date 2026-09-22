@@ -299,6 +299,33 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       onConfirm={() => { deleteResult.current?.(true); deleteResult.current = null; setDeletion(null); }} />}
     {creatingForm && <CreateDatasetFormDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId}
       onClose={() => setCreatingForm(false)} onError={onError}
+      onLoadPreview={loadMigrationPreview}
+      onPrepareChoices={async (input, signal) => {
+        signal.throwIfAborted();
+        const sequence = request.current;
+        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetId,
+          revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId });
+        signal.throwIfAborted();
+        if (sequence !== request.current) throw Error("The Collection changed. Prepare the choices again.");
+        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare these choices. Try again.");
+        return result;
+      }}
+      onApproveChoices={async (input, signal) => {
+        signal.throwIfAborted();
+        const sequence = request.current;
+        const result = await bridge().dataset({ ...input, action: "approveMigration" });
+        signal.throwIfAborted();
+        if (sequence !== request.current) throw Error("The Collection changed. Refresh to check its choices.");
+        if (result.kind !== "migrated") throw Error("dohc could not confirm these choices. Refresh the Collection.");
+        setCreatingForm(false);
+        await refresh();
+      }}
+      onDiscardChoices={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "discardMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
+      }}
       onCreate={async (input, signal) => {
         signal.throwIfAborted();
         const sequence = request.current;
