@@ -78,6 +78,8 @@ export interface AppDatasetBinding {
   revision: number;
   revisionSha256: string;
   operationIds: string[];
+  /** Generated forms may narrow the writable fields of a create operation. */
+  createFields?: Array<{ operationId: string; fieldIds: string[] }>;
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
@@ -285,11 +287,20 @@ export function parseDatasetRevision(value: unknown): DatasetRevision {
 }
 /** Syntax validation only. A reference is not an owner approval or an invocation grant. */
 export function parseDatasetBindingReference(value: unknown): AppDatasetBinding {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"]);
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"], ["createFields"]);
   if (row.kind !== "dataset") fail();
   const result: AppDatasetBinding = { kind: "dataset", datasetId: uuid(row.datasetId), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     operationIds: boundedArray(row.operationIds, DATASET_MAX_OPERATIONS, 1).map(uuid) };
   unique(result.operationIds);
+  if (Object.hasOwn(row, "createFields")) {
+    result.createFields = boundedArray(row.createFields, DATASET_MAX_OPERATIONS, 1).map(value => {
+      const entry = record(value, ["operationId", "fieldIds"]);
+      const restriction = { operationId: uuid(entry.operationId), fieldIds: boundedArray(entry.fieldIds, DATASET_MAX_FIELDS).map(uuid).sort() };
+      if (!result.operationIds.includes(restriction.operationId)) fail();
+      unique(restriction.fieldIds); return restriction;
+    }).sort((a,b) => a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0);
+    unique(result.createFields.map(entry => entry.operationId));
+  }
   return result;
 }
 export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
@@ -298,12 +309,16 @@ export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRev
   if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
   const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
   if (result.operationIds.some(id => !operations.has(id))) fail();
+  for (const restriction of result.createFields ?? []) {
+    const operation = approved.definition.operations.find(operation => operation.operationId === restriction.operationId);
+    if (!operation || operation.kind !== "create" || restriction.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
+  }
   return result;
 }
 
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
-  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"]);
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"], ["createFields"]);
   const { operations: values, ...reference } = row;
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {

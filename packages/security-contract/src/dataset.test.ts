@@ -80,6 +80,17 @@ describe("dataset publication binding", () => {
 });
 
 describe("dataset definition", () => {
+  it("narrows create fields in approved app bindings and preserves them in publication verification", () => {
+    const approved = revision(), base = binding(approved);
+    const restricted = { ...base, createFields: [{ operationId: id(5), fieldIds: [id(4)] }] };
+    expect(parseDatasetBinding(restricted, approved)).toEqual(restricted);
+    const capability = resolveAppDatasetCapability(restricted, approved);
+    expect(verifyAppDatasetCapability(capability, approved).createFields).toEqual(restricted.createFields);
+    expect(() => parseDatasetBinding({ ...base, createFields: [{ operationId: id(6), fieldIds: [id(4)] }] }, approved)).toThrow();
+    expect(() => parseDatasetBinding({ ...base, createFields: [{ operationId: id(5), fieldIds: [id(3)] }] }, approved)).toThrow();
+    expect(() => parseDatasetBindingReference({ ...base, createFields: [{ operationId: id(5), fieldIds: [id(4),id(4)] }] })).toThrow();
+    expect(() => parseDatasetBindingReference({ ...base, operationIds: [id(6)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] })).toThrow();
+  });
   it("parses grant-filtered descriptions without accepting SQL columns or hidden fields", () => {
     const rev = revision(), op = rev.definition.operations[1]!;
     const description = { datasetId: rev.datasetId, name: rev.definition.name, revision: rev.revision, revisionSha256: rev.revisionSha256,

@@ -230,3 +230,16 @@ it("commits app publication with its binding and rolls both back on failure", as
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(1);
   expect(f.host.permissions("owner", scope).permissions).toHaveLength(1);
 });
+
+it("enforces a form's create-field subset before operation execution", async () => {
+  const source = operationSource.replace("input.value,'private'",`input.values['${id(4)}'],'private'`);
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource: source });
+  const f = await fixture();await f.host.activate("owner",{workspaceId:"workspace",revision,schemaSql,operationSource:source});
+  f.host.setBinding("owner",{...scope,appId:"form",binding:{...f.binding(),revisionSha256:revision.revisionSha256,createFields:[{operationId:id(6),fieldIds:[id(4)]}]}});
+  const invoke=(input:any)=>f.host.invoke("friend",{...scope,revision:1,revisionSha256:revision.revisionSha256,operationId:id(6),input,idempotencyKey:"form",access:{kind:"app",appId:"form"}});
+  for(const input of [{value:"bypass"},{values:{[id(4)]:"good",[id(5)]:"private"}},{values:{[id(4)]:"good"},sql:"bypass"},{values:[]}]) {
+    await expect(invoke(input)).rejects.toThrow("cannot submit those fields");
+  }
+  expect(f.journal.head(scope,()=>{}).cursor.revision).toBe(0);
+  await expect(invoke({values:{[id(4)]:"allowed"}})).resolves.toMatchObject({result:{accepted:true},revision:1});
+});

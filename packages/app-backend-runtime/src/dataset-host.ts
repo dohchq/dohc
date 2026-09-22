@@ -66,7 +66,7 @@ export interface MigrateDatasetInput extends Omit<ActivateDatasetInput, "capacit
   migrationSql: string;
 }
 type StoredGrant = DatasetDataGrant;
-type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean };
+type Permission = { authority: DatasetAuthority; revision: DatasetRevision; operations: DatasetOperation[]; token: string; discover: boolean; createFields?: AppDatasetBinding["createFields"] };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function text(value: string, maximum = 256): string {
   if (typeof value !== "string" || !value.length || value.includes("\0") || Buffer.byteLength(value) > maximum) throw new DatasetHostError("invalid", "Invalid dataset identifier.");
@@ -146,7 +146,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
   }
   function permissions(context: Context, key: DatasetScope, through: DatasetAccess): Permission {
     const verified = authority(context, key, through), approved = revision(key);
-    let operations = approved.definition.operations, token = "owner", discover = true;
+    let operations = approved.definition.operations, token = "owner", discover = true, createFields: AppDatasetBinding["createFields"];
     if (through.kind === "app") {
       const row = db.prepare("SELECT binding_json,token FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?").get(key.workspaceId, key.datasetId, through.appId);
       if (!row) denied();
@@ -165,6 +165,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       operations = effectiveDatasetOperations(binding, approved, verified.caller)
         .filter(operation => verified.caller.kind === "owner" || operation.access !== "helper" || allowedHelperIds.has(operation.operationId));
       token = JSON.stringify([row.token, dataToken]); discover = false;
+      createFields = binding.createFields;
     } else if (verified.caller.kind !== "owner") {
       const row = db.prepare("SELECT grant_json,token FROM dohc_dataset_data_grants WHERE workspace_id=? AND dataset_id=? AND principal_key=?").get(key.workspaceId, key.datasetId, verified.principalKey);
       if (!row) denied();
@@ -175,7 +176,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         revisionSha256: approved.revisionSha256, operationIds: grant.operationIds }, approved, verified.caller);
       token = String(row.token); discover = grant.discover;
     }
-    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token])), discover };
+    return { authority: verified, revision: approved, operations, token: hash(JSON.stringify([verified, approved.revisionSha256, token])), discover, createFields };
   }
   function describePermission(permission: Permission): DatasetDescription {
     const { revision: approved, operations } = permission;
@@ -345,6 +346,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (raw.revision !== permitted.revision.revision || raw.revisionSha256 !== permitted.revision.revisionSha256) throw new DatasetHostError("conflict", "Dataset revision is stale. Reload it before retrying.");
       const operation = permitted.operations.find(operation => operation.operationId === operationId);
       if (!operation) denied();
+      const restricted = permitted.createFields?.find(entry => entry.operationId === operationId);
+      if (restricted) {
+        if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input,"values") ||
+          !input.values || typeof input.values !== "object" || Array.isArray(input.values) || Object.keys(input.values).some(fieldId => !restricted.fieldIds.includes(fieldId))) {
+          throw new DatasetHostError("not_authorized", "This form cannot submit those fields.");
+        }
+      }
       const authorize = () => {
         const current = permissions(context, key, through);
         if (current.token !== permitted.token || !current.operations.some(candidate => candidate.operationId === operationId)) denied();
