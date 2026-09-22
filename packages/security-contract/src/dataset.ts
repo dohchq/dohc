@@ -79,6 +79,10 @@ export interface AppDatasetBinding {
   revisionSha256: string;
   operationIds: string[];
 }
+/** Public dispatch metadata, derived from the approved revision rather than app source. */
+export interface AppDatasetCapability extends AppDatasetBinding {
+  operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly">>;
+}
 
 const ids = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sqlNames = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -234,17 +238,56 @@ export function parseDatasetRevision(value: unknown): DatasetRevision {
   if (result.datasetId !== result.definition.datasetId) fail();
   return result;
 }
-export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
-  const approved = parseDatasetRevision(approvedRevision);
+/** Syntax validation only. A reference is not an owner approval or an invocation grant. */
+export function parseDatasetBindingReference(value: unknown): AppDatasetBinding {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds"]);
   if (row.kind !== "dataset") fail();
   const result: AppDatasetBinding = { kind: "dataset", datasetId: uuid(row.datasetId), revision: revision(row.revision), revisionSha256: digest(row.revisionSha256),
     operationIds: boundedArray(row.operationIds, DATASET_MAX_OPERATIONS, 1).map(uuid) };
-  if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
   unique(result.operationIds);
+  return result;
+}
+export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision): AppDatasetBinding {
+  const approved = parseDatasetRevision(approvedRevision);
+  const result = parseDatasetBindingReference(value);
+  if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
   const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
   if (result.operationIds.some(id => !operations.has(id))) fail();
   return result;
+}
+
+/** Parse transport metadata. The host must verify it against its approved catalog. */
+export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
+  const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations"]);
+  const { operations: values, ...reference } = row;
+  const binding = parseDatasetBindingReference(reference);
+  const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {
+    const item = record(value, ["operationId", "name", "access", "readOnly"]);
+    const name = text(item.name, 64);
+    if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !["link", "helper", "owner"].includes(item.access as string)) fail();
+    return { operationId: uuid(item.operationId), name, access: item.access as DatasetOperation["access"], readOnly: boolean(item.readOnly) };
+  }).sort((a, b) => a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0);
+  unique(operations.map(operation => operation.operationId));
+  unique(operations.map(operation => operation.name));
+  if (operations.length !== binding.operationIds.length || operations.some(operation => !binding.operationIds.includes(operation.operationId))) fail();
+  return { ...binding, operationIds: [...binding.operationIds].sort(), operations };
+}
+
+/** The caller supplies a revision obtained from the owner's approved host catalog. */
+export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
+  const approved = parseDatasetRevision(approvedRevision);
+  const binding = parseDatasetBinding(value, approved);
+  const selected = new Set(binding.operationIds);
+  return parseAppDatasetCapability({ ...binding, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
+    .map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
+}
+
+export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision): AppDatasetCapability {
+  const parsed = parseAppDatasetCapability(value);
+  const { operations: _, ...binding } = parsed;
+  const expected = resolveAppDatasetCapability(binding, approvedRevision);
+  if (JSON.stringify(parsed) !== JSON.stringify(expected)) fail();
+  return expected;
 }
 
 /** Caller must be derived from current host credentials, never request JSON. */

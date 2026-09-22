@@ -3,6 +3,8 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 import { SHA256_HEX_PATTERN } from "./wirePatterns";
 import { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 import { parseAppBackendCapability, type AppBackendCapability } from "./appBackend";
+import { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
+export { parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppBackendCapability, type AppBackendCapability } from "./appBackend";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
 export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
@@ -33,7 +35,7 @@ export interface AppPublicationCandidate {
   inputs: AppPublicationFile[];
   dependencies: string[];
   files: Array<AppPublicationFile & { contentType: string }>;
-  capabilities: Array<AppCollectionCapability | AppBackendCapability>;
+  capabilities: Array<AppCollectionCapability | AppBackendCapability | AppDatasetCapability>;
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
@@ -102,7 +104,7 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     if (!seen.has(target)) throw new Error("Publication package is outside selected inputs.");
     return [name, target] as const;
   }).sort(([a], [b]) => compare(a, b)));
-  const capabilities = row.capabilities.map(value => value?.kind === "app-backend" ? parseAppBackendCapability(value) : parseAppCollectionCapability(value));
+  const capabilities = row.capabilities.map(value => value?.kind === "dataset" ? parseAppDatasetCapability(value) : value?.kind === "app-backend" ? parseAppBackendCapability(value) : parseAppCollectionCapability(value));
   const backend = capabilities.find(capability => capability.kind === "app-backend");
   const outputs = new Set<string>();let total = 0;
   const files = row.files.map(value => {

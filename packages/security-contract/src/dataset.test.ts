@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent,
   effectiveDatasetOperations, parseDatasetBinding, parseDatasetDefinition, parseDatasetRevision,
+  parseDatasetBindingReference, parseAppDatasetCapability, resolveAppDatasetCapability, verifyAppDatasetCapability,
   type AppDatasetBinding, type DatasetDefinition, type DatasetField, type DatasetRevision,
 } from "./dataset";
 
@@ -31,6 +32,52 @@ function revision(): DatasetRevision {
 function binding(rev = revision()): AppDatasetBinding {
   return { kind: "dataset", datasetId: rev.datasetId, revision: rev.revision, revisionSha256: rev.revisionSha256, operationIds: rev.definition.operations.map(operation => operation.operationId) };
 }
+
+describe("dataset publication binding", () => {
+  it("derives only selected dispatch metadata from the approved revision", () => {
+    const approved = revision();
+    const requested = { ...binding(approved), operationIds: [id(6), id(5)] };
+    const capability = resolveAppDatasetCapability(requested, approved);
+    expect(capability.operations).toEqual([
+      { operationId: id(5), name: "submit", access: "link", readOnly: false },
+      { operationId: id(6), name: "list", access: "helper", readOnly: true },
+    ]);
+    expect(capability).not.toHaveProperty("definition");
+    expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
+    requested.operationIds.push(id(7));
+    expect(capability.operationIds).toEqual([id(5), id(6)]);
+  });
+
+  it.each(["source", "schemaSql", "operations", "dataPath"])("refuses %s supplied by a consumer binding", key => {
+    expect(() => parseDatasetBindingReference({ ...binding(), [key]: "replacement" })).toThrow();
+  });
+
+  it.each(["source", "schemaSql", "dataPath"])("refuses embedded %s in publication metadata", key => {
+    const approved = revision();
+    expect(() => parseAppDatasetCapability({ ...resolveAppDatasetCapability(binding(), approved), [key]: "replacement" })).toThrow();
+  });
+
+  it.each(["name", "access", "readOnly"])("rejects forged %s metadata even when transport syntax is valid", key => {
+    const approved = revision();
+    const capability = resolveAppDatasetCapability(binding(approved), approved);
+    const operation = capability.operations[1]!;
+    if (key === "name") operation.name = "replace";
+    if (key === "access") operation.access = "link";
+    if (key === "readOnly") operation.readOnly = false;
+    expect(parseAppDatasetCapability(capability)).toEqual(capability);
+    expect(() => verifyAppDatasetCapability(capability, approved)).toThrow();
+  });
+
+  it("rejects stale revisions, unknown operations, duplicate metadata and an expanded operation set", () => {
+    const approved = revision();
+    expect(() => resolveAppDatasetCapability({ ...binding(), revision: 2 }, approved)).toThrow();
+    expect(() => resolveAppDatasetCapability({ ...binding(), revisionSha256: "e".repeat(64) }, approved)).toThrow();
+    expect(() => resolveAppDatasetCapability({ ...binding(), operationIds: [id(99)] }, approved)).toThrow();
+    const capability = resolveAppDatasetCapability({ ...binding(), operationIds: [id(5)] }, approved);
+    expect(() => parseAppDatasetCapability({ ...capability, operations: [...capability.operations, capability.operations[0]] })).toThrow();
+    expect(() => parseAppDatasetCapability({ ...capability, operationIds: [id(5), id(6)] })).toThrow();
+  });
+});
 
 describe("dataset definition", () => {
   it("creates an independent draft with stable identities across display renames", () => {

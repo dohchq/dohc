@@ -3,6 +3,7 @@ import { parseAppPublicationCandidate, parseAppCollectionCapability, parseAppBac
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { isShareablePath, isShareablePathList, isValidShareVersionId } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
+import { parseDatasetBindingReference, resolveAppDatasetCapability, type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 
@@ -12,6 +13,14 @@ const manifestLimit = 64 * 1024;
 export interface OwnerPublicationSelection { workspaceId: string; appRoot: string; shareId: string; grantId: string }
 export interface OwnerPublicationGrant { shareId: string; grantId: string; generation: number; status: "active" | "revoked"; revokedAtMs: number | null; selector: { paths: string[]; versionId: string | null } | null }
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
+export interface AppPublicationPreparationDependencies {
+  adapter: SourceAdapter;
+  signal: AbortSignal;
+  assertCurrent(): void;
+  compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
+  /** Resolves from the owner's approved catalog. Publication preparation cannot approve a dataset. */
+  resolveDatasetRevision?(binding: AppDatasetBinding): Promise<DatasetRevision>;
+}
 type BackendDeclaration = Pick<AppBackendCapability, "dataPath" | "schemaVersion" | "operations" | "tables"> & { entryPath: string; schemaPath: string };
 const digest = (domain: string, value: unknown) => createHash("sha256").update(JSON.stringify([domain, value])).digest("hex");
 const ordered = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
@@ -19,7 +28,7 @@ const ordered = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 function declaration(bytes: Uint8Array) {
   if (bytes.byteLength > manifestLimit) throw new Error("The app publication declaration is too large.");
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!value || typeof value !== "object" || Array.isArray(value) || !["entryPath,inputs,packageMap", "collection,entryPath,inputs,packageMap", "backend,entryPath,inputs,packageMap"].includes(Object.keys(value).sort().join())) throw new Error("Invalid app publication declaration.");
+  if (!value || typeof value !== "object" || Array.isArray(value) || !["entryPath,inputs,packageMap", "collection,entryPath,inputs,packageMap", "backend,entryPath,inputs,packageMap", "dataset,entryPath,inputs,packageMap"].includes(Object.keys(value).sort().join())) throw new Error("Invalid app publication declaration.");
   const row = value as Record<string, unknown>;
   if (!isShareablePath(row.entryPath) || !Array.isArray(row.inputs) || row.inputs.length === 0 || row.inputs.length >= inputBounds.maxInputFiles ||
       !row.inputs.every(isShareablePath) || new Set(row.inputs).size !== row.inputs.length || !row.inputs.includes(row.entryPath) ||
@@ -45,14 +54,12 @@ function declaration(bytes: Uint8Array) {
     backend = { entryPath: record.entryPath, schemaPath: record.schemaPath, dataPath: parsed.dataPath,
       schemaVersion: parsed.schemaVersion, operations: parsed.operations, tables: parsed.tables };
   }
-  return { entryPath: row.entryPath, inputs: row.inputs as string[], packageMap: Object.fromEntries(entries) as Record<string, string>, collection, backend };
+  const dataset = Object.hasOwn(row, "dataset") ? parseDatasetBindingReference(row.dataset) : undefined;
+  return { entryPath: row.entryPath, inputs: row.inputs as string[], packageMap: Object.fromEntries(entries) as Record<string, string>, collection, backend, dataset };
 }
 
 /** Source capture grants no publication authority. The relay repeats the grant check at commit. */
-export async function prepareOwnerAppPublication(input: OwnerPublicationSelection, grant: OwnerPublicationGrant, dependencies: {
-  adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
-  compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
-}): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"]; generation: number }> {
+export async function prepareOwnerAppPublication(input: OwnerPublicationSelection, grant: OwnerPublicationGrant, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"]; generation: number }> {
   const selector = grant.selector;
   if (grant.shareId !== input.shareId || grant.grantId !== input.grantId || grant.status !== "active" || grant.revokedAtMs !== null ||
       !Number.isSafeInteger(grant.generation) || grant.generation < 1 || !selector || !isShareablePathList(selector.paths) ||
@@ -64,19 +71,13 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
 }
 
 /** Local approval captures the same immutable source without creating a share grant. */
-export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: {
-  adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
-  compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
-}): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
   const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
   return prepareAppSources(input, "main", allowed, dependencies);
 }
 
 async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
-  versionId: string, allowed: (path: string) => boolean, dependencies: {
-    adapter: SourceAdapter; signal: AbortSignal; assertCurrent(): void;
-    compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
-  }): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+  versionId: string, allowed: (path: string) => boolean, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
   const { adapter, signal, assertCurrent } = dependencies;
   if (!allowed(input.appRoot)) throw new Error("The app is outside this link's shared files.");
   const manifestPath = `${input.appRoot}/app.publish.json`;
@@ -98,6 +99,12 @@ async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspa
   const selected = await capture(paths, inputBounds.maxInputBytes);
   if (selected.files.find(file => file.path === manifestPath)?.sha256 !== first.files[0]!.sha256) throw new Error("The app declaration changed. Prepare the app again.");
   const capabilities: AppPublicationCandidate["capabilities"] = [];
+  if (declared.dataset) {
+    if (!dependencies.resolveDatasetRevision) throw new Error("This app's Collection is unavailable. Open the Collection and try again.");
+    const approved = await dependencies.resolveDatasetRevision(declared.dataset);
+    assertCurrent(); signal.throwIfAborted();
+    capabilities.push(resolveAppDatasetCapability(declared.dataset, approved));
+  }
   if (declared.collection && schemaPath) {
     const file = selected.files.find(file => file.path === schemaPath);
     if (!file || file.bytes.byteLength > 65_536) throw new Error("The collection schema is unavailable or too large.");

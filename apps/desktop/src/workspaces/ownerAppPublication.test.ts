@@ -3,13 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { compileClosedApp } from "./closedAppCompiler";
 import { prepareOwnerAppPublication } from "./ownerAppPublication";
+import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const digest = (domain: string, value: unknown) => hash(JSON.stringify([domain, value]));
 const backend = { entryPath: "app/backend.ts", schemaPath: "app/schema.sql", dataPath: "private/registrations.sqlite", schemaVersion: 1,
   operations: [{ name: "register", access: "link", readOnly: false }, { name: "list", access: "owner", readOnly: true }],
   tables: [{ name: "registrations", primaryKey: "id", readOperation: "list", writeOperation: "register" }] };
-function harness() {
+function harness(resolveDatasetRevision?: (binding: AppDatasetBinding) => Promise<DatasetRevision>) {
   const declaration = { entryPath: "app/main.ts", inputs: ["app/main.ts", "app/backend.ts", "app/schema.sql", "app/rules.ts"], packageMap: {}, backend };
   const sources = new Map([
     ["app/app.publish.json", Buffer.from(JSON.stringify(declaration))],
@@ -40,7 +41,7 @@ function harness() {
   const controller = new AbortController();
   const prepare = () => prepareOwnerAppPublication({ workspaceId: "w", appRoot: "app", shareId: "s", grantId: "g" },
     { shareId: "s", grantId: "g", generation: 1, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null } },
-    { adapter, compile, signal: controller.signal, assertCurrent() {} });
+    { adapter, compile, signal: controller.signal, assertCurrent() {}, resolveDatasetRevision });
   return { declaration, sources, compile, capturePaths, prepare, controller,
     setDeclaration(value: unknown) { sources.set("app/app.publish.json", Buffer.from(JSON.stringify(value))); } };
 }
@@ -111,5 +112,61 @@ describe("owner backend publication", () => {
     h.compile.mockImplementationOnce(async request => { const result = await compileClosedApp(request); h.controller.abort(); return result; });
     await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
     expect(h.compile).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("owner dataset publication", () => {
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const approved: DatasetRevision = { datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64), definitionSha256: "b".repeat(64),
+    schemaSha256: "c".repeat(64), operationsSha256: "d".repeat(64), definition: {
+      formatVersion: 1, datasetId: id(1), name: "Registrations", schemaPath: "private/schema.sql", operationsPath: "private/operations.js",
+      tables: [{ tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      ] }], operations: [
+        { operationId: id(4), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [] },
+        { operationId: id(5), name: "list", label: "List", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] },
+      ],
+    } };
+  const binding: AppDatasetBinding = { kind: "dataset", datasetId: approved.datasetId, revision: approved.revision,
+    revisionSha256: approved.revisionSha256, operationIds: [id(4)] };
+  const declaration = { entryPath: "app/main.ts", inputs: ["app/main.ts"], packageMap: {}, dataset: binding };
+
+  it("captures and compiles only frontend sources and derives dispatch metadata from the catalog", async () => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve); h.setDeclaration(declaration);
+    const { candidate, files } = await h.prepare();
+    expect(resolve).toHaveBeenCalledWith(binding);
+    expect(h.compile).toHaveBeenCalledTimes(1);
+    expect(h.capturePaths).toEqual([["app/app.publish.json"], ["app/app.publish.json", "app/main.ts"]]);
+    expect(files.map(file => file.path)).toEqual(["bundle.js"]);
+    expect(candidate.capabilities).toEqual([{ ...binding, operations: [{ operationId: id(4), name: "submit", access: "link", readOnly: false }] }]);
+  });
+
+  it("does not treat a source declaration as dataset approval", async () => {
+    const h = harness(); h.setDeclaration(declaration);
+    await expect(h.prepare()).rejects.toThrow(/Collection is unavailable/);
+    expect(h.compile).not.toHaveBeenCalled();
+  });
+
+  it.each(["stale", "unknown", "source", "operations", "backend"])("refuses %s dataset bindings before compilation", async kind => {
+    const resolve = vi.fn(async () => approved);
+    const h = harness(resolve);
+    let value: unknown = declaration;
+    if (kind === "stale") value = { ...declaration, dataset: { ...binding, revision: 2 } };
+    if (kind === "unknown") value = { ...declaration, dataset: { ...binding, operationIds: [id(99)] } };
+    if (kind === "source") value = { ...declaration, dataset: { ...binding, source: "replace rules" } };
+    if (kind === "operations") value = { ...declaration, dataset: { ...binding, operations: [{ name: "submit", access: "link", readOnly: true }] } };
+    if (kind === "backend") value = { ...declaration, backend };
+    h.setDeclaration(value);
+    await expect(h.prepare()).rejects.toThrow();
+    expect(h.compile).not.toHaveBeenCalled();
+    if (["source", "operations", "backend"].includes(kind)) expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("honors cancellation after catalog resolution", async () => {
+    const h = harness(async () => { h.controller.abort(); return approved; });
+    h.setDeclaration(declaration);
+    await expect(h.prepare()).rejects.toMatchObject({ name: "AbortError" });
+    expect(h.compile).not.toHaveBeenCalled();
   });
 });

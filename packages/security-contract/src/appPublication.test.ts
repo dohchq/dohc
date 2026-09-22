@@ -53,3 +53,34 @@ describe("backend publication inventory", () => {
     expect(() => parseAppPublicationCandidate(value, limits)).toThrow(/bundle type/);
   });
 });
+
+describe("dataset publication inventory", () => {
+  const datasetId = "00000000-0000-4000-8000-000000000001";
+  const operationId = "00000000-0000-4000-8000-000000000002";
+  function datasetCandidate(): AppPublicationCandidate {
+    const value = candidate();
+    value.inputs = [identity("app/main.ts")];
+    value.dependencies = ["app/main.ts"];
+    value.files = value.files.filter(file => file.path === "bundle.js");
+    value.capabilities = [{ kind: "dataset", datasetId, revision: 1, revisionSha256: hash, operationIds: [operationId],
+      operations: [{ operationId, name: "submit", access: "link", readOnly: false }] }];
+    return value;
+  }
+
+  it("accepts a frontend-only bundle bound to an independent dataset", () => {
+    const value = datasetCandidate();
+    expect(parseAppPublicationCandidate(value, limits)).toEqual(value);
+  });
+
+  it.each(["backend.js", "schema.sql"])("rejects consumer-provided %s replacement rules", path => {
+    const value = datasetCandidate();
+    value.files.push(candidate().files.find(file => file.path === path)!);
+    expect(() => parseAppPublicationCandidate(value, limits)).toThrow(/bundle path/);
+  });
+
+  it("rejects combined dataset and backend authority", () => {
+    const value = datasetCandidate();
+    value.capabilities.push(candidate().capabilities[0]!);
+    expect(() => parseAppPublicationCandidate(value, limits)).toThrow(/capabilities/);
+  });
+});
