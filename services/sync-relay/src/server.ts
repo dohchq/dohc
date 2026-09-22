@@ -658,7 +658,7 @@ export function createSyncRelayHandler({
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       if (route.route === "app-backend") {
-        if (!appBackendsEnabled || !respondToDatasetApp) throw notFound();
+        if (!respondToDatasetApp) throw notFound();
         if (!route.workspaceId) {
           if (!linkKey || request.headers.has("cookie")) throw notFound();
           const {capability} = requireLinkCapability(request);
