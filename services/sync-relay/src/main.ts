@@ -13,6 +13,7 @@ import {
   serveFetchHandler,
 } from "@dohc/service-http";
 import { Pool } from "pg";
+import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import { errorBody } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
@@ -234,7 +235,7 @@ const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptio
 const datasetDirectory = await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
 const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
   maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
-}, onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
+}, compileOperations: compileDatasetOperations, onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
