@@ -29,7 +29,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     const publication = page.getByTestId("app-publication-dialog");
     await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
     await publication.getByTestId("app-publication-approve").click();
-    await expect(publication.getByText("Approved on this device", { exact: false })).toBeVisible();
+    await expect(publication.getByRole("button", { name: /^Open in browser / })).toBeVisible();
     const local = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ workspaceId, appRoot: "registrations-form", action: "listLocal" }), workspaceId);
     if (local.kind !== "localListed" || !local.publications[0]) throw Error("Expected approved form.");
     const launched = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ ...input, action: "launchLocal" }), { workspaceId, publicationId: local.publications[0].publicationId });

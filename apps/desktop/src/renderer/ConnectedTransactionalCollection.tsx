@@ -5,6 +5,7 @@ import { TransactionalCollectionPage } from "./TransactionalCollectionPage";
 import { SecondaryButton } from "./ui/controls";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
+import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -21,6 +22,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const [loading, setLoading] = useState(true);
   const [creatingForm, setCreatingForm] = useState(false);
+  const [reviewingSchema, setReviewingSchema] = useState(false);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
   const request = useRef(0);
@@ -45,6 +47,7 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
   </div>;
   return <><TransactionalCollectionPage workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
     onCreateForm={() => setCreatingForm(true)}
+    onReviewSchema={() => setReviewingSchema(true)}
     confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
     uploadFile={async ({ file, ...input }, signal) => {
       signal.throwIfAborted();
@@ -91,6 +94,28 @@ function ScopedCollection({ workspaceId, datasetId, tableId, onError, onFormCrea
       if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
       return result;
     }} />
+    {reviewingSchema && <CollectionMigrationReviewDialog workspaceId={workspaceId} datasetId={datasetId} onError={onError}
+      onClose={() => setReviewingSchema(false)}
+      onPrepare={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "prepareMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this change. Try again.");
+        return result;
+      }}
+      onApprove={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "approveMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
+        await refresh();
+      }}
+      onDiscard={async (input, signal) => {
+        signal.throwIfAborted();
+        const result = await bridge().dataset({ ...input, action: "discardMigration" });
+        signal.throwIfAborted();
+        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
+      }} />}
     {deletion && <DeleteCollectionRecordDialog collectionName={dataset.tables.find(table => table.tableId === tableId)?.name ?? dataset.name} recordId={deletion.id}
       onCancel={() => { deleteResult.current?.(false); deleteResult.current = null; setDeletion(null); }}
       onConfirm={() => { deleteResult.current?.(true); deleteResult.current = null; setDeletion(null); }} />}
